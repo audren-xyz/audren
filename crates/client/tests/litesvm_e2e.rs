@@ -1786,7 +1786,7 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
         "Deposit 2 SOL",
     );
 
-    // Build full Transfer (m=5, 2,450+ B payload — exceeds 1,232 B inline!)
+    // Build full Transfer (m=5, 2,450+ B payload) to verify chunked ProofBuffer execution via Solana v1 txs
     let ring = read_ring(&svm, &audren_id, pool_id, &[0]);
     let alice_notes = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, None);
     assert_eq!(alice_notes.len(), 1);
