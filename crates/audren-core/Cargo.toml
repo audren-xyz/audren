@@ -1,0 +1,8 @@
+[package]
+name = "audren-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared no_std wire layouts, PDA seeds, error codes, and proof framing for Audren."
+
+[dependencies]

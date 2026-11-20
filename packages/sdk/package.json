@@ -1,0 +1,13 @@
+{
+  "name": "@audren/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dependency TypeScript SDK for Audren — SoA EpochPage decoders, pure-RPC/WS dataSlice scanner, router-agnostic private swap client, and instruction codecs",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
