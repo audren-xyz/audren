@@ -1,19 +1,20 @@
-//! Live Solana Devnet End-to-End Verification for Audren (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`).
+//! Live Solana End-to-End Verification for Audren (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`)
+//! using Solana Transaction Version 1 (SIMD-0385, `0x81`, 4,096 B, inline `TransactionConfig`).
 //!
-//! Run explicitly against QuickNode Devnet RPC:
+//! Run explicitly against a QuickNode Devnet or Mainnet RPC:
 //! ```bash
 //! AUDREN_RPC_URL="https://your-devnet-rpc-endpoint" \
 //! AUDREN_KEYPAIR_PATH="/path/to/funder.json" \
 //! cargo test --test devnet_live -- --ignored --nocapture
 //! ```
 //!
-//! Proves live on-chain Agave execution of:
+//! Proves live on-chain Agave execution via Solana Transaction v1 of:
 //! 1. `InitPool` (if pool does not exist yet)
-//! 2. `Deposit` (native SOL -> stealth note)
+//! 2. `Deposit` (native SOL -> stealth note) in ONE Solana v1 transaction
 //! 3. Standard RPC `getAccountInfo` `dataSlice[64..1120]` note discovery
-//! 4. `WriteProofBuffer` (parallel-ready `<= 768 B` chunks, every tx `<= 1,232 B` MTU)
-//! 5. `ExecBuffered(Transfer)` (real Ristretto255 Multi-Base Triptych + native Agave ZK ElGamal Bulletproof U128 + 100% buffer rent refund)
-//! 6. `ExecBuffered(Withdraw)` (with shielded change, verifying real SOL payout + 100% buffer rent refund)
+//! 4. `Transfer` (real Ristretto255 Multi-Base Triptych + native Agave ZK ElGamal Bulletproof U128)
+//!    directly in ONE Solana v1 transaction (`<= 4,096 B`, zero legacy transactions)
+//! 5. `Withdraw` (with optional shielded change) directly in ONE Solana v1 transaction
 
 use audren_client::{
     instructions::{
@@ -33,16 +34,18 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand::{rngs::StdRng, SeedableRng};
 use serde_json::{json, Value};
 use solana_address::Address;
-use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
-use solana_message::Message;
+use solana_message::{
+    v1::{self, TransactionConfig, MAX_TRANSACTION_SIZE},
+    VersionedMessage,
+};
 use solana_signer::Signer;
-use solana_transaction::Transaction;
+use solana_transaction::versioned::VersionedTransaction;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const SOLANA_PACKET_MTU: usize = 1_232;
+const DEFAULT_LOADED_ACCOUNTS_DATA_SIZE: u32 = 64 * 1024 * 1024;
 
 fn to_ix(ix: &AudrenInstruction) -> Instruction {
     Instruction {
@@ -119,25 +122,37 @@ fn get_account_data(url: &str, pubkey: &Address, slice: Option<(usize, usize)>) 
     Some(B64.decode(b64).unwrap())
 }
 
-fn send_and_confirm(
+fn build_v1_wire(
+    payer: &Keypair,
+    ixs: &[Instruction],
+    blockhash: [u8; 32],
+    cu_limit: u32,
+    priority_fee_lamports: u64,
+) -> Vec<u8> {
+    let config = TransactionConfig::empty()
+        .with_priority_fee(priority_fee_lamports)
+        .with_compute_unit_limit(cu_limit)
+        .with_loaded_accounts_data_size_limit(DEFAULT_LOADED_ACCOUNTS_DATA_SIZE);
+    let msg = v1::Message::try_compile_with_config(&payer.pubkey(), ixs, blockhash.into(), config)
+        .expect("compile Solana v1 message");
+    let tx = VersionedTransaction::try_new(VersionedMessage::V1(msg), &[payer])
+        .expect("sign Solana v1 transaction");
+    wincode::serialize(&tx).expect("wincode-serialize Solana v1 transaction")
+}
+
+fn send_v1_and_confirm(
     url: &str,
     payer: &Keypair,
     ixs: &[Instruction],
     cu_limit: u32,
     label: &str,
 ) -> String {
-    let mut all = vec![
-        ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
-        ComputeBudgetInstruction::set_compute_unit_price(100_000),
-    ];
-    all.extend_from_slice(ixs);
     let bh = get_blockhash(url);
-    let msg = Message::new(&all, Some(&payer.pubkey()));
-    let tx = Transaction::new(&[payer], msg, bh.into());
-    let wire = bincode::serialize(&tx).unwrap();
+    let wire = build_v1_wire(payer, ixs, bh, cu_limit, 10_000);
+    assert_eq!(wire[0], 0x81, "expected Solana Transaction v1 prefix 0x81");
     assert!(
-        wire.len() <= SOLANA_PACKET_MTU,
-        "{label}: wire tx {} B exceeds Solana 1,232 B MTU!",
+        wire.len() <= MAX_TRANSACTION_SIZE,
+        "{label}: Solana v1 wire tx {} B exceeds {MAX_TRANSACTION_SIZE} B limit!",
         wire.len()
     );
     let b64 = B64.encode(&wire);
@@ -164,7 +179,10 @@ fn send_and_confirm(
             }
             if let Some(conf) = entry.get("confirmationStatus").and_then(|v| v.as_str()) {
                 if conf == "confirmed" || conf == "finalized" {
-                    println!("  [CONFIRMED] {label} ({} B) -> {sig}", wire.len());
+                    println!(
+                        "  [CONFIRMED] {label} (Solana v1 · {} B / {MAX_TRANSACTION_SIZE} B) -> {sig}",
+                        wire.len()
+                    );
                     return sig;
                 }
             }
@@ -178,6 +196,47 @@ fn send_and_confirm(
         std::thread::sleep(Duration::from_millis(500));
     }
     panic!("timed out waiting for confirmation of {label} ({sig})");
+}
+
+/// Sends an Audren instruction directly in ONE Solana v1 transaction (`<= 4,096 B`),
+/// automatically falling back to `ProofBuffer` (over v1 transactions) only if a payload
+/// ever exceeds 4,096 B.
+fn send_audren_v1(
+    url: &str,
+    payer: &Keypair,
+    audren_ix: &AudrenInstruction,
+    cu_limit: u32,
+    nonce: u64,
+    label: &str,
+) -> String {
+    let ix = to_ix(audren_ix);
+    let probe = build_v1_wire(payer, std::slice::from_ref(&ix), [0u8; 32], cu_limit, 10_000);
+    if probe.len() <= MAX_TRANSACTION_SIZE {
+        return send_v1_and_confirm(url, payer, &[ix], cu_limit, label);
+    }
+
+    let plan = build_buffered_execution(audren_ix, nonce).expect("build ProofBuffer plan");
+    for (i, chunk_ix) in plan.upload_chunks.iter().enumerate() {
+        send_v1_and_confirm(
+            url,
+            payer,
+            &[to_ix(chunk_ix)],
+            80_000,
+            &format!("{label} WriteProofBuffer(chunk {i})"),
+        );
+    }
+    let sig = send_v1_and_confirm(
+        url,
+        payer,
+        &[to_ix(&plan.execute)],
+        cu_limit,
+        &format!("ExecBuffered({label})"),
+    );
+    assert!(
+        get_account_data(url, &plan.proof_buffer, None).is_none(),
+        "{label} ProofBuffer must be closed on-chain"
+    );
+    sig
 }
 
 #[test]
@@ -206,11 +265,10 @@ fn test_live_devnet_full_shielded_lifecycle() {
     let alice = AudrenKeys::from_seed(&alice_seed);
     let bob = AudrenKeys::from_seed(&bob_seed);
 
-    // Use pool_id = 0 (canonical Devnet permissionless pool)
     let pool_id = 0u32;
     let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
 
-    println!("=== Audren Live Devnet E2E ===");
+    println!("=== Audren Live Devnet E2E (Solana Transaction v1) ===");
     println!("Program ID: {program_id}");
     println!("Payer:      {}", payer.pubkey());
     println!("Pool PDA:   {pool_pda}");
@@ -232,11 +290,11 @@ fn test_live_devnet_full_shielded_lifecycle() {
             [0u8; 32],
             2_000_000,
         );
-        send_and_confirm(&rpc_url, &payer, &[to_ix(&init_ix)], 120_000, "InitPool(#0)");
+        send_v1_and_confirm(&rpc_url, &payer, &[to_ix(&init_ix)], 120_000, "InitPool(#0)");
         0
     };
 
-    // 1. Shield 0.05 SOL to Alice
+    // 1. Shield 0.05 SOL to Alice in ONE Solana v1 transaction
     let (dep_ix, _) = build_deposit(
         program_id,
         payer.pubkey(),
@@ -249,15 +307,9 @@ fn test_live_devnet_full_shielded_lifecycle() {
         &mut rng,
     )
     .unwrap();
-    send_and_confirm(
-        &rpc_url,
-        &payer,
-        &[to_ix(&dep_ix)],
-        120_000,
-        "Deposit(0.05 SOL -> Alice)",
-    );
+    send_audren_v1(&rpc_url, &payer, &dep_ix, 120_000, seed_now, "Deposit(0.05 SOL -> Alice)");
 
-    // 2. Scan EpochPage via standard RPC dataSlice[64..1120].
+    // 2. Scan EpochPage via standard RPC dataSlice[64..1120]
     let (page_pda, _) = derive_epoch_page_pda(&program_id, pool_id, active_page_id);
     let scan_slice =
         get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
@@ -284,7 +336,7 @@ fn test_live_devnet_full_shielded_lifecycle() {
         active_page_id, alice_note.slot_index
     );
 
-    // 3. Shielded Transfer (0.03 SOL -> Bob, 0.02 SOL change -> Alice) via ProofBuffer
+    // 3. Shielded Transfer (0.03 SOL -> Bob, 0.02 SOL change -> Alice) in ONE Solana v1 tx!
     let ring = extract_ring_from_page(&page_full).unwrap();
     let (xfer_ix, _, _) = build_transfer(
         program_id,
@@ -303,28 +355,13 @@ fn test_live_devnet_full_shielded_lifecycle() {
         &mut rng,
     )
     .unwrap();
-    let xfer_plan = build_buffered_execution(&xfer_ix, seed_now).unwrap();
-    for (i, chunk_ix) in xfer_plan.upload_chunks.iter().enumerate() {
-        send_and_confirm(
-            &rpc_url,
-            &payer,
-            &[to_ix(chunk_ix)],
-            80_000,
-            &format!("Transfer WriteProofBuffer(chunk {i})"),
-        );
-    }
-    send_and_confirm(
+    send_audren_v1(
         &rpc_url,
         &payer,
-        &[to_ix(&xfer_plan.execute)],
+        &xfer_ix,
         900_000,
-        "ExecBuffered(Transfer 0.03 SOL -> Bob + 0.02 SOL change -> Alice)",
-    );
-
-    // Verify ProofBuffer closed and 100% refunded
-    assert!(
-        get_account_data(&rpc_url, &xfer_plan.proof_buffer, None).is_none(),
-        "Transfer ProofBuffer must be closed on-chain"
+        seed_now + 1,
+        "Transfer(0.03 SOL -> Bob + 0.02 SOL change -> Alice)",
     );
 
     // 4. Bob scans pure-RPC dataSlice & Withdraws 0.02 SOL (keeping 0.01 SOL shielded change!)
@@ -367,33 +404,20 @@ fn test_live_devnet_full_shielded_lifecycle() {
         &mut rng,
     )
     .unwrap();
-    let wd_plan = build_buffered_execution(&wd_ix, seed_now + 1).unwrap();
-    for (i, chunk_ix) in wd_plan.upload_chunks.iter().enumerate() {
-        send_and_confirm(
-            &rpc_url,
-            &payer,
-            &[to_ix(chunk_ix)],
-            80_000,
-            &format!("Withdraw WriteProofBuffer(chunk {i})"),
-        );
-    }
-    send_and_confirm(
+    send_audren_v1(
         &rpc_url,
         &payer,
-        &[to_ix(&wd_plan.execute)],
+        &wd_ix,
         800_000,
-        "ExecBuffered(Withdraw 0.02 SOL + 0.01 SOL shielded change)",
-    );
-    assert!(
-        get_account_data(&rpc_url, &wd_plan.proof_buffer, None).is_none(),
-        "Withdraw ProofBuffer must be closed on-chain"
+        seed_now + 2,
+        "Withdraw(0.02 SOL + 0.01 SOL shielded change)",
     );
 
-    println!("=== ALL LIVE SOLANA DEVNET E2E CHECKS PASSED 100%! ===");
+    println!("=== ALL LIVE SOLANA V1 DEVNET E2E CHECKS PASSED 100%! ===");
 }
 
 #[test]
-#[ignore = "live Mainnet smoke test (0.001 SOL full-recovery roundtrip); pass AUDREN_RPC_URL and AUDREN_KEYPAIR_PATH"]
+#[ignore = "live Mainnet smoke test (0.001 SOL full-recovery roundtrip via Solana v1); pass AUDREN_RPC_URL and AUDREN_KEYPAIR_PATH"]
 fn test_live_mainnet_smoke_full_recovery() {
     let rpc_url = std::env::var("AUDREN_RPC_URL").expect("set AUDREN_RPC_URL");
     let kp_path = std::env::var("AUDREN_KEYPAIR_PATH").expect("set AUDREN_KEYPAIR_PATH");
@@ -433,11 +457,11 @@ fn test_live_mainnet_smoke_full_recovery() {
             [0u8; 32],
             2_000_000,
         );
-        send_and_confirm(&rpc_url, &payer, &[to_ix(&init_ix)], 120_000, "Mainnet InitPool(#0)");
+        send_v1_and_confirm(&rpc_url, &payer, &[to_ix(&init_ix)], 120_000, "Mainnet InitPool(#0)");
         0
     };
 
-    // Shield 0.001 SOL -> Transfer 0.001 SOL to Bob (0 change) -> Full Withdraw 0.001 SOL back to payer!
+    // 1. Shield 0.001 SOL -> 2. Transfer 0.001 SOL to Bob -> 3. Full Withdraw back to payer (all single-tx Solana v1!)
     let (dep_ix, _) = build_deposit(
         program_id,
         payer.pubkey(),
@@ -450,7 +474,7 @@ fn test_live_mainnet_smoke_full_recovery() {
         &mut rng,
     )
     .unwrap();
-    send_and_confirm(&rpc_url, &payer, &[to_ix(&dep_ix)], 120_000, "Mainnet Deposit(0.001 SOL)");
+    send_audren_v1(&rpc_url, &payer, &dep_ix, 120_000, seed_now, "Mainnet Deposit(0.001 SOL)");
 
     let (page_pda, _) = derive_epoch_page_pda(&program_id, pool_id, active_page_id);
     let scan_slice = get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
@@ -471,7 +495,6 @@ fn test_live_mainnet_smoke_full_recovery() {
     .unwrap()
     .expect("decrypt Alice note");
 
-    // Transfer 1,000,000 lamports -> Bob (0 change), proves real Triptych + Agave Bulletproof U128 on Mainnet!
     let ring = extract_ring_from_page(&page_full).unwrap();
     let (xfer_ix, _, _) = build_transfer(
         program_id,
@@ -490,25 +513,15 @@ fn test_live_mainnet_smoke_full_recovery() {
         &mut rng,
     )
     .unwrap();
-    let xfer_plan = build_buffered_execution(&xfer_ix, seed_now).unwrap();
-    for (i, chunk_ix) in xfer_plan.upload_chunks.iter().enumerate() {
-        send_and_confirm(
-            &rpc_url,
-            &payer,
-            &[to_ix(chunk_ix)],
-            80_000,
-            &format!("Mainnet Transfer WriteProofBuffer(chunk {i})"),
-        );
-    }
-    send_and_confirm(
+    send_audren_v1(
         &rpc_url,
         &payer,
-        &[to_ix(&xfer_plan.execute)],
+        &xfer_ix,
         900_000,
-        "Mainnet ExecBuffered(Transfer 0.001 SOL -> Bob)",
+        seed_now + 1,
+        "Mainnet Transfer(0.001 SOL -> Bob)",
     );
 
-    // Bob scans pure-RPC dataSlice & does FULL Withdraw (0 change, fits in 1 single inline tx!) back to payer!
     let scan_slice_2 = get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
         .expect("EpochPage dataSlice 2");
     let bob_fvk = bob.full_viewing_key();
@@ -546,22 +559,13 @@ fn test_live_mainnet_smoke_full_recovery() {
         &mut rng,
     )
     .unwrap();
-    let wd_plan = build_buffered_execution(&wd_ix, seed_now + 1).unwrap();
-    for (i, chunk_ix) in wd_plan.upload_chunks.iter().enumerate() {
-        send_and_confirm(
-            &rpc_url,
-            &payer,
-            &[to_ix(chunk_ix)],
-            80_000,
-            &format!("Mainnet Withdraw WriteProofBuffer(chunk {i})"),
-        );
-    }
-    send_and_confirm(
+    send_audren_v1(
         &rpc_url,
         &payer,
-        &[to_ix(&wd_plan.execute)],
+        &wd_ix,
         600_000,
-        "Mainnet ExecBuffered(Full Withdraw 0.001 SOL -> payer)",
+        seed_now + 2,
+        "Mainnet Full Withdraw(0.001 SOL -> payer)",
     );
-    println!("=== LIVE SOLANA MAINNET SMOKE TEST PASSED 100%! ===");
+    println!("=== LIVE SOLANA V1 MAINNET SMOKE TEST PASSED 100%! ===");
 }

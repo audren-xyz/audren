@@ -1189,10 +1189,10 @@ pub fn build_set_paused(
     }
 }
 
-/// Split any large Audren instruction (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`) into
-/// `<= 768 B` `WriteProofBuffer` chunk instructions (each wire tx `< 1,000 B`, well below Solana's
-/// `1,232 B` MTU) plus a `2 B` `ExecBuffered` instruction that atomically executes the payload
-/// and refunds 100% of the ephemeral `ProofBuffer` rent back to `payer`.
+/// Split an oversized Audren instruction (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`) that
+/// exceeds Solana Transaction v1's `4,096 B` single-tx limit into `<= 768 B` `WriteProofBuffer`
+/// chunks plus a `2 B` `ExecBuffered` instruction that atomically executes the payload and
+/// refunds 100% of the ephemeral `ProofBuffer` rent back to `payer`.
 pub struct BufferedExecutionPlan {
     pub proof_buffer: Address,
     pub upload_chunks: Vec<AudrenInstruction>,

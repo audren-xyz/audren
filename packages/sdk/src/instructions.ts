@@ -90,9 +90,9 @@ export function encodeSetPausedData(paused: boolean): Uint8Array {
 }
 
 /**
- * Split a large instruction payload (without its 1-byte inner tag) into `<= 768 B`
- * `Tag 8` (`WriteProofBuffer`) instruction data frames so every upload tx fits below
- * Solana's `1,232 B` packet MTU. Chunks may be submitted in parallel / out of order.
+ * Split an oversized instruction payload (exceeding Solana Transaction v1's `4,096 B` limit,
+ * without its 1-byte inner tag) into `<= 768 B` `Tag 8` (`WriteProofBuffer`) frames.
+ * Chunks may be submitted in parallel / out of order via Solana v1 transactions.
  */
 export function encodeWriteProofBufferChunks(params: {
   nonce: bigint;

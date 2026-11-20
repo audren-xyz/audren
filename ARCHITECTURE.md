@@ -64,9 +64,9 @@ For ring size `N = 2^m` (`m = 5`: 1 page / 32 notes; `m = 6`: 2 pages / 64 notes
 - `verify_cross_base_1` (`128 B`) and `verify_cross_base_2` (`256 B`, also proving `A_2 - A_1 = (a_2 - a_1) * H` for independent unlinkable output asset tags) link hidden-asset commitments `V = v * A + t * H` to standard Agave Pedersen commitments `C = v * G + s * H`.
 - Agave's native `ZkE1Gama1Proof11111111111111111111111111111` program verifies `v in [0, 2^64)` via zero-rent CPI (`BatchedRangeProofU64` `672 B` / `BatchedRangeProofU128` `736 B`).
 
-### Ephemeral `ProofBuffer` (`Tags 8 / 9 / 10`)
-- Full Multi-Base Triptych (`928–1,728 B`) + Cross-Base + Bulletproof payloads exceed Solana's `1,232 B` single-transaction packet MTU.
-- `WriteProofBuffer` (`Tag 8`) writes parallel out-of-order `<= 768 B` chunks (`<= 1,071 B` wire tx) tracked by a `u16` `written_mask` inside an ephemeral PDA (`["audren_buf", payer, nonce_le_8]`, `<= 10,032 B`).
+### Solana Transaction Version 1 (`0x81`, 4,096 B) & Optional `ProofBuffer` (`Tags 8 / 9 / 10`)
+- Audren uses **Solana Transaction Version 1 (SIMD-0385)** (`4,096 B` max wire size, inline `TransactionConfig` compute budget and priority fee), enabling single-transaction direct execution for `Deposit`, `Transfer` (`m = 5/6/7`), `Merge`, `SwapViaRouter`, and `Withdraw`.
+- For oversized multi-hop swap or proof payloads exceeding `4,096 B`, `WriteProofBuffer` (`Tag 8`) writes parallel out-of-order `<= 768 B` chunks tracked by a `u16` `written_mask` inside an ephemeral PDA (`["audren_buf", payer, nonce_le_8]`, `<= 10,032 B`).
 - `ExecBuffered` (`Tag 9`, `2 B` instruction data) verifies and executes `Transfer`, `Merge`, `SwapViaRouter`, or `Withdraw` zero-copy from the buffer, then zeroes magic, resizes to `0 B`, reassigns to the System Program, and refunds 100% of rent to `payer` in the same transaction.
 - `CloseProofBuffer` (`Tag 10`) reclaims 100% of rent from an abandoned upload back to its authority.
 

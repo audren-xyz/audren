@@ -3,3 +3,4 @@ export * from './layout.ts';
 export * from './scanner.ts';
 export * from './swap.ts';
 export * from './instructions.ts';
+export * from './tx-v1.ts';

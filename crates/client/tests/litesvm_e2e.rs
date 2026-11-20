@@ -35,15 +35,17 @@ use litesvm::{types::TransactionResult, LiteSVM};
 use rand::{rngs::StdRng, SeedableRng};
 use solana_account::Account;
 use solana_address::Address;
-use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
-use solana_message::Message;
+use solana_message::{
+    v1::{self, TransactionConfig, MAX_TRANSACTION_SIZE},
+    VersionedMessage,
+};
 use solana_program_pack::Pack;
 use solana_rent::Rent;
 use solana_signer::Signer;
 use solana_system_interface::instruction as sys_ix;
-use solana_transaction::Transaction;
+use solana_transaction::versioned::VersionedTransaction;
 use spl_token_2022_interface::{
     extension::{
         transfer_fee::instruction as transfer_fee_ix,
@@ -103,6 +105,29 @@ fn new_svm(audren_id: Address, mock_router_id: Option<Address>) -> LiteSVM {
     svm
 }
 
+const DEFAULT_LOADED_ACCOUNTS_DATA_SIZE: u32 = 64 * 1024 * 1024;
+
+fn build_v1_tx(
+    payer: &Keypair,
+    extra_signers: &[&Keypair],
+    ixs: &[Instruction],
+    blockhash: [u8; 32],
+    cu_limit: u32,
+) -> (VersionedTransaction, Vec<u8>) {
+    let config = TransactionConfig::empty()
+        .with_compute_unit_limit(cu_limit)
+        .with_loaded_accounts_data_size_limit(DEFAULT_LOADED_ACCOUNTS_DATA_SIZE);
+    let msg = v1::Message::try_compile_with_config(&payer.pubkey(), ixs, blockhash.into(), config)
+        .expect("compile Solana v1 message");
+    let mut signers: Vec<&Keypair> = vec![payer];
+    signers.extend_from_slice(extra_signers);
+    let tx = VersionedTransaction::try_new(VersionedMessage::V1(msg), &signers)
+        .expect("sign Solana v1 transaction");
+    let wire = wincode::serialize(&tx).expect("wincode-serialize Solana v1 transaction");
+    assert_eq!(wire[0], 0x81, "Solana Transaction v1 must start with 0x81");
+    (tx, wire)
+}
+
 fn send_ixs(
     svm: &mut LiteSVM,
     payer: &Keypair,
@@ -110,13 +135,12 @@ fn send_ixs(
     ixs: &[Instruction],
     cu_limit: u32,
 ) -> TransactionResult {
-    let mut all_ixs = Vec::with_capacity(ixs.len() + 1);
-    all_ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(cu_limit));
-    all_ixs.extend_from_slice(ixs);
-    let msg = Message::new(&all_ixs, Some(&payer.pubkey()));
-    let mut signers: Vec<&Keypair> = vec![payer];
-    signers.extend_from_slice(extra_signers);
-    let tx = Transaction::new(&signers, msg, svm.latest_blockhash());
+    let (tx, wire) = build_v1_tx(payer, extra_signers, ixs, svm.latest_blockhash().to_bytes(), cu_limit);
+    assert!(
+        wire.len() <= MAX_TRANSACTION_SIZE,
+        "Solana v1 wire tx {} B exceeds {MAX_TRANSACTION_SIZE} B limit",
+        wire.len()
+    );
     svm.send_transaction(tx)
 }
 
@@ -1713,11 +1737,10 @@ fn test_simd0437_dynamic_rent_self_balancing() {
 }
 
 // ============================================================================
-// TEST 5: ProofBuffer MTU Enforcement (<= 1,232 B Solana Packet Limit) & Guards
+// TEST 5: ProofBuffer Chunked Upload (Solana Transaction v1) & Adversarial Guards
 // ============================================================================
 #[test]
 fn test_proof_buffer_mtu_and_adversarial_guards() {
-    const SOLANA_PACKET_MTU: usize = 1_232;
     let mut rng = StdRng::seed_from_u64(0xB0F_F32_0005);
     let audren_id = Address::new_unique();
     let mut svm = new_svm(audren_id, None);
@@ -1790,23 +1813,20 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
     let plan = build_buffered_execution(&xfer_ix, 777).unwrap();
     assert!(plan.upload_chunks.len() >= 3);
 
-    // Helper: serialize full Solana Transaction and assert <= 1,232 B MTU!
+    // Helper: serialize full Solana Transaction v1 (`0x81`) and assert <= 4,096 B limit!
     let send_mtu_checked = |svm: &mut LiteSVM,
                             signer: &Keypair,
                             ixs: &[Instruction],
                             cu_limit: u32,
                             label: &str|
      -> TransactionResult {
-        let mut all = vec![ComputeBudgetInstruction::set_compute_unit_limit(cu_limit)];
-        all.extend_from_slice(ixs);
-        let msg = Message::new(&all, Some(&signer.pubkey()));
-        let tx = Transaction::new(&[signer], msg, svm.latest_blockhash());
-        let wire_len = bincode::serialize(&tx).unwrap().len();
+        let (tx, wire) = build_v1_tx(signer, &[], ixs, svm.latest_blockhash().to_bytes(), cu_limit);
+        let wire_len = wire.len();
         assert!(
-            wire_len <= SOLANA_PACKET_MTU,
-            "{label}: wire tx {wire_len} B exceeds Solana 1,232 B MTU!"
+            wire_len <= MAX_TRANSACTION_SIZE,
+            "{label}: Solana v1 wire tx {wire_len} B exceeds {MAX_TRANSACTION_SIZE} B limit!"
         );
-        println!("    [MTU OK] {label}: {wire_len} B <= 1,232 B");
+        println!("    [V1 OK] {label}: {wire_len} B <= {MAX_TRANSACTION_SIZE} B");
         svm.send_transaction(tx)
     };
 
@@ -1927,7 +1947,7 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
         "CloseProofBuffer MUST refund 100% rent!"
     );
 
-    // Verify Buffered Withdraw WITH change (exceeds 1,232 B inline!) succeeds under 1,232 B MTU!
+    // Verify Buffered Withdraw WITH change also succeeds via Solana Transaction v1!
     let ring2 = read_ring(&svm, &audren_id, pool_id, &[0]);
     let (wd_ix, _) = build_withdraw(
         audren_id,
@@ -1970,7 +1990,7 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
         "ExecBuffered Withdraw with change",
     );
     println!(
-        "  [BUFFERED WITHDRAW OK] CU={} | ALL TXS <= 1,232 B SOLANA MTU!",
+        "  [BUFFERED WITHDRAW OK] CU={} | ALL TXS SOLANA V1 (0x81) <= {MAX_TRANSACTION_SIZE} B!",
         wd_cu
     );
 }

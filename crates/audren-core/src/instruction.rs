@@ -11,8 +11,8 @@ pub const TAG_MERGE: u8 = 4;
 pub const TAG_SWAP_VIA_ROUTER: u8 = 5;
 pub const TAG_WITHDRAW: u8 = 6;
 pub const TAG_SET_PAUSED: u8 = 7;
-/// Upload one `<= 768 B` chunk of a large proof/swap payload into an ephemeral `ProofBuffer` PDA
-/// so every transaction stays strictly below Solana's `1,232 B` UDP/QUIC packet MTU limit.
+/// Upload one `<= 768 B` chunk of an oversized proof/swap payload (exceeding Solana Transaction v1's
+/// `4,096 B` budget) into an ephemeral `ProofBuffer` PDA.
 pub const TAG_WRITE_PROOF_BUFFER: u8 = 8;
 /// Execute `TAG_TRANSFER`, `TAG_MERGE`, `TAG_SWAP_VIA_ROUTER`, or `TAG_WITHDRAW` using a
 /// completed `ProofBuffer` PDA, atomically closing the buffer and refunding 100% of rent to `payer`.

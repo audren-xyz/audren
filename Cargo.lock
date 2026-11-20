@@ -427,7 +427,6 @@ dependencies = [
  "agave-feature-set",
  "audren-core",
  "base64 0.22.1",
- "bincode",
  "bs58",
  "curve25519-dalek",
  "hkdf 0.12.4",
@@ -438,7 +437,6 @@ dependencies = [
  "sha2 0.10.9",
  "solana-account",
  "solana-address 2.7.0",
- "solana-compute-budget-interface",
  "solana-instruction 3.5.1",
  "solana-keypair",
  "solana-message",
@@ -450,6 +448,7 @@ dependencies = [
  "solana-transaction",
  "solana-zk-sdk 8.0.1",
  "spl-token-2022-interface",
+ "wincode",
 ]
 
 [[package]]
