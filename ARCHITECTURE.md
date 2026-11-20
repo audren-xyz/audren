@@ -35,10 +35,14 @@ Fixed-size column-major page holding up to 32 notes, strictly below Solana's `10
 
 **Standard RPC & WebSocket Discovery:** Placing `view_tags[32]` and `ephemeral_pks[32]` contiguously at `[64..1,120]` lets wallets scan up to **100 pages (`3,200` notes)** per `getMultipleAccounts` call using `dataSlice: { offset: 64, length: 1056 }` (~`106 KB`), or stream new notes via Agave `programSubscribe` `dataSlice`. Spent status is checked directly via 0-byte `NullifierPDA` (`["audren_null", pool_id_le, nullifier]`) existence.
 
-### Multi-Asset Asset Generators & Token-2022 Validation
+### Multi-Asset Asset Generators & Token-2022 Support
 - Every mint maps deterministically to a NUMS Ristretto255 base `G_mint = HashToRistretto("audren/v1/mint", mint)` (`[0u8; 32]` for Native SOL).
 - All supported assets share the same `EpochPage` anonymity sets.
-- On `Deposit`, Token-2022 mint extensions are inspected and mints with `PermanentDelegate`, `NonTransferable`, active/mutable `TransferHook`, or non-zero/mutable `TransferFeeConfig` are rejected to preserve 1:1 vault solvency.
+- Audren supports Native SOL, Classic SPL tokens, and all transferable Token-2022 mints:
+  - **Exact net-delta accounting (`TransferFeeConfig`):** `Deposit` and `SwapViaRouter` measure the actual vault token balance delta (`after - before > 0`) and commit `V = net_received * G_mint`, preserving exact 1:1 vault solvency even when a mint withholds a non-zero transfer fee (`bps > 0`).
+  - **Regulated issuers (`PermanentDelegate`):** Token-2022 stablecoins and RWAs carrying `PermanentDelegate` (such as PYUSD, USDG, and CASH) are accepted natively alongside Classic SPL stablecoins (USDC, USDT, EURC). Note that issuer-level `PermanentDelegate` or `FreezeAuthority` powers remain inherent to the mint itself.
+  - **Transfer hooks (`TransferHook`):** Mints with an inactive `TransferHook` (`program_id == None`) take a zero-allocation 5-account CPI fast path. Mints with an active `TransferHook` forward sanitized, non-signer trailing hook accounts while blocking Audren-owned accounts and custody vaults from ever entering the hook CPI.
+  - **Withdrawals never blocked:** `Withdraw` never rejects a mint on extensions; soulbound `NonTransferable` mints are rejected natively by Token-2022 at `transfer_checked`.
 
 ---
 

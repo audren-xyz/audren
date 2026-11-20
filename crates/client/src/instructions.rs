@@ -1,7 +1,8 @@
-//! Complete Instruction Builders for all 8 Audren instructions (`InitPool`, `OpenPage`,
-//! `Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `SetPaused`).
+//! Instruction builders for all 11 Audren instructions (`InitPool`, `OpenPage`, `Deposit`,
+//! `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `SetPaused`, `WriteProofBuffer`,
+//! `ExecBuffered`, `CloseProofBuffer`).
 //!
-//! Verified byte-for-byte against `programs/audren/program/src/lib.rs`.
+//! Verified byte-for-byte against `program/src/lib.rs`.
 
 use crate::keys::{
     prepare_dynamic_swap_output, prepare_shielded_note, AudrenAddress, PreparedDynamicOutput,
@@ -81,6 +82,40 @@ pub struct AudrenInstruction {
     pub program_id: Address,
     pub accounts: Vec<AudrenAccountMeta>,
     pub data: Vec<u8>,
+}
+
+impl AudrenInstruction {
+    /// Append optional trailing accounts (for example Token-2022 `TransferHook` program,
+    /// `ExtraAccountMetaList`, and hook accounts on `Deposit` or `Withdraw`).
+    pub fn with_extra_accounts(mut self, extra: &[AudrenAccountMeta]) -> Self {
+        self.accounts.extend_from_slice(extra);
+        self
+    }
+}
+
+/// Compute the SPL Token-2022 transfer fee withheld on a gross transfer of `amount`
+/// using Token-2022's exact ceiling division (`fee_bps / 10_000`, capped at `max_fee`).
+pub fn calculate_transfer_fee(amount: u64, fee_bps: u16, max_fee: u64) -> u64 {
+    const ONE_IN_BASIS_POINTS: u128 = 10_000;
+    if fee_bps == 0 || amount == 0 {
+        return 0;
+    }
+    let bps = (fee_bps as u128).min(ONE_IN_BASIS_POINTS);
+    let raw = if bps == ONE_IN_BASIS_POINTS {
+        amount as u128
+    } else {
+        (amount as u128)
+            .saturating_mul(bps)
+            .saturating_add(ONE_IN_BASIS_POINTS - 1)
+            / ONE_IN_BASIS_POINTS
+    };
+    raw.min(max_fee as u128).min(amount as u128) as u64
+}
+
+/// Net amount credited to the Audren vault on a gross `Deposit` of `amount` for a Token-2022
+/// mint with `TransferFeeConfig`.
+pub fn net_deposit_amount(amount: u64, fee_bps: u16, max_fee: u64) -> u64 {
+    amount.saturating_sub(calculate_transfer_fee(amount, fee_bps, max_fee))
 }
 
 fn encode_note_wire(note: &NoteEntry) -> [u8; NOTE_WIRE_LEN] {
@@ -168,10 +203,10 @@ pub fn build_open_page(
     }
 }
 
-/// Tag 2: `Deposit` — shield native SOL or SPL/safe Token-2022 directly to any Audren stealth address.
-/// Works identically for self-deposits and third-party regulated onramps:
-/// the on-chain program computes `G_mint` and `V = amount * G_mint` directly so the depositor
-/// never needs the user's spend key or a ZK proof.
+/// Tag 2: `Deposit` — shield native SOL, Classic SPL, or Token-2022 directly to any Audren stealth address.
+/// Works identically for self-deposits and third-party payment gateways: the on-chain program computes
+/// `G_mint` and `V = net_received * G_mint` directly so the depositor never needs the user's spend key
+/// or a ZK proof.
 #[allow(clippy::too_many_arguments)]
 pub fn build_deposit<R: RngCore + CryptoRng>(
     program_id: Address,
@@ -184,11 +219,42 @@ pub fn build_deposit<R: RngCore + CryptoRng>(
     spl_accounts: Option<(Address, Address, Address)>, // (token_program, depositor_ata, vault_ata)
     rng: &mut R,
 ) -> Result<(AudrenInstruction, PreparedNote), ClientError> {
+    build_deposit_with_options(
+        program_id,
+        depositor,
+        pool_id,
+        active_page_id,
+        recipient,
+        mint,
+        amount,
+        amount,
+        spl_accounts,
+        &[],
+        rng,
+    )
+}
+
+/// Tag 2: `Deposit` with explicit net vault amount (for active `TransferFee` Token-2022 mints,
+/// see [`net_deposit_amount`]) and optional trailing `TransferHook` accounts.
+#[allow(clippy::too_many_arguments)]
+pub fn build_deposit_with_options<R: RngCore + CryptoRng>(
+    program_id: Address,
+    depositor: Address,
+    pool_id: u32,
+    active_page_id: u64,
+    recipient: &AudrenAddress,
+    mint: [u8; 32],
+    gross_amount: u64,
+    net_amount: u64,
+    spl_accounts: Option<(Address, Address, Address)>, // (token_program, depositor_ata, vault_ata)
+    extra_hook_accounts: &[AudrenAccountMeta],
+    rng: &mut R,
+) -> Result<(AudrenInstruction, PreparedNote), ClientError> {
     let is_native = mint == NATIVE_SOL_MINT;
     let prepared = prepare_shielded_note(
         recipient,
         mint,
-        amount,
+        net_amount,
         false,
         None,
         false,
@@ -204,13 +270,13 @@ pub fn build_deposit<R: RngCore + CryptoRng>(
     let mut data = Vec::with_capacity(1 + 9 + DYNAMIC_OUTPUT_WIRE_LEN);
     data.push(TAG_DEPOSIT);
     data.push(u8::from(is_native));
-    data.extend_from_slice(&amount.to_le_bytes());
+    data.extend_from_slice(&gross_amount.to_le_bytes());
     data.push(prepared.entry.view_tag);
     data.extend_from_slice(&prepared.entry.ephemeral_pk);
     data.extend_from_slice(&prepared.entry.stealth_pk);
     data.extend_from_slice(&prepared.entry.ciphertext);
 
-    let accounts = if is_native {
+    let mut accounts = if is_native {
         let (sol_vault, _) = derive_sol_vault_pda(&program_id, pool_id);
         vec![
             AudrenAccountMeta::writable_signer(depositor),
@@ -238,6 +304,9 @@ pub fn build_deposit<R: RngCore + CryptoRng>(
             AudrenAccountMeta::readonly(sys_prog),
         ]
     };
+    if !is_native && !extra_hook_accounts.is_empty() {
+        accounts.extend_from_slice(extra_hook_accounts);
+    }
 
     Ok((
         AudrenInstruction {

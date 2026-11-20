@@ -124,6 +124,26 @@ export function encodeExecBufferedData(innerTag: number): Uint8Array {
   return new Uint8Array([TAG_EXEC_BUFFERED, innerTag & 0xff]);
 }
 
+/**
+ * Compute the SPL Token-2022 transfer fee withheld on a gross transfer of `amount`
+ * using Token-2022's exact ceiling division (`feeBps / 10_000`, capped at `maxFee`).
+ */
+export function calculateTransferFee(amount: bigint, feeBps: number, maxFee: bigint): bigint {
+  if (feeBps <= 0 || amount <= 0n) return 0n;
+  const bps = BigInt(Math.min(Math.floor(feeBps), 10_000));
+  const raw = bps === 10_000n ? amount : (amount * bps + 9_999n) / 10_000n;
+  const capped = raw < maxFee ? raw : maxFee;
+  return capped < amount ? capped : amount;
+}
+
+/**
+ * Net amount credited to the Audren vault on a gross `Deposit` of `amount` for a Token-2022
+ * mint with `TransferFeeConfig`.
+ */
+export function netDepositAmount(amount: bigint, feeBps: number, maxFee: bigint): bigint {
+  return amount - calculateTransferFee(amount, feeBps, maxFee);
+}
+
 /** Encode Tag 10 (`CloseProofBuffer`, 1 byte) — reclaims 100% rent from an abandoned buffer. */
 export function encodeCloseProofBufferData(): Uint8Array {
   return new Uint8Array([TAG_CLOSE_PROOF_BUFFER]);

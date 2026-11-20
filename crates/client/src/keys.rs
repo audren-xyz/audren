@@ -69,7 +69,7 @@ impl AudrenKeys {
         Self::from_seed(&seed)
     }
 
-    /// Public stealth meta-address (accepts SOL, USDC, SPL, and safe Token-2022 in one address).
+    /// Public stealth meta-address (accepts SOL, Classic SPL, and Token-2022 in one address).
     pub fn address(&self) -> AudrenAddress {
         AudrenAddress {
             spend_pk: self.spend_pk,

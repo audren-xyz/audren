@@ -1,6 +1,7 @@
 //! Audren — Private Multi-Asset Settlement & Swap Program on Solana (sBPFv3).
 //!
-//! Native SOL, Classic SPL tokens, and safe Token-2022 mints share one unified shielded
+//! Native SOL, Classic SPL tokens, and transferable Token-2022 mints (including
+//! `PermanentDelegate`, net-delta `TransferFee`, and `TransferHook`) share one unified shielded
 //! `EpochPage` pool (`32` notes / `6,240 B` per page):
 //! - Private multi-asset transfers hiding sender, recipient, token mint, and amount
 //! - Single-transaction private DEX swaps (`SwapViaRouter`) through 16 isolated `swap_escrow`
@@ -55,13 +56,7 @@ use solana_program_error::{ProgramError, ProgramResult};
 use solana_rent::{sysvar::GetSysvar, Rent};
 use solana_system_interface::{instruction as sys, program as system};
 use spl_token_2022_interface::{
-    extension::{
-        non_transferable::NonTransferable,
-        permanent_delegate::get_permanent_delegate,
-        transfer_fee::TransferFeeConfig,
-        transfer_hook::TransferHook,
-        BaseStateWithExtensions, StateWithExtensions,
-    },
+    extension::{transfer_hook::TransferHook, BaseStateWithExtensions, StateWithExtensions},
     instruction as token_ix,
     state::{Account as TokenAccount, Mint},
 };
@@ -136,35 +131,121 @@ fn claim_nullifier<'a>(
     create_pda(payer, nullifier_acc, system_program, seeds, 0, program_id)
 }
 
-/// Reject unsafe Token-2022 extensions that could drain or freeze the shared 1:1 collateral vault.
-fn check_safe_mint_extensions(mint: &AccountInfo, token_program: &Address) -> Result<u8, ProgramError> {
+#[derive(Clone, Copy)]
+struct MintInfo {
+    decimals: u8,
+    has_active_hook: bool,
+}
+
+/// Unpack a Classic SPL or Token-2022 mint and read decimals + active `TransferHook` state.
+///
+/// Supports all transferable Token-2022 mints (including `PermanentDelegate`, `TransferFeeConfig`,
+/// and `TransferHook`). Soulbound `NonTransferable` mints are rejected natively by Token-2022
+/// during `transfer_checked`.
+fn load_mint_info(mint: &AccountInfo, token_program: &Address) -> Result<MintInfo, ProgramError> {
     ensure(mint.owner == token_program, AudrenError::InvalidAccount)?;
     let md = mint.try_borrow_data()?;
     let mint_state = StateWithExtensions::<Mint>::unpack(&md)?;
-    ensure(
-        get_permanent_delegate(&mint_state).is_none(),
-        AudrenError::UnsafeMintExtension,
+    let has_active_hook = mint_state
+        .get_extension::<TransferHook>()
+        .ok()
+        .and_then(|hook| Option::<Address>::from(hook.program_id))
+        .is_some();
+    Ok(MintInfo {
+        decimals: mint_state.base.decimals,
+        has_active_hook,
+    })
+}
+
+/// Invoke Classic SPL or Token-2022 `transfer_checked`.
+///
+/// Uses a zero-allocation fast path when the mint has no active `TransferHook` (`program_id == None`).
+/// When a mint has an active `TransferHook`, appends sanitized extra accounts from `hook_candidates`
+/// with `is_signer = false` and never forwards Audren program, Audren-owned state, or blocked custody accounts.
+#[allow(clippy::too_many_arguments)]
+fn invoke_token_transfer_checked<'a>(
+    program_id: &Address,
+    vault_auth_key: &Address,
+    token_prog: &AccountInfo<'a>,
+    source: &AccountInfo<'a>,
+    mint: &AccountInfo<'a>,
+    dest: &AccountInfo<'a>,
+    authority: &AccountInfo<'a>,
+    amount: u64,
+    mint_info: MintInfo,
+    hook_candidates: &[AccountInfo<'a>],
+    blocked_keys: &[&Address],
+    signer_seeds: &[&[&[u8]]],
+) -> ProgramResult {
+    let mut ix = token_ix::transfer_checked(
+        token_prog.key,
+        source.key,
+        mint.key,
+        dest.key,
+        authority.key,
+        &[],
+        amount,
+        mint_info.decimals,
     )?;
-    ensure(
-        mint_state.get_extension::<NonTransferable>().is_err(),
-        AudrenError::UnsafeMintExtension,
-    )?;
-    if let Ok(hook) = mint_state.get_extension::<TransferHook>() {
-        ensure(
-            Option::<Address>::from(hook.program_id).is_none()
-                && Option::<Address>::from(hook.authority).is_none(),
-            AudrenError::UnsafeMintExtension,
-        )?;
+
+    if !mint_info.has_active_hook || hook_candidates.is_empty() {
+        let base_infos = [
+            source.clone(),
+            mint.clone(),
+            dest.clone(),
+            authority.clone(),
+            token_prog.clone(),
+        ];
+        return if signer_seeds.is_empty() {
+            invoke(&ix, &base_infos)
+        } else {
+            invoke_signed(&ix, &base_infos, signer_seeds)
+        };
     }
-    if let Ok(fee_cfg) = mint_state.get_extension::<TransferFeeConfig>() {
-        ensure(
-            Option::<Address>::from(fee_cfg.transfer_fee_config_authority).is_none()
-                && u16::from(fee_cfg.older_transfer_fee.transfer_fee_basis_points) == 0
-                && u16::from(fee_cfg.newer_transfer_fee.transfer_fee_basis_points) == 0,
-            AudrenError::UnsafeMintExtension,
-        )?;
+
+    let mut infos = Vec::with_capacity(5 + hook_candidates.len());
+    infos.push(source.clone());
+    infos.push(mint.clone());
+    infos.push(dest.clone());
+    infos.push(authority.clone());
+    infos.push(token_prog.clone());
+
+    for acc in hook_candidates {
+        if acc.key == program_id || acc.owner == program_id {
+            continue;
+        }
+        if acc.key == source.key
+            || acc.key == mint.key
+            || acc.key == dest.key
+            || acc.key == authority.key
+            || acc.key == token_prog.key
+        {
+            continue;
+        }
+        if blocked_keys.iter().any(|k| *k == acc.key) {
+            continue;
+        }
+        if let Some(snap) = token_account_security(acc) {
+            if snap.owner == *vault_auth_key {
+                continue;
+            }
+        }
+        if ix.accounts.iter().any(|m| m.pubkey == *acc.key) {
+            continue;
+        }
+        ix.accounts.push(if acc.is_writable {
+            solana_instruction::AccountMeta::new(*acc.key, false)
+        } else {
+            solana_instruction::AccountMeta::new_readonly(*acc.key, false)
+        });
+        infos.push(acc.clone());
     }
-    Ok(mint_state.base.decimals)
+
+    if signer_seeds.is_empty() {
+        invoke(&ix, &infos)
+    } else {
+        invoke_signed(&ix, &infos, signer_seeds)
+    }
 }
 
 fn token_balance(account: &AccountInfo, token_program: &Address) -> Result<u64, ProgramError> {
@@ -616,6 +697,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
     ensure(!pool.paused, AudrenError::PoolPaused)?;
 
     let mint_bytes: [u8; 32];
+    let committed_amount: u64;
     let rent_vault_acc: &AccountInfo;
     let sys_prog: &AccountInfo;
 
@@ -635,6 +717,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
             &[depositor.clone(), sol_vault.clone(), sys_prog.clone()],
         )?;
         mint_bytes = NATIVE_SOL_MINT;
+        committed_amount = amount;
     } else {
         ensure(accounts.len() >= 9, AudrenError::InvalidAccount)?;
         let mint = &accounts[3];
@@ -643,49 +726,54 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
         let token_prog = &accounts[6];
         rent_vault_acc = &accounts[7];
         sys_prog = &accounts[8];
+        let hook_accounts = &accounts[9..];
         check_supported_token_program(token_prog.key)?;
         check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
         ensure(
             depositor_ata.is_writable && vault_ata.is_writable && rent_vault_acc.is_writable,
             AudrenError::InvalidAccount,
         )?;
-        let decimals = check_safe_mint_extensions(mint, token_prog.key)?;
+        let mint_info = load_mint_info(mint, token_prog.key)?;
         let (v_auth, _) = vault_auth_pda(program_id, pool.pool_id);
+        let (expected_sol_vault, _) = sol_vault_pda(program_id, pool.pool_id);
         let expected_vault = expected_ata(&v_auth, token_prog.key, mint.key);
         ensure(*vault_ata.key == expected_vault, AudrenError::InvalidPda)?;
+        ensure(depositor_ata.key != vault_ata.key, AudrenError::InvalidAccount)?;
         let before = token_balance(vault_ata, token_prog.key)?;
-        let ix = token_ix::transfer_checked(
-            token_prog.key,
-            depositor_ata.key,
-            mint.key,
-            vault_ata.key,
-            depositor.key,
-            &[],
+        let blocked = [
+            pool_acc.key,
+            out_page_acc.key,
+            rent_vault_acc.key,
+            &v_auth,
+            &expected_sol_vault,
+        ];
+        invoke_token_transfer_checked(
+            program_id,
+            &v_auth,
+            token_prog,
+            depositor_ata,
+            mint,
+            vault_ata,
+            depositor,
             amount,
-            decimals,
-        )?;
-        invoke(
-            &ix,
-            &[
-                depositor_ata.clone(),
-                mint.clone(),
-                vault_ata.clone(),
-                depositor.clone(),
-                token_prog.clone(),
-            ],
+            mint_info,
+            hook_accounts,
+            &blocked,
+            &[],
         )?;
         let after = token_balance(vault_ata, token_prog.key)?;
-        ensure(
-            after.checked_sub(before) == Some(amount),
-            AudrenError::UnsafeMintExtension,
-        )?;
+        let net_received = after
+            .checked_sub(before)
+            .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+        ensure(net_received > 0, AudrenError::ZeroAmount)?;
         mint_bytes = mint.key.to_bytes();
+        committed_amount = net_received;
     }
 
     collect_page_rent_fee(depositor, rent_vault_acc, sys_prog, &pool, 1)?;
 
     let g_mint = asset_generator(&mint_bytes);
-    let commitment = pt_mul_u64(amount, g_mint)?;
+    let commitment = pt_mul_u64(committed_amount, g_mint)?;
     let note = NoteEntry {
         view_tag,
         ephemeral_pk,
@@ -696,7 +784,12 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
     };
     let idx = write_output_note(out_page_acc, program_id, &mut pool, &note)?;
     save_pool(pool_acc, program_id, &pool)?;
-    msg!("audren:deposit page={} idx={}", pool.current_page_id, idx);
+    msg!(
+        "audren:deposit page={} idx={} amount={}",
+        pool.current_page_id,
+        idx,
+        committed_amount
+    );
     Ok(())
 }
 
@@ -1109,8 +1202,8 @@ fn ix_swap_via_router(
     check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
     check_supported_token_program(token_prog_in.key)?;
     check_supported_token_program(token_prog_out.key)?;
-    let dec_in = check_safe_mint_extensions(mint_in, token_prog_in.key)?;
-    let dec_out = check_safe_mint_extensions(mint_out, token_prog_out.key)?;
+    let mint_info_in = load_mint_info(mint_in, token_prog_in.key)?;
+    let mint_info_out = load_mint_info(mint_out, token_prog_out.key)?;
 
     let (expected_va, va_bump) = vault_auth_pda(program_id, pool.pool_id);
     ensure(*vault_auth_acc.key == expected_va, AudrenError::InvalidPda)?;
@@ -1291,37 +1384,8 @@ fn ix_swap_via_router(
         &verified.nullifier,
     )?;
 
-    // 3. Custody isolation: transfer exact `amount_in` from global `vault_in` -> isolated `escrow_in`.
-    let escrow_lamports_before = escrow_acc.lamports();
-    let escrow_in_before = token_balance(escrow_in, token_prog_in.key)?;
-    let escrow_out_before = token_balance(escrow_out, token_prog_out.key)?;
-
-    let pool_le = pool.pool_id.to_le_bytes();
-    let va_seeds: &[&[u8]] = &[VAULT_AUTH_SEED, &pool_le, &[va_bump]];
-    let fund_ix = token_ix::transfer_checked(
-        token_prog_in.key,
-        vault_in.key,
-        mint_in.key,
-        escrow_in.key,
-        vault_auth_acc.key,
-        &[],
-        amount_in,
-        dec_in,
-    )?;
-    invoke_signed(
-        &fund_ix,
-        &[
-            vault_in.clone(),
-            mint_in.clone(),
-            escrow_in.clone(),
-            vault_auth_acc.clone(),
-            token_prog_in.clone(),
-        ],
-        &[va_seeds],
-    )?;
-
-    // Snapshot every writable token account owned by `swap_escrow` and block any Audren state/vault
-    // account from ever being forwarded into the external router CPI.
+    // 3. Validate router account firewall & snapshot every writable token account owned by
+    //    `swap_escrow` BEFORE any external CPI (including optional TransferHook accounts).
     let (expected_sol_vault, _) = sol_vault_pda(program_id, pool.pool_id);
     let mut watched_escrow_accs: Vec<(usize, Address, Option<Address>)> = Vec::new();
     for (idx, acc) in router_accounts.iter().enumerate() {
@@ -1349,7 +1413,49 @@ fn ix_swap_via_router(
         }
     }
 
-    // 4. Invoke the external router with ONLY `swap_escrow` signing (never `vault_auth` or `payer`).
+    // 4. Custody isolation: transfer exact `amount_in` from global `vault_in` -> isolated `escrow_in`.
+    let escrow_lamports_before = escrow_acc.lamports();
+    let escrow_in_before = token_balance(escrow_in, token_prog_in.key)?;
+    let escrow_out_before = token_balance(escrow_out, token_prog_out.key)?;
+    let vault_in_before_fund = token_balance(vault_in, token_prog_in.key)?;
+
+    let pool_le = pool.pool_id.to_le_bytes();
+    let va_seeds: &[&[u8]] = &[VAULT_AUTH_SEED, &pool_le, &[va_bump]];
+    let swap_blocked = [
+        payer.key,
+        pool_acc.key,
+        out_page_acc.key,
+        nullifier_acc.key,
+        rent_vault_acc.key,
+        vault_auth_acc.key,
+        vault_in.key,
+        vault_out.key,
+        &expected_sol_vault,
+    ];
+    invoke_token_transfer_checked(
+        program_id,
+        vault_auth_acc.key,
+        token_prog_in,
+        vault_in,
+        mint_in,
+        escrow_in,
+        vault_auth_acc,
+        amount_in,
+        mint_info_in,
+        router_accounts,
+        &swap_blocked,
+        &[va_seeds],
+    )?;
+    let vault_in_after_fund = token_balance(vault_in, token_prog_in.key)?;
+    ensure(
+        vault_in_before_fund.checked_sub(vault_in_after_fund) == Some(amount_in),
+        AudrenError::ArithmeticOverflow,
+    )?;
+    let escrow_in_funded = token_balance(escrow_in, token_prog_in.key)?
+        .checked_sub(escrow_in_before)
+        .ok_or_else(|| err(AudrenError::EscrowAccountAltered))?;
+
+    // 5. Invoke the external router with ONLY `swap_escrow` signing (never `vault_auth` or `payer`).
     let cpi_metas: Vec<solana_instruction::AccountMeta> = router_accounts
         .iter()
         .map(|acc| {
@@ -1369,7 +1475,7 @@ fn ix_swap_via_router(
     let escrow_seeds: &[&[u8]] = &[ESCROW_SEED, &pool_le, &[shard_id], &[escrow_bump]];
     invoke_signed(&router_ix, router_accounts, &[escrow_seeds])?;
 
-    // 5. Post-CPI custody & authority integrity checks (owner, lamports, zero delegate, close_authority).
+    // 6. Post-CPI custody & authority integrity checks (owner, lamports, zero delegate, close_authority).
     ensure(
         escrow_acc.owner == &system::id()
             && escrow_acc.data_is_empty()
@@ -1395,83 +1501,69 @@ fn ix_swap_via_router(
     let actual_out = escrow_out_after
         .checked_sub(escrow_out_before)
         .ok_or_else(|| err(AudrenError::SlippageExceeded))?;
-    ensure(actual_out >= min_amount_out, AudrenError::SlippageExceeded)?;
+    ensure(actual_out > 0, AudrenError::SlippageExceeded)?;
 
     let unspent_in = escrow_in_after
         .checked_sub(escrow_in_before)
         .ok_or_else(|| err(AudrenError::EscrowAccountAltered))?;
-    ensure(unspent_in <= amount_in, AudrenError::EscrowAccountAltered)?;
+    ensure(unspent_in <= escrow_in_funded, AudrenError::EscrowAccountAltered)?;
     if unspent_in > 0 {
         ensure(allow_partial, AudrenError::UnexpectedPartialFill)?;
     }
 
-    // 6. Sweep `actual_out` from `escrow_out` -> global `vault_out` (verifying 1:1 vault delta)
-    //    and any unspent input back to `vault_in`.
+    // 7. Sweep `actual_out` from `escrow_out` -> global `vault_out` and commit the exact net
+    //    vault delta `net_out >= min_amount_out` (1:1 solvent even on TransferFee mints).
     let vault_out_before = token_balance(vault_out, token_prog_out.key)?;
-    let sweep_out_ix = token_ix::transfer_checked(
-        token_prog_out.key,
-        escrow_out.key,
-        mint_out.key,
-        vault_out.key,
-        escrow_acc.key,
-        &[],
+    invoke_token_transfer_checked(
+        program_id,
+        vault_auth_acc.key,
+        token_prog_out,
+        escrow_out,
+        mint_out,
+        vault_out,
+        escrow_acc,
         actual_out,
-        dec_out,
-    )?;
-    invoke_signed(
-        &sweep_out_ix,
-        &[
-            escrow_out.clone(),
-            mint_out.clone(),
-            vault_out.clone(),
-            escrow_acc.clone(),
-            token_prog_out.clone(),
-        ],
+        mint_info_out,
+        router_accounts,
+        &swap_blocked,
         &[escrow_seeds],
     )?;
     let vault_out_after = token_balance(vault_out, token_prog_out.key)?;
-    ensure(
-        vault_out_after.checked_sub(vault_out_before) == Some(actual_out),
-        AudrenError::UnsafeMintExtension,
-    )?;
+    let net_out = vault_out_after
+        .checked_sub(vault_out_before)
+        .ok_or_else(|| err(AudrenError::SlippageExceeded))?;
+    ensure(net_out >= min_amount_out, AudrenError::SlippageExceeded)?;
 
+    let mut net_refund = 0u64;
     if unspent_in > 0 {
         let vault_in_before = token_balance(vault_in, token_prog_in.key)?;
-        let sweep_in_ix = token_ix::transfer_checked(
-            token_prog_in.key,
-            escrow_in.key,
-            mint_in.key,
-            vault_in.key,
-            escrow_acc.key,
-            &[],
+        invoke_token_transfer_checked(
+            program_id,
+            vault_auth_acc.key,
+            token_prog_in,
+            escrow_in,
+            mint_in,
+            vault_in,
+            escrow_acc,
             unspent_in,
-            dec_in,
-        )?;
-        invoke_signed(
-            &sweep_in_ix,
-            &[
-                escrow_in.clone(),
-                mint_in.clone(),
-                vault_in.clone(),
-                escrow_acc.clone(),
-                token_prog_in.clone(),
-            ],
+            mint_info_in,
+            router_accounts,
+            &swap_blocked,
             &[escrow_seeds],
         )?;
         let vault_in_after = token_balance(vault_in, token_prog_in.key)?;
-        ensure(
-            vault_in_after.checked_sub(vault_in_before) == Some(unspent_in),
-            AudrenError::UnsafeMintExtension,
-        )?;
+        net_refund = vault_in_after
+            .checked_sub(vault_in_before)
+            .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
     }
 
-    // 7. Compute dynamic `V_out = actual_out * G_{mint_out}` on-chain (2,208 CU, 0 B extra proof!)
+    // 8. Compute dynamic `V_out = net_out * G_{mint_out}` on-chain
     //    and append fresh stealth note(s) into the shared `EpochPage`.
-    let out_notes_count = 1u64 + u64::from(has_change) + u64::from(unspent_in > 0);
+    let out_notes_count = 1u64 + u64::from(has_change) + u64::from(net_refund > 0);
     collect_page_rent_fee(payer, rent_vault_acc, sys_prog, &pool, out_notes_count)?;
 
     let g_out = asset_generator(&mint_out.key.to_bytes());
-    let v_out = pt_mul_u64(actual_out, g_out)?;
+    let v_out = pt_mul_u64(net_out, g_out)?;
     let swap_note = NoteEntry {
         view_tag: out_view_tag,
         ephemeral_pk: out_eph_pk,
@@ -1485,9 +1577,9 @@ fn ix_swap_via_router(
     if let Some((note_chg, _, _, _)) = change_bundle {
         write_output_note(out_page_acc, program_id, &mut pool, &note_chg)?;
     }
-    if unspent_in > 0 {
+    if net_refund > 0 {
         if let Some((r_tag, r_eph, r_stealth, r_ct)) = refund_desc {
-            let v_ref = pt_mul_u64(unspent_in, g_in)?;
+            let v_ref = pt_mul_u64(net_refund, g_in)?;
             let refund_note = NoteEntry {
                 view_tag: r_tag,
                 ephemeral_pk: r_eph,
@@ -1506,11 +1598,11 @@ fn ix_swap_via_router(
         .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
     save_pool(pool_acc, program_id, &pool)?;
     msg!(
-        "audren:swap_router page={} idx={} actual_out={} unspent_in={}",
+        "audren:swap_router page={} idx={} net_out={} net_refund={}",
         pool.current_page_id,
         idx_out,
-        actual_out,
-        unspent_in
+        net_out,
+        net_refund
     );
     Ok(())
 }
@@ -1687,36 +1779,47 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
         let vault_ata = &accounts[9];
         let recipient_ata = &accounts[10];
         let token_prog = &accounts[11];
+        let n_pages = input_pages_for_m(m).map_err(err)?;
+        let hook_accounts = &accounts[pages_start + n_pages..];
         check_supported_token_program(token_prog.key)?;
-        let decimals = check_safe_mint_extensions(mint, token_prog.key)?;
+        let mint_info = load_mint_info(mint, token_prog.key)?;
         let (expected_va, va_bump) = vault_auth_pda(program_id, pool.pool_id);
+        let (expected_sol_vault, _) = sol_vault_pda(program_id, pool.pool_id);
         ensure(*vault_auth.key == expected_va, AudrenError::InvalidPda)?;
         ensure(
             *vault_ata.key == expected_ata(&expected_va, token_prog.key, mint.key),
             AudrenError::InvalidPda,
         )?;
+        ensure(recipient_ata.key != vault_ata.key, AudrenError::InvalidAccount)?;
         let pool_le = pool.pool_id.to_le_bytes();
         let va_seeds: &[&[u8]] = &[VAULT_AUTH_SEED, &pool_le, &[va_bump]];
-        let ix = token_ix::transfer_checked(
-            token_prog.key,
-            vault_ata.key,
-            mint.key,
-            recipient_ata.key,
-            vault_auth.key,
-            &[],
+        let vault_before = token_balance(vault_ata, token_prog.key)?;
+        let blocked = [
+            payer.key,
+            pool_acc.key,
+            out_page_acc.key,
+            nullifier_acc.key,
+            rent_vault_acc.key,
+            &expected_sol_vault,
+        ];
+        invoke_token_transfer_checked(
+            program_id,
+            &expected_va,
+            token_prog,
+            vault_ata,
+            mint,
+            recipient_ata,
+            vault_auth,
             amount_out,
-            decimals,
-        )?;
-        invoke_signed(
-            &ix,
-            &[
-                vault_ata.clone(),
-                mint.clone(),
-                recipient_ata.clone(),
-                vault_auth.clone(),
-                token_prog.clone(),
-            ],
+            mint_info,
+            hook_accounts,
+            &blocked,
             &[va_seeds],
+        )?;
+        let vault_after = token_balance(vault_ata, token_prog.key)?;
+        ensure(
+            vault_before.checked_sub(vault_after) == Some(amount_out),
+            AudrenError::ArithmeticOverflow,
         )?;
     }
 

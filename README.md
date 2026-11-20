@@ -2,11 +2,11 @@
 
 Private multi-asset settlement, router-agnostic DEX swaps, and verifiable compliance on Solana (`sBPFv3`).
 
-Native SOL, Classic SPL tokens, and safe Token-2022 mints share one shielded pool. Users can shield assets, send private transfers, execute single-transaction private swaps through any Solana DEX aggregator or AMM router, and produce selective disclosure or institutional audit proofs — with no trusted setup.
+Native SOL, Classic SPL tokens, and transferable Token-2022 mints share one shielded pool. Users can shield assets, send private transfers, execute single-transaction private swaps through any Solana DEX aggregator or AMM router, and produce selective disclosure or institutional audit proofs — with no trusted setup.
 
 ## Core Capabilities
 
-- **Unified Multi-Asset Shielded Pool:** Native SOL, Classic SPL, and safe Token-2022 mints share a single pool. Per-mint Ristretto255 generators (`G_mint`) hide sender, recipient, token mint, and amount inside Pedersen commitments (`V = v * A + r * H`). Token-2022 mints with `PermanentDelegate`, `NonTransferable`, active/mutable `TransferHook`, or non-zero/mutable `TransferFeeConfig` are rejected on deposit.
+- **Unified Multi-Asset Shielded Pool:** Native SOL, Classic SPL (USDC, USDT, EURC, JitoSOL, cbBTC), and transferable Token-2022 mints (including regulated issuers with `PermanentDelegate` such as PYUSD, USDG, and CASH, fee-on-transfer `TransferFeeConfig` via exact post-transfer vault delta accounting, and `TransferHook` mints via sanitized trailing hook accounts) share a single pool. Per-mint Ristretto255 generators (`G_mint`) hide sender, recipient, token mint, and amount inside Pedersen commitments (`V = v * A + r * H`). Soulbound `NonTransferable` mints are rejected natively by Token-2022.
 - **Single-Transaction Private DEX Swaps (`SwapViaRouter`):** Route shielded swaps through any Solana DEX aggregator or AMM router — Jupiter, Orca, Raydium, Meteora, Phoenix, Titan, DFlow, or custom routers — without unshielding to a public wallet. Exact `amount_in` moves into one of 16 isolated `swap_escrow` PDA shards that signs the external CPI; `vault_auth` never signs an external CPI, and `actual_out >= min_amount_out` settles directly into an unlinkable stealth note.
 - **Selective Disclosure & Institutional Auditability:** Pools initialize as either `Permissionless` (user-controlled per-transaction `SelectiveDisclosureProof` and read-only `FullViewingKey` exports) or `InstitutionalAudited`, where every spend cryptographically proves valid ElGamal encryption of the spent stealth key and hidden mint to `PoolState::auditor_pk` on-chain with zero custody or freeze authority.
 - **No Trusted Setup:** Spend authorization, nullifier uniqueness, asset conservation, and optional auditor encryption use pure Ristretto255 Multi-Base Binary Triptych (`32 / 64 / 128`-note rings) verified via Agave's native `sol_curve_multiscalar_mul` syscall and native `ZkE1Gama1Proof` 64-bit Bulletproofs.
@@ -32,7 +32,7 @@ Measured on sBPFv3 (`LiteSVM`, Agave 4.3):
 | --- | --- | ---: | --- |
 | `0x00` | `InitPool` | `35,697 – 47,687` | Create `PoolState` (`192 B`), `EpochPage #0` (`6,240 B`), `sol_vault`, `page_rent_vault` |
 | `0x01` | `OpenPage` | `18,179 – 28,679` | Permissionless rollover allocating `page_id + 1` funded by `PageRentVault` via live `Rent::get()` |
-| `0x02` | `Deposit` | `19,030 – 38,813` | Shield Native SOL, Classic SPL, or safe Token-2022 to any stealth address (no ZK proof required) |
+| `0x02` | `Deposit` | `19,030 – 38,813` | Shield Native SOL, Classic SPL, or Token-2022 to any stealth address (no ZK proof required) |
 | `0x03` | `Transfer` (`m = 5`, 32-note ring) | `451,591 – 485,822` | Private 1-in -> 2-out transfer (Triptych + CrossBase2 + Agave `BatchedRangeProofU128`) |
 | `0x03` | `Transfer` (`m = 5`, audited) | `506,766` | Audited transfer enforcing ElGamal `(S_1, S_2)` + `(M_1, M_2)` under `K_aud` |
 | `0x03` | `Transfer` (`m = 6 / m = 7`) | `824,512 / 1,113,133` | 64-note (2-page) / 128-note (4-page) rings inside Solana's default 32 KiB heap |

@@ -19,7 +19,7 @@ Concise architectural rules, invariants, and verification commands for contribut
    - `vault_auth` and `payer` must never be marked as signers on the external CPI; only `swap_escrow` signs.
    - No Audren program, `PoolState`, `EpochPage`, `NullifierPDA`, or vault account may appear in `router_accounts`.
    - `swap_escrow` and escrow token accounts (`escrow_in`, `escrow_out`) must pass all pre- and post-CPI owner, delegate, `close_authority`, lamport, and slippage (`actual_out >= min_amount_out`) checks.
-3. **Token-2022 Vault Solvency:** `Deposit` must continue rejecting Token-2022 mints carrying `PermanentDelegate`, `NonTransferable`, active or mutable `TransferHook`, or non-zero/mutable `TransferFeeConfig`.
+3. **Token-2022 Solvency & Hook Isolation:** `Deposit` and `SwapViaRouter` must always commit the measured net vault balance increase (`after - before > 0`) so fee-on-transfer (`TransferFeeConfig`) mints preserve exact 1:1 vault solvency. `Withdraw` must never block withdrawals based on mint extensions. Whenever trailing `TransferHook` accounts are forwarded into `transfer_checked`, `is_signer` must be cleared and Audren-owned accounts and custody vaults must be filtered out.
 4. **Packet MTU & Atomic Buffer Rent (`ProofBuffer`):** `WriteProofBuffer` chunk sizes must remain `<= 768 B` so serialized upload transactions stay strictly under Solana's `1,232 B` UDP/QUIC packet limit. `ExecBuffered` and `CloseProofBuffer` must zero the buffer magic, shrink to `0 B`, reassign to the System Program, and refund 100% of lamports to `authority`/`payer`.
 5. **sBPFv3 Runtime Safety:**
    - Zero `unsafe` blocks in `program/`.

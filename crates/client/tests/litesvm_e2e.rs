@@ -8,9 +8,10 @@
 use agave_feature_set::FeatureSet;
 use audren_client::{
     instructions::{
-        build_buffered_execution, build_close_proof_buffer, build_deposit, build_init_pool,
-        build_merge, build_open_page, build_set_paused, build_swap_via_router, build_transfer,
-        build_withdraw, AudrenAccountMeta, AudrenInstruction, SwapViaRouterParams,
+        build_buffered_execution, build_close_proof_buffer, build_deposit,
+        build_deposit_with_options, build_init_pool, build_merge, build_open_page,
+        build_set_paused, build_swap_via_router, build_transfer, build_withdraw,
+        net_deposit_amount, AudrenAccountMeta, AudrenInstruction, SwapViaRouterParams,
     },
     keys::{AudrenKeys, AuditorKeypair, SelectiveDisclosureProof},
     pda::{
@@ -44,7 +45,11 @@ use solana_signer::Signer;
 use solana_system_interface::instruction as sys_ix;
 use solana_transaction::Transaction;
 use spl_token_2022_interface::{
-    extension::ExtensionType,
+    extension::{
+        transfer_fee::instruction as transfer_fee_ix,
+        transfer_hook::instruction as transfer_hook_ix,
+        ExtensionType,
+    },
     instruction as token_ix,
     state::{Account as TokenAccount, Mint},
 };
@@ -284,10 +289,48 @@ fn token_balance_of(svm: &LiteSVM, ata: &Address) -> u64 {
     u64::from_le_bytes(acc.data[64..72].try_into().unwrap())
 }
 
+/// Create a real Token-2022 ATA with required account extensions (e.g. `TransferFeeAmount`,
+/// `NonTransferableAccount`) initialized via `initialize_account3` and funded via `mint_to`.
+fn create_t22_ata_with_balance(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    t22_prog: &Address,
+    mint: &Address,
+    owner: &Address,
+    amount: u64,
+    account_extensions: &[ExtensionType],
+) -> Address {
+    let ata = derive_ata(owner, t22_prog, mint);
+    let space = ExtensionType::try_calculate_account_len::<TokenAccount>(account_extensions).unwrap();
+    let rent = svm.minimum_balance_for_rent_exemption(space);
+    svm.set_account(
+        ata,
+        Account {
+            lamports: rent,
+            data: vec![0u8; space],
+            owner: *t22_prog,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+    let init_ix = token_ix::initialize_account3(t22_prog, &ata, mint, owner).unwrap();
+    let mut ixs = vec![init_ix];
+    if amount > 0 {
+        ixs.push(token_ix::mint_to(t22_prog, mint, &ata, &payer.pubkey(), &[], amount).unwrap());
+    }
+    expect_ok(
+        send_ixs(svm, payer, &[], &ixs, 200_000),
+        "init_t22_ata_with_balance",
+    );
+    ata
+}
+
 // ----------------------------------------------------------------------------
-// TEST 1: Full Lifecycle — SOL + SPL + Safe Token-2022, Transfer (m=5,6,7),
-//         Merge, Withdraw, Pure-RPC DataSlice Scan, Selective Disclosure,
-//         Double-Spend & Bad Proof Rejection, Unsafe Token-2022 Rejection!
+// TEST 1: Full Lifecycle — SOL + SPL + Token-2022 (incl. PermanentDelegate &
+//         active TransferFee), Transfer (m=5,6,7), Merge, Withdraw, Pure-RPC
+//         DataSlice Scan, Selective Disclosure, Double-Spend & Bad Proof
+//         Rejection, Soulbound NonTransferable Rejection!
 // ----------------------------------------------------------------------------
 #[test]
 fn test_full_permissionless_lifecycle_and_security() {
@@ -358,7 +401,7 @@ fn test_full_permissionless_lifecycle_and_security() {
     assert_eq!(alice_notes[0].amount, sol_amount);
     assert_eq!(alice_notes[0].mint, NATIVE_SOL_MINT);
 
-    // 3. Deposit Classic SPL Token + Safe Token-2022 Token
+    // 3. Deposit Classic SPL Token + Plain Token-2022 Token
     let classic_prog = Address::new_from_array(CLASSIC_TOKEN_PROGRAM_ID);
     let t22_prog = Address::new_from_array(TOKEN_2022_PROGRAM_ID);
     let (vault_auth, _) = derive_vault_auth_pda(&audren_id, pool_id);
@@ -385,7 +428,7 @@ fn test_full_permissionless_lifecycle_and_security() {
     );
     assert_eq!(token_balance_of(&svm, &vault_usdc), 5_000_000);
 
-    // Safe Token-2022 mint (no forbidden extensions)
+    // Plain Token-2022 mint (no extensions)
     let safe_t22_mint = create_mint(&mut svm, &payer, &t22_prog, 6);
     let payer_t22 = create_ata_with_balance(&mut svm, &t22_prog, &safe_t22_mint.pubkey(), &payer.pubkey(), 2_000_000);
     let vault_t22 = create_ata_with_balance(&mut svm, &t22_prog, &safe_t22_mint.pubkey(), &vault_auth, 0);
@@ -403,35 +446,220 @@ fn test_full_permissionless_lifecycle_and_security() {
     .unwrap();
     expect_ok(
         send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_t22_ix)], 300_000),
-        "Deposit Safe Token-2022 (1 T22)",
+        "Deposit Plain Token-2022 (1 T22)",
     );
 
-    // 4. Reject Unsafe Token-2022 Mint (PermanentDelegate)
-    let bad_mint = Keypair::new();
-    let bad_space = ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::PermanentDelegate]).unwrap();
-    let bad_rent = svm.minimum_balance_for_rent_exemption(bad_space);
-    let c_ix = sys_ix::create_account(&payer.pubkey(), &bad_mint.pubkey(), bad_rent, bad_space as u64, &t22_prog);
-    let pd_ix = token_ix::initialize_permanent_delegate(&t22_prog, &bad_mint.pubkey(), &authority.pubkey()).unwrap();
-    let m_ix = token_ix::initialize_mint2(&t22_prog, &bad_mint.pubkey(), &payer.pubkey(), None, 6).unwrap();
-    expect_ok(send_ixs(&mut svm, &payer, &[&bad_mint], &[c_ix, pd_ix, m_ix], 200_000), "create unsafe T22 mint");
-    let payer_bad = create_ata_with_balance(&mut svm, &t22_prog, &bad_mint.pubkey(), &payer.pubkey(), 500_000);
-    let vault_bad = create_ata_with_balance(&mut svm, &t22_prog, &bad_mint.pubkey(), &vault_auth, 0);
-    let (dep_bad_ix, _) = build_deposit(
+    // 4a. Regulated Token-2022 Stablecoin Mint (PYUSD / USDG extension profile:
+    //     PermanentDelegate + TransferFeeConfig(0/0, mutable) + TransferHook(None, mutable))
+    let reg_mint = Keypair::new();
+    let reg_space = ExtensionType::try_calculate_account_len::<Mint>(&[
+        ExtensionType::PermanentDelegate,
+        ExtensionType::TransferFeeConfig,
+        ExtensionType::TransferHook,
+    ])
+    .unwrap();
+    let reg_rent = svm.minimum_balance_for_rent_exemption(reg_space);
+    let c_ix = sys_ix::create_account(
+        &payer.pubkey(),
+        &reg_mint.pubkey(),
+        reg_rent,
+        reg_space as u64,
+        &t22_prog,
+    );
+    let pd_ix =
+        token_ix::initialize_permanent_delegate(&t22_prog, &reg_mint.pubkey(), &authority.pubkey())
+            .unwrap();
+    let tf_ix = transfer_fee_ix::initialize_transfer_fee_config(
+        &t22_prog,
+        &reg_mint.pubkey(),
+        Some(&authority.pubkey()),
+        Some(&authority.pubkey()),
+        0,
+        0,
+    )
+    .unwrap();
+    let th_ix = transfer_hook_ix::initialize(
+        &t22_prog,
+        &reg_mint.pubkey(),
+        Some(authority.pubkey()),
+        None,
+    )
+    .unwrap();
+    let m_ix =
+        token_ix::initialize_mint2(&t22_prog, &reg_mint.pubkey(), &payer.pubkey(), None, 6)
+            .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[&reg_mint], &[c_ix, pd_ix, tf_ix, th_ix, m_ix], 300_000),
+        "create regulated T22 mint (PYUSD/USDG profile)",
+    );
+    let payer_reg = create_t22_ata_with_balance(
+        &mut svm,
+        &payer,
+        &t22_prog,
+        &reg_mint.pubkey(),
+        &payer.pubkey(),
+        500_000,
+        &[ExtensionType::TransferFeeAmount],
+    );
+    let vault_reg = create_t22_ata_with_balance(
+        &mut svm,
+        &payer,
+        &t22_prog,
+        &reg_mint.pubkey(),
+        &vault_auth,
+        0,
+        &[ExtensionType::TransferFeeAmount],
+    );
+    let (dep_reg_ix, _) = build_deposit(
         audren_id,
         payer.pubkey(),
         pool_id,
         0,
         &alice.address(),
-        bad_mint.pubkey().to_bytes(),
+        reg_mint.pubkey().to_bytes(),
         100_000,
-        Some((t22_prog, payer_bad, vault_bad)),
+        Some((t22_prog, payer_reg, vault_reg)),
         &mut rng,
     )
     .unwrap();
-    expect_custom_err(
-        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_bad_ix)], 300_000),
-        AudrenError::UnsafeMintExtension,
-        "Reject T22 PermanentDelegate",
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_reg_ix)], 300_000),
+        "Deposit Regulated Token-2022 (PYUSD/USDG profile)",
+    );
+    assert_eq!(token_balance_of(&svm, &vault_reg), 100_000);
+
+    // 4b. Active TransferFee Token-2022 Mint (100 bps = 1%, max_fee = 50_000):
+    //     Gross deposit 1_000_000 credits exact net 990_000 to vault & commits V = 990_000 * G_mint.
+    let fee_mint = Keypair::new();
+    let fee_space = ExtensionType::try_calculate_account_len::<Mint>(&[
+        ExtensionType::TransferFeeConfig,
+    ])
+    .unwrap();
+    let fee_rent = svm.minimum_balance_for_rent_exemption(fee_space);
+    let c_fee = sys_ix::create_account(
+        &payer.pubkey(),
+        &fee_mint.pubkey(),
+        fee_rent,
+        fee_space as u64,
+        &t22_prog,
+    );
+    let tf_active = transfer_fee_ix::initialize_transfer_fee_config(
+        &t22_prog,
+        &fee_mint.pubkey(),
+        Some(&authority.pubkey()),
+        Some(&authority.pubkey()),
+        100,    // 1.00% transfer fee
+        50_000, // max fee cap
+    )
+    .unwrap();
+    let m_fee =
+        token_ix::initialize_mint2(&t22_prog, &fee_mint.pubkey(), &payer.pubkey(), None, 6)
+            .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[&fee_mint], &[c_fee, tf_active, m_fee], 300_000),
+        "create active TransferFee T22 mint (100 bps)",
+    );
+    let payer_fee = create_t22_ata_with_balance(
+        &mut svm,
+        &payer,
+        &t22_prog,
+        &fee_mint.pubkey(),
+        &payer.pubkey(),
+        2_000_000,
+        &[ExtensionType::TransferFeeAmount],
+    );
+    let vault_fee = create_t22_ata_with_balance(
+        &mut svm,
+        &payer,
+        &t22_prog,
+        &fee_mint.pubkey(),
+        &vault_auth,
+        0,
+        &[ExtensionType::TransferFeeAmount],
+    );
+    let expected_net = net_deposit_amount(1_000_000, 100, 50_000);
+    assert_eq!(expected_net, 990_000);
+    let (dep_fee_ix, _) = build_deposit_with_options(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        fee_mint.pubkey().to_bytes(),
+        1_000_000,
+        expected_net,
+        Some((t22_prog, payer_fee, vault_fee)),
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_fee_ix)], 300_000),
+        "Deposit Active TransferFee T22 (1_000_000 gross -> 990_000 net)",
+    );
+    assert_eq!(token_balance_of(&svm, &vault_fee), 990_000);
+    let alice_t22_notes = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, None);
+    let fee_note = alice_t22_notes
+        .iter()
+        .find(|n| n.mint == fee_mint.pubkey().to_bytes())
+        .expect("Alice decrypts and verifies net 990_000 commitment for TransferFee note");
+    assert_eq!(fee_note.amount, 990_000);
+
+    // 4c. Soulbound NonTransferable Token-2022 Mint -> rejected natively by Token-2022!
+    let soul_mint = Keypair::new();
+    let soul_space = ExtensionType::try_calculate_account_len::<Mint>(&[
+        ExtensionType::NonTransferable,
+    ])
+    .unwrap();
+    let soul_rent = svm.minimum_balance_for_rent_exemption(soul_space);
+    let c_soul = sys_ix::create_account(
+        &payer.pubkey(),
+        &soul_mint.pubkey(),
+        soul_rent,
+        soul_space as u64,
+        &t22_prog,
+    );
+    let nt_ix = token_ix::initialize_non_transferable_mint(&t22_prog, &soul_mint.pubkey()).unwrap();
+    let m_soul =
+        token_ix::initialize_mint2(&t22_prog, &soul_mint.pubkey(), &payer.pubkey(), None, 6)
+            .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[&soul_mint], &[c_soul, nt_ix, m_soul], 300_000),
+        "create soulbound NonTransferable T22 mint",
+    );
+    let payer_soul = create_t22_ata_with_balance(
+        &mut svm,
+        &payer,
+        &t22_prog,
+        &soul_mint.pubkey(),
+        &payer.pubkey(),
+        100_000,
+        &[ExtensionType::NonTransferableAccount],
+    );
+    let vault_soul = create_t22_ata_with_balance(
+        &mut svm,
+        &payer,
+        &t22_prog,
+        &soul_mint.pubkey(),
+        &vault_auth,
+        0,
+        &[ExtensionType::NonTransferableAccount],
+    );
+    let (dep_soul_ix, _) = build_deposit(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        soul_mint.pubkey().to_bytes(),
+        50_000,
+        Some((t22_prog, payer_soul, vault_soul)),
+        &mut rng,
+    )
+    .unwrap();
+    assert!(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_soul_ix)], 300_000).is_err(),
+        "Soulbound NonTransferable mint must fail transfer_checked natively in Token-2022"
     );
 
     // 5. Shielded Transfer (m=5, 1 page = 32 notes): Alice sends 0.6 SOL to Bob + 0.9 SOL change
