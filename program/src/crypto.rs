@@ -1,20 +1,19 @@
-//! Audren On-Chain Ristretto255 Cryptographic Verifiers (~520 LOC audit surface).
+//! Audren On-Chain Ristretto255 Cryptographic Verifiers.
 //!
-//! Zero Groth16 circuits, zero trusted setup, zero custom indexer:
+//! Pure Ristretto255 + native Agave syscalls (no trusted setup):
 //! 1. [`verify_triptych`] — Multi-Base Binary Triptych (`N = 32`, `64`, or `128` across
-//!    `1`, `2`, or `4` `EpochPage`s) verified in ONE single batched Agave
-//!    `sol_curve_multiscalar_mul` syscall (`<= 439` points, well under Agave's `512`-point cap),
-//!    proving simultaneously:
+//!    `1`, `2`, or `4` `EpochPage`s) verified via chunked Agave `sol_curve_multiscalar_mul`
+//!    syscalls inside Solana's default 32 KiB heap, proving simultaneously:
 //!    - Secret note ownership `P_l = x * G`
-//!    - Unique deterministic nullifier `x * J = U` (which also makes spending empty `IDENTITY`
-//!      slots mathematically impossible since `0 * J = IDENTITY != U`)
+//!    - Unique deterministic nullifier `x * J = U` (empty `IDENTITY` slots are mathematically
+//!      unspendable since `0 * J = IDENTITY != U`)
 //!    - Unified multi-asset & value balance `(A_l - A_spend) + alpha * (V_l - V_spend) = delta * H`
-//!    - Optional cryptographically enforced Auditor ElGamal `(S_1, S_2) = (r_s * G, P_l + r_s * K_aud)`
-//! 2. [`verify_auditor_asset_proof`] — Verifiable ElGamal encryption of hidden `G_mint` to `K_aud` (192 B).
+//!    - Optional protocol-enforced Auditor ElGamal `(S_1, S_2) = (r_s * G, P_l + r_s * K_aud)`
+//! 2. [`verify_auditor_asset_proof`] — Verifiable ElGamal encryption of hidden `G_mint` to `K_aud` (`192 B`).
 //! 3. [`verify_cross_base_1`] / [`verify_cross_base_2`] — Bridges hidden-asset commitments `(A, V)`
-//!    to Agave native Pedersen `(G, C)` (128 B / 224 B).
-//! 4. [`verify_native_range_u64`] / [`verify_native_range_u128`] — Delegates Bulletproofs via CPI
-//!    to Agave's native `zk_elgamal_proof_program`.
+//!    to Agave native Pedersen `(G, C)` (`128 B` / `256 B`).
+//! 4. [`verify_native_range_u64`] / [`verify_native_range_u128`] — Delegates 64-bit Bulletproofs
+//!    via CPI to Agave's native `zk_elgamal_proof_program`.
 
 use crate::scalar::Scalar;
 use crate::state::{ensure, err, page_slot_witness, Point};
@@ -190,8 +189,8 @@ impl VerifiedTriptych {
     }
 }
 
-/// Verify a Multi-Base Binary Triptych proof (`m = 6` -> 64 notes, or `m = 7` -> 128 notes)
-/// in ONE batched Agave `sol_curve_multiscalar_mul` syscall.
+/// Verify a Multi-Base Binary Triptych proof (`m = 5` -> 32 notes, `m = 6` -> 64 notes,
+/// or `m = 7` -> 128 notes) via batched Agave `sol_curve_multiscalar_mul` syscalls.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_triptych(
     m: u8,

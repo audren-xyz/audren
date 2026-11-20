@@ -1,7 +1,7 @@
 /**
- * Zero-Indexer Pure Solana RPC `getMultipleAccounts` & Agave 4.4 `programSubscribe` (`dataSlice`) Scanner.
- * Scans up to 100 `EpochPage` PDAs (`3,200` shielded notes) per single RPC call (~`106 KB` total)
- * and resolves live spent/unspent state via 0-byte `NullifierPDA` existence checks.
+ * Standard Solana RPC `getMultipleAccounts` and Agave `programSubscribe` (`dataSlice`) scanner.
+ * Scans up to 100 `EpochPage` PDAs (`3,200` shielded notes) per RPC call (~`106 KB`)
+ * and checks spent status via 0-byte `NullifierPDA` existence.
  */
 
 import {

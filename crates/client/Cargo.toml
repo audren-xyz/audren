@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
-description = "Audren Rust SDK: Multi-Base Triptych prover, zero-indexer RPC/WS scanner, institutional auditor decryptor, and router-agnostic private swap builder"
+description = "Audren Rust SDK: Multi-Base Triptych prover, router-agnostic private swap builder, institutional auditor decryptor, and standard RPC/WS scanner"
 
 [dependencies]
 aes-gcm = "0.10.3"

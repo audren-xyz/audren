@@ -1,21 +1,20 @@
-//! Audren — Institutional Confidential & Full-Private Settlement Program on Solana (sBPFv3).
+//! Audren — Private Multi-Asset Settlement & Swap Program on Solana (sBPFv3).
 //!
-//! Supports Native SOL, Classic SPL tokens, and safe Token-2022 mints inside one unified
-//! multi-asset `EpochPage` note pool (`32` notes / `6,240 B` per page — below Solana's `10 KiB`
-//! CPI allocation cap and 100% compatible with Agave 4.5 Account Data Direct Mapping `SIMD-0460`):
-//! - Zero custom indexer (Structure-of-Arrays `EpochPage` layout scanned via pure Solana RPC
-//!   `getMultipleAccounts` and Agave 4.4 `programSubscribe` `dataSlice` `[64..1120]`)
-//! - Zero Groth16 / zero trusted setup / zero prover servers (pure Ristretto255 Multi-Base Triptych
-//!   over 1, 2, or 4 pages = `32 / 64 / 128` notes verified in ONE batched Agave
-//!   `sol_curve_multiscalar_mul` syscall + native Agave Bulletproofs)
-//! - Non-custodial 1-tx private swaps through isolated `swap_escrow` PDAs -> any Solana DEX router (Jupiter, Orca, Raydium, Meteora, Phoenix, or custom routers)
-//!   (same shared protocol address executes all trades; output lands directly in an unlinkable
-//!   stealth note for the unknown originator)
-//! - Self-balancing page rent (`SIMD-0437` / `SIMD-0438` immune): reads live `Rent::get()` sysvar
-//!   and caps per-note fees + `PageRentVault` buffer automatically
-//! - Optional protocol-enforced institutional auditor (`PoolMode::InstitutionalAudited`) where
-//!   every spend cryptographically proves valid ElGamal encryption to `K_aud` on-chain
-//! - Crypto-agile `protocol_version` ready for Solana's post-quantum verifier transition
+//! Native SOL, Classic SPL tokens, and safe Token-2022 mints share one unified shielded
+//! `EpochPage` pool (`32` notes / `6,240 B` per page):
+//! - Private multi-asset transfers hiding sender, recipient, token mint, and amount
+//! - Single-transaction private DEX swaps (`SwapViaRouter`) through 16 isolated `swap_escrow`
+//!   shards into any Solana DEX aggregator or AMM router (Jupiter, Orca, Raydium, Meteora,
+//!   Phoenix, Titan, DFlow, or custom routers), settling output into a fresh stealth note
+//! - Opt-in institutional auditability (`PoolMode::InstitutionalAudited`), enforcing verifiable
+//!   ElGamal encryption of spent stealth pubkeys and hidden mints under `K_aud` on-chain
+//! - Pure Ristretto255 Multi-Base Binary Triptych (`32 / 64 / 128`-note rings) verified via
+//!   Agave's native `sol_curve_multiscalar_mul` syscall and native Agave Bulletproofs
+//! - Structure-of-Arrays `EpochPage` accounts (`6,240 B < 10 KiB` CPI cap, `SIMD-0460` zero
+//!   realloc) readable directly via standard Solana RPC `getMultipleAccounts` and
+//!   `programSubscribe` `dataSlice[64..1120]`
+//! - Live `Rent::get()` self-balancing page-rent vault (`SIMD-0437` / `SIMD-0438` compatible)
+//! - Crypto-agile `protocol_version` field for future verifier upgrades
 
 #![allow(unexpected_cfgs)]
 

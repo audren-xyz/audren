@@ -1,12 +1,13 @@
 //! Audren Rust Client SDK.
 //!
-//! End-to-end client library for the Audren shielded multi-asset protocol on Solana:
+//! Client library for private multi-asset settlement, router-agnostic DEX swaps, and
+//! selective disclosure / institutional auditability on Solana:
 //! - Deterministic stealth key hierarchy, `FullViewingKey` (Mode 2), `SelectiveDisclosureProof` (Mode 1),
 //!   and `AuditorKeypair` (`PoolMode::InstitutionalAudited`)
 //! - Multi-Base Binary Triptych (`N = 32 / 64 / 128`), Auditor Asset Encryption, Cross-Base 1/2,
-//!   and Native Agave Batched Bulletproof provers
-//! - Zero-indexer pure Solana RPC `getMultipleAccounts` (`dataSlice`) & WS `programSubscribe` scanner
+//!   and native Agave Batched Bulletproof provers
 //! - Router-agnostic 1-tx private swap builder (Jupiter, Orca, Raydium, Meteora, Phoenix, or any DEX router)
+//! - Standard Solana RPC `getMultipleAccounts` (`dataSlice`) and WS `programSubscribe` scanner
 
 pub mod instructions;
 pub mod keys;

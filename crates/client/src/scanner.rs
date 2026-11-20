@@ -1,9 +1,8 @@
-//! Zero-Indexer Pure-RPC Scanner for Audren `EpochPage` PDAs and `NullifierPDA`s.
+//! Standard Solana RPC & WebSocket scanner for Audren `EpochPage` PDAs and `NullifierPDA`s.
 //!
 //! Uses Solana's native `getMultipleAccounts(..., { dataSlice: { offset: 64, length: 1056 } })`
-//! (and Agave 4.4 `programSubscribe` WebSocket `dataSlice` streaming) so a wallet scans up to
-//! **100 pages (`3,200` notes)** per single RPC call (~`106 KB` total) without any centralized
-//! indexing server or API key.
+//! and Agave `programSubscribe` WebSocket `dataSlice` streaming to scan up to 100 pages
+//! (`3,200` notes) per RPC call (~`106 KB`).
 
 use crate::keys::{
     compute_note_nullifier, decrypt_note_memo, derive_stealth_from_shared, quick_view_tag_match,

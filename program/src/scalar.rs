@@ -3,7 +3,7 @@
 //!
 //! All intermediate sums inside `mul_limbs` and `montgomery_reduce` are bounded strictly
 //! below `2^62` (`9 * (2^29 - 1)^2 < 2^62 < u64::MAX`), so `wrapping_add` is mathematically
-//! overflow-free while eliminating ~180 redundant overflow branches per scalar multiply on sBPF.
+//! overflow-free without per-limb carry checks on sBPF.
 
 use core::ops::{Add, Mul, Neg, Sub};
 

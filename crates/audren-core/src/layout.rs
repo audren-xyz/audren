@@ -1,14 +1,11 @@
 //! Fixed-offset, zero-copy account layouts for Audren.
 //!
-//! `EpochPage` intentionally uses a **Structure-of-Arrays (SoA)** layout sized at
-//! `6,240 bytes` (`32` notes/page) — comfortably below Solana's `10,240 B` (`10 KiB`)
-//! per-instruction CPI allocation limit (`MAX_PERMITTED_DATA_INCREASE`) and 100%
-//! compatible with Agave 4.5 Account Data Direct Mapping (`SIMD-0460`).
+//! `EpochPage` uses a Structure-of-Arrays (SoA) layout sized at `6,240 bytes` (`32` notes/page) —
+//! below Solana's `10,240 B` (`10 KiB`) per-instruction CPI allocation limit and compatible with
+//! Agave Account Data Direct Mapping (`SIMD-0460`).
 //!
-//! Pure-RPC wallets scan up to 100 pages (`3,200` notes) in a single Solana
-//! `getMultipleAccounts` call (or real-time Agave 4.4 `programSubscribe` WebSocket)
-//! using `dataSlice: { offset: PAGE_SCAN_OFFSET, length: PAGE_SCAN_LEN }` (`1,056 B`/page)
-//! with zero custom indexer.
+//! Wallets scan up to 100 pages (`3,200` notes) per standard Solana `getMultipleAccounts` call
+//! (or Agave `programSubscribe` WebSocket) using `dataSlice: { offset: PAGE_SCAN_OFFSET, length: PAGE_SCAN_LEN }` (`1,056 B`/page).
 
 use crate::{AudrenError, Bytes32, PoolMode};
 
@@ -24,8 +21,8 @@ pub const PROOF_BUFFER_MAGIC: [u8; 8] = *b"AUDRNBF1";
 // ---------------------------------------------------------------------------
 
 pub const PROOF_BUFFER_HEADER_LEN: usize = 48;
-/// Fixed per-chunk payload slice (`768 B` + `14 B` ix header + 3 accounts = `~950 B` wire tx,
-/// comfortably under Solana's `1,232 B` packet limit).
+/// Fixed per-chunk payload slice (`768 B` payload => `<= 1,071 B` serialized wire tx,
+/// below Solana's `1,232 B` UDP/QUIC packet limit).
 pub const PROOF_BUFFER_CHUNK_SIZE: usize = 768;
 /// Maximum chunks tracked by the `u16` `written_mask` (`13 * 768 + 48 = 10,032 B <= 10,240 B`).
 pub const PROOF_BUFFER_MAX_CHUNKS: usize = 13;

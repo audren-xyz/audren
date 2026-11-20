@@ -10,7 +10,7 @@
 //! Proves live on-chain Agave execution of:
 //! 1. `InitPool` (if pool does not exist yet)
 //! 2. `Deposit` (native SOL -> stealth note)
-//! 3. Pure-RPC `getAccountInfo` `dataSlice[64..1120]` scan (zero custom indexer!)
+//! 3. Standard RPC `getAccountInfo` `dataSlice[64..1120]` note discovery
 //! 4. `WriteProofBuffer` (parallel-ready `<= 768 B` chunks, every tx `<= 1,232 B` MTU)
 //! 5. `ExecBuffered(Transfer)` (real Ristretto255 Multi-Base Triptych + native Agave ZK ElGamal Bulletproof U128 + 100% buffer rent refund)
 //! 6. `ExecBuffered(Withdraw)` (with shielded change, verifying real SOL payout + 100% buffer rent refund)
@@ -257,7 +257,7 @@ fn test_live_devnet_full_shielded_lifecycle() {
         "Deposit(0.05 SOL -> Alice)",
     );
 
-    // 2. Pure-RPC dataSlice[64..1120] scan — ZERO custom indexer!
+    // 2. Scan EpochPage via standard RPC dataSlice[64..1120].
     let (page_pda, _) = derive_epoch_page_pda(&program_id, pool_id, active_page_id);
     let scan_slice =
         get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))

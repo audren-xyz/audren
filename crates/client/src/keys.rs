@@ -266,7 +266,7 @@ pub fn derive_stealth_for_recipient<R: RngCore + CryptoRng>(
     derive_stealth_from_shared(&recipient.spend_pk, ephemeral_pk, &shared)
 }
 
-/// Fast 1-byte `view_tag` check for zero-indexer `dataSlice` scanning (`255/256` rejection rate).
+/// Fast 1-byte `view_tag` check for `dataSlice` note discovery (`255/256` rejection rate).
 #[inline]
 pub fn quick_view_tag_match(fvk: &FullViewingKey, ephemeral_pk: &Point, view_tag: u8) -> Option<RistrettoPoint> {
     let r_pt = decompress(ephemeral_pk).ok()?;
