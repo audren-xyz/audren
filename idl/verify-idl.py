@@ -218,6 +218,13 @@ def main() -> None:
     assert sh_arch == sbf_arch, f"upgrade-program.sh SBF_ARCH ({sh_arch}) != build-sbf.py ({sbf_arch})"
     assert "@sha256:" in sh_img, f"upgrade-program.sh VERIFY_BASE_IMAGE must be digest-pinned: {sh_img}"
 
+    rust_channel = gen.read_toml_value(ROOT / "rust-toolchain.toml", "toolchain", "channel")
+    ci_yml = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    ci_rust_m = re.search(r"toolchain:\s*'([^']+)'", ci_yml)
+    assert ci_rust_m and ci_rust_m.group(1) == rust_channel, (
+        f".github/workflows/ci.yml Rust toolchain ({ci_rust_m.group(1) if ci_rust_m else None}) != rust-toolchain.toml ({rust_channel})"
+    )
+
     # 11. Verify cross-layer JUPITER_CPI_EXCLUDED_DEXES parity across Rust, SDK, Relayer, and Web Worker
     rust_router = (ROOT / "crates" / "client" / "src" / "router.rs").read_text()
     rust_m = re.search(r'pub const JUPITER_CPI_EXCLUDED_DEXES:\s*&str\s*=\s*"([^"]+)"', rust_router)
