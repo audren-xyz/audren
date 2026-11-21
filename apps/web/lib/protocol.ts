@@ -20,8 +20,8 @@ export const AUDREN = {
   securityPda: 'GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj',
   otterVerifyPda: 'FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt',
   elfBytes: 242_672,
-  elfSha256: '8ce322f5bd3f08975385eb0a69e3e863d5f05910d3aaa46f753b1b899f412c26',
-  executableHash: '0aa268a9f2bac5c0f6c08f6eecc199151235d7f056d3b4944f97bf7b1dca0159',
+  elfSha256: '1519b14df0c25fa8f958bad7d916d010564494d16ebefb7f1c12884d41017393',
+  executableHash: '019c39babe6fb7d3ef8e118633556b347285e59dbb12baf5e2cb8db6bdd48116',
   securityEmail: 'security@audren.xyz',
   githubOrg: 'https://github.com/audren-xyz',
   githubCore: 'https://github.com/audren-xyz/audren',
@@ -41,10 +41,10 @@ export const AUDREN = {
     withdrawTx: '5pHwRUNoJBPY4w5nv4PQYLurY9GKBDVstFN3EYsRHgX1mMU9EzbavYN7y1gJxFbzxqA6AE28eHz9zcCpaEXVNg9m',
   },
   devnet: {
-    slot: '524,792,132',
-    deployTx: '3oz2HNeb9YVBLkVuiBpkYYAutKNGzJt6HcQgH69xCM1pm3EBm1Q26odQsdcqWvsD2bnECnz754FQjEcAufekkPJ7',
-    transferTx: 'R1KbSUDuWkv3NeSu14TNL2Y6oPv6z4oDE6JRbMqRJ4Vcy8qALBH6NbW6qbVav13voWYRxZKLWW4847mNXg3c8zj',
-    withdrawTx: '2VFPyoDHkAQtuhru42fQ6dyM417pVKHqyYVNrHSPMEf1rrDcS4DYBtyipogSqQMuBGYrCRhnQsRKDZoLg3odFMcS',
+    slot: '524,861,233',
+    deployTx: 'iATWMbuHhDJYZxWw1tUdgcjrC5mRTEboCbDBM9VHhx9htAzNfJQq54wUYxBiHYMhhZkizMB7CmrHg3WZ8exjEUv',
+    transferTx: '2UL1Jy9k5GfMFL7N8sh7HBG2kza2Xp4zYVUDBkvpfQDNT7peDvcNpedcxiuC3aCxEG2nH2VvJENyiogSdufeZkXc',
+    withdrawTx: '2yTXobr9BGVG1hxhM2gBFifTdwUkUhqwPyFGNWUdKj1Bv9GZWqVzsJvFajzceASpkWDiDus3Y3PCAyACan8dyimr',
   },
 } as const
 

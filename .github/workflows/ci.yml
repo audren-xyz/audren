@@ -60,16 +60,22 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - name: Run Cross-SDK Real sBPFv3 LiteSVM Suite (TypeScript + UniFFI -> verified Mainnet audren.so)
+      - name: Build deterministic sBPFv3 audren.so & audren_mock_router.so + run ALL LiteSVM & Cross-SDK suites
         env:
           AUDREN_REQUIRE_SBF: '1'
+          AUDREN_REQUIRE_MOCK_ROUTER: '1'
         run: |
           pnpm --dir packages/sdk install --frozen-lockfile
           pnpm --dir packages/sdk build
           mkdir -p target/deploy
-          curl -fsSL https://github.com/audren-xyz/audren/releases/download/v0.2.0/audren.so -o target/deploy/audren.so
-          curl -fsSL https://github.com/audren-xyz/audren/releases/download/v0.2.0/audren.so.sha256 -o target/deploy/audren.so.sha256
-          (cd target/deploy && head -n 1 audren.so.sha256 | sha256sum -c -)
+          docker run --rm --entrypoint bash \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd \
+            -c "CARGO_TARGET_DIR=/tmp/sbf-target cargo-build-sbf --manifest-path /build/program/Cargo.toml --sbf-out-dir /build/target/deploy --arch v3 --tools-version v1.57 && CARGO_TARGET_DIR=/tmp/sbf-target cargo-build-sbf --manifest-path /build/tests/mock-router/Cargo.toml --sbf-out-dir /build/target/deploy --arch v3 --tools-version v1.57 && chmod 644 /build/target/deploy/audren.so /build/target/deploy/audren_mock_router.so"
+          python3 scripts/build-sbf.py --check-elf target/deploy/audren.so
+          python3 scripts/build-sbf.py --check-elf target/deploy/audren_mock_router.so
+          cargo test -p audren-client --test litesvm_e2e -- --nocapture
           cargo test -p audren-ffi --test cross_sdk_litesvm -- --nocapture
       - name: Build native libaudren_ffi.so (release)
         run: cargo build -p audren-ffi --release
