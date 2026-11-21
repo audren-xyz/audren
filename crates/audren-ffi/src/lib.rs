@@ -2,33 +2,33 @@
 //!
 //! Exposes the exact same 6 Audren SDK building blocks backed directly by `audren-core` and
 //! constant-time `audren-client` cryptography — zero duplicated crypto, zero transcript drift:
-//! 1. Keys & `aud1...` stealth addresses (`derive_keys_from_seed`, `derive_subaccount_keys`, `export_full_viewing_key`)
+//! 1. Keys, `aud1...` stealth addresses & deterministic DeFi sessions (`derive_keys_from_seed`, `derive_subaccount_keys`, `derive_defi_session_keypair`, `export_full_viewing_key`)
 //! 2. Canonical PDAs & account decoders (`derive_*_pda`, `decode_pool_state`, `decode_epoch_page_header`)
 //! 3. Zero-indexer `dataSlice` scanning & note decryption (`page_scan_data_slice`, `scan_page_dataslice`, `scan_epoch_page`)
-//! 4. Local proof generation & instruction builders (`Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `ProofBuffer`)
+//! 4. Local proof generation & instruction builders (`Deposit`, `Transfer`, `Merge`, `ExecViaEscrow`, `Withdraw`, `ProofBuffer`)
 //! 5. Selective disclosure receipts & institutional audit (`create_selective_disclosure_proof`, `verify_*`, `auditor_*`)
-//! 6. Router & relayer helpers (`jupiter_cpi_excluded_dexes`, `default_relay_url`, `prepare_router_accounts`)
+//! 6. Escrow & relayer helpers (`jupiter_cpi_excluded_dexes`, `default_relay_url`, `prepare_escrow_accounts`)
 
 use audren_client::{
     instructions::{
         build_buffered_execution, build_close_proof_buffer, build_deposit_with_options,
-        build_merge, build_open_lane_page, build_open_page, build_swap_via_router, build_transfer,
-        build_withdraw, net_deposit_amount as rust_net_deposit_amount, AudrenAccountMeta,
-        AudrenInstruction, SwapViaRouterParams,
+        build_exec_via_escrow, build_merge, build_open_lane_page, build_open_page, build_transfer,
+        build_withdraw_with_params, net_deposit_amount as rust_net_deposit_amount,
+        AudrenAccountMeta, AudrenInstruction, ExecViaEscrowParams, WithdrawParams,
     },
     keys::{
         AudrenAddress, AudrenKeys, AuditorKeypair, FullViewingKey, SelectiveDisclosureProof,
     },
     pda::{
         derive_ata, derive_epoch_page_pda as rust_derive_epoch_page_pda,
-        derive_lane_pda as rust_derive_lane_pda,
+        derive_escrow_pda as rust_derive_escrow_pda, derive_lane_pda as rust_derive_lane_pda,
         derive_lane_rent_vault_pda as rust_derive_lane_rent_vault_pda,
         derive_nullifier_pda as rust_derive_nullifier_pda,
         derive_page_rent_vault_pda as rust_derive_page_rent_vault_pda,
         derive_pool_pda as rust_derive_pool_pda,
         derive_proof_buffer_pda as rust_derive_proof_buffer_pda,
         derive_sol_vault_pda as rust_derive_sol_vault_pda,
-        derive_swap_escrow_pda as rust_derive_swap_escrow_pda,
+        derive_unwrap_pda as rust_derive_unwrap_pda,
         derive_vault_auth_pda as rust_derive_vault_auth_pda,
     },
     prover::{asset_generator as rust_asset_generator, extract_ring_from_page},
@@ -187,6 +187,31 @@ pub fn derive_subaccount_keys(
     })
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FfiDefiSessionKeypair {
+    pub session_index: u32,
+    pub secret_seed: Vec<u8>,
+    pub pubkey: Vec<u8>,
+    pub keypair_bytes: Vec<u8>,
+    pub address: String,
+}
+
+#[uniffi::export]
+pub fn derive_defi_session_keypair(
+    master_seed_32: Vec<u8>,
+    session_index: u32,
+) -> Result<FfiDefiSessionKeypair, AudrenFfiError> {
+    let seed = to_arr32(&master_seed_32, "master_seed")?;
+    let kp = AudrenKeys::derive_defi_session_keypair(&seed, session_index);
+    Ok(FfiDefiSessionKeypair {
+        session_index: kp.session_index,
+        secret_seed: kp.secret_seed.to_vec(),
+        pubkey: kp.pubkey.to_vec(),
+        keypair_bytes: kp.keypair_bytes.to_vec(),
+        address: kp.address,
+    })
+}
+
 #[uniffi::export]
 pub fn parse_audren_address(encoded: String) -> Result<FfiAudrenAddress, AudrenFfiError> {
     let addr = AudrenAddress::from_base58(&encoded)?;
@@ -319,13 +344,24 @@ pub fn derive_page_rent_vault_pda(
 }
 
 #[uniffi::export]
-pub fn derive_swap_escrow_pda(
+pub fn derive_escrow_pda(
     pool_id: u32,
     shard_id: u8,
     program_id: String,
 ) -> Result<FfiPda, AudrenFfiError> {
     let pid = default_program_id_or(&program_id)?;
-    Ok(pda_record(rust_derive_swap_escrow_pda(&pid, pool_id, shard_id)))
+    Ok(pda_record(rust_derive_escrow_pda(&pid, pool_id, shard_id)))
+}
+
+#[uniffi::export]
+pub fn derive_unwrap_pda(
+    pool_id: u32,
+    nullifier_32: Vec<u8>,
+    program_id: String,
+) -> Result<FfiPda, AudrenFfiError> {
+    let pid = default_program_id_or(&program_id)?;
+    let nf = to_arr32(&nullifier_32, "nullifier")?;
+    Ok(pda_record(rust_derive_unwrap_pda(&pid, pool_id, &nf)))
 }
 
 #[uniffi::export]
@@ -698,6 +734,7 @@ pub struct FfiDepositParams {
     pub mint_32: Vec<u8>,
     pub gross_amount: u64,
     pub net_amount: u64,
+    pub fee_from_amount: bool,
     pub token_program: Option<String>,
     pub depositor_ata: Option<String>,
     pub vault_ata: Option<String>,
@@ -734,6 +771,7 @@ pub fn build_deposit_instruction(
         mint,
         params.gross_amount,
         params.net_amount,
+        params.fee_from_amount,
         spl,
         &[],
         &mut OsRng,
@@ -844,7 +882,7 @@ pub fn build_merge_instruction(
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiSwapViaRouterParams {
+pub struct FfiExecViaEscrowParams {
     pub program_id: String,
     pub payer: String,
     pub pool_id: u32,
@@ -859,21 +897,24 @@ pub struct FfiSwapViaRouterParams {
     pub token_program_out: String,
     pub amount_in: u64,
     pub min_amount_out: u64,
+    pub relayer_fee: u64,
+    pub fee_on_output: bool,
+    pub fee_recipient_ata: Option<String>,
     pub allow_partial_refund: bool,
     pub recipient_address: String,
     pub change_address: String,
     pub auditor_pk_32: Option<Vec<u8>>,
-    pub router_program_id: String,
+    pub target_program_id: String,
     pub escrow_idx: u8,
     pub escrow_in_idx: u8,
     pub escrow_out_idx: u8,
-    pub router_ix_data: Vec<u8>,
-    pub router_accounts: Vec<FfiAccountMeta>,
+    pub target_ix_data: Vec<u8>,
+    pub action_accounts: Vec<FfiAccountMeta>,
 }
 
 #[uniffi::export]
-pub fn build_swap_via_router_instruction(
-    params: FfiSwapViaRouterParams,
+pub fn build_exec_via_escrow_instruction(
+    params: FfiExecViaEscrowParams,
 ) -> Result<FfiBuiltInstruction, AudrenFfiError> {
     let pid = default_program_id_or(&params.program_id)?;
     let payer = parse_address(&params.payer, "payer")?;
@@ -882,22 +923,26 @@ pub fn build_swap_via_router_instruction(
     let mint_out = to_arr32(&params.mint_out_32, "mint_out")?;
     let tp_in = parse_address(&params.token_program_in, "token_program_in")?;
     let tp_out = parse_address(&params.token_program_out, "token_program_out")?;
+    let fee_recipient_ata = match params.fee_recipient_ata {
+        Some(s) => Some(parse_address(&s, "fee_recipient_ata")?),
+        None => None,
+    };
     let recipient = AudrenAddress::from_base58(&params.recipient_address)?;
     let change_addr = AudrenAddress::from_base58(&params.change_address)?;
     let auditor_pk = match params.auditor_pk_32 {
         Some(b) => Some(to_arr32(&b, "auditor_pk")?),
         None => None,
     };
-    let router_pid = parse_address(&params.router_program_id, "router_program_id")?;
-    let mut router_accounts = Vec::with_capacity(params.router_accounts.len());
-    for a in &params.router_accounts {
-        router_accounts.push(AudrenAccountMeta {
-            pubkey: parse_address(&a.pubkey, "router_account.pubkey")?,
+    let target_pid = parse_address(&params.target_program_id, "target_program_id")?;
+    let mut action_accounts = Vec::with_capacity(params.action_accounts.len());
+    for a in &params.action_accounts {
+        action_accounts.push(AudrenAccountMeta {
+            pubkey: parse_address(&a.pubkey, "action_account.pubkey")?,
             is_signer: a.is_signer,
             is_writable: a.is_writable,
         });
     }
-    let swap_params = SwapViaRouterParams {
+    let exec_params = ExecViaEscrowParams {
         program_id: pid,
         payer,
         pool_id: params.pool_id,
@@ -912,18 +957,21 @@ pub fn build_swap_via_router_instruction(
         token_program_out: tp_out,
         amount_in: params.amount_in,
         min_amount_out: params.min_amount_out,
+        relayer_fee: params.relayer_fee,
+        fee_on_output: params.fee_on_output,
+        fee_recipient_ata,
         allow_partial_refund: params.allow_partial_refund,
         recipient: &recipient,
         change_addr: &change_addr,
         auditor_pk,
-        router_program_id: router_pid,
+        target_program_id: target_pid,
         escrow_idx: params.escrow_idx,
         escrow_in_idx: params.escrow_in_idx,
         escrow_out_idx: params.escrow_out_idx,
-        router_ix_data: &params.router_ix_data,
-        router_accounts: &router_accounts,
+        target_ix_data: &params.target_ix_data,
+        action_accounts: &action_accounts,
     };
-    let (ix, _, _, _) = build_swap_via_router(&swap_params, &mut OsRng)?;
+    let (ix, _, _, _) = build_exec_via_escrow(&exec_params, &mut OsRng)?;
     Ok(ix_to_ffi(&ix))
 }
 
@@ -940,6 +988,9 @@ pub struct FfiWithdrawParams {
     pub recipient_account: String,
     pub change_address: String,
     pub amount: u64,
+    pub relayer_fee: u64,
+    pub fee_recipient: Option<String>,
+    pub unwrap_wsol: bool,
     pub spl_token_program: Option<String>,
     pub auditor_pk_32: Option<Vec<u8>>,
 }
@@ -954,6 +1005,10 @@ pub fn build_withdraw_instruction(
     let owned = owned_note_from_ffi(&params.input_note)?;
     let recipient_account = parse_address(&params.recipient_account, "recipient_account")?;
     let change_addr = AudrenAddress::from_base58(&params.change_address)?;
+    let fee_recipient = match params.fee_recipient {
+        Some(s) => Some(parse_address(&s, "fee_recipient")?),
+        None => None,
+    };
     let spl_tp = match params.spl_token_program {
         Some(s) => Some(parse_address(&s, "spl_token_program")?),
         None => None,
@@ -962,20 +1017,25 @@ pub fn build_withdraw_instruction(
         Some(b) => Some(to_arr32(&b, "auditor_pk")?),
         None => None,
     };
-    let (ix, _) = build_withdraw(
-        pid,
-        payer,
-        params.pool_id,
-        params.out_page_id,
-        &params.input_page_ids,
-        &ring,
-        &owned,
-        params.secret_index as usize,
-        recipient_account,
-        &change_addr,
-        params.amount,
-        spl_tp,
-        auditor_pk,
+    let (ix, _) = build_withdraw_with_params(
+        &WithdrawParams {
+            program_id: pid,
+            payer,
+            pool_id: params.pool_id,
+            out_page_id: params.out_page_id,
+            input_page_ids: &params.input_page_ids,
+            ring: &ring,
+            input_note: &owned,
+            secret_index: params.secret_index as usize,
+            recipient_account,
+            change_addr: &change_addr,
+            amount: params.amount,
+            relayer_fee: params.relayer_fee,
+            fee_recipient,
+            unwrap_wsol: params.unwrap_wsol,
+            spl_token_program: spl_tp,
+            auditor_pk,
+        },
         &mut OsRng,
     )?;
     Ok(ix_to_ffi(&ix))
@@ -1151,11 +1211,11 @@ pub fn auditor_decrypt_note(
 }
 
 // ============================================================================
-// 6. Router & Relayer Helpers
+// 6. Escrow & Relayer Helpers
 // ============================================================================
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiPreparedRouterAccounts {
+pub struct FfiPreparedEscrowAccounts {
     pub escrow_pda: String,
     pub escrow_in_ata: String,
     pub escrow_out_ata: String,
@@ -1179,18 +1239,18 @@ pub fn default_relay_url() -> String {
 }
 
 #[uniffi::export]
-pub fn prepare_router_accounts(
+pub fn prepare_escrow_accounts(
     pool_id: u32,
     shard_id: u8,
     input_mint_b58: String,
     output_mint_b58: String,
     input_token_program_b58: String,
     output_token_program_b58: String,
-    router_accounts: Vec<FfiAccountMeta>,
+    action_accounts: Vec<FfiAccountMeta>,
     program_id: String,
-) -> Result<FfiPreparedRouterAccounts, AudrenFfiError> {
+) -> Result<FfiPreparedEscrowAccounts, AudrenFfiError> {
     let pid = default_program_id_or(&program_id)?;
-    let (escrow_pda, _) = rust_derive_swap_escrow_pda(&pid, pool_id, shard_id);
+    let (escrow_pda, _) = rust_derive_escrow_pda(&pid, pool_id, shard_id);
     let in_mint = parse_address(&input_mint_b58, "input_mint")?;
     let out_mint = parse_address(&output_mint_b58, "output_mint")?;
     let in_tp = parse_address(&input_token_program_b58, "input_token_program")?;
@@ -1198,10 +1258,10 @@ pub fn prepare_router_accounts(
     let escrow_in_ata = derive_ata(&escrow_pda, &in_tp, &in_mint);
     let escrow_out_ata = derive_ata(&escrow_pda, &out_tp, &out_mint);
 
-    let mut metas = Vec::with_capacity(router_accounts.len());
-    for a in &router_accounts {
+    let mut metas = Vec::with_capacity(action_accounts.len());
+    for a in &action_accounts {
         metas.push(AudrenAccountMeta {
-            pubkey: parse_address(&a.pubkey, "router_account.pubkey")?,
+            pubkey: parse_address(&a.pubkey, "action_account.pubkey")?,
             is_signer: a.is_signer,
             is_writable: a.is_writable,
         });
@@ -1213,12 +1273,12 @@ pub fn prepare_router_accounts(
         &escrow_out_ata,
     )
     .ok_or_else(|| AudrenFfiError::InvalidInput {
-        reason: "router accounts missing swap_escrow, escrow_in_ata, or escrow_out_ata"
+        reason: "action accounts missing escrow_pda, escrow_in_ata, or escrow_out_ata"
             .to_string(),
     })?;
 
     let escrow_str = escrow_pda.to_string();
-    let accounts = router_accounts
+    let accounts = action_accounts
         .into_iter()
         .map(|mut a| {
             if a.pubkey == escrow_str {
@@ -1228,7 +1288,7 @@ pub fn prepare_router_accounts(
         })
         .collect();
 
-    Ok(FfiPreparedRouterAccounts {
+    Ok(FfiPreparedEscrowAccounts {
         escrow_pda: escrow_str,
         escrow_in_ata: escrow_in_ata.to_string(),
         escrow_out_ata: escrow_out_ata.to_string(),

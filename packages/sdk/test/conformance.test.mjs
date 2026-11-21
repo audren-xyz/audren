@@ -53,6 +53,15 @@ test('1. keys: master keys, sub-accounts, FVK, addresses & asset generators matc
     assert.equal(derived.address, sub.address);
   }
 
+  for (const sess of vectors.alice_defi_sessions) {
+    const seedOnly = await core.deriveDefiSessionSeed(aliceSeed, sess.session_index);
+    assert.equal(bytesToHex(seedOnly), sess.secret_seed_hex);
+    const derived = await prover.deriveDefiSessionKeypair(aliceSeed, sess.session_index);
+    assert.equal(bytesToHex(derived.secretSeed), sess.secret_seed_hex);
+    assert.equal(bytesToHex(derived.pubkey), sess.pubkey_hex);
+    assert.equal(derived.address, sess.address);
+  }
+
   const solGen = await prover.assetGenerator(prover.NATIVE_SOL_MINT);
   assert.equal(bytesToHex(solGen), vectors.asset_generators.native_sol_gen_hex);
 
@@ -65,7 +74,7 @@ test('1. keys: master keys, sub-accounts, FVK, addresses & asset generators matc
   assert.equal(bytesToHex(usdcGen), vectors.asset_generators.usdc_gen_hex);
 });
 
-test('2. pdas & layouts: all 10 Pool #0 PDAs, PoolState and EpochPageHeader match Rust byte-for-byte', async () => {
+test('2. pdas & layouts: all 11 Pool #0 PDAs, PoolState and EpochPageHeader match Rust byte-for-byte', async () => {
   const p = vectors.pdas;
   const pool = await core.derivePoolPda(p.pool_id);
   assert.equal(pool.address, p.pool.address);
@@ -91,9 +100,16 @@ test('2. pdas & layouts: all 10 Pool #0 PDAs, PoolState and EpochPageHeader matc
   assert.equal(rentVault.address, p.page_rent_vault.address);
   assert.equal(rentVault.bump, p.page_rent_vault.bump);
 
-  const escrow0 = await core.deriveSwapEscrowPda(p.pool_id, 0);
-  assert.equal(escrow0.address, p.swap_escrow_0.address);
-  assert.equal(escrow0.bump, p.swap_escrow_0.bump);
+  const escrow0 = await core.deriveEscrowPda(p.pool_id, 0);
+  assert.equal(escrow0.address, p.escrow_0.address);
+  assert.equal(escrow0.bump, p.escrow_0.bump);
+
+  const unwrapPda = await core.deriveUnwrapPda(
+    p.pool_id,
+    hexToBytes(vectors.epoch_page.alice_note.nullifier_hex),
+  );
+  assert.equal(unwrapPda.address, p.unwrap_pda.address);
+  assert.equal(unwrapPda.bump, p.unwrap_pda.bump);
 
   const lane1 = await core.deriveLanePda(p.pool_id, 1);
   assert.equal(lane1.address, p.lane_1.address);
@@ -296,8 +312,8 @@ test('4. prover: exact wire lengths & accounts for Deposit, Transfer, Merge, Pro
     amount: 1_000_000n,
   });
   assert.equal(wdIx.data[0], core.TAG_WITHDRAW);
-  assert.equal(wdIx.data.length, 1_966);
-  assert.equal(wdIx.accounts.length, 10);
+  assert.equal(wdIx.data.length, 1_973);
+  assert.equal(wdIx.accounts.length, 11);
   assert.equal(wdChg.amount, 500_000n);
 
   const { instruction: wdFullIx } = await prover.buildWithdrawInstruction({
@@ -313,7 +329,7 @@ test('4. prover: exact wire lengths & accounts for Deposit, Transfer, Merge, Pro
     amount: ownedNote.amount,
   });
   assert.equal(wdFullIx.data[0], core.TAG_WITHDRAW);
-  assert.equal(wdFullIx.data.length, 941);
+  assert.equal(wdFullIx.data.length, 948);
   assert.equal(wdFullIx.accounts[1].isWritable, false);
 });
 
@@ -358,7 +374,7 @@ test('5. disclosure & auditor: Rust-generated SelectiveDisclosure, odd Lane 1 pa
   assert.equal(bytesToHex(decrypted.assetGenerator), vectors.auditor.expected_asset_gen_hex);
 });
 
-test('6. router & relayer: Jupiter CPI excluded DEXes, default relay URL, dataSlice & prepareRouterAccounts', async () => {
+test('6. escrow & relayer: Jupiter CPI excluded DEXes, default relay URL, dataSlice & prepareEscrowAccounts', async () => {
   assert.equal(core.JUPITER_CPI_EXCLUDED_DEXES.join(','), vectors.jupiter_cpi_excluded_dexes);
   assert.equal(core.AUDREN_DEFAULT_RELAY_URL, 'https://relay.audren.xyz');
   assert.deepEqual(core.PAGE_SCAN_DATA_SLICE, {
@@ -366,17 +382,17 @@ test('6. router & relayer: Jupiter CPI excluded DEXes, default relay URL, dataSl
     length: vectors.epoch_page.scan_length,
   });
 
-  const escrow0 = vectors.pdas.swap_escrow_0.address;
+  const escrow0 = vectors.pdas.escrow_0.address;
   const wsol = vectors.asset_generators.wsol_mint_b58;
   const usdc = vectors.asset_generators.usdc_mint_b58;
   const { address: escrowInAta } = await core.deriveAssociatedTokenAddress(escrow0, wsol);
   const { address: escrowOutAta } = await core.deriveAssociatedTokenAddress(escrow0, usdc);
-  const prep = await core.prepareRouterAccounts({
+  const prep = await core.prepareEscrowAccounts({
     poolId: 0,
     shardId: 0,
     inputMint: wsol,
     outputMint: usdc,
-    routerAccounts: [
+    actionAccounts: [
       { pubkey: escrowInAta, isSigner: false, isWritable: true },
       { pubkey: escrow0, isSigner: true, isWritable: true },
       { pubkey: escrowOutAta, isSigner: false, isWritable: true },

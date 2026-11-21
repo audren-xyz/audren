@@ -18,7 +18,8 @@ All accounts use fixed offsets, little-endian integers, 8-byte ASCII magics, and
 | `vault_auth` | `["audren_vault", pool_id_le4]` | `0 B` | PDA owner of all SPL / Token-2022 custody ATAs |
 | `sol_vault` | `["audren_sol", pool_id_le4]` | `16 B` | Custody PDA holding native SOL (8 B magic `"AUDRNSL1"` + bump) |
 | `page_rent_vault` | `["audren_rent", pool_id_le4]` | `16 B` | Self-funding Lane 0 rollover reserve (8 B magic `"AUDRNRN1"` + bump) |
-| `swap_escrow` | `["audren_escrow", pool_id_le4, shard_u8]` | `0 B` | Isolated CPI signer shard (`shard_u8 in 0..16`) for `SwapViaRouter` |
+| `swap_escrow` | `["audren_escrow", pool_id_le4, shard_u8]` | `0 B` | Isolated CPI signer shard (`shard_u8 in 0..16`) for `ExecViaEscrow` |
+| `unwrap_pda` | `["audren_unwrap", pool_id_le4, nullifier_32]` | `0 B` (ephemeral) | 1-shot WSOL token account created & closed atomically to `recipient` during `Withdraw(unwrap_wsol=true)` |
 | `ProofBuffer` | `["audren_buf", authority_32, nonce_le8]` | `<= 10,032 B` | Ephemeral chunked payload PDA; closed atomically on `ExecBuffered` |
 | `AppendLaneState` | `["audren_lane", pool_id_le4, lane_u8]` | `64 B` | Parallel append lane cursor (`lane_u8 in 1..16`) |
 | `lane_rent_vault` | `["audren_lrent", pool_id_le4, lane_u8]` | `16 B` | Self-funding rollover reserve for parallel lane `1..15` |
@@ -100,7 +101,7 @@ For ring size `N = 2^m` (`m = 5`: 1 page / 32 notes; `m = 6`: 2 pages / 64 notes
 
 - **Strong Fiat-Shamir transcript binding (SHA-256 `hashv`):**
   1. Per-page digest `page_hash_i = SHA-256("audren/v1/ring/page" || page_id_le8 || prefix_u8 || stealth_pks[..prefix] || asset_tags[..prefix] || commitments[..prefix])`, combined into `ring_root = SHA-256("audren/v1/triptych/ring" || m || audited_u8 || aud_bytes_32 || page_hash_0 || ...)`. Each page's `prefix_count in 1..=page.count` is committed inside the proof so concurrent appends to an open page after proving never invalidate the ring.
-  2. `ctx_hash` hashes instruction domain, program ID, pool ID, output commitments/ciphertexts, recipient/mint/amount (for `Withdraw`), and `router_program` + `mints` + `amount_in` + `min_amount_out` + `escrow_shard` + `flags` + optional change/refund wires (for `SwapViaRouter`) — preventing relayers from substituting any public parameter.
+  2. `ctx_hash` hashes instruction domain, program ID, pool ID, output commitments/ciphertexts, recipient/mint/amount/`flags`/`relayer_fee`/`fee_recipient` (for `Withdraw`), and `target_program` + `mints` + `amount_in` + `min_amount_out` + `escrow_shard` + `flags` + `relayer_fee` + `fee_recipient_ata` + optional change/refund wires (for `ExecViaEscrow`) — preventing relayers from substituting any public parameter.
   3. Challenge `alpha = HashToScalar("triptych/alpha", ctx_hash, ring_root, A_spend, V_spend)` binds the asset/value balance linear combination before `W[..m]`; challenge `xi = HashToScalar("triptych/xi", ring_root, alpha, J, A, B, C, D, X[..m], Y[..m], W[..m], S_1?, S_2?, T[..m]?, E[..m]?)` binds all prover commitments.
   4. Random batching weights `mu_2..mu_7` are derived from `SHA-256("audren/v1/triptych/batch" || xi || full_proof)` so all verification equations collapse into chunked calls to Agave's native `sol_curve_multiscalar_mul` syscall inside Solana's `32 KiB` heap.
 
@@ -123,7 +124,7 @@ For ring size `N = 2^m` (`m = 5`: 1 page / 32 notes; `m = 6`: 2 pages / 64 notes
 
 Why value conservation alone is not sufficient: in `Transfer`, the prover must prove `V_spend == V_pay + V_chg` **and** that neither `v_pay` nor `v_chg` wraps modulo the group order `l` (a negative-value inflation attack).
 
-- **`CrossBase1` (`128 B`, used in `Merge`, `Withdraw` with change, and `SwapViaRouter` with shielded change):** Proves knowledge of `(v, t, s)` such that `V = v * A + t * H` AND `C = v * G + s * H` commit to the exact same `v`.
+- **`CrossBase1` (`128 B`, used in `Merge`, `Withdraw` with change, and `ExecViaEscrow` with shielded change):** Proves knowledge of `(v, t, s)` such that `V = v * A + t * H` AND `C = v * G + s * H` commit to the exact same `v`.
 - **`CrossBase2` (`256 B`, used in `Transfer`):** On-chain `ix_transfer` sets `A_spend = A_pay` and `V_spend = V_pay + V_chg`. Triptych Eq 5 proves `(A_in - A_pay) in <H>` and `(V_in - (V_pay + V_chg)) in <H>`, while `CrossBase2` proves simultaneously:
   1. `A_chg - A_pay = d * H` (both output notes carry independent, unlinkable re-randomized asset tags derived from ECDH, yet strictly bind to the same hidden mint `G_mint` as the spent input — preventing cross-asset minting);
   2. `V_pay = v_pay * A_pay + t_1 * H` matches Agave Pedersen `C_pay = v_pay * G + s_1 * H`;
@@ -136,20 +137,27 @@ Why value conservation alone is not sufficient: in `Transfer`, the prover must p
   - **Selective Disclosure Receipt:** A user proves `(amount, mint, pageId, slotIndex)` for a single note by disclosing the opening `(v, a, r_v)` verified directly against the on-chain `EpochPage` commitment bytes (`V == v * A + r_v * H`, `A == G_mint + a * H`). Tampering with even 1 base unit fails commitment equality immediately.
   - **Scoped Sub-Account & Full Viewing Keys:** Exporting `(view_sk, S)` grants read-only scanning of incoming notes with zero spend capability (`s` stays private). For stream-scoped disclosure (e.g., an isolated invoice or payroll address without exposing a primary treasury), SDK callers derive an independent child seed via `HKDF-SHA256(salt = "audren/v1/subaccount", ikm = master_seed, info = u32_le(index))` (`index >= 1`; `index == 0` is the primary account).
 - **`PoolMode::InstitutionalAudited`:**
-  - Every spend verifies Triptych Equations 6–7 (`(S_1, S_2)` encrypting `P_l` under `K_aud`); hidden-asset spends (`Transfer` and `Merge`) additionally verify `AuditorAssetProof` (`192 B`, DLEQ proving `(M_1, M_2) = (r_m * G, G_mint + r_m * K_aud)`), whereas `SwapViaRouter` and `Withdraw` carry their mint(s) as public instruction accounts.
+  - Every spend verifies Triptych Equations 6–7 (`(S_1, S_2)` encrypting `P_l` under `K_aud`); hidden-asset spends (`Transfer` and `Merge`) additionally verify `AuditorAssetProof` (`192 B`, DLEQ proving `(M_1, M_2) = (r_m * G, G_mint + r_m * K_aud)`), whereas `ExecViaEscrow` and `Withdraw` carry their mint(s) as public instruction accounts.
   - The auditor decrypts `P_l = S_2 - k_aud * S_1` (and `G_mint = M_2 - k_aud * M_1` on `Transfer`/`Merge`) offline with zero freeze, pause, or withdrawal power.
 
 ---
 
-## 3. Private DEX Swaps (`SwapViaRouter`, Tag 5) & Escape Hatch (`Withdraw`, Tag 6)
+## 3. Shielded DeFi (`ExecViaEscrow`, Tag 5), Self-Paying Exit (`Withdraw`, Tag 6) & Private DeFi Sessions
 
-`SwapViaRouter` executes full or partial shielded swaps through a compatible Solana router accepting its PDA signer and satisfying custody and transaction limits; hosted route availability is separate:
+`ExecViaEscrow` executes any stateless `Token A -> Token B` Solana CPI through a compatible target program accepting its `swap_escrow` PDA signer (DEX aggregators & AMMs are one example alongside lending reserve supply minting `kTokens`, yield vaults, liquid staking pools, perp LP tokens, and permissionless RWA mint/redeem):
 
-1. **Nullifier-first ordering & router binding:** `NullifierPDA` is created before the router CPI (eliminating re-entrancy/replay). `router_program`, `mint_in`, `mint_out`, `amount_in`, `min_amount_out`, `escrow_shard`, `flags`, and optional change/refund descriptors are hashed into `ctx_hash`.
-2. **Optional shielded change (`flags & 1`, partial swaps):** Users can swap any fraction `amount_in < v_in` of a private note; the remainder `v_chg = v_in - amount_in` is proven via `CrossBase1` (`128 B`) + `BatchedRangeProofU64` (`672 B`) and appended as an encrypted change note in the same transaction.
-3. **Custody isolation:** Exact `amount_in` moves from `vault_in` (`vault_auth` PDA) into isolated `escrow_in` owned by `swap_escrow` shard `0..16`. Only `swap_escrow` signs the external CPI; `vault_auth` and `payer` are never marked signer; Audren program/state/vault/page/nullifier accounts are forbidden inside `router_accounts`.
-4. **Post-CPI verification:** `swap_escrow` must remain System-owned, zero-data, and non-drained (`lamports_after >= lamports_before`); `escrow_in` and `escrow_out` are verified pre- and post-CPI for immutable owner (`swap_escrow`), zero delegate, and unchanged `close_authority`.
-5. **Dynamic stealth settlement:** `actual_out = post_escrow_out - pre_escrow_out > 0` sweeps into `vault_out` (using measured vault delta for Token-2022 `TransferFeeConfig` solvency), checks the measured vault receipt `net_out = post_vault_out - pre_vault_out >= min_amount_out`, commits on-chain as `V_out = net_out * G_{mint_out}`, and appends to `EpochPage` under fresh one-time `P_out`. Unspent escrow input either reverts (`flags & 2 == 0`) or sweeps back into a stealth refund note (`flags & 2 != 0`, `allow_partial`).
+1. **Nullifier-first ordering & target-program binding:** `NullifierPDA` is created before the external CPI (eliminating re-entrancy/replay). `target_program`, `mint_in`, `mint_out`, `amount_in`, `min_amount_out`, `escrow_shard`, `flags`, `relayer_fee`, `fee_recipient_ata`, and optional change/refund descriptors are hashed into `ctx_hash`.
+2. **Native relayer fee (`relayer_fee` + `EXEC_FLAG_FEE_ON_OUTPUT`):** Relayers can be compensated natively from either `mint_in` (`flags & 4 == 0`, deducted before escrow CPI) or `mint_out` (`flags & 4 != 0`, deducted from measured net vault output) via `[15] fee_recipient_ata`, enabling self-paying execution for any DeFi protocol — not just DEX aggregators with platform fee parameters.
+3. **Optional shielded change (`flags & 1`, partial execution):** Users can route any fraction `amount_in < v_in` of a private note; the remainder `v_chg = v_in - amount_in` is proven via `CrossBase1` (`128 B`) + `BatchedRangeProofU64` (`672 B`) and appended as an encrypted change note in the same transaction.
+4. **Custody isolation:** Exact CPI input moves from `vault_in` (`vault_auth` PDA) into isolated `escrow_in` owned by `swap_escrow` shard `0..16`. Only `swap_escrow` signs the external CPI; `vault_auth` and `payer` are never marked signer; Audren program/state/vault/page/nullifier accounts are forbidden inside `action_accounts`.
+5. **Post-CPI verification:** `swap_escrow` must remain System-owned, zero-data, and non-drained (`lamports_after >= lamports_before`); `escrow_in` and `escrow_out` are verified pre- and post-CPI for immutable owner (`swap_escrow`), zero delegate, and unchanged `close_authority`.
+6. **Dynamic stealth settlement:** `actual_out = post_escrow_out - pre_escrow_out > 0` sweeps into `vault_out` (using measured vault delta for Token-2022 `TransferFeeConfig` solvency), deducts any output `relayer_fee`, checks `net_out >= min_amount_out`, commits on-chain as `V_out = net_out * G_{mint_out}`, and appends to `EpochPage` under fresh one-time `P_out`. Unspent escrow input either reverts (`flags & 2 == 0`) or sweeps back into a stealth refund note (`flags & 2 != 0`, `allow_partial`).
+
+### Self-Paying `Withdraw` (Tag 6), Atomic WSOL Unwrap & Private DeFi Sessions
+
+- **Native `relayer_fee` & `[7] fee_recipient`:** `Withdraw` supports optional native fee deduction directly from the withdrawn SOL or SPL note (`amount + relayer_fee` total public payout), allowing zero-SOL recipients and session wallets to be funded in one relayed transaction.
+- **Atomic `unwrap_wsol` (`WITHDRAW_FLAG_UNWRAP_WSOL = 0x02`):** Unshielding a shielded WSOL note can atomically initialize the 1-shot ephemeral PDA `["audren_unwrap", pool_id_le4, nullifier_32]`, transfer WSOL from `vault_auth`, and invoke SPL Token `CloseAccount` with destination `recipient` — delivering pure Native SOL directly to a 0-lamport wallet in one instruction while preserving full-exit pause bypass.
+- **Deterministic Private DeFi Sessions (`B_0, B_1, ...`) & Zero-Dust Sweep (`DEPOSIT_FLAG_FEE_FROM_AMOUNT = 0x01`):** For stateful DeFi protocols requiring persistent user position accounts (borrowing, leveraged perps, margin), SDKs derive deterministic Ed25519 session keypairs via `HKDF-SHA256(salt = "audren/v1/defi_session", ikm = master_seed, info = u32_le(session_index))`. After closing a session, `Deposit` with `flags & 1` deducts the live page-rent contribution from `amount` itself so the session wallet sweeps 100% of remaining SOL back into the pool leaving **0 lamports** behind. Positions opened by a session wallet `B_i` (collateral, debt, margin, liquidations) remain public on Solana.
 
 ### Privacy boundaries and effective anonymity
 
@@ -170,12 +178,12 @@ Why value conservation alone is not sufficient: in `Transfer`, the prover must p
 ## 4. Token-2022 Solvency & Solana v1 / `ProofBuffer`
 
 - **Token-2022 support:**
-  - `TransferFeeConfig`: `Deposit` and `SwapViaRouter` commit the measured post-transfer vault balance delta (`after - before > 0`), crediting the measured net receipt rather than the requested gross amount.
+  - `TransferFeeConfig`: `Deposit` and `ExecViaEscrow` commit the measured post-transfer vault balance delta (`after - before > 0`), crediting the measured net receipt rather than the requested gross amount.
   - `PermanentDelegate`: Regulated stablecoins and RWAs (PYUSD, USDG, CASH) are supported natively alongside Classic SPL mints.
   - `TransferHook`: Inactive hooks take a zero-allocation fast path; active hooks receive sanitized non-signer trailing hook accounts with Audren-owned accounts and custody vaults filtered out.
   - Audren does not impose a blanket mint-extension denylist. Transfers still depend on token-program checks and issuer policies; `NonTransferable` mints cannot be transferred.
 - **Solana Transaction Version 1 (`0x81`, `4,096 B`) + `ProofBuffer` (`Tags 8 / 9 / 10`):**
-  - Relayers and native SDK clients can settle supported payloads for `Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, and `Withdraw` in **one Solana v1 transaction**, subject to client support and transaction limits (`<= 4,096 B`, inline `TransactionConfig` compute budget and priority fee, zero `ComputeBudgetInstruction`).
+  - Relayers and native SDK clients can settle supported payloads for `Deposit`, `Transfer`, `Merge`, `ExecViaEscrow`, and `Withdraw` in **one Solana v1 transaction**, subject to client support and transaction limits (`<= 4,096 B`, inline `TransactionConfig` compute budget and priority fee, zero `ComputeBudgetInstruction`).
   - Browser wallets restricted to `v0` (`1,232 B`) or oversized multi-hop swaps upload `<= 768 B` chunks via `WriteProofBuffer` (`Tag 8`) tracked by a `u16` `written_mask`, execute zero-copy via `ExecBuffered` (`Tag 9`), and atomically zero magic, shrink to `0 B`, reassign to the System Program, and refund 100% of buffer rent to `payer` in the same transaction. `CloseProofBuffer` (`Tag 10`) recovers 100% of rent from abandoned uploads.
 
 ---

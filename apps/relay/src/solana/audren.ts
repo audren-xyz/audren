@@ -1,5 +1,6 @@
 import {
   SYSTEM_PROGRAM_ID,
+  WSOL_MINT_STR,
   base58Decode,
   base58Encode,
   bytesEqual,
@@ -12,8 +13,8 @@ import {
 import type { AudrenOpKind, SolanaAccountMeta, SolanaInstruction } from '../types'
 
 // ============================================================================
-// Audren v1 Protocol Constants & PDAs
-// Verified byte-for-byte against `program/src/lib.rs`
+// Audren v0.3.0 Protocol Constants & PDAs
+// Verified byte-for-byte against `program/src/lib.rs` and `crates/audren-core/`
 // ============================================================================
 
 export const AUDREN_PROGRAM_ID_STR = 'AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3'
@@ -23,9 +24,21 @@ export const TAG_OPEN_PAGE = 1
 export const TAG_DEPOSIT = 2
 export const TAG_TRANSFER = 3
 export const TAG_MERGE = 4
-export const TAG_SWAP_VIA_ROUTER = 5
+export const TAG_EXEC_VIA_ESCROW = 5
+export const TAG_SWAP_VIA_ROUTER = TAG_EXEC_VIA_ESCROW
 export const TAG_WITHDRAW = 6
 export const TAG_OPEN_LANE_PAGE = 12
+
+export const DEPOSIT_FLAG_NATIVE_SOL = 0x01
+export const DEPOSIT_FLAG_FEE_FROM_AMOUNT = 0x02
+
+export const EXEC_FLAG_HAS_CHANGE = 0x01
+export const EXEC_FLAG_ALLOW_PARTIAL_REFUND = 0x02
+export const EXEC_FLAG_FEE_ON_OUTPUT = 0x04
+
+export const WITHDRAW_FLAG_NATIVE_SOL = 0x01
+export const WITHDRAW_FLAG_HAS_CHANGE = 0x02
+export const WITHDRAW_FLAG_UNWRAP_WSOL = 0x04
 
 export const MAX_APPEND_LANES = 16
 export const MAX_ESCROW_SHARDS = 16
@@ -51,8 +64,8 @@ export function opKindFromTag(tag: number): AudrenOpKind | null {
       return 'transfer'
     case TAG_MERGE:
       return 'merge'
-    case TAG_SWAP_VIA_ROUTER:
-      return 'swap'
+    case TAG_EXEC_VIA_ESCROW:
+      return 'exec_escrow'
     case TAG_WITHDRAW:
       return 'withdraw'
     default:
@@ -93,9 +106,18 @@ export function deriveVaultAuthPda(poolId = 0) {
   return findProgramAddressSync([utf8('audren_vault'), u32le(poolId)], AUDREN_PROGRAM_ID)
 }
 
-export function deriveSwapEscrowPda(poolId: number, shardId: number) {
+export function deriveEscrowPda(poolId: number, shardId: number) {
   return findProgramAddressSync(
     [utf8('audren_escrow'), u32le(poolId), new Uint8Array([shardId & 0xff])],
+    AUDREN_PROGRAM_ID,
+  )
+}
+
+export const deriveSwapEscrowPda = deriveEscrowPda
+
+export function deriveUnwrapPda(poolId: number, nullifier32: Uint8Array) {
+  return findProgramAddressSync(
+    [utf8('audren_unwrap'), u32le(poolId), nullifier32],
     AUDREN_PROGRAM_ID,
   )
 }
@@ -186,64 +208,181 @@ export function buildOpenLanePageIx(params: {
 
 /**
  * Extract nullifier PDA base58 addresses directly from Audren instruction accounts:
- *   - Tag 3 (Transfer): [3] nullifier_pda
- *   - Tag 4 (Merge):    [3] nullifier_1_pda, [4] nullifier_2_pda
- *   - Tag 5 (Swap):     [3] nullifier_pda
- *   - Tag 6 (Withdraw): [3] nullifier_pda
+ *   - Tag 3 (Transfer):      [3] nullifier_pda
+ *   - Tag 4 (Merge):         [3] nullifier_1_pda, [4] nullifier_2_pda
+ *   - Tag 5 (ExecViaEscrow): [3] nullifier_pda
+ *   - Tag 6 (Withdraw):      [3] nullifier_pda
  */
 export function extractNullifierPdas(tag: number, accounts: SolanaAccountMeta[]): string[] {
   if (tag === TAG_MERGE) {
     if (accounts.length < 5) return []
     return [base58Encode(accounts[3]!.pubkey), base58Encode(accounts[4]!.pubkey)]
   }
-  if (tag === TAG_TRANSFER || tag === TAG_SWAP_VIA_ROUTER || tag === TAG_WITHDRAW) {
+  if (tag === TAG_TRANSFER || tag === TAG_EXEC_VIA_ESCROW || tag === TAG_WITHDRAW) {
     if (accounts.length < 4) return []
     return [base58Encode(accounts[3]!.pubkey)]
   }
   return []
 }
 
-/**
- * Extract swap metadata from Tag 5 (`SwapViaRouter`).
- * Exact account layout (verified against `apps/web/lib/audren-prover.ts`):
- *   [0] payer, [1] pool, [2] out_page, [3] nullifier, [4] rent_vault,
- *   [5] zk_program, [6] system_program, [7] vault_auth,
- *   [8] in_mint, [9] vault_in, [10] token_program_in,
- *   [11] out_mint, [12] vault_out, [13] token_program_out,
- *   [14] router_program_id, [15..] input_pages + router_accounts
- */
-export function parseSwapMeta(
-  ixData: Uint8Array,
-  accounts: SolanaAccountMeta[],
-): {
+export interface ParsedExecEscrowMeta {
   shardId: number
+  flags: number
+  hasChange: boolean
+  allowPartialRefund: boolean
+  feeOnOutput: boolean
   amountIn: bigint
   minAmountOut: bigint
+  relayerFee: bigint
   mintIn: string
   vaultIn: string
   tokenProgIn: string
   mintOut: string
   vaultOut: string
   tokenProgOut: string
-  routerProgramId: string
+  targetProgramId: string
+  feeRecipientAta: string
+  feeMint: string
+  feeTokenProg: string
   escrowPda: string
-} | null {
-  if (ixData.length < 154 || ixData[0] !== TAG_SWAP_VIA_ROUTER || accounts.length < 19) return null
+}
+
+/**
+ * Parse v0.3.0 Tag 5 (`ExecViaEscrow`) wire header and fixed account header.
+ * Wire:
+ *   [0] tag(5), [1] m, [2] shard_id, [3] flags,
+ *   [4..12] amount_in, [12..20] min_amount_out, [20..28] relayer_fee, ...
+ * Accounts:
+ *   [0] payer, [1] pool, [2] out_page, [3] nullifier, [4] rent_vault,
+ *   [5] zk_program, [6] system_program, [7] vault_auth,
+ *   [8] in_mint, [9] vault_in, [10] token_program_in,
+ *   [11] out_mint, [12] vault_out, [13] token_program_out,
+ *   [14] target_program_id, [15] fee_recipient_ata, [16..] input_pages + action_accounts
+ */
+export function parseExecEscrowMeta(
+  ixData: Uint8Array,
+  accounts: SolanaAccountMeta[],
+): ParsedExecEscrowMeta | null {
+  if (ixData.length < 162 || ixData[0] !== TAG_EXEC_VIA_ESCROW || accounts.length < 20) return null
   const shardId = ixData[2]!
   if (shardId >= MAX_ESCROW_SHARDS) return null
-  const escrowPda = base58Encode(deriveSwapEscrowPda(0, shardId).address)
+  const flags = ixData[3]!
+  if ((flags & ~0x07) !== 0) return null
+  const feeOnOutput = (flags & EXEC_FLAG_FEE_ON_OUTPUT) !== 0
+  const mintIn = base58Encode(accounts[8]!.pubkey)
+  const tokenProgIn = base58Encode(accounts[10]!.pubkey)
+  const mintOut = base58Encode(accounts[11]!.pubkey)
+  const tokenProgOut = base58Encode(accounts[13]!.pubkey)
+  const escrowPda = base58Encode(deriveEscrowPda(0, shardId).address)
   return {
     shardId,
+    flags,
+    hasChange: (flags & EXEC_FLAG_HAS_CHANGE) !== 0,
+    allowPartialRefund: (flags & EXEC_FLAG_ALLOW_PARTIAL_REFUND) !== 0,
+    feeOnOutput,
     amountIn: readU64le(ixData, 4),
     minAmountOut: readU64le(ixData, 12),
-    mintIn: base58Encode(accounts[8]!.pubkey),
+    relayerFee: readU64le(ixData, 20),
+    mintIn,
     vaultIn: base58Encode(accounts[9]!.pubkey),
-    tokenProgIn: base58Encode(accounts[10]!.pubkey),
-    mintOut: base58Encode(accounts[11]!.pubkey),
+    tokenProgIn,
+    mintOut,
     vaultOut: base58Encode(accounts[12]!.pubkey),
-    tokenProgOut: base58Encode(accounts[13]!.pubkey),
-    routerProgramId: base58Encode(accounts[14]!.pubkey),
+    tokenProgOut,
+    targetProgramId: base58Encode(accounts[14]!.pubkey),
+    feeRecipientAta: base58Encode(accounts[15]!.pubkey),
+    feeMint: feeOnOutput ? mintOut : mintIn,
+    feeTokenProg: feeOnOutput ? tokenProgOut : tokenProgIn,
     escrowPda,
+  }
+}
+
+export const parseSwapMeta = parseExecEscrowMeta
+
+export interface ParsedWithdrawMeta {
+  flags: number
+  isNativeSol: boolean
+  hasChange: boolean
+  unwrapWsol: boolean
+  amount: bigint
+  relayerFee: bigint
+  feeRecipient: string
+  mint: string | null
+  tokenProgram: string | null
+  recipientAccount: string
+}
+
+/**
+ * Parse v0.3.0 Tag 6 (`Withdraw`) wire header and fixed account layout.
+ * Wire:
+ *   [0] tag(6), [1] m, [2] flags, [3..11] amount, [11..19] relayer_fee, ...
+ * Accounts:
+ *   [0..6] payer, pool, out_page, nullifier, rent_vault, zk_prog, sys_prog
+ *   [7] fee_recipient
+ *   Native SOL (bit0=1):        [8] sol_vault, [9] recipient, [10..] input_pages
+ *   SPL (bit0=0, bit2=0):       [8] mint, [9] vault_auth, [10] vault_ata, [11] recipient_ata, [12] token_prog, [13..] input_pages
+ *   Unwrap WSOL (bit0=0,bit2=1):[8] wsol_mint, [9] vault_auth, [10] vault_wsol_ata, [11] recipient_wallet, [12] token_prog, [13] unwrap_pda, [14..] input_pages
+ */
+export function parseWithdrawMeta(
+  ixData: Uint8Array,
+  accounts: SolanaAccountMeta[],
+): ParsedWithdrawMeta | null {
+  if (ixData.length < 24 || ixData[0] !== TAG_WITHDRAW) return null
+  const flags = ixData[2]!
+  if ((flags & ~0x07) !== 0) return null
+  const isNativeSol = (flags & WITHDRAW_FLAG_NATIVE_SOL) !== 0
+  const hasChange = (flags & WITHDRAW_FLAG_HAS_CHANGE) !== 0
+  const unwrapWsol = (flags & WITHDRAW_FLAG_UNWRAP_WSOL) !== 0
+  if (isNativeSol && unwrapWsol) return null
+
+  const amount = readU64le(ixData, 3)
+  const relayerFee = readU64le(ixData, 11)
+  if (accounts.length < 11) return null
+  const feeRecipient = base58Encode(accounts[7]!.pubkey)
+
+  if (isNativeSol) {
+    return {
+      flags,
+      isNativeSol: true,
+      hasChange,
+      unwrapWsol: false,
+      amount,
+      relayerFee,
+      feeRecipient,
+      mint: null,
+      tokenProgram: null,
+      recipientAccount: base58Encode(accounts[9]!.pubkey),
+    }
+  }
+  if (unwrapWsol) {
+    if (accounts.length < 15) return null
+    const mint = base58Encode(accounts[8]!.pubkey)
+    if (mint !== WSOL_MINT_STR) return null
+    return {
+      flags,
+      isNativeSol: false,
+      hasChange,
+      unwrapWsol: true,
+      amount,
+      relayerFee,
+      feeRecipient,
+      mint,
+      tokenProgram: base58Encode(accounts[12]!.pubkey),
+      recipientAccount: base58Encode(accounts[11]!.pubkey),
+    }
+  }
+  if (accounts.length < 14) return null
+  return {
+    flags,
+    isNativeSol: false,
+    hasChange,
+    unwrapWsol: false,
+    amount,
+    relayerFee,
+    feeRecipient,
+    mint: base58Encode(accounts[8]!.pubkey),
+    tokenProgram: base58Encode(accounts[12]!.pubkey),
+    recipientAccount: base58Encode(accounts[11]!.pubkey),
   }
 }
 
@@ -251,7 +390,7 @@ export function isAudrenVaultOrEscrowOwner(ownerB58: string, poolId = 0): boolea
   const ownerBytes = base58Decode(ownerB58)
   if (bytesEqual(ownerBytes, deriveVaultAuthPda(poolId).address)) return true
   for (let sid = 0; sid < MAX_ESCROW_SHARDS; sid++) {
-    if (bytesEqual(ownerBytes, deriveSwapEscrowPda(poolId, sid).address)) return true
+    if (bytesEqual(ownerBytes, deriveEscrowPda(poolId, sid).address)) return true
   }
   return false
 }

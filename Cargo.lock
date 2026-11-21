@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "audren-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "agave-feature-set",
@@ -518,11 +518,11 @@ dependencies = [
 
 [[package]]
 name = "audren-core"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "audren-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agave-feature-set",
  "audren-client",

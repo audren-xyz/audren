@@ -35,7 +35,7 @@ import {
   TAG_MERGE,
   TAG_OPEN_LANE_PAGE,
   TAG_OPEN_PAGE,
-  TAG_SWAP_VIA_ROUTER,
+  TAG_EXEC_VIA_ESCROW,
   TAG_TRANSFER,
   TAG_WITHDRAW,
   TOKEN_2022_PROGRAM_ID,
@@ -48,7 +48,7 @@ import {
   deriveAta,
   deriveLanePda,
   deriveLaneRentVaultPda,
-  deriveSwapEscrowPda,
+  deriveEscrowPda,
   deriveVaultAuthPda,
   laneOfPageId,
   pageIdForLane,
@@ -596,7 +596,7 @@ async function handleGetPool(request: Request, env: Env, forcedCluster?: Cluster
       derivePoolPda(0),
       deriveSolVaultPda(0),
       deriveVaultAuthPda(0),
-      deriveSwapEscrowPda(0, 0),
+      deriveEscrowPda(0, 0),
     ])
     const poolB58 = base58Encode(poolPda.address)
     const solVaultB58 = base58Encode(solVaultPda.address)
@@ -1678,6 +1678,7 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
   if (!body.pageId || !/^\d+$/.test(body.pageId) || !body.mint) {
     return jsonResponse({ error: 'Missing numeric pageId or mint' }, 400)
   }
+  const isNativeSol = body.mint === '11111111111111111111111111111111'
   let mintBytes: Uint8Array
   try {
     mintBytes = base58Decode(body.mint)
@@ -1687,21 +1688,28 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
   }
 
   try {
-    // 1. Resolve exact token program for `mint` in 1 RPC call so we derive ONE vault ATA (never 2x subrequests!)
-    const [pagePda, vaultAuthPda, mintInfo] = await Promise.all([
-      deriveEpochPagePda(0, BigInt(body.pageId)),
-      deriveVaultAuthPda(0),
-      rpcCall<{ value: { owner?: string } | null }>(rpcUrl, 'getAccountInfo', [
-        body.mint,
-        { encoding: 'base64', commitment: 'confirmed', dataSlice: { offset: 0, length: 0 } },
-      ]),
-    ])
-    const tokenProgBytes =
-      mintInfo.value?.owner === TOKEN_2022_PROGRAM_ID_STR
-        ? TOKEN_2022_PROGRAM_ID
-        : CLASSIC_TOKEN_PROGRAM_ID
-    const vaultAta = await deriveAta(vaultAuthPda.address, tokenProgBytes, mintBytes)
-    const vaultB58 = base58Encode(vaultAta)
+    // 1. Resolve exact vault address (either `sol_vault` for Native SOL sweep deposits OR
+    //    ONE derived SPL/Token-2022 vault ATA for ExecViaEscrow dynamic outputs).
+    const [pagePda, vaultB58] = await (async () => {
+      const pda = await deriveEpochPagePda(0, BigInt(body.pageId!))
+      if (isNativeSol) {
+        const sv = await deriveSolVaultPda(0)
+        return [pda, base58Encode(sv.address)] as const
+      }
+      const [vaultAuthPda, mintInfo] = await Promise.all([
+        deriveVaultAuthPda(0),
+        rpcCall<{ value: { owner?: string } | null }>(rpcUrl, 'getAccountInfo', [
+          body.mint,
+          { encoding: 'base64', commitment: 'confirmed', dataSlice: { offset: 0, length: 0 } },
+        ]),
+      ])
+      const tokenProgBytes =
+        mintInfo.value?.owner === TOKEN_2022_PROGRAM_ID_STR
+          ? TOKEN_2022_PROGRAM_ID
+          : CLASSIC_TOKEN_PROGRAM_ID
+      const vaultAta = await deriveAta(vaultAuthPda.address, tokenProgBytes, mintBytes)
+      return [pda, base58Encode(vaultAta)] as const
+    })()
     const pageB58 = base58Encode(pagePda.address)
 
     // 2. Fetch at most 36 confirmed signatures on this EpochPage (stays safely within CF Workers' 50-subrequest budget)
@@ -1715,12 +1723,14 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
     const targetSlot =
       typeof body.slotIndex === 'number' && Number.isInteger(body.slotIndex) ? body.slotIndex : null
     const logRe = new RegExp(
-      `audren:swap_router page=${body.pageId} idx=(\\d+) net_out=(\\d+) net_refund=(\\d+)`,
+      `audren:(?:swap_router|exec_escrow) page=${body.pageId} idx=(\\d+) net_out=(\\d+) net_refund=(\\d+)`,
     )
 
     type TxInspect = {
       meta?: {
         logMessages?: string[]
+        preBalances?: number[]
+        postBalances?: number[]
         preTokenBalances?: Array<{ accountIndex: number; uiTokenAmount: { amount: string } }>
         postTokenBalances?: Array<{ accountIndex: number; uiTokenAmount: { amount: string } }>
         loadedAddresses?: { writable?: string[]; readonly?: string[] }
@@ -1743,16 +1753,18 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
       let exactHit = false
       for (const tx of txs) {
         if (!tx?.meta) continue
-        for (const line of tx.meta.logMessages ?? []) {
-          const m = logRe.exec(line)
-          if (!m) continue
-          const idxOut = Number(m[1])
-          const netOut = m[2]
-          const netRefund = m[3]
-          if (netOut !== '0') candidateAmounts.add(netOut)
-          if (netRefund !== '0') candidateAmounts.add(netRefund)
-          if (targetSlot !== null && idxOut === targetSlot) {
-            exactHit = true
+        if (!isNativeSol) {
+          for (const line of tx.meta.logMessages ?? []) {
+            const m = logRe.exec(line)
+            if (!m) continue
+            const idxOut = Number(m[1])
+            const netOut = m[2]
+            const netRefund = m[3]
+            if (netOut !== '0') candidateAmounts.add(netOut)
+            if (netRefund !== '0') candidateAmounts.add(netRefund)
+            if (targetSlot !== null && idxOut === targetSlot) {
+              exactHit = true
+            }
           }
         }
         if (tx.transaction?.message?.accountKeys) {
@@ -1766,15 +1778,21 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
           ]
           const idx = fullKeys.indexOf(vaultB58)
           if (idx >= 0) {
-            const pre = BigInt(
-              tx.meta.preTokenBalances?.find((b) => b.accountIndex === idx)?.uiTokenAmount.amount ??
-                '0',
-            )
-            const post = BigInt(
-              tx.meta.postTokenBalances?.find((b) => b.accountIndex === idx)?.uiTokenAmount
-                .amount ?? '0',
-            )
-            if (post > pre) candidateAmounts.add((post - pre).toString())
+            if (isNativeSol) {
+              const preLam = BigInt(tx.meta.preBalances?.[idx] ?? 0)
+              const postLam = BigInt(tx.meta.postBalances?.[idx] ?? 0)
+              if (postLam > preLam) candidateAmounts.add((postLam - preLam).toString())
+            } else {
+              const pre = BigInt(
+                tx.meta.preTokenBalances?.find((b) => b.accountIndex === idx)?.uiTokenAmount.amount ??
+                  '0',
+              )
+              const post = BigInt(
+                tx.meta.postTokenBalances?.find((b) => b.accountIndex === idx)?.uiTokenAmount
+                  .amount ?? '0',
+              )
+              if (post > pre) candidateAmounts.add((post - pre).toString())
+            }
           }
         }
       }
@@ -2168,7 +2186,7 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
     const candidateShards = explicitShard !== null ? [explicitShard] : [0, 1, 2, 3, 4, 5, 6, 7]
     const shardInfo = await Promise.all(
       candidateShards.map(async (sid) => {
-        const escrowPda = (await deriveSwapEscrowPda(0, sid)).address
+        const escrowPda = (await deriveEscrowPda(0, sid)).address
         const [escrowIn, escrowOut] = await Promise.all([
           deriveAta(escrowPda, tokenProgIn, mintInBytes),
           deriveAta(escrowPda, tokenProgOut, mintOutBytes),
@@ -2303,7 +2321,7 @@ async function handleJupiterSwapInstructions(request: Request, env: Env): Promis
       : 0
 
   try {
-    const escrowPda = (await deriveSwapEscrowPda(0, shardId)).address
+    const escrowPda = (await deriveEscrowPda(0, shardId)).address
     const escrowB58 = base58Encode(escrowPda)
     const rpcUrl = getRpcUrl(env, 'mainnet')
     const [tokenProgInStr, tokenProgOutStr] = await resolveMintTokenPrograms(
@@ -2457,12 +2475,12 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   if (
     tag !== TAG_TRANSFER &&
     tag !== TAG_MERGE &&
-    tag !== TAG_SWAP_VIA_ROUTER &&
+    tag !== TAG_EXEC_VIA_ESCROW &&
     tag !== TAG_WITHDRAW
   ) {
     return jsonResponse(
       {
-        error: `Relayer only permits Transfer (3), Merge (4), SwapViaRouter (5), or Withdraw (6); got tag ${tag}`,
+        error: `Relayer only permits Transfer (3), Merge (4), ExecViaEscrow (5), or Withdraw (6); got tag ${tag}`,
       },
       400,
     )
@@ -2500,8 +2518,8 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     const writesOutput =
       tag === TAG_TRANSFER ||
       tag === TAG_MERGE ||
-      tag === TAG_SWAP_VIA_ROUTER ||
-      (tag === TAG_WITHDRAW && ixData.length >= 4 && ixData[3] !== 0)
+      tag === TAG_EXEC_VIA_ESCROW ||
+      (tag === TAG_WITHDRAW && ixData.length >= 3 && (ixData[2] & 0x02) !== 0)
     if (writesOutput && decodedAccounts.length >= 3) {
       const requestedFromId =
         body.rolloverFromPageId !== undefined && /^\d+$/.test(body.rolloverFromPageId)
@@ -2581,14 +2599,18 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     if (Array.isArray(body.setupAtas) && body.setupAtas.length > 0) {
       const [vaultAuthPda, ...escrowPdas] = await Promise.all([
         deriveVaultAuthPda(0),
-        ...Array.from({ length: MAX_ESCROW_SHARDS }, (_, sid) => deriveSwapEscrowPda(0, sid)),
+        ...Array.from({ length: MAX_ESCROW_SHARDS }, (_, sid) => deriveEscrowPda(0, sid)),
       ])
       const allowedOwners = new Set([
         base58Encode(vaultAuthPda.address),
         ...escrowPdas.map((p) => base58Encode(p.address)),
       ])
       const isSplWithdraw =
-        tag === TAG_WITHDRAW && ixData.length >= 3 && ixData[2] === 0 && decodedAccounts.length >= 12
+        tag === TAG_WITHDRAW &&
+        ixData.length >= 3 &&
+        (ixData[2] & 0x01) === 0 &&
+        (ixData[2] & 0x04) === 0 &&
+        decodedAccounts.length >= 14
       for (const req of body.setupAtas.slice(0, 4)) {
         if (
           req.tokenProgram !== CLASSIC_TOKEN_PROGRAM_ID_STR &&
@@ -2613,9 +2635,9 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         const isAllowedPda = allowedOwners.has(req.owner)
         const isWithdrawRecipientAta =
           isSplWithdraw &&
-          bytesEqual(ata, decodedAccounts[10].pubkey) &&
+          bytesEqual(ata, decodedAccounts[11].pubkey) &&
           bytesEqual(mintBytes, decodedAccounts[8].pubkey) &&
-          bytesEqual(tpBytes, decodedAccounts[11].pubkey)
+          bytesEqual(tpBytes, decodedAccounts[12].pubkey)
         if (!isAllowedPda && !isWithdrawRecipientAta) {
           return jsonResponse(
             { error: 'Relayer setupAtas only allowed for Audren vault/escrow PDAs or SPL Withdraw recipient ATA' },

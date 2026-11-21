@@ -1,11 +1,15 @@
-//! Audren — Private Multi-Asset Settlement & Swap Program on Solana (Pinocchio + sBPFv3).
+//! Audren — Private Multi-Asset Settlement & Shielded DeFi Execution Program on Solana (Pinocchio + sBPFv3).
 //!
 //! Native SOL, Classic SPL tokens, and transferable Token-2022 mints (including
 //! `PermanentDelegate`, net-delta `TransferFee`, and `TransferHook`) share one unified shielded
 //! `EpochPage` pool (`32` notes / `6,240 B` per page):
 //! - Private multi-asset transfers hiding sender, recipient, token mint, and amount
-//! - Single-transaction private DEX swaps (`SwapViaRouter`) through 16 isolated `swap_escrow`
-//!   shards into compatible PDA-signing routers, settling output into a fresh stealth note
+//! - Single-transaction protocol-agnostic shielded DeFi execution (`ExecViaEscrow`, Tag 5) through
+//!   16 isolated `escrow` shards into any compatible PDA-signing Solana program (DEX swaps, supply
+//!   lending, yield vaults, liquid staking, perp LP, RWA mint/redeem) with native `ctx_hash`-bound
+//!   relayer fees on either the input or output mint
+//! - Self-paying withdrawals (`Withdraw`, Tag 6) with optional atomic WSOL unwrap into Native SOL
+//!   via 1-shot nullifier-seeded PDA (`audren_unwrap`), plus zero-dust Native SOL sweep deposits
 //! - Opt-in institutional auditability (`PoolMode::InstitutionalAudited`), enforcing verifiable
 //!   ElGamal encryption of spent stealth pubkeys and hidden mints under `K_aud` on-chain
 //! - Pure Ristretto255 Multi-Base Binary Triptych (`32 / 64 / 128`-note rings) verified via
@@ -29,11 +33,13 @@ mod state;
 use audren_core::{
     instruction::{
         input_pages_for_m, triptych_proof_len, AUDITOR_ASSET_PROOF_LEN, CROSS_BASE_1_LEN,
-        CROSS_BASE_2_LEN, DYNAMIC_OUTPUT_WIRE_LEN, MAX_MERGE_RING_SLOTS, NOTE_WIRE_LEN,
-        RANGE_U128_PROOF_LEN, RANGE_U64_PROOF_LEN, TAG_CLOSE_PROOF_BUFFER, TAG_DEPOSIT,
-        TAG_EXEC_BUFFERED, TAG_INIT_LANE, TAG_INIT_POOL, TAG_MERGE, TAG_OPEN_LANE_PAGE,
-        TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_SWAP_VIA_ROUTER, TAG_TRANSFER, TAG_WITHDRAW,
-        TAG_WRITE_PROOF_BUFFER,
+        CROSS_BASE_2_LEN, DEPOSIT_FLAG_FEE_FROM_AMOUNT, DEPOSIT_FLAG_NATIVE_SOL,
+        DYNAMIC_OUTPUT_WIRE_LEN, EXEC_FLAG_ALLOW_PARTIAL_REFUND, EXEC_FLAG_FEE_ON_OUTPUT,
+        EXEC_FLAG_HAS_CHANGE, MAX_MERGE_RING_SLOTS, NOTE_WIRE_LEN, RANGE_U128_PROOF_LEN,
+        RANGE_U64_PROOF_LEN, TAG_CLOSE_PROOF_BUFFER, TAG_DEPOSIT, TAG_EXEC_BUFFERED,
+        TAG_EXEC_VIA_ESCROW, TAG_INIT_LANE, TAG_INIT_POOL, TAG_MERGE, TAG_OPEN_LANE_PAGE,
+        TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_TRANSFER, TAG_WITHDRAW, TAG_WRITE_PROOF_BUFFER,
+        WITHDRAW_FLAG_HAS_CHANGE, WITHDRAW_FLAG_NATIVE_SOL, WITHDRAW_FLAG_UNWRAP_WSOL,
     },
     lane_of_page_id,
     layout::{
@@ -47,7 +53,7 @@ use audren_core::{
     page_id_for_lane, seq_of_page_id, AudrenError, PoolMode, CLASSIC_TOKEN_PROGRAM_ID,
     ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MAX_APPEND_LANES, NATIVE_SOL_MINT, NULLIFIER_SEED,
     PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, PROTOCOL_VERSION, SOL_VAULT_SEED,
-    SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, VAULT_AUTH_SEED, WSOL_MINT,
+    SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, UNWRAP_SEED, VAULT_AUTH_SEED, WSOL_MINT,
 };
 use core::mem::MaybeUninit;
 use crypto::{
@@ -70,7 +76,7 @@ use state::{
     check_supported_token_program, ensure, err, escrow_pda, expected_ata, init_sentinel_bytes,
     lane_pda, lane_rent_pda, load_lane, load_page_header, load_pool, nullifier_pda, page_pda,
     page_rent_pda, pool_pda, proof_buffer_pda, save_lane, save_pool, sol_vault_from_pool,
-    sol_vault_pda, vault_auth_from_pool, vault_auth_pda,
+    sol_vault_pda, unwrap_pda, vault_auth_from_pool, vault_auth_pda,
 };
 
 // Pinocchio zero-copy entrypoint bounded at 128 accounts (covers `SIMD-0596` TxV1 + headroom
@@ -245,7 +251,11 @@ const SPL_MULTISIG_LEN: usize = 355;
 const TOKEN_2022_ACCOUNT_TYPE_MINT: u8 = 1;
 const TOKEN_2022_ACCOUNT_TYPE_ACCOUNT: u8 = 2;
 const TOKEN_2022_EXT_TRANSFER_HOOK: u16 = 14;
+const TOKEN_IX_CLOSE_ACCOUNT: u8 = 9;
 const TOKEN_IX_TRANSFER_CHECKED: u8 = 12;
+const TOKEN_IX_INITIALIZE_ACCOUNT3: u8 = 18;
+const CLASSIC_TOKEN_ID: Address = Address::new_from_array(CLASSIC_TOKEN_PROGRAM_ID);
+const WSOL_ID: Address = Address::new_from_array(WSOL_MINT);
 
 #[derive(Clone, Copy)]
 struct MintInfo {
@@ -612,19 +622,19 @@ fn invoke_token_transfer_checked(
     )
 }
 
-/// Out-of-line zero-copy external DEX router CPI (`data` forwarded by slice reference, zero `.to_vec()`).
+/// Out-of-line zero-copy external DeFi target CPI (`data` forwarded by slice reference, zero `.to_vec()`).
 #[inline(never)]
-fn invoke_router_cpi(
-    router_prog: &Address,
-    router_accounts: &[AccountView],
-    router_data: &[u8],
+fn invoke_target_cpi(
+    target_prog: &Address,
+    action_accounts: &[AccountView],
+    target_data: &[u8],
     expected_escrow: &Address,
     escrow_signer: &[Signer],
 ) -> ProgramResult {
-    let n = router_accounts.len();
+    let n = action_accounts.len();
     ensure(n <= MAX_ROUTER_CPI_ACCOUNTS, AudrenError::InvalidAccount)?;
     let mut metas = [const { MaybeUninit::<InstructionAccount>::uninit() }; MAX_ROUTER_CPI_ACCOUNTS];
-    for (i, acc) in router_accounts.iter().enumerate() {
+    for (i, acc) in action_accounts.iter().enumerate() {
         let is_signer = acc.address() == expected_escrow;
         metas[i].write(InstructionAccount::new(
             acc.address(),
@@ -636,11 +646,163 @@ fn invoke_router_cpi(
     let meta_slice =
         unsafe { core::slice::from_raw_parts(metas.as_ptr() as *const InstructionAccount, n) };
     let ix = InstructionView {
-        program_id: router_prog,
+        program_id: target_prog,
         accounts: meta_slice,
-        data: router_data,
+        data: target_data,
     };
-    invoke_signed_arena(&ix, router_accounts, escrow_signer)
+    invoke_signed_arena(&ix, action_accounts, escrow_signer)
+}
+
+/// Out-of-line atomic WSOL unwrap helper (`Withdraw` with `WITHDRAW_FLAG_UNWRAP_WSOL`):
+/// creates a 1-shot nullifier-seeded token account (`["audren_unwrap", pool_id, J]`) owned by
+/// `vault_auth`, transfers `total_out` WSOL into it, closes it to `payer` (refunding 100% of
+/// temporary token account rent), and distributes exact `amount_out` Native SOL to `recipient`
+/// and optional `relayer_fee` Native SOL to `fee_recipient`.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn unwrap_wsol_and_payout(
+    program_id: &Address,
+    pool_id: u32,
+    nullifier: &[u8; 32],
+    payer: &AccountView,
+    sys_prog: &AccountView,
+    vault_auth: &AccountView,
+    mint: &AccountView,
+    vault_ata: &AccountView,
+    recipient: &AccountView,
+    fee_recipient: &AccountView,
+    token_prog: &AccountView,
+    unwrap_acc: &AccountView,
+    amount_out: u64,
+    relayer_fee: u64,
+    va_signer: &[Signer],
+) -> ProgramResult {
+    let total_out = amount_out
+        .checked_add(relayer_fee)
+        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    let (expected_unwrap, unwrap_bump) = unwrap_pda(program_id, pool_id, nullifier);
+    ensure(unwrap_acc.address() == &expected_unwrap, AudrenError::InvalidPda)?;
+    ensure(
+        unwrap_acc.is_writable() && unwrap_acc.owned_by(&SYSTEM_ID) && unwrap_acc.is_data_empty(),
+        AudrenError::InvalidAccount,
+    )?;
+    ensure(
+        recipient.address() != unwrap_acc.address()
+            && recipient.address() != vault_auth.address()
+            && recipient.address() != vault_ata.address()
+            && recipient.address() != program_id
+            && !recipient.owned_by(program_id),
+        AudrenError::InvalidAccount,
+    )?;
+    if relayer_fee > 0 {
+        ensure(
+            fee_recipient.is_writable()
+                && fee_recipient.address() != unwrap_acc.address()
+                && fee_recipient.address() != vault_auth.address()
+                && fee_recipient.address() != vault_ata.address()
+                && fee_recipient.address() != program_id
+                && !fee_recipient.owned_by(program_id),
+            AudrenError::InvalidAccount,
+        )?;
+    }
+
+    let pool_le = pool_id.to_le_bytes();
+    let unwrap_bump_b = [unwrap_bump];
+    let unwrap_seeds = [
+        Seed::from(UNWRAP_SEED),
+        Seed::from(&pool_le),
+        Seed::from(nullifier),
+        Seed::from(&unwrap_bump_b),
+    ];
+    create_pda(
+        payer,
+        unwrap_acc,
+        sys_prog,
+        &unwrap_seeds,
+        SPL_ACCOUNT_LEN,
+        token_prog.address(),
+    )?;
+
+    // InitializeAccount3 (tag 18 || owner[32]) with owner = vault_auth.
+    let mut init_data = [0u8; 33];
+    init_data[0] = TOKEN_IX_INITIALIZE_ACCOUNT3;
+    init_data[1..33].copy_from_slice(vault_auth.address().as_ref());
+    let init_metas = [
+        InstructionAccount::writable(unwrap_acc.address()),
+        InstructionAccount::readonly(mint.address()),
+    ];
+    let init_ix = InstructionView {
+        program_id: token_prog.address(),
+        accounts: &init_metas,
+        data: &init_data,
+    };
+    invoke_signed(&init_ix, &[unwrap_acc, mint], &[])?;
+
+    // TransferChecked `total_out` WSOL from `vault_ata` -> `unwrap_acc`.
+    let vault_before = token_balance(vault_ata, token_prog.address())?;
+    let mut xfer_data = [0u8; 10];
+    xfer_data[0] = TOKEN_IX_TRANSFER_CHECKED;
+    xfer_data[1..9].copy_from_slice(&total_out.to_le_bytes());
+    xfer_data[9] = 9; // WSOL always has 9 decimals
+    let xfer_metas = [
+        InstructionAccount::writable(vault_ata.address()),
+        InstructionAccount::readonly(mint.address()),
+        InstructionAccount::writable(unwrap_acc.address()),
+        InstructionAccount::readonly_signer(vault_auth.address()),
+    ];
+    let xfer_ix = InstructionView {
+        program_id: token_prog.address(),
+        accounts: &xfer_metas,
+        data: &xfer_data,
+    };
+    invoke_signed(&xfer_ix, &[vault_ata, mint, unwrap_acc, vault_auth], va_signer)?;
+    let vault_after = token_balance(vault_ata, token_prog.address())?;
+    ensure(
+        vault_before.checked_sub(vault_after) == Some(total_out),
+        AudrenError::ArithmeticOverflow,
+    )?;
+
+    // CloseAccount `unwrap_acc` -> `payer` (destroys ephemeral PDA, refunds 100% rent + total_out SOL).
+    let payer_before_close = payer.lamports();
+    let close_data = [TOKEN_IX_CLOSE_ACCOUNT];
+    let close_metas = [
+        InstructionAccount::writable(unwrap_acc.address()),
+        InstructionAccount::writable(payer.address()),
+        InstructionAccount::readonly_signer(vault_auth.address()),
+    ];
+    let close_ix = InstructionView {
+        program_id: token_prog.address(),
+        accounts: &close_metas,
+        data: &close_data,
+    };
+    invoke_signed(&close_ix, &[unwrap_acc, payer, vault_auth], va_signer)?;
+    let unwrapped_received = payer
+        .lamports()
+        .checked_sub(payer_before_close)
+        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    ensure(
+        unwrap_acc.lamports() == 0 && unwrapped_received >= total_out,
+        AudrenError::ArithmeticOverflow,
+    )?;
+
+    // Distribute exact `amount_out` to `recipient` and optional `relayer_fee` to `fee_recipient`.
+    if recipient.address() != payer.address() {
+        Transfer {
+            from: payer,
+            to: recipient,
+            lamports: amount_out,
+        }
+        .invoke()?;
+    }
+    if relayer_fee > 0 && fee_recipient.address() != payer.address() {
+        Transfer {
+            from: payer,
+            to: fee_recipient,
+            lamports: relayer_fee,
+        }
+        .invoke()?;
+    }
+    Ok(())
 }
 
 fn decode_note_wire(data: &[u8]) -> Result<NoteEntry, ProgramError> {
@@ -678,9 +840,9 @@ fn collect_page_rent_fee(
     _system_program: &AccountView,
     pool: &PoolState,
     num_notes: u64,
-) -> ProgramResult {
+) -> Result<u64, ProgramError> {
     if pool.page_rent_fee_lamports == 0 || num_notes == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let page_rent = rent_minimum_balance(PAGE_LEN)?;
     let min_vault = rent_minimum_balance(SENTINEL_ACCOUNT_LEN)?;
@@ -689,7 +851,7 @@ fn collect_page_rent_fee(
         .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
     let deficit_to_target = target_vault_balance.saturating_sub(page_rent_vault.lamports());
     if deficit_to_target == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let live_per_note = page_rent.div_ceil(PAGE_CAPACITY as u64);
     let effective_per_note = pool.page_rent_fee_lamports.min(live_per_note);
@@ -705,7 +867,7 @@ fn collect_page_rent_fee(
         }
         .invoke()?;
     }
-    Ok(())
+    Ok(total)
 }
 
 /// Zero-allocation stack container for `1`, `2`, or `4` strictly ordered input `EpochPage` borrows.
@@ -848,7 +1010,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         TAG_DEPOSIT => ix_deposit(program_id, accounts, rest),
         TAG_TRANSFER => ix_transfer(program_id, accounts, rest),
         TAG_MERGE => ix_merge(program_id, accounts, rest),
-        TAG_SWAP_VIA_ROUTER => ix_swap_via_router(program_id, accounts, rest),
+        TAG_EXEC_VIA_ESCROW => ix_exec_via_escrow(program_id, accounts, rest),
         TAG_WITHDRAW => ix_withdraw(program_id, accounts, rest),
         TAG_SET_PAUSED => ix_set_paused(program_id, accounts, rest),
         TAG_WRITE_PROOF_BUFFER => ix_write_proof_buffer(program_id, accounts, rest),
@@ -1162,7 +1324,16 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Pr
         data.len() == 9 + DYNAMIC_OUTPUT_WIRE_LEN,
         AudrenError::InvalidInstruction,
     )?;
-    let is_native = data[0] != 0;
+    let flags = data[0];
+    ensure(
+        (flags & !(DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT)) == 0,
+        AudrenError::InvalidInstruction,
+    )?;
+    let is_native = (flags & DEPOSIT_FLAG_NATIVE_SOL) != 0;
+    let fee_from_amount = (flags & DEPOSIT_FLAG_FEE_FROM_AMOUNT) != 0;
+    if fee_from_amount {
+        ensure(is_native, AudrenError::InvalidInstruction)?;
+    }
     ensure(
         accounts.len() >= if is_native { 6 } else { 9 },
         AudrenError::InvalidAccount,
@@ -1192,15 +1363,13 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Pr
 
     let mint_bytes: [u8; 32];
     let committed_amount: u64;
-    let rent_vault_acc: &AccountView;
-    let sys_prog: &AccountView;
     let out_lane: u8;
 
     if is_native {
         ensure(accounts.len() >= 6, AudrenError::InvalidAccount)?;
         let sol_vault = &accounts[3];
-        rent_vault_acc = &accounts[4];
-        sys_prog = &accounts[5];
+        let rent_vault_acc = &accounts[4];
+        let sys_prog = &accounts[5];
         check_sol_vault(sol_vault, program_id, &pool)?;
         out_lane =
             resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?.0;
@@ -1208,22 +1377,38 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Pr
             sol_vault.is_writable() && rent_vault_acc.is_writable(),
             AudrenError::InvalidAccount,
         )?;
-        Transfer {
-            from: depositor,
-            to: sol_vault,
-            lamports: amount,
+        if fee_from_amount {
+            let fee_paid = collect_page_rent_fee(depositor, rent_vault_acc, sys_prog, &pool, 1)?;
+            let net_sol = amount
+                .checked_sub(fee_paid)
+                .ok_or_else(|| err(AudrenError::ZeroAmount))?;
+            ensure(net_sol > 0, AudrenError::ZeroAmount)?;
+            Transfer {
+                from: depositor,
+                to: sol_vault,
+                lamports: net_sol,
+            }
+            .invoke()?;
+            committed_amount = net_sol;
+        } else {
+            Transfer {
+                from: depositor,
+                to: sol_vault,
+                lamports: amount,
+            }
+            .invoke()?;
+            collect_page_rent_fee(depositor, rent_vault_acc, sys_prog, &pool, 1)?;
+            committed_amount = amount;
         }
-        .invoke()?;
         mint_bytes = NATIVE_SOL_MINT;
-        committed_amount = amount;
     } else {
         ensure(accounts.len() >= 9, AudrenError::InvalidAccount)?;
         let mint = &accounts[3];
         let depositor_ata = &accounts[4];
         let vault_ata = &accounts[5];
         let token_prog = &accounts[6];
-        rent_vault_acc = &accounts[7];
-        sys_prog = &accounts[8];
+        let rent_vault_acc = &accounts[7];
+        let sys_prog = &accounts[8];
         let hook_accounts = &accounts[9..];
         check_supported_token_program(token_prog.address())?;
         out_lane =
@@ -1268,11 +1453,10 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Pr
             .checked_sub(before)
             .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
         ensure(net_received > 0, AudrenError::ZeroAmount)?;
+        collect_page_rent_fee(depositor, rent_vault_acc, sys_prog, &pool, 1)?;
         mint_bytes = address_bytes(mint.address());
         committed_amount = net_received;
     }
-
-    collect_page_rent_fee(depositor, rent_vault_acc, sys_prog, &pool, 1)?;
 
     let slot = Clock::get()?.slot;
     let g_mint = asset_generator(&mint_bytes);
@@ -1590,18 +1774,18 @@ fn ix_merge(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Prog
 }
 
 // ============================================================================
-// Tag 5: SwapViaRouter (1-tx router-agnostic private swap via isolated `swap_escrow` PDA)
+// Tag 5: ExecViaEscrow (1-tx protocol-agnostic private DeFi execution via sharded `escrow` PDA)
 // ============================================================================
-fn ix_swap_via_router(
+fn ix_exec_via_escrow(
     program_id: &Address,
     accounts: &[AccountView],
     data: &[u8],
 ) -> ProgramResult {
     ensure(
-        data.len() >= 24 + DYNAMIC_OUTPUT_WIRE_LEN,
+        data.len() >= 32 + DYNAMIC_OUTPUT_WIRE_LEN,
         AudrenError::InvalidInstruction,
     )?;
-    ensure(accounts.len() >= 19, AudrenError::InvalidAccount)?;
+    ensure(accounts.len() >= 20, AudrenError::InvalidAccount)?;
 
     let payer = &accounts[0];
     let pool_acc = &accounts[1];
@@ -1617,7 +1801,8 @@ fn ix_swap_via_router(
     let mint_out = &accounts[11];
     let vault_out = &accounts[12];
     let token_prog_out = &accounts[13];
-    let router_prog = &accounts[14];
+    let target_prog = &accounts[14];
+    let fee_recipient_ata = &accounts[15];
 
     ensure(payer.is_signer(), AudrenError::Unauthorized)?;
     ensure(
@@ -1630,13 +1815,13 @@ fn ix_swap_via_router(
         AudrenError::InvalidAccount,
     )?;
     ensure(
-        router_prog.executable()
-            && router_prog.address() != program_id
-            && router_prog.address() != sys_prog.address()
-            && router_prog.address() != zk_prog.address()
-            && router_prog.address() != token_prog_in.address()
-            && router_prog.address() != token_prog_out.address(),
-        AudrenError::InvalidRouterProgram,
+        target_prog.executable()
+            && target_prog.address() != program_id
+            && target_prog.address() != sys_prog.address()
+            && target_prog.address() != zk_prog.address()
+            && target_prog.address() != token_prog_in.address()
+            && target_prog.address() != token_prog_out.address(),
+        AudrenError::InvalidTargetProgram,
     )?;
 
     let mut pool = load_pool(pool_acc, program_id)?;
@@ -1664,17 +1849,29 @@ fn ix_swap_via_router(
     let m = data[0];
     let shard_id = data[1];
     let flags = data[2];
-    let has_change = (flags & 1) != 0;
-    let allow_partial = (flags & 2) != 0;
+    ensure(
+        (flags & !(EXEC_FLAG_HAS_CHANGE | EXEC_FLAG_ALLOW_PARTIAL_REFUND | EXEC_FLAG_FEE_ON_OUTPUT))
+            == 0,
+        AudrenError::InvalidInstruction,
+    )?;
+    let has_change = (flags & EXEC_FLAG_HAS_CHANGE) != 0;
+    let allow_partial = (flags & EXEC_FLAG_ALLOW_PARTIAL_REFUND) != 0;
+    let fee_on_output = (flags & EXEC_FLAG_FEE_ON_OUTPUT) != 0;
     let amount_in = read_u64(data, 3).map_err(err)?;
     let min_amount_out = read_u64(data, 11).map_err(err)?;
-    let escrow_idx = data[19] as usize;
-    let escrow_in_idx = data[20] as usize;
-    let escrow_out_idx = data[21] as usize;
-    let router_data_len = u16::from_le_bytes([data[22], data[23]]) as usize;
+    let relayer_fee = read_u64(data, 19).map_err(err)?;
+    let escrow_idx = data[27] as usize;
+    let escrow_in_idx = data[28] as usize;
+    let escrow_out_idx = data[29] as usize;
+    let target_data_len = u16::from_le_bytes([data[30], data[31]]) as usize;
     ensure(amount_in > 0 && min_amount_out > 0, AudrenError::ZeroAmount)?;
+    if relayer_fee == 0 {
+        ensure(!fee_on_output, AudrenError::InvalidInstruction)?;
+    } else if !fee_on_output {
+        ensure(relayer_fee < amount_in, AudrenError::InvalidInstruction)?;
+    }
 
-    let mut off = 24usize;
+    let mut off = 32usize;
     let out_desc = &data[off..off + DYNAMIC_OUTPUT_WIRE_LEN];
     off += DYNAMIC_OUTPUT_WIRE_LEN;
     let out_view_tag = out_desc[0];
@@ -1726,12 +1923,12 @@ fn ix_swap_via_router(
     let audited = pool.has_auditor();
     let trip_len = triptych_proof_len(m, audited).map_err(err)?;
     ensure(
-        data.len() == off + trip_len + router_data_len,
+        data.len() == off + trip_len + target_data_len,
         AudrenError::InvalidInstruction,
     )?;
     let trip_bytes = &data[off..off + trip_len];
     off += trip_len;
-    let router_data = &data[off..off + router_data_len];
+    let target_data = &data[off..off + target_data_len];
 
     let g_in = asset_generator(&address_bytes(mint_in.address()));
     let v_in_exact = pt_mul_u64(amount_in, g_in)?;
@@ -1743,14 +1940,14 @@ fn ix_swap_via_router(
     };
 
     let n_pages = input_pages_for_m(m).map_err(err)?;
-    let router_start = 15 + n_pages;
-    ensure(accounts.len() >= router_start + 3, AudrenError::InvalidAccount)?;
-    let router_accounts = &accounts[router_start..];
+    let action_start = 16 + n_pages;
+    ensure(accounts.len() >= action_start + 3, AudrenError::InvalidAccount)?;
+    let action_accounts = &accounts[action_start..];
     ensure(
-        router_accounts.len() <= MAX_ROUTER_CPI_ACCOUNTS
-            && escrow_idx < router_accounts.len()
-            && escrow_in_idx < router_accounts.len()
-            && escrow_out_idx < router_accounts.len()
+        action_accounts.len() <= MAX_ROUTER_CPI_ACCOUNTS
+            && escrow_idx < action_accounts.len()
+            && escrow_in_idx < action_accounts.len()
+            && escrow_out_idx < action_accounts.len()
             && escrow_idx != escrow_in_idx
             && escrow_idx != escrow_out_idx
             && escrow_in_idx != escrow_out_idx,
@@ -1758,9 +1955,9 @@ fn ix_swap_via_router(
     )?;
 
     let (expected_escrow, escrow_bump) = escrow_pda(program_id, pool.pool_id, shard_id)?;
-    let escrow_acc = &router_accounts[escrow_idx];
-    let escrow_in = &router_accounts[escrow_in_idx];
-    let escrow_out = &router_accounts[escrow_out_idx];
+    let escrow_acc = &action_accounts[escrow_idx];
+    let escrow_in = &action_accounts[escrow_in_idx];
+    let escrow_out = &action_accounts[escrow_out_idx];
     ensure(escrow_acc.address() == &expected_escrow, AudrenError::InvalidPda)?;
     ensure(
         escrow_in.is_writable() && escrow_out.is_writable(),
@@ -1785,16 +1982,57 @@ fn ix_swap_via_router(
         AudrenError::InvalidInstruction,
     )?;
 
+    let expected_sol_vault = sol_vault_from_pool(program_id, &pool)?;
+    let fee_recip_bytes = if relayer_fee > 0 {
+        let fee_prog = if fee_on_output {
+            token_prog_out.address()
+        } else {
+            token_prog_in.address()
+        };
+        let fee_k = fee_recipient_ata.address();
+        ensure(
+            fee_recipient_ata.is_writable()
+                && !fee_recipient_ata.owned_by(program_id)
+                && fee_k != program_id
+                && fee_k != vault_auth_acc.address()
+                && fee_k != vault_in.address()
+                && fee_k != vault_out.address()
+                && fee_k != escrow_acc.address()
+                && fee_k != escrow_in.address()
+                && fee_k != escrow_out.address()
+                && fee_k != pool_acc.address()
+                && fee_k != out_page_acc.address()
+                && fee_k != nullifier_acc.address()
+                && fee_k != rent_vault_acc.address()
+                && fee_k != &expected_sol_vault,
+            AudrenError::InvalidAccount,
+        )?;
+        let Some(fee_snap) = token_account_security(fee_recipient_ata) else {
+            return Err(err(AudrenError::InvalidAccount));
+        };
+        ensure(
+            fee_snap.token_program == *fee_prog
+                && fee_snap.owner != expected_va
+                && fee_snap.owner != expected_escrow,
+            AudrenError::InvalidAccount,
+        )?;
+        address_bytes(fee_k)
+    } else {
+        [0u8; 32]
+    };
+
     let ctx_hash = transcript_root(&[
-        b"audren/v1/swap_router",
+        b"audren/v1/exec_escrow",
         &address_bytes(program_id),
         &pool.pool_id.to_le_bytes(),
         &[m, shard_id, flags],
-        &address_bytes(router_prog.address()),
+        &address_bytes(target_prog.address()),
         &address_bytes(mint_in.address()),
         &address_bytes(mint_out.address()),
         &amount_in.to_le_bytes(),
         &min_amount_out.to_le_bytes(),
+        &relayer_fee.to_le_bytes(),
+        &fee_recip_bytes,
         out_desc,
         chg_wire_slice,
         c_chg_slice,
@@ -1805,7 +2043,7 @@ fn ix_swap_via_router(
     let auditor_opt = if audited { Some(&pool.auditor_pk) } else { None };
     let verified = {
         let input_pages =
-            InputPages::load(&accounts[15..router_start], program_id, pool.pool_id, m)?;
+            InputPages::load(&accounts[16..action_start], program_id, pool.pool_id, m)?;
         let slices = input_pages.as_slices();
         let v = verify_triptych(
             m,
@@ -1842,10 +2080,9 @@ fn ix_swap_via_router(
         &verified.nullifier,
     )?;
 
-    // 3–6. Validate router account firewall, snapshot every writable `swap_escrow` token account
-    //      in the disjoint `[16 KiB .. 24 KiB)` SBF heap arena, fund `escrow_in`, invoke the
-    //      external router, and verify post-CPI custody & authority integrity.
-    let expected_sol_vault = sol_vault_from_pool(program_id, &pool)?;
+    // 3–6. Validate action account firewall, snapshot every writable `escrow` token account
+    //      in the disjoint `[16 KiB .. 24 KiB)` SBF heap arena, optionally pay input-side
+    //      `relayer_fee`, fund `escrow_in`, invoke `target_prog`, and verify post-CPI integrity.
     let pool_le = pool.pool_id.to_le_bytes();
     let va_bump_b = [va_bump];
     let va_seeds = [
@@ -1863,7 +2100,7 @@ fn ix_swap_via_router(
         Seed::from(&escrow_bump_b),
     ];
     let escrow_signer = [Signer::from(&escrow_seeds)];
-    let swap_blocked = [
+    let exec_blocked = [
         payer.address(),
         pool_acc.address(),
         out_page_acc.address(),
@@ -1878,7 +2115,7 @@ fn ix_swap_via_router(
     let escrow_out_before = token_balance(escrow_out, token_prog_out.address())?;
 
     let escrow_in_funded = WatchedEscrowBuf::with_buf(|watched_escrow_accs| -> Result<u64, ProgramError> {
-        for (idx, acc) in router_accounts.iter().enumerate() {
+        for (idx, acc) in action_accounts.iter().enumerate() {
             let k = acc.address();
             ensure(
                 k != program_id
@@ -1890,7 +2127,8 @@ fn ix_swap_via_router(
                     && k != out_page_acc.address()
                     && k != nullifier_acc.address()
                     && k != rent_vault_acc.address()
-                    && k != &expected_sol_vault,
+                    && k != &expected_sol_vault
+                    && (relayer_fee == 0 || k != fee_recipient_ata.address()),
                 AudrenError::InvalidAccount,
             )?;
             if !acc.is_writable() {
@@ -1906,6 +2144,27 @@ fn ix_swap_via_router(
 
         let escrow_lamports_before = escrow_acc.lamports();
         let vault_in_before_fund = token_balance(vault_in, token_prog_in.address())?;
+        let exec_amount_in = if relayer_fee > 0 && !fee_on_output {
+            invoke_token_transfer_checked(
+                program_id,
+                vault_auth_acc.address(),
+                token_prog_in,
+                vault_in,
+                mint_in,
+                fee_recipient_ata,
+                vault_auth_acc,
+                relayer_fee,
+                mint_info_in,
+                action_accounts,
+                &exec_blocked,
+                &va_signer,
+            )?;
+            amount_in
+                .checked_sub(relayer_fee)
+                .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?
+        } else {
+            amount_in
+        };
 
         invoke_token_transfer_checked(
             program_id,
@@ -1915,10 +2174,10 @@ fn ix_swap_via_router(
             mint_in,
             escrow_in,
             vault_auth_acc,
-            amount_in,
+            exec_amount_in,
             mint_info_in,
-            router_accounts,
-            &swap_blocked,
+            action_accounts,
+            &exec_blocked,
             &va_signer,
         )?;
         let vault_in_after_fund = token_balance(vault_in, token_prog_in.address())?;
@@ -1930,10 +2189,10 @@ fn ix_swap_via_router(
             .checked_sub(escrow_in_before)
             .ok_or_else(|| err(AudrenError::EscrowAccountAltered))?;
 
-        invoke_router_cpi(
-            router_prog.address(),
-            router_accounts,
-            router_data,
+        invoke_target_cpi(
+            target_prog.address(),
+            action_accounts,
+            target_data,
             &expected_escrow,
             &escrow_signer,
         )?;
@@ -1945,7 +2204,7 @@ fn ix_swap_via_router(
             AudrenError::EscrowAuthorityAltered,
         )?;
         for entry in watched_escrow_accs.as_slice() {
-            let acc = &router_accounts[entry.idx as usize];
+            let acc = &action_accounts[entry.idx as usize];
             let Some(snap) = token_account_security(acc) else {
                 return Err(err(AudrenError::EscrowAccountAltered));
             };
@@ -1976,7 +2235,31 @@ fn ix_swap_via_router(
         ensure(allow_partial, AudrenError::UnexpectedPartialFill)?;
     }
 
-    // 7. Sweep `actual_out` from `escrow_out` -> global `vault_out`.
+    // 7. Optionally pay output-side `relayer_fee` and sweep net output from `escrow_out` -> `vault_out`.
+    let user_gross_out = if relayer_fee > 0 && fee_on_output {
+        let rem = actual_out
+            .checked_sub(relayer_fee)
+            .ok_or_else(|| err(AudrenError::SlippageExceeded))?;
+        ensure(rem > 0, AudrenError::SlippageExceeded)?;
+        invoke_token_transfer_checked(
+            program_id,
+            vault_auth_acc.address(),
+            token_prog_out,
+            escrow_out,
+            mint_out,
+            fee_recipient_ata,
+            escrow_acc,
+            relayer_fee,
+            mint_info_out,
+            action_accounts,
+            &exec_blocked,
+            &escrow_signer,
+        )?;
+        rem
+    } else {
+        actual_out
+    };
+
     let vault_out_before = token_balance(vault_out, token_prog_out.address())?;
     invoke_token_transfer_checked(
         program_id,
@@ -1986,10 +2269,10 @@ fn ix_swap_via_router(
         mint_out,
         vault_out,
         escrow_acc,
-        actual_out,
+        user_gross_out,
         mint_info_out,
-        router_accounts,
-        &swap_blocked,
+        action_accounts,
+        &exec_blocked,
         &escrow_signer,
     )?;
     let vault_out_after = token_balance(vault_out, token_prog_out.address())?;
@@ -2011,8 +2294,8 @@ fn ix_swap_via_router(
             escrow_acc,
             unspent_in,
             mint_info_in,
-            router_accounts,
-            &swap_blocked,
+            action_accounts,
+            &exec_blocked,
             &escrow_signer,
         )?;
         let vault_in_after = token_balance(vault_in, token_prog_in.address())?;
@@ -2028,7 +2311,7 @@ fn ix_swap_via_router(
     let slot = Clock::get()?.slot;
     let g_out = asset_generator(&address_bytes(mint_out.address()));
     let v_out = pt_mul_u64(net_out, g_out)?;
-    let swap_note = NoteEntry {
+    let exec_note = NoteEntry {
         view_tag: out_view_tag,
         ephemeral_pk: out_eph_pk,
         stealth_pk: out_stealth_pk,
@@ -2036,7 +2319,7 @@ fn ix_swap_via_router(
         commitment: v_out,
         ciphertext: out_ct,
     };
-    write_output_note(*out_page_acc, program_id, &mut pool, out_lane, &swap_note, slot)?;
+    write_output_note(*out_page_acc, program_id, &mut pool, out_lane, &exec_note, slot)?;
 
     if let Some((note_chg, _, _, _)) = change_bundle {
         write_output_note(*out_page_acc, program_id, &mut pool, out_lane, &note_chg, slot)?;
@@ -2064,21 +2347,33 @@ fn ix_swap_via_router(
     }
 
     finalize_pool_spend(*pool_acc, program_id, &mut pool, out_lane, 1)?;
-    log_tag("audren:swap_router");
+    log_tag("audren:exec_escrow");
     Ok(())
 }
 
 // ============================================================================
-// Tag 6: Withdraw (full-private 1-in spend -> public recipient SPL/SOL + optional hidden change)
+// Tag 6: Withdraw (self-paying 1-in spend -> public SOL / SPL / unwrapped WSOL + optional change)
 // ============================================================================
 fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
-    ensure(data.len() >= 11, AudrenError::InvalidInstruction)?;
+    ensure(data.len() >= 18, AudrenError::InvalidInstruction)?;
     let m = data[0];
-    let is_native = data[1] != 0;
-    let has_change = data[2] != 0;
-    let amount_out = read_u64(data, 3).map_err(err)?;
+    let flags = data[1];
+    ensure(
+        (flags & !(WITHDRAW_FLAG_NATIVE_SOL | WITHDRAW_FLAG_HAS_CHANGE | WITHDRAW_FLAG_UNWRAP_WSOL))
+            == 0,
+        AudrenError::InvalidInstruction,
+    )?;
+    let is_native = (flags & WITHDRAW_FLAG_NATIVE_SOL) != 0;
+    let has_change = (flags & WITHDRAW_FLAG_HAS_CHANGE) != 0;
+    let unwrap_wsol = (flags & WITHDRAW_FLAG_UNWRAP_WSOL) != 0;
+    ensure(!(is_native && unwrap_wsol), AudrenError::InvalidInstruction)?;
+    let amount_out = read_u64(data, 2).map_err(err)?;
+    let relayer_fee = read_u64(data, 10).map_err(err)?;
     ensure(amount_out > 0, AudrenError::ZeroAmount)?;
-    ensure(accounts.len() >= 10, AudrenError::InvalidAccount)?;
+    let total_out = amount_out
+        .checked_add(relayer_fee)
+        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    ensure(accounts.len() >= 11, AudrenError::InvalidAccount)?;
 
     let payer = &accounts[0];
     let pool_acc = &accounts[1];
@@ -2087,6 +2382,7 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     let rent_vault_acc = &accounts[4];
     let zk_prog = &accounts[5];
     let sys_prog = &accounts[6];
+    let fee_recipient = &accounts[7];
     ensure(payer.is_signer(), AudrenError::Unauthorized)?;
     ensure(
         payer.is_writable() && nullifier_acc.is_writable(),
@@ -2107,7 +2403,7 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         0
     };
 
-    let mut off = 11usize;
+    let mut off = 18usize;
     let mut change_bundle: Option<(NoteEntry, [u8; 32], &[u8], &[u8])> = None;
     let mut chg_wire_slice: &[u8] = &[];
     let mut c_chg_slice: &[u8] = &[];
@@ -2133,27 +2429,58 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     let trip_bytes = &data[off..off + trip_len];
 
     let (mint_bytes, recipient_key, pages_start) = if is_native {
-        ensure(accounts.len() >= 10, AudrenError::InvalidAccount)?;
+        ensure(accounts.len() >= 11, AudrenError::InvalidAccount)?;
         ensure(
-            accounts[7].is_writable() && accounts[8].is_writable(),
+            accounts[8].is_writable() && accounts[9].is_writable(),
             AudrenError::InvalidAccount,
         )?;
-        (NATIVE_SOL_MINT, address_bytes(accounts[8].address()), 9usize)
-    } else {
-        ensure(accounts.len() >= 13, AudrenError::InvalidAccount)?;
+        (NATIVE_SOL_MINT, address_bytes(accounts[9].address()), 10usize)
+    } else if unwrap_wsol {
+        ensure(accounts.len() >= 15, AudrenError::InvalidAccount)?;
         ensure(
-            accounts[9].is_writable() && accounts[10].is_writable(),
+            accounts[10].is_writable() && accounts[11].is_writable() && accounts[13].is_writable(),
+            AudrenError::InvalidAccount,
+        )?;
+        ensure(
+            accounts[9].address() == &WSOL_ID && accounts[12].address() == &CLASSIC_TOKEN_ID,
             AudrenError::InvalidAccount,
         )?;
         (
-            address_bytes(accounts[8].address()),
-            address_bytes(accounts[10].address()),
-            12usize,
+            WSOL_MINT,
+            address_bytes(accounts[11].address()),
+            14usize,
+        )
+    } else {
+        ensure(accounts.len() >= 14, AudrenError::InvalidAccount)?;
+        ensure(
+            accounts[10].is_writable() && accounts[11].is_writable(),
+            AudrenError::InvalidAccount,
+        )?;
+        (
+            address_bytes(accounts[9].address()),
+            address_bytes(accounts[11].address()),
+            13usize,
         )
     };
 
+    let fee_recip_bytes = if relayer_fee > 0 {
+        ensure(
+            fee_recipient.is_writable()
+                && !fee_recipient.owned_by(program_id)
+                && fee_recipient.address() != program_id
+                && fee_recipient.address() != nullifier_acc.address()
+                && fee_recipient.address() != pool_acc.address()
+                && fee_recipient.address() != out_page_acc.address()
+                && fee_recipient.address() != rent_vault_acc.address(),
+            AudrenError::InvalidAccount,
+        )?;
+        address_bytes(fee_recipient.address())
+    } else {
+        [0u8; 32]
+    };
+
     let g_mint = asset_generator(&mint_bytes);
-    let v_out = pt_mul_u64(amount_out, g_mint)?;
+    let v_out = pt_mul_u64(total_out, g_mint)?;
     let v_spend = if let Some((ref note_chg, _, _, _)) = change_bundle {
         ensure(note_chg.asset_tag == g_mint, AudrenError::InvalidInstruction)?;
         pt_add(v_out, note_chg.commitment)?
@@ -2165,10 +2492,12 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         b"audren/v1/withdraw",
         &address_bytes(program_id),
         &pool.pool_id.to_le_bytes(),
-        &[m, u8::from(is_native), u8::from(has_change)],
+        &[m, flags],
         &mint_bytes,
         &recipient_key,
         &amount_out.to_le_bytes(),
+        &relayer_fee.to_le_bytes(),
+        &fee_recip_bytes,
         chg_wire_slice,
         c_chg_slice,
     ]);
@@ -2223,31 +2552,93 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     }
 
     if is_native {
-        let mut sol_vault = accounts[7];
-        let mut recipient = accounts[8];
+        let mut sol_vault = accounts[8];
+        let mut recipient = accounts[9];
+        let mut fee_acc = accounts[7];
         check_sol_vault(&sol_vault, program_id, &pool)?;
         ensure(
-            recipient.address() != sol_vault.address(),
+            recipient.address() != sol_vault.address()
+                && recipient.address() != program_id
+                && !recipient.owned_by(program_id),
             AudrenError::InvalidAccount,
         )?;
         let min_bal = rent_minimum_balance(SENTINEL_ACCOUNT_LEN)?;
         let new_bal = sol_vault
             .lamports()
-            .checked_sub(amount_out)
+            .checked_sub(total_out)
             .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
         ensure(new_bal >= min_bal, AudrenError::ArithmeticOverflow)?;
-        let new_recip = recipient
-            .lamports()
-            .checked_add(amount_out)
-            .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
         sol_vault.set_lamports(new_bal);
-        recipient.set_lamports(new_recip);
+        if relayer_fee > 0 && fee_acc.address() == recipient.address() {
+            let new_recip = recipient
+                .lamports()
+                .checked_add(total_out)
+                .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+            recipient.set_lamports(new_recip);
+        } else {
+            let new_recip = recipient
+                .lamports()
+                .checked_add(amount_out)
+                .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+            recipient.set_lamports(new_recip);
+            if relayer_fee > 0 {
+                ensure(
+                    fee_acc.address() != sol_vault.address(),
+                    AudrenError::InvalidAccount,
+                )?;
+                let new_fee = fee_acc
+                    .lamports()
+                    .checked_add(relayer_fee)
+                    .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+                fee_acc.set_lamports(new_fee);
+            }
+        }
+    } else if unwrap_wsol {
+        let vault_auth = &accounts[8];
+        let mint = &accounts[9];
+        let vault_ata = &accounts[10];
+        let recipient = &accounts[11];
+        let token_prog = &accounts[12];
+        let unwrap_acc = &accounts[13];
+        let expected_va = vault_auth_from_pool(program_id, &pool)?;
+        let va_bump = pool.vault_auth_bump;
+        ensure(vault_auth.address() == &expected_va, AudrenError::InvalidPda)?;
+        ensure(
+            vault_ata.address()
+                == &expected_ata(&expected_va, token_prog.address(), mint.address()),
+            AudrenError::InvalidPda,
+        )?;
+        let pool_le = pool.pool_id.to_le_bytes();
+        let va_bump_b = [va_bump];
+        let va_seeds = [
+            Seed::from(VAULT_AUTH_SEED),
+            Seed::from(&pool_le),
+            Seed::from(&va_bump_b),
+        ];
+        let va_signer = [Signer::from(&va_seeds)];
+        unwrap_wsol_and_payout(
+            program_id,
+            pool.pool_id,
+            &verified.nullifier,
+            payer,
+            sys_prog,
+            vault_auth,
+            mint,
+            vault_ata,
+            recipient,
+            fee_recipient,
+            token_prog,
+            unwrap_acc,
+            amount_out,
+            relayer_fee,
+            &va_signer,
+        )?;
     } else {
-        let vault_auth = &accounts[7];
-        let mint = &accounts[8];
-        let vault_ata = &accounts[9];
-        let recipient_ata = &accounts[10];
-        let token_prog = &accounts[11];
+        let vault_auth = &accounts[8];
+        let mint = &accounts[9];
+        let vault_ata = &accounts[10];
+        let recipient_ata = &accounts[11];
+        let token_prog = &accounts[12];
         let n_pages = input_pages_for_m(m).map_err(err)?;
         let hook_accounts = &accounts[pages_start + n_pages..];
         check_supported_token_program(token_prog.address())?;
@@ -2265,6 +2656,19 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
             recipient_ata.address() != vault_ata.address(),
             AudrenError::InvalidAccount,
         )?;
+        if relayer_fee > 0 {
+            ensure(
+                fee_recipient.address() != vault_ata.address(),
+                AudrenError::InvalidAccount,
+            )?;
+            let Some(fee_snap) = token_account_security(fee_recipient) else {
+                return Err(err(AudrenError::InvalidAccount));
+            };
+            ensure(
+                fee_snap.token_program == *token_prog.address() && fee_snap.owner != expected_va,
+                AudrenError::InvalidAccount,
+            )?;
+        }
         let pool_le = pool.pool_id.to_le_bytes();
         let va_bump_b = [va_bump];
         let va_seeds = [
@@ -2296,14 +2700,28 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
             &blocked,
             &va_signer,
         )?;
+        if relayer_fee > 0 {
+            invoke_token_transfer_checked(
+                program_id,
+                &expected_va,
+                token_prog,
+                vault_ata,
+                mint,
+                fee_recipient,
+                vault_auth,
+                relayer_fee,
+                mint_info,
+                hook_accounts,
+                &blocked,
+                &va_signer,
+            )?;
+        }
         let vault_after = token_balance(vault_ata, token_prog.address())?;
         ensure(
-            vault_before.checked_sub(vault_after) == Some(amount_out),
+            vault_before.checked_sub(vault_after) == Some(total_out),
             AudrenError::ArithmeticOverflow,
         )?;
     }
-
-    let _ = WSOL_MINT;
 
     finalize_pool_spend(*pool_acc, program_id, &mut pool, out_lane, 1)?;
     log_tag("audren:withdraw");
@@ -2447,7 +2865,7 @@ fn ix_exec_buffered(
     ensure(
         matches!(
             inner_tag,
-            TAG_TRANSFER | TAG_MERGE | TAG_SWAP_VIA_ROUTER | TAG_WITHDRAW
+            TAG_TRANSFER | TAG_MERGE | TAG_EXEC_VIA_ESCROW | TAG_WITHDRAW
         ),
         AudrenError::InvalidInstruction,
     )?;
@@ -2491,7 +2909,7 @@ fn ix_exec_buffered(
         match inner_tag {
             TAG_TRANSFER => ix_transfer(program_id, inner_accounts, payload)?,
             TAG_MERGE => ix_merge(program_id, inner_accounts, payload)?,
-            TAG_SWAP_VIA_ROUTER => ix_swap_via_router(program_id, inner_accounts, payload)?,
+            TAG_EXEC_VIA_ESCROW => ix_exec_via_escrow(program_id, inner_accounts, payload)?,
             TAG_WITHDRAW => ix_withdraw(program_id, inner_accounts, payload)?,
             _ => return Err(err(AudrenError::InvalidInstruction)),
         }

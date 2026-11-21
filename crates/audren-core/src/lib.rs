@@ -22,7 +22,7 @@ pub const AUDREN_PROGRAM_ID: Bytes32 =
 /// future versions (`>= 2`) swap the verifier without changing vaults, escrow, or router CPI.
 pub const PROTOCOL_VERSION: u8 = 1;
 
-/// Maximum number of sharded `swap_escrow` PDAs per pool (prevents write-lock contention).
+/// Maximum number of sharded `escrow` PDAs per pool (prevents write-lock contention).
 pub const MAX_ESCROW_SHARDS: u8 = 16;
 
 /// Maximum number of independent concurrent append lanes per logical pool (`0..16`).
@@ -92,6 +92,9 @@ pub const ESCROW_SEED: &[u8] = b"audren_escrow";
 pub const PROOF_BUFFER_SEED: &[u8] = b"audren_buf";
 pub const LANE_SEED: &[u8] = b"audren_lane";
 pub const LANE_RENT_SEED: &[u8] = b"audren_lrent";
+/// One-shot ephemeral WSOL unwrap token account PDA (`["audren_unwrap", pool_id_le4, J_32]`),
+/// created, funded, and closed atomically inside `Withdraw` when `WITHDRAW_FLAG_UNWRAP_WSOL` is set.
+pub const UNWRAP_SEED: &[u8] = b"audren_unwrap";
 
 /// Protocol operating mode for a pool.
 #[repr(u8)]
@@ -146,7 +149,7 @@ pub enum AudrenError {
     InvalidAuditorProof = 22,
     MissingAuditorKey = 23,
     InvalidEscrowShard = 24,
-    InvalidRouterProgram = 25,
+    InvalidTargetProgram = 25,
     EscrowAuthorityAltered = 26,
     EscrowAccountAltered = 27,
     SlippageExceeded = 28,

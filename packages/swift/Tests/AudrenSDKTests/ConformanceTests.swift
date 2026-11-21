@@ -30,6 +30,13 @@ private struct SubaccountVector: Decodable {
     let address: String
 }
 
+private struct DefiSessionVector: Decodable {
+    let session_index: UInt32
+    let secret_seed_hex: String
+    let pubkey_hex: String
+    let address: String
+}
+
 private struct PdaVector: Decodable {
     let address: String
     let bump: UInt8
@@ -43,7 +50,8 @@ private struct PdaSuiteVector: Decodable {
     let sol_vault: PdaVector
     let vault_auth: PdaVector
     let page_rent_vault: PdaVector
-    let swap_escrow_0: PdaVector
+    let escrow_0: PdaVector
+    let unwrap_pda: PdaVector
     let lane_1: PdaVector
     let lane_rent_vault_1: PdaVector
     let proof_buffer_authority: String
@@ -127,6 +135,7 @@ private struct ConformanceVectors: Decodable {
     let program_id: String
     let alice: KeyVector
     let alice_subaccounts: [SubaccountVector]
+    let alice_defi_sessions: [DefiSessionVector]
     let bob: KeyVector
     let pdas: PdaSuiteVector
     let asset_generators: AssetGeneratorsVector
@@ -213,6 +222,16 @@ final class ConformanceTests: XCTestCase {
             XCTAssertEqual(derived.address, sub.address)
         }
 
+        for sess in v.alice_defi_sessions {
+            let derived = try deriveDefiSessionKeypair(
+                masterSeed32: aliceSeed,
+                sessionIndex: sess.session_index
+            )
+            XCTAssertEqual(dataToHex(derived.secretSeed), sess.secret_seed_hex)
+            XCTAssertEqual(dataToHex(derived.pubkey), sess.pubkey_hex)
+            XCTAssertEqual(derived.address, sess.address)
+        }
+
         let nativeSolGen = try assetGenerator(mint32: Data(repeating: 0, count: 32))
         XCTAssertEqual(dataToHex(nativeSolGen), v.asset_generators.native_sol_gen_hex)
 
@@ -231,7 +250,11 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(try deriveSolVaultPda(poolId: 0, programId: pid).address, v.pdas.sol_vault.address)
         XCTAssertEqual(try deriveVaultAuthPda(poolId: 0, programId: pid).address, v.pdas.vault_auth.address)
         XCTAssertEqual(try derivePageRentVaultPda(poolId: 0, programId: pid).address, v.pdas.page_rent_vault.address)
-        XCTAssertEqual(try deriveSwapEscrowPda(poolId: 0, shardId: 0, programId: pid).address, v.pdas.swap_escrow_0.address)
+        XCTAssertEqual(try deriveEscrowPda(poolId: 0, shardId: 0, programId: pid).address, v.pdas.escrow_0.address)
+        XCTAssertEqual(
+            try deriveUnwrapPda(poolId: 0, nullifier32: hexToData(v.epoch_page.alice_note.nullifier_hex), programId: pid).address,
+            v.pdas.unwrap_pda.address
+        )
         XCTAssertEqual(try deriveLanePda(poolId: 0, laneId: 1, programId: pid).address, v.pdas.lane_1.address)
         XCTAssertEqual(try deriveLaneRentVaultPda(poolId: 0, laneId: 1, programId: pid).address, v.pdas.lane_rent_vault_1.address)
         XCTAssertEqual(
@@ -325,6 +348,7 @@ final class ConformanceTests: XCTestCase {
             mint32: Data(repeating: 0, count: 32),
             grossAmount: 500_000,
             netAmount: 500_000,
+            feeFromAmount: false,
             tokenProgram: nil,
             depositorAta: nil,
             vaultAta: nil
@@ -429,12 +453,15 @@ final class ConformanceTests: XCTestCase {
             recipientAccount: payer,
             changeAddress: alice.address,
             amount: 1_000_000,
+            relayerFee: 0,
+            feeRecipient: nil,
+            unwrapWsol: false,
             splTokenProgram: nil,
             auditorPk32: nil
         ))
         XCTAssertEqual(wdIx.data.first, 6)
-        XCTAssertEqual(wdIx.data.count, 1_966)
-        XCTAssertEqual(wdIx.accounts.count, 10)
+        XCTAssertEqual(wdIx.data.count, 1_973)
+        XCTAssertEqual(wdIx.accounts.count, 11)
 
         let wdFullIx = try buildWithdrawInstruction(params: FfiWithdrawParams(
             programId: pid,
@@ -448,11 +475,14 @@ final class ConformanceTests: XCTestCase {
             recipientAccount: payer,
             changeAddress: alice.address,
             amount: note.amount,
+            relayerFee: 0,
+            feeRecipient: nil,
+            unwrapWsol: false,
             splTokenProgram: nil,
             auditorPk32: nil
         ))
         XCTAssertEqual(wdFullIx.data.first, 6)
-        XCTAssertEqual(wdFullIx.data.count, 941)
+        XCTAssertEqual(wdFullIx.data.count, 948)
         XCTAssertFalse(wdFullIx.accounts[1].isWritable)
 
         // 5. Selective Disclosure & Institutional Auditor Decrypt
@@ -487,12 +517,12 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(dataToHex(dec.spentStealthPk), v.auditor.expected_spent_pk_hex)
         XCTAssertEqual(dataToHex(dec.assetGenerator), v.auditor.expected_asset_gen_hex)
 
-        // 6. Router & Relayer (including prepareRouterAccounts + ATA derivation + signer stripping)
+        // 6. Escrow & Relayer (including prepareEscrowAccounts + ATA derivation + signer stripping)
         XCTAssertEqual(jupiterCpiExcludedDexes().joined(separator: ","), v.jupiter_cpi_excluded_dexes)
         XCTAssertEqual(defaultRelayUrl(), "https://relay.audren.xyz")
 
         let classicTp = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        let escrow0 = v.pdas.swap_escrow_0.address
+        let escrow0 = v.pdas.escrow_0.address
         let escrowInAta = try deriveAssociatedTokenAddress(
             ownerB58: escrow0,
             mintB58: v.asset_generators.wsol_mint_b58,
@@ -503,14 +533,14 @@ final class ConformanceTests: XCTestCase {
             mintB58: v.asset_generators.usdc_mint_b58,
             tokenProgramB58: classicTp
         )
-        let prep = try prepareRouterAccounts(
+        let prep = try prepareEscrowAccounts(
             poolId: 0,
             shardId: 0,
             inputMintB58: v.asset_generators.wsol_mint_b58,
             outputMintB58: v.asset_generators.usdc_mint_b58,
             inputTokenProgramB58: classicTp,
             outputTokenProgramB58: classicTp,
-            routerAccounts: [
+            actionAccounts: [
                 FfiAccountMeta(pubkey: escrowInAta, isSigner: false, isWritable: true),
                 FfiAccountMeta(pubkey: escrow0, isSigner: true, isWritable: true),
                 FfiAccountMeta(pubkey: escrowOutAta, isSigner: false, isWritable: true),

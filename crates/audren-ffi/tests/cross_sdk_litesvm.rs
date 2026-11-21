@@ -13,7 +13,7 @@ use audren_client::{
     instructions::{build_init_lane, build_init_pool, build_set_paused, AudrenInstruction},
     keys::{AudrenKeys, SelectiveDisclosureProof},
     pda::{
-        derive_ata, derive_epoch_page_pda, derive_lane_pda, derive_pool_pda, derive_swap_escrow_pda,
+        derive_ata, derive_epoch_page_pda, derive_escrow_pda, derive_lane_pda, derive_pool_pda,
         derive_vault_auth_pda,
     },
     scanner::{decrypt_owned_note, scan_page_dataslice},
@@ -334,7 +334,7 @@ fn typescript_sdk_prover_real_litesvm_all_instructions() {
     let mint_usdc = create_mint(&mut svm, &payer, &token_prog, 6);
     let mint_wsol = create_mint(&mut svm, &payer, &token_prog, 9);
     let (vault_auth, _) = derive_vault_auth_pda(&audren_id, pool_id);
-    let (swap_escrow, _) = derive_swap_escrow_pda(&audren_id, pool_id, shard_id);
+    let (swap_escrow, _) = derive_escrow_pda(&audren_id, pool_id, shard_id);
     svm.airdrop(&swap_escrow, 1_000_000).unwrap();
 
     let _payer_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &payer.pubkey(), 100_000_000);
@@ -444,7 +444,9 @@ fn typescript_sdk_prover_real_litesvm_all_instructions() {
     let merged_rust = decrypt_owned_note(&alice_rust.full_viewing_key(), Some(&alice_rust), &audren_id, pool_id, &page0, 5, None).unwrap().expect("Rust decrypts TS Merge output");
     assert_eq!(merged_rust.amount, 2_250_000_000);
 
-    // 4. TS SwapViaRouter (Tag 5, partial with shielded change!): 30 USDC -> 250 WSOL (20 USDC change!)
+    // 4. TS ExecViaEscrow (Tag 5, partial with shielded change + native relayerFee on output!):
+    //    30 USDC -> 250 WSOL (20 USDC change, 5_000_000 WSOL relayer fee, 245_000_000 WSOL to Bob!)
+    let relayer_wsol_ata = create_ata_with_balance(&mut svm, &token_prog, &mint_wsol.pubkey(), &authority.pubkey(), 0);
     let mut router_data = Vec::with_capacity(19);
     router_data.push(0u8); // happy path mode
     router_data.extend_from_slice(&30_000_000u64.to_le_bytes());
@@ -464,7 +466,7 @@ fn typescript_sdk_prover_real_litesvm_all_instructions() {
         { "pubkey": mint_wsol.pubkey().to_string(), "isSigner": false, "isWritable": false },
     ]);
     let ts_swap = call_ts_driver(&json!({
-        "op": "swap",
+        "op": "exec_escrow",
         "seedHex": to_hex(&alice_seed),
         "payer": payer.pubkey().to_string(),
         "poolId": pool_id,
@@ -480,28 +482,31 @@ fn typescript_sdk_prover_real_litesvm_all_instructions() {
         "tokenProgramOut": token_prog.to_string(),
         "amountIn": "30000000",
         "minAmountOut": "200000000",
+        "relayerFee": "5000000",
+        "feeOnOutput": true,
+        "feeRecipientAta": relayer_wsol_ata.to_string(),
         "recipientAddr": bob_addr,
         "changeAddr": alice_addr,
-        "routerProgramId": router_id.to_string(),
-        "routerIxDataHex": to_hex(&router_data),
-        "routerAccounts": router_accounts_json,
+        "targetProgramId": router_id.to_string(),
+        "targetIxDataHex": to_hex(&router_data),
+        "actionAccounts": router_accounts_json,
     }));
     if artifacts.mock_router_so.is_some() {
         expect_ok(
             send_v1(&mut svm, &payer, &[], &[json_to_svm_ix(&ts_swap["instruction"])], 1_100_000),
-            "TS SwapViaRouter partial + change (real mock router)",
+            "TS ExecViaEscrow partial + change + output relayerFee (real mock router)",
         );
         let page0 = read_page(&svm, &audren_id, pool_id, 0);
         assert_eq!(PageHeader::decode(&page0).unwrap().count, 8);
-        let bob_swap_out = decrypt_owned_note(&bob_fvk, Some(&bob_rust), &audren_id, pool_id, &page0, 6, Some(250_000_000)).unwrap().expect("Bob decrypts TS swap dynamic output");
-        assert_eq!(bob_swap_out.amount, 250_000_000);
+        let bob_swap_out = decrypt_owned_note(&bob_fvk, Some(&bob_rust), &audren_id, pool_id, &page0, 6, Some(245_000_000)).unwrap().expect("Bob decrypts TS ExecViaEscrow net dynamic output");
+        assert_eq!(bob_swap_out.amount, 245_000_000);
         assert_eq!(bob_swap_out.mint, mint_wsol.pubkey().to_bytes());
-        let alice_swap_chg = decrypt_owned_note(&alice_rust.full_viewing_key(), Some(&alice_rust), &audren_id, pool_id, &page0, 7, None).unwrap().expect("Alice decrypts TS swap blinded change");
+        let alice_swap_chg = decrypt_owned_note(&alice_rust.full_viewing_key(), Some(&alice_rust), &audren_id, pool_id, &page0, 7, None).unwrap().expect("Alice decrypts TS ExecViaEscrow blinded change");
         assert_eq!(alice_swap_chg.amount, 20_000_000);
         assert_eq!(alice_swap_chg.mint, mint_usdc.pubkey().to_bytes());
     } else {
         assert!(!ts_swap["instruction"]["dataHex"].as_str().unwrap().is_empty());
-        println!("  [OK] TS SwapViaRouter instruction built (on-chain mock router skipped: audren_mock_router.so not present)");
+        println!("  [OK] TS ExecViaEscrow instruction built (on-chain mock router skipped: audren_mock_router.so not present)");
     }
     let page0 = read_page(&svm, &audren_id, pool_id, 0);
 
@@ -661,7 +666,7 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
     let mint_usdc = create_mint(&mut svm, &payer, &token_prog, 6);
     let mint_wsol = create_mint(&mut svm, &payer, &token_prog, 9);
     let (vault_auth, _) = derive_vault_auth_pda(&audren_id, pool_id);
-    let (swap_escrow, _) = derive_swap_escrow_pda(&audren_id, pool_id, shard_id);
+    let (swap_escrow, _) = derive_escrow_pda(&audren_id, pool_id, shard_id);
     svm.airdrop(&swap_escrow, 1_000_000).unwrap();
     let payer_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &payer.pubkey(), 100_000_000);
     let vault_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &vault_auth, 0);
@@ -682,6 +687,7 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
         mint_32: NATIVE_SOL_MINT.to_vec(),
         gross_amount: 2_000_000_000,
         net_amount: 2_000_000_000,
+        fee_from_amount: false,
         token_program: None,
         depositor_ata: None,
         vault_ata: None,
@@ -697,6 +703,7 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
         mint_32: NATIVE_SOL_MINT.to_vec(),
         gross_amount: 1_000_000_000,
         net_amount: 1_000_000_000,
+        fee_from_amount: false,
         token_program: None,
         depositor_ata: None,
         vault_ata: None,
@@ -712,6 +719,7 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
         mint_32: mint_usdc.pubkey().to_bytes().to_vec(),
         gross_amount: 50_000_000,
         net_amount: 50_000_000,
+        fee_from_amount: false,
         token_program: Some(token_prog.to_string()),
         depositor_ata: Some(payer_usdc.to_string()),
         vault_ata: Some(vault_usdc.to_string()),
@@ -773,7 +781,8 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
     }).unwrap();
     expect_ok(send_v1(&mut svm, &payer, &[], &[ffi_to_svm_ix(&mrg)], 1_300_000), "FFI Merge m=5+5 (real audren.so)");
 
-    // 4. FFI prepare_router_accounts + build_swap_via_router_instruction (partial with change!)
+    // 4. FFI prepare_escrow_accounts + build_exec_via_escrow_instruction (partial with change + native relayer fee!)
+    let relayer_usdc_ata = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &authority.pubkey(), 0);
     let page0 = read_page(&svm, &audren_id, pool_id, 0);
     let alice_notes = scan_epoch_page(pool_id, page0.clone(), Some(alice.spend_sk.clone()), alice.spend_pk.clone(), alice.view_sk.clone(), pid_str.clone()).unwrap();
     let n_usdc = alice_notes.iter().find(|n| n.slot_index == 2).unwrap().clone();
@@ -789,7 +798,7 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
         FfiAccountMeta { pubkey: mint_usdc.pubkey().to_string(), is_signer: false, is_writable: false },
         FfiAccountMeta { pubkey: mint_wsol.pubkey().to_string(), is_signer: false, is_writable: false },
     ];
-    let prep = prepare_router_accounts(
+    let prep = prepare_escrow_accounts(
         pool_id,
         shard_id,
         mint_usdc.pubkey().to_string(),
@@ -802,11 +811,11 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
     assert_eq!((prep.escrow_idx, prep.escrow_in_idx, prep.escrow_out_idx), (3, 1, 4));
     let mut rdata = Vec::with_capacity(19);
     rdata.push(0u8);
-    rdata.extend_from_slice(&30_000_000u64.to_le_bytes());
+    rdata.extend_from_slice(&29_000_000u64.to_le_bytes());
     rdata.extend_from_slice(&250_000_000u64.to_le_bytes());
     rdata.push(6);
     rdata.push(9);
-    let swp = build_swap_via_router_instruction(FfiSwapViaRouterParams {
+    let swp = build_exec_via_escrow_instruction(FfiExecViaEscrowParams {
         program_id: pid_str.clone(),
         payer: payer.pubkey().to_string(),
         pool_id,
@@ -821,25 +830,28 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
         token_program_out: token_prog.to_string(),
         amount_in: 30_000_000,
         min_amount_out: 200_000_000,
+        relayer_fee: 1_000_000,
+        fee_on_output: false,
+        fee_recipient_ata: Some(relayer_usdc_ata.to_string()),
         allow_partial_refund: false,
         recipient_address: bob.address.clone(),
         change_address: alice.address.clone(),
-        router_program_id: router_id.to_string(),
+        target_program_id: router_id.to_string(),
         escrow_idx: prep.escrow_idx,
         escrow_in_idx: prep.escrow_in_idx,
         escrow_out_idx: prep.escrow_out_idx,
-        router_ix_data: rdata,
-        router_accounts: prep.accounts,
+        target_ix_data: rdata,
+        action_accounts: prep.accounts,
         auditor_pk_32: None,
     }).unwrap();
     if artifacts.mock_router_so.is_some() {
-        expect_ok(send_v1(&mut svm, &payer, &[], &[ffi_to_svm_ix(&swp)], 1_100_000), "FFI SwapViaRouter partial + change");
+        expect_ok(send_v1(&mut svm, &payer, &[], &[ffi_to_svm_ix(&swp)], 1_100_000), "FFI ExecViaEscrow partial + change + input relayerFee");
     } else {
         assert!(!swp.data.is_empty());
-        println!("  [OK] FFI SwapViaRouter instruction built (on-chain mock router skipped: audren_mock_router.so not present)");
+        println!("  [OK] FFI ExecViaEscrow instruction built (on-chain mock router skipped: audren_mock_router.so not present)");
     }
 
-    // 5. FFI Withdraw (full) + ProofBuffer + CloseProofBuffer
+    // 5. FFI Withdraw (full + native relayer_fee!) + ProofBuffer + CloseProofBuffer
     let page0 = read_page(&svm, &audren_id, pool_id, 0);
     let alice_notes = scan_epoch_page(pool_id, page0.clone(), Some(alice.spend_sk.clone()), alice.spend_pk.clone(), alice.view_sk.clone(), pid_str.clone()).unwrap();
     let merged_note = alice_notes.iter().find(|n| n.slot_index == 5).unwrap().clone();
@@ -854,7 +866,10 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
         secret_index: 5,
         recipient_account: recipient_wallet.pubkey().to_string(),
         change_address: alice.address.clone(),
-        amount: 2_250_000_000,
+        amount: 2_245_000_000,
+        relayer_fee: 5_000_000,
+        fee_recipient: Some(authority.pubkey().to_string()),
+        unwrap_wsol: false,
         spl_token_program: None,
         auditor_pk_32: None,
     }).unwrap();
@@ -888,6 +903,7 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
             mint_32: NATIVE_SOL_MINT.to_vec(),
             gross_amount: 10_000_000 + u64::from(i),
             net_amount: 10_000_000 + u64::from(i),
+            fee_from_amount: false,
             token_program: None,
             depositor_ata: None,
             vault_ata: None,
@@ -913,6 +929,7 @@ fn ffi_swift_kotlin_core_real_litesvm_and_ts_decrypt() {
         mint_32: NATIVE_SOL_MINT.to_vec(),
         gross_amount: 123_456_789,
         net_amount: 123_456_789,
+        fee_from_amount: false,
         token_program: None,
         depositor_ata: None,
         vault_ata: None,

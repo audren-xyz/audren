@@ -14,7 +14,7 @@ use audren_core::{
     AudrenError, Bytes32, ASSOCIATED_TOKEN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID, ESCROW_SEED,
     LANE_RENT_SEED, LANE_SEED, MAX_APPEND_LANES, MAX_ESCROW_SHARDS, NULLIFIER_SEED,
     PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, PROTOCOL_VERSION, SOL_VAULT_SEED,
-    TOKEN_2022_PROGRAM_ID, VAULT_AUTH_SEED,
+    TOKEN_2022_PROGRAM_ID, UNWRAP_SEED, VAULT_AUTH_SEED,
 };
 use pinocchio::{error::ProgramError, AccountView, Address};
 
@@ -126,6 +126,10 @@ pub fn escrow_pda(
         &[ESCROW_SEED, &pool_id.to_le_bytes(), &[shard_id]],
         program_id,
     ))
+}
+
+pub fn unwrap_pda(program_id: &Address, pool_id: u32, nullifier: &Bytes32) -> (Address, u8) {
+    Address::find_program_address(&[UNWRAP_SEED, &pool_id.to_le_bytes(), nullifier], program_id)
 }
 
 pub fn proof_buffer_pda(program_id: &Address, authority: &Address, nonce: u64) -> (Address, u8) {

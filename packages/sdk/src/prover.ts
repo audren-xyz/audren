@@ -72,13 +72,24 @@ export const TAG_OPEN_PAGE = 1
 export const TAG_DEPOSIT = 2
 export const TAG_TRANSFER = 3
 export const TAG_MERGE = 4
-export const TAG_SWAP_VIA_ROUTER = 5
+export const TAG_EXEC_VIA_ESCROW = 5
 export const TAG_WITHDRAW = 6
 export const TAG_WRITE_PROOF_BUFFER = 8
 export const TAG_EXEC_BUFFERED = 9
 export const TAG_CLOSE_PROOF_BUFFER = 10
 export const TAG_INIT_LANE = 11
 export const TAG_OPEN_LANE_PAGE = 12
+
+export const DEPOSIT_FLAG_NATIVE_SOL = 1 << 0
+export const DEPOSIT_FLAG_FEE_FROM_AMOUNT = 1 << 1
+
+export const EXEC_FLAG_HAS_CHANGE = 1 << 0
+export const EXEC_FLAG_ALLOW_PARTIAL_REFUND = 1 << 1
+export const EXEC_FLAG_FEE_ON_OUTPUT = 1 << 2
+
+export const WITHDRAW_FLAG_NATIVE_SOL = 1 << 0
+export const WITHDRAW_FLAG_HAS_CHANGE = 1 << 1
+export const WITHDRAW_FLAG_UNWRAP_WSOL = 1 << 2
 
 export const MAX_APPEND_LANES = 16
 export const MAX_ESCROW_SHARDS = 16
@@ -255,11 +266,15 @@ export async function deriveVaultAuthPda(poolId = 0) {
   return findProgramAddress([utf8('audren_vault'), u32le(poolId)], AUDREN_PROGRAM_ID)
 }
 
-export async function deriveSwapEscrowPda(poolId = 0, shardId = 0) {
+export async function deriveEscrowPda(poolId = 0, shardId = 0) {
   return findProgramAddress(
     [utf8('audren_escrow'), u32le(poolId), new Uint8Array([shardId & 0xff])],
     AUDREN_PROGRAM_ID,
   )
+}
+
+export async function deriveUnwrapPda(poolId: number, nullifier: Uint8Array) {
+  return findProgramAddress([utf8('audren_unwrap'), u32le(poolId), nullifier], AUDREN_PROGRAM_ID)
 }
 
 export async function deriveNullifierPda(poolId: number, nullifier: Uint8Array) {
@@ -1331,10 +1346,10 @@ export interface PreparedDynamicOutput {
   stealthScalar: bigint
 }
 
-export async function prepareDynamicSwapOutput(params: {
+export async function prepareDynamicOutput(params: {
   recipient: AudrenRecipient
   mintOut: Uint8Array
-  minAmountOut: bigint
+  expectedMinAmount: bigint
   memoText?: string
 }): Promise<PreparedDynamicOutput> {
   const recipient = resolveAudrenAddress(params.recipient)
@@ -1346,9 +1361,9 @@ export async function prepareDynamicSwapOutput(params: {
   const ciphertext = await encryptNoteMemo(
     mat,
     params.mintOut,
-    params.minAmountOut,
+    params.expectedMinAmount,
     NOTE_FLAG_DYNAMIC_ONCHAIN_VALUE,
-    params.memoText ?? 'JUP',
+    params.memoText ?? 'EXEC',
   )
 
   return {
@@ -1809,6 +1824,7 @@ export function buildCloseProofBufferInstruction(params: {
  * Tag 2: `Deposit` — shield Native SOL, Classic SPL, or Token-2022 directly from user's wallet.
  * For Token-2022 mints with an active `TransferFeeConfig`, pass `netAmount` (from
  * `netDepositAmount`) so the encrypted memo matches the exact on-chain net vault delta.
+ * Pass `feeFromAmount: true` (Native SOL only) so retiring session wallets can sweep to `0` lamports.
  */
 export async function buildDepositInstruction(params: {
   depositor: Uint8Array
@@ -1818,20 +1834,49 @@ export async function buildDepositInstruction(params: {
   mint: Uint8Array
   amount: bigint
   netAmount?: bigint
+  feeFromAmount?: boolean
   tokenProgram?: Uint8Array
   memoText?: string
   createVaultAtaIfMissing?: boolean
 }): Promise<{ instructions: SolanaInstruction[]; note: PreparedFullNote }> {
   const isNative = bytesEqual(params.mint, NATIVE_SOL_MINT)
+  if (params.feeFromAmount && !isNative) {
+    throw new Error('feeFromAmount is only valid for Native SOL deposits')
+  }
   const noteAmount = params.netAmount ?? params.amount
-  const note = await prepareShieldedNote({
-    recipient: params.recipient,
-    mint: params.mint,
-    amount: noteAmount,
-    blindAsset: false,
-    blindValue: false,
-    memoText: params.memoText ?? 'SHIELD',
-  })
+  let note: PreparedFullNote
+  if (params.feeFromAmount) {
+    const dynOut = await prepareDynamicOutput({
+      recipient: params.recipient,
+      mintOut: params.mint,
+      expectedMinAmount: noteAmount,
+      memoText: params.memoText ?? 'SWEEP',
+    })
+    const gMintBytes = await assetGenerator(params.mint)
+    const commitment = compressPoint(mulRistretto(decompressPoint(gMintBytes), noteAmount))
+    note = {
+      viewTag: dynOut.viewTag,
+      ephemeralPk: dynOut.ephemeralPk,
+      stealthPk: dynOut.stealthPk,
+      assetTag: gMintBytes,
+      commitment,
+      ciphertext: dynOut.ciphertext,
+      mint: params.mint,
+      amount: noteAmount,
+      assetBlinding: 0n,
+      valueBlinding: 0n,
+      stealthScalar: dynOut.stealthScalar,
+    }
+  } else {
+    note = await prepareShieldedNote({
+      recipient: params.recipient,
+      mint: params.mint,
+      amount: noteAmount,
+      blindAsset: false,
+      blindValue: false,
+      memoText: params.memoText ?? 'SHIELD',
+    })
+  }
 
   const [poolPda, outPagePda, laneTarget] = await Promise.all([
     derivePoolPda(params.poolId),
@@ -1839,8 +1884,12 @@ export async function buildDepositInstruction(params: {
     resolveOutLaneRentVault(params.poolId, params.activePageId),
   ])
 
+  const flags =
+    (isNative ? DEPOSIT_FLAG_NATIVE_SOL : 0) |
+    (params.feeFromAmount ? DEPOSIT_FLAG_FEE_FROM_AMOUNT : 0)
+
   const data = concatBytes(
-    new Uint8Array([TAG_DEPOSIT, isNative ? 1 : 0]),
+    new Uint8Array([TAG_DEPOSIT, flags]),
     u64le(params.amount),
     new Uint8Array([note.viewTag]),
     note.ephemeralPk,
@@ -2206,10 +2255,12 @@ export async function buildMergeInstruction(params: {
 }
 
 /**
- * Tag 5: `SwapViaRouter` — 1-tx non-custodial private DEX swap (Jupiter, Orca, Raydium, etc.).
+ * Tag 5: `ExecViaEscrow` — 1-tx non-custodial protocol-agnostic shielded DeFi execution
+ * (DEX swaps, supply lending `kTokens`, yield vaults, liquid staking, perp LP, RWA mint/redeem).
+ * Supports optional native self-paying `relayerFee` bound in `ctx_hash` on either `mintIn` or `mintOut`.
  * When `amountIn === inputNote.amount` (full spend), requires ZERO Bulletproofs (~25 ms)!
  */
-export async function buildSwapViaRouterInstruction(params: {
+export async function buildExecViaEscrowInstruction(params: {
   payer: Uint8Array
   poolId: number
   outPageId: bigint
@@ -2223,11 +2274,15 @@ export async function buildSwapViaRouterInstruction(params: {
   tokenProgramOut: Uint8Array
   amountIn: bigint
   minAmountOut: bigint
+  relayerFee?: bigint
+  feeOnOutput?: boolean
+  feeRecipientAta?: Uint8Array
+  allowPartialRefund?: boolean
   recipient: AudrenRecipient
   changeAddr: AudrenRecipient
-  routerProgramId: Uint8Array
-  routerIxData: Uint8Array
-  routerAccounts: SolanaAccountMeta[]
+  targetProgramId: Uint8Array
+  targetIxData: Uint8Array
+  actionAccounts: SolanaAccountMeta[]
   escrowIdx: number
   escrowInIdx: number
   escrowOutIdx: number
@@ -2236,26 +2291,60 @@ export async function buildSwapViaRouterInstruction(params: {
   instruction: SolanaInstruction
   outDesc: PreparedDynamicOutput
   changeNote: PreparedFullNote | null
+  refundDesc: PreparedDynamicOutput | null
   nullifier: Uint8Array
 }> {
   if (params.amountIn <= 0n || params.amountIn > params.inputNote.amount) {
-    throw new Error('Invalid swap amountIn')
+    throw new Error('Invalid amountIn')
   }
   if (params.minAmountOut <= 0n) {
     throw new Error('minAmountOut must be > 0')
   }
+  const relayerFee = params.relayerFee ?? 0n
+  const feeOnOutput = Boolean(params.feeOnOutput)
+  if (relayerFee < 0n) throw new Error('relayerFee cannot be negative')
+  if (relayerFee === 0n && feeOnOutput) {
+    throw new Error('feeOnOutput requires relayerFee > 0')
+  }
+  if (relayerFee > 0n && !feeOnOutput && relayerFee >= params.amountIn) {
+    throw new Error('Input-side relayerFee must be strictly less than amountIn')
+  }
+  if (relayerFee > 0n && !params.feeRecipientAta) {
+    throw new Error('feeRecipientAta required when relayerFee > 0')
+  }
+  const feeRecipBytes =
+    relayerFee > 0n && params.feeRecipientAta ? params.feeRecipientAta : IDENTITY_BYTES
+  const feeRecipMeta: SolanaAccountMeta =
+    relayerFee > 0n && params.feeRecipientAta
+      ? { pubkey: params.feeRecipientAta, isSigner: false, isWritable: true }
+      : { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false }
+
   const m = params.inputPageIds.length === 1 ? 5 : params.inputPageIds.length === 2 ? 6 : 7
   const chgAmount = params.inputNote.amount - params.amountIn
   const hasChange = chgAmount > 0n
-  const flags = hasChange ? 1 : 0
+  const allowPartialRefund = Boolean(params.allowPartialRefund)
+  const flags =
+    (hasChange ? EXEC_FLAG_HAS_CHANGE : 0) |
+    (allowPartialRefund ? EXEC_FLAG_ALLOW_PARTIAL_REFUND : 0) |
+    (feeOnOutput ? EXEC_FLAG_FEE_ON_OUTPUT : 0)
 
-  const outDesc = await prepareDynamicSwapOutput({
+  const outDesc = await prepareDynamicOutput({
     recipient: params.recipient,
     mintOut: params.mintOut,
-    minAmountOut: params.minAmountOut,
-    memoText: params.memoText ?? 'JUP',
+    expectedMinAmount: params.minAmountOut,
+    memoText: params.memoText ?? 'EXEC',
   })
   const outDescWire = encodeDynamicWire(outDesc)
+
+  const refundDesc = allowPartialRefund
+    ? await prepareDynamicOutput({
+        recipient: params.changeAddr,
+        mintOut: params.inputNote.mint,
+        expectedMinAmount: 0n,
+        memoText: 'REFUND',
+      })
+    : null
+  const refundWire = refundDesc ? encodeDynamicWire(refundDesc) : new Uint8Array(0)
 
   const gInBytes = await assetGenerator(params.inputNote.mint)
   const gInPt = decompressPoint(gInBytes)
@@ -2292,18 +2381,21 @@ export async function buildSwapViaRouterInstruction(params: {
   const chgWireSlice = changeNote ? encodeNoteWire(changeNote) : new Uint8Array(0)
   const cChgSlice = cChg ?? new Uint8Array(0)
   const ctxHash = await sha256(
-    utf8('audren/v1/swap_router'),
+    utf8('audren/v1/exec_escrow'),
     AUDREN_PROGRAM_ID,
     u32le(params.poolId),
     new Uint8Array([m, params.shardId & 0xff, flags]),
-    params.routerProgramId,
+    params.targetProgramId,
     params.inputNote.mint,
     params.mintOut,
     u64le(params.amountIn),
     u64le(params.minAmountOut),
+    u64le(relayerFee),
+    feeRecipBytes,
     outDescWire,
     chgWireSlice,
     cChgSlice,
+    refundWire,
   )
 
   const triptych = await proveTriptych({
@@ -2323,11 +2415,12 @@ export async function buildSwapViaRouterInstruction(params: {
   })
 
   const dataParts: Uint8Array[] = [
-    new Uint8Array([TAG_SWAP_VIA_ROUTER, m, params.shardId & 0xff, flags]),
+    new Uint8Array([TAG_EXEC_VIA_ESCROW, m, params.shardId & 0xff, flags]),
     u64le(params.amountIn),
     u64le(params.minAmountOut),
+    u64le(relayerFee),
     new Uint8Array([params.escrowIdx, params.escrowInIdx, params.escrowOutIdx]),
-    u16le(params.routerIxData.length),
+    u16le(params.targetIxData.length),
     outDescWire,
   ]
 
@@ -2344,14 +2437,18 @@ export async function buildSwapViaRouterInstruction(params: {
     dataParts.push(encodeNoteWire(changeNote), cChg, xbase1, range64Proof)
   }
 
-  dataParts.push(triptych.proof, params.routerIxData)
+  if (refundDesc) {
+    dataParts.push(refundWire)
+  }
+
+  dataParts.push(triptych.proof, params.targetIxData)
   const data = concatBytes(...dataParts)
 
   const [poolPda, vaultAuthPda, escrowPda, outPagePda, nullifierPda, laneTarget, ...inputPagePdas] =
     await Promise.all([
       derivePoolPda(params.poolId),
       deriveVaultAuthPda(params.poolId),
-      deriveSwapEscrowPda(params.poolId, params.shardId),
+      deriveEscrowPda(params.poolId, params.shardId),
       deriveEpochPagePda(params.poolId, params.outPageId),
       deriveNullifierPda(params.poolId, triptych.nullifier),
       resolveOutLaneRentVault(params.poolId, params.outPageId),
@@ -2378,9 +2475,10 @@ export async function buildSwapViaRouterInstruction(params: {
     { pubkey: params.mintOut, isSigner: false, isWritable: false },
     { pubkey: vaultOut, isSigner: false, isWritable: true },
     { pubkey: params.tokenProgramOut, isSigner: false, isWritable: false },
-    { pubkey: params.routerProgramId, isSigner: false, isWritable: false },
+    { pubkey: params.targetProgramId, isSigner: false, isWritable: false },
+    feeRecipMeta,
     ...inputPagePdas.map((p) => ({ pubkey: p.address, isSigner: false, isWritable: false })),
-    ...params.routerAccounts.map((meta) => ({
+    ...params.actionAccounts.map((meta) => ({
       pubkey: meta.pubkey,
       isSigner: bytesEqual(meta.pubkey, escrowPda.address) ? false : meta.isSigner,
       isWritable: meta.isWritable,
@@ -2391,13 +2489,15 @@ export async function buildSwapViaRouterInstruction(params: {
     instruction: { programId: AUDREN_PROGRAM_ID, accounts, data },
     outDesc,
     changeNote,
+    refundDesc,
     nullifier: triptych.nullifier,
   }
 }
 
 /**
- * Tag 6: `Withdraw` — unshield exact amount to any public Solana wallet (full or partial).
- * Full note withdraw requires ZERO Bulletproofs (~25 ms in browser)!
+ * Tag 6: `Withdraw` — unshield exact `amount` to any public Solana wallet (full or partial),
+ * with optional native self-paying `relayerFee` and atomic WSOL->Native SOL `unwrapWsol`.
+ * Full note withdraw requires ZERO Bulletproofs (~25 ms in browser) and always works when paused!
  */
 export async function buildWithdrawInstruction(params: {
   payer: Uint8Array
@@ -2407,22 +2507,49 @@ export async function buildWithdrawInstruction(params: {
   ring: RingSlotWitness[]
   inputNote: SpendableAudrenNote
   secretIndex: number
-  recipientAccount: Uint8Array // wallet pubkey for SOL, or recipient ATA for SPL/Token-2022
+  /** Native SOL wallet pubkey (for SOL or `unwrapWsol`), or recipient ATA for SPL/Token-2022. */
+  recipientAccount: Uint8Array
   changeAddr: AudrenRecipient
   amount: bigint
+  relayerFee?: bigint
+  /** Relayer Native SOL wallet (for SOL or `unwrapWsol`) or relayer token ATA (for SPL/Token-2022). */
+  feeRecipient?: Uint8Array
+  /** Atomically unwrap a shielded WSOL note straight to Native SOL at `recipientAccount`. */
+  unwrapWsol?: boolean
   splTokenProgram?: Uint8Array
 }): Promise<{
   instruction: SolanaInstruction
   changeNote: PreparedFullNote | null
   nullifier: Uint8Array
 }> {
-  if (params.amount <= 0n || params.amount > params.inputNote.amount) {
+  const relayerFee = params.relayerFee ?? 0n
+  const unwrapWsol = Boolean(params.unwrapWsol)
+  if (relayerFee < 0n) throw new Error('relayerFee cannot be negative')
+  const totalOut = params.amount + relayerFee
+  if (params.amount <= 0n || totalOut > params.inputNote.amount) {
     throw new Error('Invalid withdraw amount')
   }
-  const m = params.inputPageIds.length === 1 ? 5 : params.inputPageIds.length === 2 ? 6 : 7
   const isNative = params.inputNote.isNativeSol
-  const chgAmount = params.inputNote.amount - params.amount
+  if (unwrapWsol && (isNative || !bytesEqual(params.inputNote.mint, WSOL_MINT))) {
+    throw new Error('unwrapWsol requires a shielded WSOL input note')
+  }
+  if (relayerFee > 0n && !params.feeRecipient) {
+    throw new Error('feeRecipient required when relayerFee > 0')
+  }
+  const feeRecipBytes =
+    relayerFee > 0n && params.feeRecipient ? params.feeRecipient : IDENTITY_BYTES
+  const feeRecipMeta: SolanaAccountMeta =
+    relayerFee > 0n && params.feeRecipient
+      ? { pubkey: params.feeRecipient, isSigner: false, isWritable: true }
+      : { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false }
+
+  const m = params.inputPageIds.length === 1 ? 5 : params.inputPageIds.length === 2 ? 6 : 7
+  const chgAmount = params.inputNote.amount - totalOut
   const hasChange = chgAmount > 0n
+  const flags =
+    (isNative ? WITHDRAW_FLAG_NATIVE_SOL : 0) |
+    (hasChange ? WITHDRAW_FLAG_HAS_CHANGE : 0) |
+    (unwrapWsol ? WITHDRAW_FLAG_UNWRAP_WSOL : 0)
 
   const gMintBytes = await assetGenerator(params.inputNote.mint)
   const gMintPt = decompressPoint(gMintBytes)
@@ -2448,11 +2575,11 @@ export async function buildWithdrawInstruction(params: {
     range64Proof = range.proof
     cChg = range.commitment
     vSpend = compressPoint(
-      mulRistretto(gMintPt, params.amount).add(decompressPoint(changeNote.commitment)),
+      mulRistretto(gMintPt, totalOut).add(decompressPoint(changeNote.commitment)),
     )
     vSpendEffBlinding = changeNote.valueBlinding
   } else {
-    vSpend = compressPoint(mulRistretto(gMintPt, params.amount))
+    vSpend = compressPoint(mulRistretto(gMintPt, totalOut))
     vSpendEffBlinding = 0n
   }
 
@@ -2462,10 +2589,12 @@ export async function buildWithdrawInstruction(params: {
     utf8('audren/v1/withdraw'),
     AUDREN_PROGRAM_ID,
     u32le(params.poolId),
-    new Uint8Array([m, isNative ? 1 : 0, hasChange ? 1 : 0]),
+    new Uint8Array([m, flags]),
     params.inputNote.mint,
     params.recipientAccount,
     u64le(params.amount),
+    u64le(relayerFee),
+    feeRecipBytes,
     chgWireSlice,
     cChgSlice,
   )
@@ -2487,8 +2616,9 @@ export async function buildWithdrawInstruction(params: {
   })
 
   const dataParts: Uint8Array[] = [
-    new Uint8Array([TAG_WITHDRAW, m, isNative ? 1 : 0, hasChange ? 1 : 0]),
+    new Uint8Array([TAG_WITHDRAW, m, flags]),
     u64le(params.amount),
+    u64le(relayerFee),
   ]
 
   if (changeNote && cChg && range64Proof) {
@@ -2529,6 +2659,7 @@ export async function buildWithdrawInstruction(params: {
     { pubkey: rentVaultAddress, isSigner: false, isWritable: hasChange },
     { pubkey: ZK_ELGAMAL_PROOF_PROGRAM_ID, isSigner: false, isWritable: false },
     { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+    feeRecipMeta,
   ]
 
   if (isNative) {
@@ -2536,6 +2667,21 @@ export async function buildWithdrawInstruction(params: {
     accounts.push(
       { pubkey: solVault, isSigner: false, isWritable: true },
       { pubkey: params.recipientAccount, isSigner: false, isWritable: true },
+    )
+  } else if (unwrapWsol) {
+    const tokenProg = params.splTokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID
+    const vaultAuth = (await deriveVaultAuthPda(params.poolId)).address
+    const [vaultAta, unwrapPda] = await Promise.all([
+      deriveAta(vaultAuth, tokenProg, params.inputNote.mint),
+      deriveUnwrapPda(params.poolId, triptych.nullifier),
+    ])
+    accounts.push(
+      { pubkey: vaultAuth, isSigner: false, isWritable: false },
+      { pubkey: params.inputNote.mint, isSigner: false, isWritable: false },
+      { pubkey: vaultAta, isSigner: false, isWritable: true },
+      { pubkey: params.recipientAccount, isSigner: false, isWritable: true },
+      { pubkey: tokenProg, isSigner: false, isWritable: false },
+      { pubkey: unwrapPda.address, isSigner: false, isWritable: true },
     )
   } else {
     const tokenProg = params.splTokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID

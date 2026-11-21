@@ -1,12 +1,14 @@
 //! Audren Rust Client SDK.
 //!
-//! Client library for private multi-asset settlement, router-agnostic DEX swaps, and
-//! selective disclosure / institutional auditability on Solana:
-//! - Deterministic stealth key hierarchy, `FullViewingKey` (Mode 2), `SelectiveDisclosureProof` (Mode 1),
-//!   and `AuditorKeypair` (`PoolMode::InstitutionalAudited`)
+//! Client library for private multi-asset settlement, protocol-agnostic shielded DeFi execution
+//! (`ExecViaEscrow`), self-paying withdrawals (`Withdraw` + `unwrap_wsol`), deterministic DeFi
+//! session wallets, and selective disclosure / institutional auditability on Solana:
+//! - Deterministic stealth key hierarchy, `DefiSessionKeypair`, `FullViewingKey` (Mode 2),
+//!   `SelectiveDisclosureProof` (Mode 1), and `AuditorKeypair` (`PoolMode::InstitutionalAudited`)
 //! - Multi-Base Binary Triptych (`N = 32 / 64 / 128`), Auditor Asset Encryption, Cross-Base 1/2,
 //!   and native Agave Batched Bulletproof provers
-//! - Router-agnostic 1-tx private swap builder for compatible PDA-signing routers
+//! - Protocol-agnostic 1-tx `ExecViaEscrow` builder for compatible PDA-signing Solana programs
+//!   (DEX swaps, supply lending, vaults, liquid staking, perp LP, RWA mint/redeem)
 //! - Standard Solana RPC `getMultipleAccounts` (`dataSlice`) and WS `programSubscribe` scanner
 
 pub mod instructions;

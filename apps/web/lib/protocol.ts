@@ -7,8 +7,8 @@
  */
 
 export const AUDREN = {
-  version: '0.2.0',
-  releaseTag: 'v0.2.0',
+  version: '0.3.0',
+  releaseTag: 'v0.3.0',
   verifiedCommit: 'c288d5356f58a50fe2e7ac84dce4b84401e3bdf0',
   programId: 'AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3',
   programData: 'Gj4hW4KuMTNR9YTPmixRPsNcMNwRvYTXdksxLgoGRiVM',
@@ -19,13 +19,13 @@ export const AUDREN = {
   idlPda: '5QoLwK1C3NpUXjsHEV14RsQE65MaaiT9WxGvoTyxBPsn',
   securityPda: 'GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj',
   otterVerifyPda: 'FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt',
-  elfBytes: 228_184,
-  elfSha256: '76f975f5c68f6b3c51762407df37099bccd4e71dd5bf850c58c8737aa6f985da',
+  elfBytes: 242_672,
+  elfSha256: '8ce322f5bd3f08975385eb0a69e3e863d5f05910d3aaa46f753b1b899f412c26',
   executableHash: '0aa268a9f2bac5c0f6c08f6eecc199151235d7f056d3b4944f97bf7b1dca0159',
   securityEmail: 'security@audren.xyz',
   githubOrg: 'https://github.com/audren-xyz',
   githubCore: 'https://github.com/audren-xyz/audren',
-  githubRelease: 'https://github.com/audren-xyz/audren/releases/tag/v0.2.0',
+  githubRelease: 'https://github.com/audren-xyz/audren/releases/tag/v0.3.0',
   githubExamples: 'https://github.com/audren-xyz/examples',
   osecVerifyStatusUrl: 'https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3',
   relayUrl: 'https://relay.audren.xyz',
@@ -83,12 +83,12 @@ export function shortHash(value: string, head = 8, tail = 6) {
 }
 
 export const MEASURED_CU_ROWS = [
-  { ix: 'Deposit (Tag 2)', cu: 14_831, maxCu: 22_975, note: 'Native SOL, Classic SPL, or Token-2022 · 0 ZK proof' },
-  { ix: 'Withdraw full (Tag 6)', cu: 212_975, maxCu: 350_094, note: 'Read-only PoolState escape hatch · optional shielded change' },
-  { ix: 'SwapViaRouter (Tag 5)', cu: 366_823, maxCu: 366_823, note: 'Isolated swap_escrow CPI · leaves ~1.03M CU for DEX' },
-  { ix: 'Transfer m=5 (32 ring)', cu: 441_137, maxCu: 457_281, note: 'Strong Fiat-Shamir Triptych + native Bulletproof U128' },
-  { ix: 'Transfer audited (m=5)', cu: 494_089, maxCu: 494_089, note: 'Enforces ElGamal (S₁,S₂) + (M₁,M₂) to K_aud' },
-  { ix: 'Merge 2→1 (Tag 4)', cu: 549_568, maxCu: 549_568, note: 'Two m=5 proofs consolidated into 1 output note' },
-  { ix: 'Transfer m=6 (64 ring)', cu: 798_272, maxCu: 798_272, note: '2 EpochPages · chunked 8 KiB MSM buffer' },
-  { ix: 'Transfer m=7 (128 ring)', cu: 1_082_506, maxCu: 1_082_506, note: '4 EpochPages inside default 32 KiB Solana heap' },
+  { ix: 'Deposit / Sweep (Tag 2)', cu: 14_850, maxCu: 23_194, note: 'Native SOL (incl. zero-dust fee_from_amount), Classic SPL, or Token-2022 · 0 ZK proof' },
+  { ix: 'Withdraw full / unwrap (Tag 6)', cu: 217_911, maxCu: 361_999, note: 'Read-only PoolState escape hatch · native relayer fee · atomic WSOL → SOL unwrap' },
+  { ix: 'ExecViaEscrow (Tag 5)', cu: 367_517, maxCu: 402_715, note: 'Protocol-agnostic Token A → Token B CPI + native relayer fee · leaves ~1.0M CU for DeFi' },
+  { ix: 'Transfer m=5 (32 ring)', cu: 441_375, maxCu: 460_232, note: 'Strong Fiat-Shamir Triptych + native Bulletproof U128' },
+  { ix: 'Transfer audited (m=5)', cu: 494_245, maxCu: 494_245, note: 'Enforces ElGamal (S₁,S₂) + (M₁,M₂) to K_aud' },
+  { ix: 'Merge 2→1 (Tag 4)', cu: 540_902, maxCu: 553_147, note: 'Two m=5 proofs consolidated into 1 output note' },
+  { ix: 'Transfer m=6 (64 ring)', cu: 802_725, maxCu: 802_725, note: '2 EpochPages · chunked 8 KiB MSM buffer' },
+  { ix: 'Transfer m=7 (128 ring)', cu: 1_082_264, maxCu: 1_082_264, note: '4 EpochPages inside default 32 KiB Solana heap' },
 ] as const

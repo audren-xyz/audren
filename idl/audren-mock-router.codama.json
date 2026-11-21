@@ -6,10 +6,10 @@
     "kind": "programNode",
     "name": "audrenMockRouter",
     "publicKey": "11111111111111111111111111111111",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "origin": "shank",
     "docs": [
-      "Minimal zero-alloc Pinocchio sBPFv3 mock DEX router used by Audren SwapViaRouter integration tests.",
+      "Minimal zero-alloc Pinocchio sBPFv3 mock target program used by Audren ExecViaEscrow integration tests.",
       "Not deployed to Mainnet; tests assign an ephemeral LiteSVM program ID."
     ],
     "accounts": [],

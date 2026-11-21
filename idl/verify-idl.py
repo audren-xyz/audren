@@ -265,7 +265,7 @@ def main() -> None:
 
     relay_audren = (ROOT / "apps" / "relay" / "src" / "solana" / "audren.ts").read_text()
     assert f"AUDREN_PROGRAM_ID_STR = '{CANONICAL_PROGRAM_ID}'" in relay_audren, "Relay AUDREN_PROGRAM_ID_STR mismatch"
-    for relay_seed in ("audren_pool", "audren_page", "audren_rent", "audren_lane", "audren_lrent", "audren_vault", "audren_escrow"):
+    for relay_seed in ("audren_pool", "audren_page", "audren_rent", "audren_lane", "audren_lrent", "audren_vault", "audren_escrow", "audren_unwrap"):
         assert f"'{relay_seed}'" in relay_audren, f"Relay audren.ts missing PDA seed '{relay_seed}'"
 
     # 13. Verify apps/web/lib/protocol.ts & docs/DEPLOYMENTS.md parity

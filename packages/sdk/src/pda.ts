@@ -23,6 +23,7 @@ import {
   POOL_SEED,
   PROOF_BUFFER_SEED,
   SOL_VAULT_SEED,
+  UNWRAP_SEED,
   VAULT_AUTH_SEED,
 } from './constants.ts';
 
@@ -369,7 +370,7 @@ export async function deriveNullifierPda(
   );
 }
 
-export async function deriveSwapEscrowPda(
+export async function deriveEscrowPda(
   poolId = 0,
   shardId = 0,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
@@ -379,6 +380,20 @@ export async function deriveSwapEscrowPda(
   }
   return findProgramAddress(
     [utf8Encoder.encode(ESCROW_SEED), u32le(poolId), new Uint8Array([shardId])],
+    programId,
+  );
+}
+
+export async function deriveUnwrapPda(
+  poolId: number,
+  nullifier: Uint8Array,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  if (nullifier.byteLength !== 32) {
+    throw new RangeError(`Nullifier must be 32 bytes, got ${nullifier.byteLength}`);
+  }
+  return findProgramAddress(
+    [utf8Encoder.encode(UNWRAP_SEED), u32le(poolId), nullifier],
     programId,
   );
 }

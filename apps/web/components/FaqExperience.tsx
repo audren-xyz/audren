@@ -18,9 +18,9 @@ interface FaqItem {
 }
 
 const CATEGORIES: { id: CategoryId; label: string }[] = [
-  { id: 'all', label: 'All questions (13)' },
+  { id: 'all', label: 'All questions (14)' },
   { id: 'privacy', label: 'Privacy & rings' },
-  { id: 'swaps', label: 'Swaps & tokens' },
+  { id: 'swaps', label: 'DeFi & tokens' },
   { id: 'crypto', label: 'Proofs & scanning' },
   { id: 'custody', label: 'Custody, fees & audits' },
 ]
@@ -64,21 +64,28 @@ const FAQS: readonly FaqItem[] = [
   {
     id: 'dex',
     category: 'swaps',
-    catLabel: 'Swaps & tokens',
-    q: 'Which Solana DEX aggregators and AMMs work with SwapViaRouter?',
-    a: 'SwapViaRouter is router-agnostic: it accepts any compatible PDA-signing Solana DEX aggregator or AMM instruction (such as Titan, DFlow, OKX DEX, Jupiter, Raydium, Orca, Meteora, or a custom router) and checks escrow ownership, delegates, lamports, and slippage before settling to a fresh private record. Integrators choose whichever aggregator their relay or client routes through; the hosted demo currently uses Jupiter (collecting small swap fees to help cover relay sponsorship). Router adapters in source do not imply every venue or hosted service is enabled, and external DEX tokens and trade amounts remain public.',
+    catLabel: 'DeFi & tokens',
+    q: 'What Solana DeFi protocols work with ExecViaEscrow (Tag 5)?',
+    a: 'ExecViaEscrow is protocol-agnostic: DEX swaps are just one example. Any compatible PDA-signing Solana CPI that transforms Token A into Token B — DEX aggregators and AMMs (Jupiter, Titan, DFlow, OKX DEX, Raydium, Orca, Meteora), lending reserve deposits minting receipt tokens (such as Kamino kUSDC/kSOL), auto-compounding yield vaults, liquid staking pools (JitoSOL, INF), perp LP tokens (JLP), or permissionless RWA mint/redeem — executes atomically through one of 16 sharded escrow PDAs. The program enforces escrow ownership, zero delegates, lamport invariants, slippage (min_amount_out), and native input/output relayer fees before reshielding the exact net vault delta. External DeFi program calls, mints, amounts, and output records remain public.',
+  },
+  {
+    id: 'defi-sessions',
+    category: 'swaps',
+    catLabel: 'DeFi & tokens',
+    q: 'How do self-paying Withdraw, atomic WSOL unwrap, and Private DeFi Sessions work?',
+    a: 'For stateful DeFi protocols that require a persistent user position account (such as borrowing, leveraged perpetuals, or margin trading), Audren SDKs derive deterministic Ed25519 session keypairs (B_0, B_1…) via HKDF-SHA256("audren/v1/defi_session"). You can fund a brand-new 0-lamport session wallet directly from the pool in a single relayed Tag 6 Withdraw: native relayer_fee reimburses the relayer from the withdrawn note itself, and flags & 2 (unwrap_wsol) unwraps WSOL atomically into Native SOL through an ephemeral audren_unwrap PDA (and still bypasses pool pause on full exits). When finished, Tag 2 Deposit with DEPOSIT_FLAG_FEE_FROM_AMOUNT deducts the rent contribution from the deposit itself to sweep every remaining lamport back into the pool with zero dust. Important boundary: any collateral, borrow, or perp position opened by session wallet B_i remains completely public on that DeFi protocol.',
   },
   {
     id: 'tokens',
     category: 'swaps',
-    catLabel: 'Swaps & tokens',
+    catLabel: 'DeFi & tokens',
     q: 'Which tokens and Token-2022 extensions does Audren support?',
     a: 'Audren accepts native SOL, classic SPL and transferable Token-2022 assets without an Audren wrapper token. Deposits use the net received vault delta for fee-on-transfer accounting; transfer hooks receive sanitized trailing accounts. NonTransferable mints cannot transfer. Issuer freeze controls, permanent delegates, hook policies and other token restrictions still apply. Integration support is not a guarantee that every mint can move in every state.',
   },
   {
     id: 'third-party-deposit',
     category: 'swaps',
-    catLabel: 'Swaps & tokens',
+    catLabel: 'DeFi & tokens',
     q: 'Can third parties or payment gateways deposit directly to a user’s shielded address?',
     a: 'Yes. Tag 2 (Deposit) requires zero user spend keys and zero ZK proofs from the depositor. Any wallet, treasury desk, or regulated payment gateway derives a fresh one-time stealth pubkey from the recipient’s public Audren address and calls Deposit; the on-chain program computes G_mint and V = net_received * G_mint directly.',
   },
@@ -87,7 +94,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'crypto',
     catLabel: 'Proofs & scanning',
     q: 'How do Triptych + Bulletproof proofs fit in a single Solana transaction?',
-    a: 'Audren uses Solana Transaction Version 1 (SIMD-0385, 0x81 prefix), which expands the transaction size limit to 4,096 bytes and carries compute-unit limits and priority fees inline inside the v1 header without separate ComputeBudget instructions. Deposit (~300 B), Transfer (m=5/6, ~2.4 KiB), Withdraw (~2.1 KiB), and SwapViaRouter (full ~2.3 KiB, or partial with shielded change ~3.2 KiB) all settle directly in ONE Solana v1 transaction. For oversized payloads exceeding 4,096 bytes (such as complex multi-hop swaps or large rings), Tag 8 (WriteProofBuffer) and Tag 9 (ExecBuffered) upload chunks and atomically refund 100% of buffer rent back to the payer.',
+    a: 'Audren uses Solana Transaction Version 1 (SIMD-0385, 0x81 prefix), which expands the transaction size limit to 4,096 bytes and carries compute-unit limits and priority fees inline inside the v1 header without separate ComputeBudget instructions. Deposit (~300 B), Transfer (m=5/6, ~2.4 KiB), Withdraw (~2.1 KiB), and ExecViaEscrow (full ~2.3 KiB, or partial with shielded change ~3.2 KiB) all settle directly in ONE Solana v1 transaction. For oversized payloads exceeding 4,096 bytes (such as complex multi-hop DeFi CPIs or large rings), Tag 8 (WriteProofBuffer) and Tag 9 (ExecBuffered) upload chunks and atomically refund 100% of buffer rent back to the payer.',
   },
   {
     id: 'scanning',
@@ -108,7 +115,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'custody',
     catLabel: 'Custody, fees & audits',
     q: 'Can an institutional auditor freeze or move funds in InstitutionalAudited pools?',
-    a: 'No. The auditor holds only a read-only decryption scalar k_aud matching PoolState::auditor_pk. Every spend in an audited pool proves valid ElGamal encryption of the spent stealth pubkey P_l under K_aud inside Triptych Equations 6–7, and hidden-asset spends (Transfer and Merge) additionally verify AuditorAssetProof encrypting G_mint (whereas SwapViaRouter and Withdraw expose their mints as public accounts) — giving verifiable provenance with zero custody or spend authority.',
+    a: 'No. The auditor holds only a read-only decryption scalar k_aud matching PoolState::auditor_pk. Every spend in an audited pool proves valid ElGamal encryption of the spent stealth pubkey P_l under K_aud inside Triptych Equations 6–7, and hidden-asset spends (Transfer and Merge) additionally verify AuditorAssetProof encrypting G_mint (whereas ExecViaEscrow and Withdraw expose their mints as public accounts) — giving verifiable provenance with zero custody or spend authority.',
   },
   {
     id: 'pause-fees',

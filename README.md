@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/audren-xyz/audren/actions/workflows/ci.yml"><img src="https://github.com/audren-xyz/audren/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/audren-xyz/audren/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/release-v0.2.0-121210" alt="Release v0.2.0" /></a>
+  <a href="https://github.com/audren-xyz/audren/releases/tag/v0.3.0"><img src="https://img.shields.io/badge/release-v0.3.0-121210" alt="Release v0.3.0" /></a>
   <a href="https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build"><img src="https://img.shields.io/badge/Solana%20Verified%20Build-sBPFv3-184433" alt="Solana Verified Build" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-434039" alt="Apache-2.0 License" /></a>
   <a href="https://audren.xyz"><img src="https://img.shields.io/badge/app-audren.xyz-C83E2B" alt="audren.xyz" /></a>
@@ -18,11 +18,11 @@
 
 **Private money on Solana. Existing tokens. One shared pool.**
 
-Audren is an open-source, self-custodial privacy protocol on Solana (`sBPFv3`, `pinocchio 0.11.1`, `#![no_std]`). Native SOL, Classic SPL tokens, and transferable Token-2022 mints share one permissionless pool (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`). Shield assets without wrapper tokens, send private transfers across 32/64/128-slot rings, swap privately through compatible DEX routers in a single transaction, and generate selective receipts — with local proofs, keys you control, no trusted setup, and no off-chain indexer.
+Audren is an open-source, self-custodial privacy protocol on Solana (`sBPFv3`, `pinocchio 0.11.1`, `#![no_std]`). Native SOL, Classic SPL tokens, and transferable Token-2022 mints share one permissionless pool (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`). Shield assets without wrapper tokens, send private transfers across 32/64/128-slot rings, compose with Solana DeFi via protocol-agnostic `ExecViaEscrow` CPI (DEX swaps, lending supply, yield vaults, liquid staking, perp LP, RWAs), fund 0-SOL wallets or deterministic DeFi session keypairs with self-paying fees & atomic WSOL unwrap, sweep back with zero dust, and generate selective receipts — with local proofs, keys you control, no trusted setup, and no off-chain indexer.
 
 ## Privacy and accounting boundaries
 
-Public deposits, withdrawals and external DEX trades are intentional boundaries: their accounts, tokens and amounts remain observable. Private proofs conceal input selection within a candidate set; they do not guarantee that outside information cannot reconnect activity. Compatible relayers are permissionless and optional, hold no user spending keys, and can observe request metadata. Direct submission exposes its fee payer.
+Public deposits, withdrawals, external DeFi CPI calls (`ExecViaEscrow`), and stateful positions opened by deterministic session wallets (`B_0, B_1…`) are intentional boundaries: their accounts, programs, tokens and amounts remain observable on Solana. Private proofs conceal input selection within a candidate set; they do not guarantee that outside information cannot reconnect activity. Compatible relayers are permissionless and optional, hold no user spending keys, and can observe request metadata. Direct submission exposes its fee payer.
 
 Ring capacity is not a count of equally plausible notes or independent users. Empty slots, candidate selection and known public records affect effective anonymity. More TVL alone does not guarantee more privacy. Visible vault assets do not independently prove coverage of private liabilities. See [the specification](ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity) for the operation-specific scope and security assumptions.
 
@@ -40,7 +40,7 @@ Ring capacity is not a count of equally plausible notes or independent users. Em
        • `#![no_std]` Pinocchio 0.11.1 zero-copy entrypoint & stack CPIs
        • Verifies Triptych via native `sol_curve_multiscalar_mul` + precomputed NUMS generators
        • Verifies 64-bit Bulletproofs via native `ZkE1Gama1Proof` CPI
-       • Enforces NullifierPDA uniqueness & SwapViaRouter escrow isolation
+       • Enforces NullifierPDA uniqueness, ExecViaEscrow custody isolation & atomic WSOL unwrap
 ```
 
 ## Official SDKs (4 Languages, 1 Shared Conformance Spec)
@@ -58,12 +58,12 @@ Runnable examples for all 4 languages — verified in CI for **100% byte-for-byt
 
 ### The 6 Standardized Building Blocks Across All 4 SDKs
 
-1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — all 10 canonical PDAs (`pool`, `epoch_page`, `sol_vault`, `vault_auth`, `page_rent_vault`, `swap_escrow`, `lane`, `lane_rent_vault`, `nullifier`, `proof_buffer`), `deriveAssociatedTokenAddress`, lane `page_id` bit-packing, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`
+1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
+2. **PDAs & Layouts** — all 11 canonical PDAs (`pool`, `epoch_page`, `sol_vault`, `vault_auth`, `page_rent_vault`, `swap_escrow`, `unwrap`, `lane`, `lane_rent_vault`, `nullifier`, `proof_buffer`), `deriveAssociatedTokenAddress`, lane `page_id` bit-packing, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`
 3. **Scanner** — `dataSlice: { offset: 64, length: 1056 }` view-tag filtering (`scanPageDataslice`), read-only FVK & spendable note decryption (`scanEpochPage`) with per-slot decoy fault isolation
-4. **Prover** — local proof generation & instruction builders (`Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `ProofBuffer`, `CloseProofBuffer`, `OpenPage`, `OpenLanePage`)
+4. **Prover** — local proof generation & instruction builders (`Deposit` incl. `fee_from_amount`, `Transfer`, `Merge`, `ExecViaEscrow` incl. native `relayer_fee`, `Withdraw` incl. native `relayer_fee` & atomic `unwrap_wsol`, `ProofBuffer`, `CloseProofBuffer`, `OpenPage`, `OpenLanePage`)
 5. **Disclosure & Audit** — Mode 1 Selective Disclosure proof (64-bit safe across parallel lanes `1..15`) + standalone/on-page verify, Mode 2 Full Viewing Key, and Institutional Auditor ElGamal decryption
-6. **Relayer, Router & IDLs** — `DEFAULT_RELAY_URL`, `prepareRouterAccounts`, `JUPITER_CPI_EXCLUDED_DEXES`, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs (`45` synced UniFFI exports verified by `idl/verify-idl.py`)
+6. **Relayer, Escrow CPI & IDLs** — `DEFAULT_RELAY_URL`, `prepareEscrowAccounts` (alias `prepareRouterAccounts`), `JUPITER_CPI_EXCLUDED_DEXES`, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs (`47` synced UniFFI exports verified by `idl/verify-idl.py`)
 
 ## Repository layout
 
@@ -79,7 +79,7 @@ spec/                 Canonical cross-language conformance vectors (spec/test-ve
 idl/                  Published Codama v1.8.0 & Anchor v0.30+ IDLs, security.json, and verifier
 apps/relay/           Open-source, self-hostable Cloudflare Worker Privacy Relayer
 apps/web/             Next.js 16 + Cloudflare Worker web app, Wallet Vault & Devnet sandbox
-tests/mock-router/    Isolated Pinocchio sBPFv3 mock router for adversarial SwapViaRouter tests
+tests/mock-router/    Isolated Pinocchio sBPFv3 mock router for adversarial ExecViaEscrow tests
 scripts/              Deterministic sBPFv3 build helper (`build-sbf.py`), upgrade script & mobile SDK builder
 assets/brand/         Canonical Audren SVG/PNG logos, README wordmarks, and social preview cards
 docs/                 Self-host relayer guide and canonical deployment addresses
@@ -90,7 +90,7 @@ CONTRIBUTING.md       Contributor workflow and zero-drift verification checklist
 
 ## Published IDLs, Security & Documentation
 
-- **Published IDLs & On-Chain Metadata (`idl/`):** Deterministic Codama v1.8.0 ([`idl/audren.codama.json`](idl/audren.codama.json)) and Anchor v0.30+ ([`idl/audren.anchor.json`](idl/audren.anchor.json)) schemas covering all 13 instructions, 7 account layouts, 10 PDA seeds, and 33 errors — mirrored into `@audren/sdk` (`AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`) and published on-chain on Mainnet and Devnet via Solana Program Metadata ([`idl/README.md`](idl/README.md)).
+- **Published IDLs & On-Chain Metadata (`idl/`):** Deterministic Codama v1.8.0 ([`idl/audren.codama.json`](idl/audren.codama.json)) and Anchor v0.30+ ([`idl/audren.anchor.json`](idl/audren.anchor.json)) schemas covering all 13 instructions, 7 account layouts, 11 PDA seeds, and 33 errors — mirrored into `@audren/sdk` (`AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`) and published on-chain on Mainnet and Devnet via Solana Program Metadata ([`idl/README.md`](idl/README.md)).
 - **Security & Disclosure:** [`SECURITY.md`](SECURITY.md) and canonical on-chain security metadata ([`idl/security.json`](idl/security.json), `security@audren.xyz`), published via Solana Program Metadata (`GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj`) and embedded in the sBPFv3 program binary.
 - **Verified Builds & Releases:** Reproducible Docker sBPFv3 builds pinned to the Solana Foundation Agave `4.3.0` (`v1.57`) verifiable build image (`solana-verify`) with automated PDA attestation, GitHub Releases, and zero-drift CI verification via [`scripts/upgrade-program.sh`](scripts/upgrade-program.sh) and [`.github/workflows/ci.yml`](.github/workflows/ci.yml) ([`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md#solana-verified-builds-verifycly8mb96wd9wqq3wdxqwm4ou6r42th37db9fc)).
 - **Protocol Architecture:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — account layouts, Ristretto255 Multi-Base Triptych soundness proofs, swap custody isolation, Token-2022 solvency, and sBPFv3 runtime engineering.
@@ -103,11 +103,11 @@ CONTRIBUTING.md       Contributor workflow and zero-drift verification checklist
 | --- | --- | --- |
 | `0x00` | `InitPool` | Create `PoolState` (`192 B`), `EpochPage #0` (`6,240 B`), `sol_vault`, `page_rent_vault` |
 | `0x01` | `OpenPage` | Permissionless Lane `0` rollover allocating `page_id + 1` funded by `PageRentVault` |
-| `0x02` | `Deposit` | Shield Native SOL, Classic SPL, or Token-2022 to any stealth address (zero ZK proof) |
+| `0x02` | `Deposit` | Shield Native SOL, Classic SPL, or Token-2022 to any stealth address (`flags & 1` deducts rent fee from deposit for 0-dust sweeps; zero ZK proof) |
 | `0x03` | `Transfer` | Private 1-in → 2-out transfer (`m = 5/6/7`, Triptych + CrossBase2 + `BatchedRangeProofU128`) |
 | `0x04` | `Merge` | Consolidate 2 shielded notes of the same hidden asset into 1 note |
-| `0x05` | `SwapViaRouter` | Full or partial shielded swap via isolated `swap_escrow` CPI (`flags & 1` shielded change; `flags & 2` refund) |
-| `0x06` | `Withdraw` | Unshield exact amount to a public wallet/ATA; full withdrawals keep `PoolState` read-only and bypass `SetPaused` |
+| `0x05` | `ExecViaEscrow` | Protocol-agnostic 1-tx Token A → Token B CPI via isolated `swap_escrow` (DEXs, lending supply, yield vaults, LSTs, perp LP, RWAs) with native input/output `relayer_fee`, optional shielded change (`flags & 1`), and partial refund (`flags & 2`) |
+| `0x06` | `Withdraw` | Unshield exact amount to any wallet/ATA with optional native `relayer_fee` and atomic WSOL → Native SOL unwrap (`flags & 2` via `audren_unwrap` PDA); full withdrawals keep `PoolState` read-only and bypass `SetPaused` |
 | `0x07` | `SetPaused` | Emergency pause toggle by pool authority (zero vault custody) |
 | `0x08` | `WriteProofBuffer` | Upload `<= 768 B` payload chunk into ephemeral `ProofBuffer` PDA (`<= 10,032 B`) |
 | `0x09` | `ExecBuffered` | Execute buffered instruction zero-copy and atomically refund 100% of buffer rent |
@@ -147,7 +147,7 @@ pnpm --dir apps/web check
 python3 scripts/build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy
 python3 scripts/build-sbf.py --manifest-path tests/mock-router/Cargo.toml --sbf-out-dir target/deploy
 
-# Run all 7 LiteSVM integration & adversarial suites + real-sBPFv3 Cross-SDK LiteSVM suite
+# Run all 8 LiteSVM integration & adversarial suites + real-sBPFv3 Cross-SDK LiteSVM suite
 cargo test --test litesvm_e2e -- --nocapture
 AUDREN_REQUIRE_SBF=1 cargo test -p audren-ffi --test cross_sdk_litesvm -- --nocapture
 ```

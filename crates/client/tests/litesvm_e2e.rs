@@ -9,15 +9,16 @@ use agave_feature_set::FeatureSet;
 use audren_client::{
     instructions::{
         build_buffered_execution, build_close_proof_buffer, build_deposit,
-        build_deposit_with_options, build_init_lane, build_init_pool, build_merge,
-        build_open_lane_page, build_open_page, build_set_paused, build_swap_via_router,
-        build_transfer, build_withdraw, net_deposit_amount, AudrenAccountMeta, AudrenInstruction,
-        SwapViaRouterParams,
+        build_deposit_with_options, build_exec_via_escrow, build_init_lane, build_init_pool,
+        build_merge, build_open_lane_page, build_open_page, build_set_paused, build_transfer,
+        build_withdraw, build_withdraw_with_params, net_deposit_amount, AudrenAccountMeta,
+        AudrenInstruction, ExecViaEscrowParams, WithdrawParams,
     },
     keys::{AuditorKeypair, AudrenKeys, SelectiveDisclosureProof},
     pda::{
-        derive_ata, derive_epoch_page_pda, derive_lane_pda, derive_page_rent_vault_pda,
-        derive_pool_pda, derive_sol_vault_pda, derive_swap_escrow_pda, derive_vault_auth_pda,
+        derive_ata, derive_epoch_page_pda, derive_escrow_pda, derive_lane_pda,
+        derive_page_rent_vault_pda, derive_pool_pda, derive_sol_vault_pda, derive_unwrap_pda,
+        derive_vault_auth_pda,
     },
     prover::{asset_generator, extract_ring_from_page, RingSlotWitness},
     router::locate_escrow_indices,
@@ -649,6 +650,7 @@ fn test_full_permissionless_lifecycle_and_security() {
         fee_mint.pubkey().to_bytes(),
         1_000_000,
         expected_net,
+        false,
         Some((t22_prog, payer_fee, vault_fee)),
         &[],
         &mut rng,
@@ -1300,7 +1302,7 @@ fn test_swap_via_router_and_adversarial_defenses() {
     let mint_wsol = create_mint(&mut svm, &payer, &token_prog, 9);
 
     let (vault_auth, _) = derive_vault_auth_pda(&audren_id, pool_id);
-    let (swap_escrow, _) = derive_swap_escrow_pda(&audren_id, pool_id, shard_id);
+    let (swap_escrow, _) = derive_escrow_pda(&audren_id, pool_id, shard_id);
     // Give swap_escrow 1_000_000 lamports so we can verify malicious router cannot drain lamports!
     svm.airdrop(&swap_escrow, 1_000_000).unwrap();
 
@@ -1396,8 +1398,8 @@ fn test_swap_via_router_and_adversarial_defenses() {
 
     // --- ADVERSARIAL 1: Slippage violation (router pays 199_999_999 < min 200_000_000) ---
     let bad_slip_data = make_router_data(0, 30_000_000, 199_999_999);
-    let (slip_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    let (slip_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1412,16 +1414,19 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: false,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: router_id,
+            target_program_id: router_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &bad_slip_data,
-            router_accounts: &base_router_accs,
+            target_ix_data: &bad_slip_data,
+            action_accounts: &base_router_accs,
         },
         &mut rng,
     )
@@ -1435,8 +1440,8 @@ fn test_swap_via_router_and_adversarial_defenses() {
     // --- ADVERSARIAL 2: Malicious delegate approval on escrow_in -> EscrowAccountAltered ---
     let delegate_accs = make_router_accounts(vec![AudrenAccountMeta::readonly(attacker.pubkey())]);
     let delegate_data = make_router_data(1, 30_000_000, 250_000_000);
-    let (del_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    let (del_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1451,16 +1456,19 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: false,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: router_id,
+            target_program_id: router_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &delegate_data,
-            router_accounts: &delegate_accs,
+            target_ix_data: &delegate_data,
+            action_accounts: &delegate_accs,
         },
         &mut rng,
     )
@@ -1473,8 +1481,8 @@ fn test_swap_via_router_and_adversarial_defenses() {
 
     // --- ADVERSARIAL 3: Malicious owner hijack on escrow_out -> EscrowAccountAltered ---
     let owner_data = make_router_data(2, 30_000_000, 250_000_000);
-    let (own_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    let (own_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1489,16 +1497,19 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: false,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: router_id,
+            target_program_id: router_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &owner_data,
-            router_accounts: &delegate_accs,
+            target_ix_data: &owner_data,
+            action_accounts: &delegate_accs,
         },
         &mut rng,
     )
@@ -1515,8 +1526,8 @@ fn test_swap_via_router_and_adversarial_defenses() {
         AudrenAccountMeta::readonly(Address::new_from_array(SYSTEM_PROGRAM_ID)),
     ]);
     let drain_data = make_router_data(3, 30_000_000, 250_000_000);
-    let (drain_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    let (drain_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1531,16 +1542,19 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: false,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: router_id,
+            target_program_id: router_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &drain_data,
-            router_accounts: &drain_accs,
+            target_ix_data: &drain_data,
+            action_accounts: &drain_accs,
         },
         &mut rng,
     )
@@ -1551,11 +1565,11 @@ fn test_swap_via_router_and_adversarial_defenses() {
         "Reject escrow lamport drain",
     );
 
-    // --- ADVERSARIAL 5: Smuggling protected `vault_usdc` inside router_accounts -> InvalidAccount ---
+    // --- ADVERSARIAL 5: Smuggling protected `vault_usdc` inside action_accounts -> InvalidAccount ---
     let smuggle_accs = make_router_accounts(vec![AudrenAccountMeta::writable(vault_usdc)]);
     let ok_data = make_router_data(0, 30_000_000, 250_000_000);
-    let (smug_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    let (smug_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1570,16 +1584,19 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: false,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: router_id,
+            target_program_id: router_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &ok_data,
-            router_accounts: &smuggle_accs,
+            target_ix_data: &ok_data,
+            action_accounts: &smuggle_accs,
         },
         &mut rng,
     )
@@ -1590,9 +1607,9 @@ fn test_swap_via_router_and_adversarial_defenses() {
         "Reject vault smuggling into router",
     );
 
-    // --- ADVERSARIAL 6: Self-reentrancy (router_program == audren_id) -> InvalidRouterProgram ---
-    let (self_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    // --- ADVERSARIAL 6: Self-reentrancy (target_program == audren_id) -> InvalidTargetProgram ---
+    let (self_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1607,30 +1624,33 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: false,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: audren_id,
+            target_program_id: audren_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &ok_data,
-            router_accounts: &base_router_accs,
+            target_ix_data: &ok_data,
+            action_accounts: &base_router_accs,
         },
         &mut rng,
     )
     .unwrap();
     expect_custom_err(
         send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&self_ix)], 700_000),
-        AudrenError::InvalidRouterProgram,
-        "Reject self-reentrancy router",
+        AudrenError::InvalidTargetProgram,
+        "Reject self-reentrancy target program",
     );
 
     // --- ADVERSARIAL 7: Unexpected partial fill when allow_partial_refund == false ---
     let partial_data = make_router_data(0, 22_000_000, 210_000_000); // leaves 8_000_000 unspent
-    let (unexp_partial_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    let (unexp_partial_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1645,16 +1665,19 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: false,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: router_id,
+            target_program_id: router_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &partial_data,
-            router_accounts: &base_router_accs,
+            target_ix_data: &partial_data,
+            action_accounts: &base_router_accs,
         },
         &mut rng,
     )
@@ -1675,8 +1698,8 @@ fn test_swap_via_router_and_adversarial_defenses() {
     // Alice spends 50 USDC note -> swaps 30 USDC (router fills 22 USDC -> pays 250_000_000 WSOL to Bob,
     // 8 USDC unspent refunded to Alice stealth refund note, 20 USDC private change note to Alice!)
     let happy_data = make_router_data(0, 22_000_000, 250_000_000);
-    let (happy_ix, _, _, _) = build_swap_via_router(
-        &SwapViaRouterParams {
+    let (happy_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
             program_id: audren_id,
             payer: payer.pubkey(),
             pool_id,
@@ -1691,23 +1714,26 @@ fn test_swap_via_router_and_adversarial_defenses() {
             token_program_out: token_prog,
             amount_in: 30_000_000,
             min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
             allow_partial_refund: true,
             recipient: &bob.address(),
             change_addr: &alice.address(),
             auditor_pk: None,
-            router_program_id: router_id,
+            target_program_id: router_id,
             escrow_idx,
             escrow_in_idx,
             escrow_out_idx,
-            router_ix_data: &happy_data,
-            router_accounts: &base_router_accs,
+            target_ix_data: &happy_data,
+            action_accounts: &base_router_accs,
         },
         &mut rng,
     )
     .unwrap();
     expect_ok(
         send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&happy_ix)], 800_000),
-        "SwapViaRouter (fill+change+refund, idx=3/1/4)",
+        "ExecViaEscrow (fill+change+refund, idx=3/1/4)",
     );
 
     // Verify exact vault & escrow balances (zero tokens left stranded in escrow!)
@@ -2219,10 +2245,12 @@ fn test_security_frozen_heart_prefix_immunity_and_change_binding() {
         b"audren/v1/withdraw",
         audren_id.as_ref(),
         &pool_id.to_le_bytes(),
-        &[m as u8, 1u8, 0u8],
+        &[m as u8, 1u8],
         &NATIVE_SOL_MINT,
         attacker.pubkey().as_ref(),
         &victim_amount.to_le_bytes(),
+        &0u64.to_le_bytes(),
+        attacker.pubkey().as_ref(),
         &[],
         &[],
     ]);
@@ -2380,9 +2408,9 @@ fn test_security_frozen_heart_prefix_immunity_and_change_binding() {
     let mut wd_forge_data = Vec::new();
     wd_forge_data.push(TAG_WITHDRAW);
     wd_forge_data.push(m as u8);
-    wd_forge_data.push(1); // is_native
-    wd_forge_data.push(0); // has_change
+    wd_forge_data.push(1); // flags = WITHDRAW_FLAG_NATIVE_SOL
     wd_forge_data.extend_from_slice(&victim_amount.to_le_bytes());
+    wd_forge_data.extend_from_slice(&0u64.to_le_bytes()); // relayer_fee = 0
     wd_forge_data.push(2); // prefix_count = 2 (includes slot 0 + freshly deposited slot 1!)
     wd_forge_data.extend_from_slice(&j_bytes);
     wd_forge_data.extend_from_slice(&a_bytes);
@@ -2415,6 +2443,7 @@ fn test_security_frozen_heart_prefix_immunity_and_change_binding() {
             AccountMeta::new_readonly(rent_vault, false),
             AccountMeta::new_readonly(zk_prog, false),
             AccountMeta::new_readonly(sys_prog, false),
+            AccountMeta::new_readonly(attacker.pubkey(), false),
             AccountMeta::new(sol_vault, false),
             AccountMeta::new(attacker.pubkey(), false),
             AccountMeta::new_readonly(page0_pda, false),
@@ -2527,9 +2556,9 @@ fn test_security_frozen_heart_prefix_immunity_and_change_binding() {
         &mut rng,
     )
     .unwrap();
-    // Change note wire starts at data[12..]; stealth_pk is at offset +33..+65 inside NOTE_WIRE_LEN.
+    // Change note wire starts at data[19..]; stealth_pk is at offset +33..+65 inside NOTE_WIRE_LEN.
     let attacker_stealth = compress(&(Scalar::from(999u64) * g));
-    partial_wd.data[12 + 33..12 + 65].copy_from_slice(&attacker_stealth);
+    partial_wd.data[19 + 33..19 + 65].copy_from_slice(&attacker_stealth);
     expect_custom_err(
         send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&partial_wd)], 900_000),
         AudrenError::InvalidTriptychProof,
@@ -2903,4 +2932,626 @@ fn test_multilane_parallel_appends_pause_escape_and_slots() {
         "Full Withdraw SUCCEEDS while Pool is Paused (non-custodial escape hatch!)",
     );
     println!("  [MULTI-LANE + PAUSE ESCAPE + REAL SLOTS PASSED]");
+}
+
+// ----------------------------------------------------------------------------
+// TEST 8: v0.3.0 Universal DeFi Execution Rail, Native Relayer Fees,
+//         Atomic WSOL Unwrap -> 0-Lamport Deterministic DeFi Session Wallet,
+//         Pause Escape Hatch on Unwrap, and Zero-Dust `fee_from_amount` Sweep!
+// ----------------------------------------------------------------------------
+#[test]
+fn test_v030_exec_fees_unwrap_wsol_defi_session_and_zero_dust_sweep() {
+    use audren_core::WSOL_MINT;
+    use solana_system_interface::instruction as sys_ix;
+    use spl_token_2022_interface::instruction as token_ix;
+
+    println!("\n=== TEST 8: v0.3.0 ExecViaEscrow Fees, Withdraw unwrap_wsol, DeFi Session B_0 & Zero-Dust Sweep ===");
+    let mut rng = StdRng::seed_from_u64(0x0303_2026);
+    let audren_id = Keypair::new().pubkey();
+    let router_id = Keypair::new().pubkey();
+    let mut svm = new_svm(audren_id, Some(router_id));
+
+    let authority = Keypair::new();
+    let relayer = Keypair::new();
+    let fee_recipient = Keypair::new();
+    svm.airdrop(&authority.pubkey(), 50_000_000_000).unwrap();
+    svm.airdrop(&relayer.pubkey(), 50_000_000_000).unwrap();
+    // Give fee_recipient minimal rent-exempt balance so SystemProgram transfers of any size succeed cleanly
+    svm.airdrop(&fee_recipient.pubkey(), 1_000_000).unwrap();
+
+    let master_seed = [0x33u8; 32];
+    let alice = AudrenKeys::from_seed(&master_seed);
+    let bob = AudrenKeys::random(&mut rng);
+    let session_b0 = AudrenKeys::derive_defi_session_keypair(&master_seed, 0);
+    let session_kp = Keypair::new_from_array(session_b0.secret_seed);
+    let session_pubkey = session_kp.pubkey();
+    assert_eq!(session_pubkey.to_bytes(), session_b0.pubkey);
+    assert!(svm.get_account(&session_pubkey).is_none(), "B_0 starts with 0 lamports!");
+
+    let pool_id = 30u32;
+    let shard_id = 5u8;
+    let page_rent_fee = 1_500_000u64;
+    let init_ix = build_init_pool(
+        audren_id,
+        authority.pubkey(),
+        pool_id,
+        PoolMode::Permissionless,
+        true,
+        [0u8; 32],
+        page_rent_fee,
+    );
+    expect_ok(
+        send_ixs(&mut svm, &authority, &[], &[to_svm_ix(&init_ix)], 300_000),
+        "InitPool (v0.3.0)",
+    );
+
+    let token_prog = Address::new_from_array(CLASSIC_TOKEN_PROGRAM_ID);
+    let wsol_mint = Address::new_from_array(WSOL_MINT);
+    // Ensure LiteSVM has the canonical genesis WSOL Mint account (82 bytes, decimals=9, initialized=true).
+    {
+        let mut wsol_mint_data = vec![0u8; 82];
+        wsol_mint_data[44] = 9; // decimals = 9
+        wsol_mint_data[45] = 1; // is_initialized = true
+        svm.set_account(
+            wsol_mint,
+            Account {
+                lamports: svm.minimum_balance_for_rent_exemption(82),
+                data: wsol_mint_data,
+                owner: token_prog,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    }
+    let mint_usdc = create_mint(&mut svm, &relayer, &token_prog, 6);
+
+    let (vault_auth, _) = derive_vault_auth_pda(&audren_id, pool_id);
+    let (escrow_pda, _) = derive_escrow_pda(&audren_id, pool_id, shard_id);
+    let (sol_vault, _) = derive_sol_vault_pda(&audren_id, pool_id);
+    let (rent_vault, _) = derive_page_rent_vault_pda(&audren_id, pool_id);
+    svm.airdrop(&escrow_pda, 1_000_000).unwrap();
+
+    // Helper: create a real native WSOL Classic SPL token account funded with `lamports` of WSOL.
+    let create_real_wsol_account = |svm: &mut LiteSVM, owner: &Address, wsol_amount: u64| -> Address {
+        let acct = Keypair::new();
+        let rent = svm.minimum_balance_for_rent_exemption(165);
+        let c_ix = sys_ix::create_account(
+            &relayer.pubkey(),
+            &acct.pubkey(),
+            rent + wsol_amount,
+            165,
+            &token_prog,
+        );
+        let init_ix = token_ix::initialize_account3(&token_prog, &acct.pubkey(), &wsol_mint, owner).unwrap();
+        expect_ok(
+            send_ixs(svm, &relayer, &[&acct], &[c_ix, init_ix], 200_000),
+            "create real native WSOL token account",
+        );
+        acct.pubkey()
+    };
+    let create_real_wsol_ata = |svm: &mut LiteSVM, owner: &Address, wsol_amount: u64| -> Address {
+        let ata = derive_ata(owner, &token_prog, &wsol_mint);
+        let rent = svm.minimum_balance_for_rent_exemption(165);
+        let mut data = vec![0u8; 165];
+        data[0..32].copy_from_slice(wsol_mint.as_ref());
+        data[32..64].copy_from_slice(owner.as_ref());
+        data[64..72].copy_from_slice(&wsol_amount.to_le_bytes());
+        // SPL Token Account layout: state(108)=1(Initialized), is_native(109..121)=Some(rent)
+        data[108] = 1;
+        data[109..113].copy_from_slice(&1u32.to_le_bytes());
+        data[113..121].copy_from_slice(&rent.to_le_bytes());
+        svm.set_account(
+            ata,
+            Account {
+                lamports: rent + wsol_amount,
+                data,
+                owner: token_prog,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+        ata
+    };
+
+    let payer_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &relayer.pubkey(), 100_000_000);
+    let vault_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &vault_auth, 0);
+    let vault_wsol = create_real_wsol_ata(&mut svm, &vault_auth, 0);
+    let escrow_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &escrow_pda, 0);
+    let escrow_wsol = create_real_wsol_ata(&mut svm, &escrow_pda, 0);
+    let relayer_usdc_ata = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &fee_recipient.pubkey(), 0);
+    let relayer_wsol_ata = create_real_wsol_ata(&mut svm, &fee_recipient.pubkey(), 0);
+    let payer_wsol_src = create_real_wsol_account(&mut svm, &relayer.pubkey(), 3_000_000_000);
+
+    let (mock_pool_auth, _) = Address::find_program_address(&[b"mock_pool"], &router_id);
+    let mock_pool_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &mock_pool_auth, 500_000_000);
+    let mock_pool_wsol = create_real_wsol_ata(&mut svm, &mock_pool_auth, 10_000_000_000);
+
+    // Deposit 50 USDC + 2.0 real WSOL for Alice
+    let (dep_usdc, _) = build_deposit(
+        audren_id,
+        relayer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        mint_usdc.pubkey().to_bytes(),
+        50_000_000,
+        Some((token_prog, payer_usdc, vault_usdc)),
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&dep_usdc)], 300_000), "Deposit 50 USDC");
+
+    let (dep_wsol, _) = build_deposit(
+        audren_id,
+        relayer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        WSOL_MINT,
+        2_000_000_000,
+        Some((token_prog, payer_wsol_src, vault_wsol)),
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&dep_wsol)], 300_000), "Deposit 2.0 real WSOL");
+
+    let alice_notes = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, None);
+    let alice_usdc = alice_notes.iter().find(|n| n.mint == mint_usdc.pubkey().to_bytes()).unwrap().clone();
+    let alice_wsol = alice_notes.iter().find(|n| n.mint == WSOL_MINT).unwrap().clone();
+    let ring = read_ring(&svm, &audren_id, pool_id, &[0]);
+
+    let base_action_accs = vec![
+        AudrenAccountMeta::readonly(mock_pool_auth),
+        AudrenAccountMeta::writable(escrow_usdc),
+        AudrenAccountMeta::writable(mock_pool_usdc),
+        AudrenAccountMeta::writable_signer(escrow_pda),
+        AudrenAccountMeta::writable(escrow_wsol),
+        AudrenAccountMeta::writable(mock_pool_wsol),
+        AudrenAccountMeta::readonly(token_prog),
+        AudrenAccountMeta::readonly(token_prog),
+        AudrenAccountMeta::readonly(mint_usdc.pubkey()),
+        AudrenAccountMeta::readonly(wsol_mint),
+    ];
+    let (escrow_idx, escrow_in_idx, escrow_out_idx) =
+        locate_escrow_indices(&base_action_accs, &escrow_pda, &escrow_usdc, &escrow_wsol).unwrap();
+    let make_router_data = |spend_in: u64, pay_out: u64| {
+        let mut d = Vec::with_capacity(19);
+        d.push(0u8);
+        d.extend_from_slice(&spend_in.to_le_bytes());
+        d.extend_from_slice(&pay_out.to_le_bytes());
+        d.push(6);
+        d.push(9);
+        d
+    };
+
+    // 8a-ADVERSARIAL: fee_recipient_ata aliased inside action_accounts -> InvalidAccount
+    let mut aliased_accs = base_action_accs.clone();
+    aliased_accs.push(AudrenAccountMeta::writable(relayer_usdc_ata));
+    let rdata_29 = make_router_data(29_000_000, 250_000_000);
+    let (bad_alias_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring,
+            input_note: &alice_usdc,
+            secret_index: alice_usdc.slot_index,
+            mint_out: WSOL_MINT,
+            token_program_in: token_prog,
+            token_program_out: token_prog,
+            amount_in: 30_000_000,
+            min_amount_out: 200_000_000,
+            relayer_fee: 1_000_000,
+            fee_on_output: false,
+            fee_recipient_ata: Some(relayer_usdc_ata),
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &rdata_29,
+            action_accounts: &aliased_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&bad_alias_ix)], 800_000),
+        AudrenError::InvalidAccount,
+        "Reject fee_recipient_ata aliased into action_accounts",
+    );
+
+    // 8a-ADVERSARIAL: vault-owned fee_recipient_ata -> InvalidAccount
+    let (bad_vault_fee_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring,
+            input_note: &alice_usdc,
+            secret_index: alice_usdc.slot_index,
+            mint_out: WSOL_MINT,
+            token_program_in: token_prog,
+            token_program_out: token_prog,
+            amount_in: 30_000_000,
+            min_amount_out: 200_000_000,
+            relayer_fee: 1_000_000,
+            fee_on_output: false,
+            fee_recipient_ata: Some(vault_usdc),
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &rdata_29,
+            action_accounts: &base_action_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&bad_vault_fee_ix)], 800_000),
+        AudrenError::InvalidAccount,
+        "Reject vault_usdc as fee_recipient_ata",
+    );
+
+    // 8a-HAPPY: ExecViaEscrow with fee_on_output = false (1 USDC fee from 30 USDC input; 20 USDC change!)
+    let (mut exec_in_fee_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring,
+            input_note: &alice_usdc,
+            secret_index: alice_usdc.slot_index,
+            mint_out: WSOL_MINT,
+            token_program_in: token_prog,
+            token_program_out: token_prog,
+            amount_in: 30_000_000,
+            min_amount_out: 200_000_000,
+            relayer_fee: 1_000_000,
+            fee_on_output: false,
+            fee_recipient_ata: Some(relayer_usdc_ata),
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &rdata_29,
+            action_accounts: &base_action_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+
+    // Tampering fee_recipient_ata (account [15]) MUST fail Fiat-Shamir proof!
+    let mut tampered_fee_ata = exec_in_fee_ix.clone();
+    tampered_fee_ata.accounts[15].pubkey = payer_usdc;
+    expect_custom_err(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&tampered_fee_ata)], 800_000),
+        AudrenError::InvalidTriptychProof,
+        "Reject tampered fee_recipient_ata on ExecViaEscrow",
+    );
+    // Tampering relayer_fee byte MUST fail Fiat-Shamir proof!
+    let mut tampered_fee_amt = exec_in_fee_ix.clone();
+    tampered_fee_amt.data[20] ^= 0x01;
+    expect_custom_err(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&tampered_fee_amt)], 800_000),
+        AudrenError::InvalidTriptychProof,
+        "Reject tampered relayer_fee on ExecViaEscrow",
+    );
+    exec_in_fee_ix.accounts[15].pubkey = relayer_usdc_ata; // untouched
+    expect_ok(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&exec_in_fee_ix)], 900_000),
+        "ExecViaEscrow (fee_on_output=false, 1 USDC fee -> relayer, 29 USDC -> escrow)",
+    );
+    assert_eq!(token_balance_of(&svm, &relayer_usdc_ata), 1_000_000);
+    assert_eq!(token_balance_of(&svm, &vault_usdc), 20_000_000);
+    assert_eq!(token_balance_of(&svm, &escrow_usdc), 0);
+    assert_eq!(token_balance_of(&svm, &escrow_wsol), 0);
+    assert_eq!(token_balance_of(&svm, &vault_wsol), 2_250_000_000); // 2.0 WSOL + 0.25 WSOL
+
+    // 8b-HAPPY + SLIPPAGE: ExecViaEscrow with fee_on_output = true (spend Alice's 20 USDC change note!)
+    let ring2 = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let alice_chg_usdc = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, None)
+        .into_iter()
+        .find(|n| n.mint == mint_usdc.pubkey().to_bytes() && n.amount == 20_000_000)
+        .expect("Alice decrypts 20 USDC change note");
+    let rdata_20 = make_router_data(20_000_000, 200_000_000);
+
+    // Slippage check must apply AFTER subtracting relayer_fee (200_000_000 - 15_000_000 = 185_000_000 < 185_000_001)
+    let (slip_after_fee_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring2,
+            input_note: &alice_chg_usdc,
+            secret_index: alice_chg_usdc.slot_index,
+            mint_out: WSOL_MINT,
+            token_program_in: token_prog,
+            token_program_out: token_prog,
+            amount_in: 20_000_000,
+            min_amount_out: 185_000_001,
+            relayer_fee: 15_000_000,
+            fee_on_output: true,
+            fee_recipient_ata: Some(relayer_wsol_ata),
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &rdata_20,
+            action_accounts: &base_action_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&slip_after_fee_ix)], 900_000),
+        AudrenError::SlippageExceeded,
+        "Slippage check must enforce post-fee net_out >= min_amount_out",
+    );
+
+    let (exec_out_fee_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring2,
+            input_note: &alice_chg_usdc,
+            secret_index: alice_chg_usdc.slot_index,
+            mint_out: WSOL_MINT,
+            token_program_in: token_prog,
+            token_program_out: token_prog,
+            amount_in: 20_000_000,
+            min_amount_out: 185_000_000,
+            relayer_fee: 15_000_000,
+            fee_on_output: true,
+            fee_recipient_ata: Some(relayer_wsol_ata),
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &rdata_20,
+            action_accounts: &base_action_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&exec_out_fee_ix)], 900_000),
+        "ExecViaEscrow (fee_on_output=true, 15_000_000 WSOL -> relayer, 185_000_000 WSOL -> Bob)",
+    );
+    assert_eq!(token_balance_of(&svm, &relayer_wsol_ata), 15_000_000);
+    assert_eq!(token_balance_of(&svm, &vault_wsol), 2_435_000_000);
+    assert_eq!(token_balance_of(&svm, &escrow_wsol), 0);
+
+    // 8c. Self-Paying Withdraw WITH atomic `unwrap_wsol = true` -> 0-lamport fresh DeFi Session B_0!
+    // Alice splits 2.0 WSOL note: 900_000_000 lamports Native SOL -> fresh B_0,
+    // 10_000_000 lamports Native SOL -> fee_recipient, and 1_090_000_000 WSOL shielded change -> Alice!
+    let ring3 = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let fee_before = svm.get_account(&fee_recipient.pubkey()).unwrap().lamports;
+    let (unwrap_part_ix, _) = build_withdraw_with_params(
+        &WithdrawParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            input_page_ids: &[0],
+            ring: &ring3,
+            input_note: &alice_wsol,
+            secret_index: alice_wsol.slot_index,
+            recipient_account: session_pubkey,
+            change_addr: &alice.address(),
+            amount: 900_000_000,
+            relayer_fee: 10_000_000,
+            fee_recipient: Some(fee_recipient.pubkey()),
+            unwrap_wsol: true,
+            spl_token_program: Some(token_prog),
+            auditor_pk: None,
+        },
+        &mut rng,
+    )
+    .unwrap();
+
+    // Adversarial: tamper fee_recipient -> InvalidTriptychProof
+    let mut bad_fee_rcpt = unwrap_part_ix.clone();
+    bad_fee_rcpt.accounts[7].pubkey = authority.pubkey();
+    expect_custom_err(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&bad_fee_rcpt)], 900_000),
+        AudrenError::InvalidTriptychProof,
+        "Reject tampered fee_recipient on Withdraw(unwrap_wsol)",
+    );
+
+    let (unwrap_pda_addr, _) = derive_unwrap_pda(&audren_id, pool_id, alice_wsol.nullifier.as_ref().unwrap());
+    expect_ok(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&unwrap_part_ix)], 900_000),
+        "Withdraw(unwrap_wsol=true, relayer_fee=0.01 SOL) -> 0-lamport DeFi Session B_0!",
+    );
+    assert_eq!(svm.get_account(&session_pubkey).unwrap().lamports, 900_000_000);
+    assert_eq!(svm.get_account(&fee_recipient.pubkey()).unwrap().lamports, fee_before + 10_000_000);
+    assert!(
+        svm.get_account(&unwrap_pda_addr).map(|a| a.lamports).unwrap_or(0) == 0,
+        "unwrap_pda MUST be closed with 0 residual lamports!"
+    );
+
+    // 8c-PAUSE: Pause pool & prove FULL Withdraw(unwrap_wsol = true, relayer_fee = 5_000_000) STILL SUCCEEDS!
+    let pause_ix = build_set_paused(audren_id, authority.pubkey(), pool_id, true);
+    expect_ok(send_ixs(&mut svm, &authority, &[], &[to_svm_ix(&pause_ix)], 100_000), "Pause pool");
+
+    let ring4 = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let alice_wsol_chg = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, None)
+        .into_iter()
+        .find(|n| n.mint == WSOL_MINT && n.amount == 1_090_000_000)
+        .expect("Alice decrypts 1.09 WSOL change note");
+    let fee_before2 = svm.get_account(&fee_recipient.pubkey()).unwrap().lamports;
+    let session_before2 = svm.get_account(&session_pubkey).unwrap().lamports;
+    let (unwrap_escape_ix, _) = build_withdraw_with_params(
+        &WithdrawParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            input_page_ids: &[0],
+            ring: &ring4,
+            input_note: &alice_wsol_chg,
+            secret_index: alice_wsol_chg.slot_index,
+            recipient_account: session_pubkey,
+            change_addr: &alice.address(),
+            amount: 1_085_000_000,
+            relayer_fee: 5_000_000,
+            fee_recipient: Some(fee_recipient.pubkey()),
+            unwrap_wsol: true,
+            spl_token_program: Some(token_prog),
+            auditor_pk: None,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    assert!(!unwrap_escape_ix.accounts[1].is_writable, "Full unwrap_wsol must keep PoolState read-only");
+    expect_ok(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&unwrap_escape_ix)], 900_000),
+        "Full Withdraw(unwrap_wsol=true, relayer_fee) SUCCEEDS while Pool is Paused!",
+    );
+    assert_eq!(svm.get_account(&session_pubkey).unwrap().lamports, session_before2 + 1_085_000_000);
+    assert_eq!(svm.get_account(&fee_recipient.pubkey()).unwrap().lamports, fee_before2 + 5_000_000);
+
+    // Unpause pool for zero-dust sweep deposits!
+    let unpause_ix = build_set_paused(audren_id, authority.pubkey(), pool_id, false);
+    expect_ok(send_ixs(&mut svm, &authority, &[], &[to_svm_ix(&unpause_ix)], 100_000), "Unpause pool");
+
+    // 8d. Zero-Dust Native SOL Sweep Deposit (`fee_from_amount = true`) signed by B_0!
+    // B_0 currently holds 1_985_000_000 lamports. B_0 signs its own retiring sweep tx (5_000 lamport tx fee)
+    // and sweeps `balance - 5_000` with `fee_from_amount = true` -> B_0 lands on LITERALLY 0 LAMPORTS!
+    let b0_bal = svm.get_account(&session_pubkey).unwrap().lamports;
+    assert_eq!(b0_bal, 1_985_000_000);
+    let sol_vault_before = svm.get_account(&sol_vault).map(|a| a.lamports).unwrap_or(0);
+    let rent_vault_before = svm.get_account(&rent_vault).map(|a| a.lamports).unwrap_or(0);
+    let sweep_gross = b0_bal - 5_000; // exact balance minus single-sig Solana base fee!
+    let (sweep_ix, _) = build_deposit_with_options(
+        audren_id,
+        session_pubkey,
+        pool_id,
+        0,
+        &alice.address(),
+        NATIVE_SOL_MINT,
+        sweep_gross,
+        sweep_gross - page_rent_fee,
+        true, // fee_from_amount = true!
+        None,
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &session_kp, &[], &[to_svm_ix(&sweep_ix)], 300_000),
+        "Zero-dust sweep Deposit(fee_from_amount=true) signed by B_0 (rent vault charging fee)",
+    );
+    let b0_after = svm.get_account(&session_pubkey).map(|a| a.lamports).unwrap_or(0);
+    assert_eq!(b0_after, 0, "Retiring DeFi Session wallet B_0 MUST finish with literally 0 lamports!");
+    let sol_delta = svm.get_account(&sol_vault).unwrap().lamports - sol_vault_before;
+    let rent_delta = svm.get_account(&rent_vault).unwrap().lamports - rent_vault_before;
+    assert!(rent_delta > 0 && rent_delta <= page_rent_fee, "dynamic SIMD-0437 rent fee collected");
+    assert_eq!(sol_delta, sweep_gross - rent_delta);
+
+    // Verify Alice decrypts the dynamic sweep note using the measured `sol_delta` AND spends it!
+    let alice_sweep = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, Some(sol_delta))
+        .into_iter()
+        .find(|n| n.mint == NATIVE_SOL_MINT && n.amount == sol_delta)
+        .expect("Alice decrypts zero-dust sweep SOL note via sol_vault delta");
+    assert!(alice_sweep.is_dynamic_output);
+
+    let ring5 = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let fee_before3 = svm.get_account(&fee_recipient.pubkey()).unwrap().lamports;
+    let (wd_sweep_ix, _) = build_withdraw_with_params(
+        &WithdrawParams {
+            program_id: audren_id,
+            payer: relayer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            input_page_ids: &[0],
+            ring: &ring5,
+            input_note: &alice_sweep,
+            secret_index: alice_sweep.slot_index,
+            recipient_account: authority.pubkey(),
+            change_addr: &alice.address(),
+            amount: alice_sweep.amount - 2_000_000,
+            relayer_fee: 2_000_000,
+            fee_recipient: Some(fee_recipient.pubkey()),
+            unwrap_wsol: false,
+            spl_token_program: None,
+            auditor_pk: None,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &relayer, &[], &[to_svm_ix(&wd_sweep_ix)], 900_000),
+        "Spend dynamic sweep SOL note via self-paying Native SOL Withdraw!",
+    );
+    assert_eq!(svm.get_account(&fee_recipient.pubkey()).unwrap().lamports, fee_before3 + 2_000_000);
+
+    // 8d-FULL-RENT: Top up PageRentVault to full capacity (rent fee charged = 0) and sweep a fresh B_1 to 0 lamports!
+    let session_b1 = AudrenKeys::derive_defi_session_keypair(&master_seed, 1);
+    let b1_kp = Keypair::new_from_array(session_b1.secret_seed);
+    svm.airdrop(&b1_kp.pubkey(), 250_000_000).unwrap();
+    svm.airdrop(&rent_vault, 500_000_000).unwrap(); // PageRentVault now well above cap -> fee = 0!
+    let sol_vault_before2 = svm.get_account(&sol_vault).unwrap().lamports;
+    let sweep_b1_gross = 250_000_000 - 5_000;
+    let (sweep_b1_ix, _) = build_deposit_with_options(
+        audren_id,
+        b1_kp.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        NATIVE_SOL_MINT,
+        sweep_b1_gross,
+        sweep_b1_gross,
+        true,
+        None,
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &b1_kp, &[], &[to_svm_ix(&sweep_b1_ix)], 300_000),
+        "Zero-dust sweep Deposit(fee_from_amount=true) when PageRentVault is full (fee=0)",
+    );
+    assert_eq!(svm.get_account(&b1_kp.pubkey()).map(|a| a.lamports).unwrap_or(0), 0);
+    assert_eq!(svm.get_account(&sol_vault).unwrap().lamports - sol_vault_before2, sweep_b1_gross);
+    println!("  [v0.3.0 EXEC FEES + UNWRAP WSOL + DEFI SESSION B_0/B_1 + ZERO-DUST SWEEP PASSED]");
 }

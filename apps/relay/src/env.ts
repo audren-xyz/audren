@@ -30,6 +30,7 @@ export interface Env {
   // Non-secret tunable policy vars (from wrangler.jsonc)
   DEFAULT_AGGREGATOR?: string
   ENABLED_AGGREGATORS?: string
+  ALLOWED_PRE_IX_PROGRAMS?: string
   BASE_SWAP_FEE_BPS?: string
   MAX_SELF_PAY_BPS?: string
   MICRO_SWAP_FEE_BPS?: string
@@ -49,6 +50,8 @@ export interface Env {
 export interface RelayPolicyConfig {
   defaultAggregator: AggregatorId
   enabledAggregators: Set<AggregatorId>
+  /** Strictly allowlisted zero-signer crank programs permitted in `preInstructions` before Tag 5. */
+  allowedPreIxPrograms: Set<string>
   baseSwapFeeBps: number
   maxSelfPayBps: number
   microSwapFeeBps: number
@@ -66,6 +69,21 @@ export interface RelayPolicyConfig {
 }
 
 const VALID_AGGREGATORS: readonly AggregatorId[] = ['jupiter', 'bedrock', 'dflow', 'titan', 'okx']
+
+/**
+ * Default zero-signer DeFi refresh/oracle crank programs permitted in `preInstructions`
+ * immediately before Audren Tag 5 (`ExecViaEscrow`):
+ *   - Kamino Lending (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`) — `RefreshReserve`
+ *   - Kamino Vaults (`kvauTFR8qm1dhniz6pYuBZkuene3Hfrs1VQhVRgCNrr`)
+ *   - Pyth Solana Receiver (`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`)
+ *   - Sanctum S Controller (`5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx`)
+ */
+export const DEFAULT_ALLOWED_PRE_IX_PROGRAMS: readonly string[] = [
+  'KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD',
+  'kvauTFR8qm1dhniz6pYuBZkuene3Hfrs1VQhVRgCNrr',
+  'rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ',
+  '5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx',
+]
 
 function parseNum(raw: string | undefined, fallback: number, min: number, max: number): number {
   const n = Number(raw)
@@ -89,6 +107,11 @@ export function loadPolicyConfig(env: Env): RelayPolicyConfig {
     .map((s) => s.trim().toLowerCase())
     .filter((s): s is AggregatorId => VALID_AGGREGATORS.includes(s as AggregatorId))
 
+  const rawPreIx = (env.ALLOWED_PRE_IX_PROGRAMS ?? DEFAULT_ALLOWED_PRE_IX_PROGRAMS.join(','))
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
   const corsOrigins = (env.CORS_ORIGINS ?? '*')
     .split(',')
     .map((s) => s.trim())
@@ -97,6 +120,7 @@ export function loadPolicyConfig(env: Env): RelayPolicyConfig {
   return {
     defaultAggregator,
     enabledAggregators: new Set(rawEnabled.length > 0 ? rawEnabled : ['jupiter']),
+    allowedPreIxPrograms: new Set(rawPreIx),
     baseSwapFeeBps: Math.trunc(parseNum(env.BASE_SWAP_FEE_BPS, 25, 0, 1000)),
     maxSelfPayBps: Math.trunc(parseNum(env.MAX_SELF_PAY_BPS, 450, 25, 2000)),
     microSwapFeeBps: Math.trunc(parseNum(env.MICRO_SWAP_FEE_BPS, 50, 0, 1000)),

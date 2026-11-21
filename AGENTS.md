@@ -6,8 +6,8 @@ Standalone open-source repository for the **Audren** Solana shielded protocol, p
 
 - **`crates/audren-core/`** is `#![no_std]` and is the single source of truth for PDA seeds, account layouts, instruction tags (`0x00..=0x0C`), proof wire lengths, and `AudrenError` codes.
 - **`program/`** is an isolated `#![no_std]` `pinocchio 0.11.1` sBPFv3 program manifest excluded from the root Cargo workspace so sBPFv3 dependencies never collide with host crates (`solana-zk-sdk`, `litesvm`). Always check both manifests independently.
-- **`tests/mock-router/`** is an isolated `#![no_std]` `pinocchio 0.11.1` sBPFv3 test router used by `litesvm_e2e` to exercise adversarial router behavior against `SwapViaRouter`.
-- **`crates/client/`** provides the Rust SDK (provers, RPC/WebSocket scanner, `SwapViaRouter` builder, selective disclosure, auditor decryptor, and LiteSVM / live Solana integration suites).
+- **`tests/mock-router/`** is an isolated `#![no_std]` `pinocchio 0.11.1` sBPFv3 test router used by `litesvm_e2e` to exercise adversarial target-program behavior against `ExecViaEscrow`.
+- **`crates/client/`** provides the Rust SDK (provers, RPC/WebSocket scanner, `ExecViaEscrow` builder, deterministic `DefiSessionKeypair`, selective disclosure, auditor decryptor, and LiteSVM / live Solana integration suites).
 - **`crates/audren-ffi/`** is the UniFFI native FFI facade over `crates/client` generating the Swift (`packages/swift/`) and Kotlin (`packages/kotlin/`) mobile SDKs with zero cryptographic re-implementation drift.
 - **`spec/test-vectors.json`** is the single canonical cross-language conformance suite verified byte-for-byte by Rust (`audren-client` & `audren-ffi`), TypeScript (`@audren/sdk` & `@audren/sdk/prover`), Swift (`AudrenSDK`), and Kotlin (`xyz.audren.sdk`) on every CI run.
 - **`idl/`** owns deterministic Codama v1.8.0 and Anchor v0.30+ IDL generation (`idl/generate-idl.py`) and drift verification (`idl/verify-idl.py`), mirrored into `packages/sdk/`.
@@ -20,13 +20,14 @@ Standalone open-source repository for the **Audren** Solana shielded protocol, p
 ## Mandatory protocol invariants
 
 1. **Byte-for-byte wire parity across all layers:** Any change to account offsets, PDA seeds, transcript domain separators, instruction tags, or proof layouts in `crates/audren-core/` or `program/src/` must match `idl/` (re-run `python3 idl/generate-idl.py && python3 idl/verify-idl.py`), `crates/client/`, `packages/sdk/`, `apps/relay/src/solana/`, and `apps/web/lib/`. Keep PDA-CPI Jupiter venue exclusions (`JUPITER_CPI_EXCLUDED_DEXES`) synced across `crates/client/src/router.rs`, `packages/sdk/src/swap.ts`, `apps/relay/src/aggregators/jupiter.ts`, and `apps/web/worker/index.ts`.
-2. **Swap custody isolation (`SwapViaRouter`, Tag 5):**
-   - `NullifierPDA` is created before the external router CPI.
-   - `router_program` is bound inside the Fiat-Shamir `ctx_hash`.
+2. **Escrow custody isolation (`ExecViaEscrow`, Tag 5) & atomic WSOL unwrap (`Withdraw`, Tag 6):**
+   - `NullifierPDA` is created before the external DeFi CPI.
+   - `target_program`, `relayer_fee`, `flags`, and `fee_recipient_ata` (when `relayer_fee > 0`) are bound inside the Fiat-Shamir `ctx_hash`.
    - `vault_auth` and `payer` are never signers on the external CPI; only the selected `swap_escrow` shard PDA (`0..16`) signs.
-   - No Audren program, `PoolState`, `AppendLaneState`, `EpochPage`, `NullifierPDA`, or custody vault may appear in `router_accounts`.
+   - No Audren program, `PoolState`, `AppendLaneState`, `EpochPage`, `NullifierPDA`, or custody vault may appear in `action_accounts`.
    - `swap_escrow` and escrow token accounts (`escrow_in`, `escrow_out`) pass pre- and post-CPI owner, delegate, `close_authority`, lamport non-drain, and slippage (`actual_out >= min_amount_out`) checks.
-3. **Token-2022 solvency and hook isolation:** `Deposit` and `SwapViaRouter` commit the measured net vault balance delta (`after - before > 0`) so fee-on-transfer (`TransferFeeConfig`) deposits are not credited above the measured net receipt. Transfer-hook mints are rejected unless safely validated; trailing accounts have `is_signer` cleared and Audren custody accounts filtered out.
+   - `Withdraw` with `WITHDRAW_FLAG_UNWRAP_WSOL` (`flags & 2`) initializes an ephemeral 1-shot `audren_unwrap` PDA (`["audren_unwrap", pool_id_le4, nullifier_32]`), transfers WSOL from `vault_auth`, and closes `audren_unwrap` atomically to `recipient` in the same instruction (preserving full-exit pause bypass).
+3. **Token-2022 solvency and hook isolation:** `Deposit` (including `DEPOSIT_FLAG_FEE_FROM_AMOUNT` zero-dust sweeps) and `ExecViaEscrow` commit the measured net vault balance delta (`after - before > 0`) so fee-on-transfer (`TransferFeeConfig`) deposits are not credited above the measured net receipt. Transfer-hook mints are rejected unless safely validated; trailing accounts have `is_signer` cleared and Audren custody accounts filtered out.
 4. **Parallel append lanes (`Tag 11` / `Tag 12`):** Lane `0` uses page IDs `(0 << 56) | seq`; parallel lanes `1..15` use `(lane_id << 56) | seq` with `AppendLaneState` (`64 B`), `LaneRentVault`, and read-only `PoolState`, while sharing the unified custody vaults and canonical `NullifierPDA` namespace.
 5. **Solana Transaction Version 1 (`0x81`, `4,096 B`) and atomic `ProofBuffer` rent:** Direct settlement uses Solana Transaction v1 (SIMD-0385) with inline `TransactionConfig`. For oversized payloads or `v0`-only wallets, `WriteProofBuffer` (`Tag 8`) uploads `<= 768 B` chunks and `ExecBuffered` (`Tag 9`) / `CloseProofBuffer` (`Tag 10`) close the buffer atomically and refund 100% of lamports to `authority`/`payer`.
 6. **sBPFv3 runtime & Pinocchio discipline:**

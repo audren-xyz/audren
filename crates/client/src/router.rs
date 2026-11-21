@@ -1,7 +1,8 @@
-//! Router-Agnostic Private Swap & Stateless Relayer Wire Codecs.
+//! Protocol-Agnostic Shielded DeFi Execution (`ExecViaEscrow`) & Stateless Relayer Wire Codecs.
 //!
-//! Works with compatible PDA-signing Solana routers that satisfy Audren custody
-//! checks and transaction limits. Hosted route availability is provider-specific.
+//! Works with any compatible PDA-signing Solana program (DEX aggregators, supply lending,
+//! yield vaults, liquid staking, perp LP, RWA mint/redeem) that satisfies Audren custody
+//! isolation and transaction limits.
 
 use serde::{Deserialize, Serialize};
 use solana_address::Address;
@@ -13,7 +14,7 @@ use crate::instructions::AudrenAccountMeta;
 pub const DEFAULT_RELAY_URL: &str = "https://relay.audren.xyz";
 
 /// Jupiter DEX labels that reject PDA CPI callers (e.g. `InvalidRealUser` / sysvar top-level
-/// instruction introspection) and must be excluded when routing through `SwapViaRouter`.
+/// instruction introspection) and must be excluded when routing through `ExecViaEscrow`.
 pub const JUPITER_CPI_EXCLUDED_DEXES: &str =
     "Kipseli,Quantum,BisonFi,BisonFi Predict,BinaryFi,Obsidian,VaultLiquidUnstake,Sanctum Prop S";
 
@@ -31,12 +32,12 @@ pub struct RouterQuoteRequest {
     pub exclude_dexes: Option<String>,
 }
 
-/// Standard aggregator `/swap-instructions` request configured for Audren's sharded `swap_escrow` PDA.
+/// Standard aggregator `/swap-instructions` request configured for Audren's sharded `escrow` PDA.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterSwapInstructionsRequest {
     pub quote_response: serde_json::Value,
-    /// Must be Audren's `derive_swap_escrow_pda(program_id, pool_id, shard_id)` address.
+    /// Must be Audren's `derive_escrow_pda(program_id, pool_id, shard_id)` address.
     pub user_public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_and_unwrap_sol: Option<bool>,
@@ -45,17 +46,17 @@ pub struct RouterSwapInstructionsRequest {
 }
 
 impl RouterSwapInstructionsRequest {
-    pub fn for_audren_escrow(quote_response: serde_json::Value, swap_escrow: &Address) -> Self {
+    pub fn for_audren_escrow(quote_response: serde_json::Value, escrow_pda: &Address) -> Self {
         Self {
             quote_response,
-            user_public_key: swap_escrow.to_string(),
+            user_public_key: escrow_pda.to_string(),
             wrap_and_unwrap_sol: Some(false),
             use_shared_accounts: Some(false),
         }
     }
 }
 
-/// Decoded account metadata from a DEX aggregator's `swapInstruction` JSON object.
+/// Decoded account metadata from an external program instruction JSON object.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterAccountMeta {
@@ -64,30 +65,30 @@ pub struct RouterAccountMeta {
     pub is_writable: bool,
 }
 
-/// Decoded external router instruction returned by a DEX aggregator API.
+/// Decoded external program instruction (target CPI action or zero-signer pre-instruction crank).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterEncodedInstruction {
     pub program_id: String,
     pub accounts: Vec<RouterAccountMeta>,
-    /// Base64-encoded raw router instruction data.
+    /// Base64-encoded raw instruction data.
     pub data: String,
 }
 
-/// Locate `(escrow_idx, escrow_in_idx, escrow_out_idx)` inside an arbitrary router account list.
+/// Locate `(escrow_idx, escrow_in_idx, escrow_out_idx)` inside an arbitrary action account list.
 pub fn locate_escrow_indices(
-    router_accounts: &[AudrenAccountMeta],
-    swap_escrow: &Address,
+    action_accounts: &[AudrenAccountMeta],
+    escrow_pda: &Address,
     escrow_in: &Address,
     escrow_out: &Address,
 ) -> Option<(u8, u8, u8)> {
-    let e_idx = router_accounts
+    let e_idx = action_accounts
         .iter()
-        .position(|m| m.pubkey == *swap_escrow)?;
-    let in_idx = router_accounts
+        .position(|m| m.pubkey == *escrow_pda)?;
+    let in_idx = action_accounts
         .iter()
         .position(|m| m.pubkey == *escrow_in)?;
-    let out_idx = router_accounts
+    let out_idx = action_accounts
         .iter()
         .position(|m| m.pubkey == *escrow_out)?;
     Some((
@@ -97,10 +98,10 @@ pub fn locate_escrow_indices(
     ))
 }
 
-/// Prepared router accounts ready for [`crate::instructions::build_swap_via_router`].
-/// Mirrors TypeScript `PreparedRouterAccounts`, Swift `FfiPreparedRouterAccounts`, and Kotlin.
+/// Prepared escrow accounts ready for [`crate::instructions::build_exec_via_escrow`].
+/// Mirrors TypeScript `PreparedEscrowAccounts`, Swift `FfiPreparedEscrowAccounts`, and Kotlin.
 #[derive(Clone, Debug)]
-pub struct PreparedRouterAccounts {
+pub struct PreparedEscrowAccounts {
     pub escrow_pda: Address,
     pub escrow_in_ata: Address,
     pub escrow_out_ata: Address,
@@ -110,10 +111,10 @@ pub struct PreparedRouterAccounts {
     pub accounts: Vec<AudrenAccountMeta>,
 }
 
-/// Derive `(swap_escrow, escrow_in_ata, escrow_out_ata)`, locate `(escrow_idx, escrow_in_idx, escrow_out_idx)`
-/// inside `router_accounts`, and strip the external signer bit on `swap_escrow` (Audren signs via `invoke_signed`).
+/// Derive `(escrow_pda, escrow_in_ata, escrow_out_ata)`, locate `(escrow_idx, escrow_in_idx, escrow_out_idx)`
+/// inside `action_accounts`, and strip the external signer bit on `escrow_pda` (Audren signs via `invoke_signed`).
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_router_accounts(
+pub fn prepare_escrow_accounts(
     program_id: &Address,
     pool_id: u32,
     shard_id: u8,
@@ -121,17 +122,17 @@ pub fn prepare_router_accounts(
     output_mint: &Address,
     input_token_program: &Address,
     output_token_program: &Address,
-    router_accounts: &[AudrenAccountMeta],
-) -> Result<PreparedRouterAccounts, crate::ClientError> {
-    let (escrow_pda, _) = crate::pda::derive_swap_escrow_pda(program_id, pool_id, shard_id);
+    action_accounts: &[AudrenAccountMeta],
+) -> Result<PreparedEscrowAccounts, crate::ClientError> {
+    let (escrow_pda, _) = crate::pda::derive_escrow_pda(program_id, pool_id, shard_id);
     let escrow_in_ata = crate::pda::derive_ata(&escrow_pda, input_token_program, input_mint);
     let escrow_out_ata = crate::pda::derive_ata(&escrow_pda, output_token_program, output_mint);
     let (escrow_idx, escrow_in_idx, escrow_out_idx) =
-        locate_escrow_indices(router_accounts, &escrow_pda, &escrow_in_ata, &escrow_out_ata)
+        locate_escrow_indices(action_accounts, &escrow_pda, &escrow_in_ata, &escrow_out_ata)
             .ok_or(crate::ClientError::InvalidProofInput(
-                "router_accounts must contain swap_escrow, escrow_in_ata, and escrow_out_ata",
+                "action_accounts must contain escrow_pda, escrow_in_ata, and escrow_out_ata",
             ))?;
-    let accounts = router_accounts
+    let accounts = action_accounts
         .iter()
         .map(|m| AudrenAccountMeta {
             pubkey: m.pubkey,
@@ -143,7 +144,7 @@ pub fn prepare_router_accounts(
             is_writable: m.is_writable,
         })
         .collect();
-    Ok(PreparedRouterAccounts {
+    Ok(PreparedEscrowAccounts {
         escrow_pda,
         escrow_in_ata,
         escrow_out_ata,
@@ -172,11 +173,15 @@ pub struct RelayerSetupAta {
 pub struct RelayerSubmitRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster: Option<String>,
-    /// Base64-encoded Audren instruction bytes (`Transfer` / `Merge` / `SwapViaRouter` / `Withdraw`).
+    /// Base64-encoded Audren instruction bytes (`Transfer` / `Merge` / `ExecViaEscrow` / `Withdraw`).
     pub instruction_data_b64: String,
     pub accounts: Vec<RouterAccountMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_atas: Option<Vec<RelayerSetupAta>>,
+    /// Optional zero-signer pre-instructions (e.g. Kamino `refreshReserve` or Pyth crank)
+    /// allowlisted strictly for `ExecViaEscrow` (`Tag 5`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_instructions: Option<Vec<RouterEncodedInstruction>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_unit_limit: Option<u32>,
     /// Decimal string lamports for Solana v1 `priorityFeeLamports`.

@@ -45,6 +45,7 @@ export const VAULT_AUTH_SEED = 'audren_vault';
 export const SOL_VAULT_SEED = 'audren_sol';
 export const PAGE_RENT_SEED = 'audren_rent';
 export const ESCROW_SEED = 'audren_escrow';
+export const UNWRAP_SEED = 'audren_unwrap';
 export const PROOF_BUFFER_SEED = 'audren_buf';
 export const LANE_SEED = 'audren_lane';
 export const LANE_RENT_SEED = 'audren_lrent';
@@ -93,7 +94,7 @@ export const TAG_OPEN_PAGE = 1;
 export const TAG_DEPOSIT = 2;
 export const TAG_TRANSFER = 3;
 export const TAG_MERGE = 4;
-export const TAG_SWAP_VIA_ROUTER = 5;
+export const TAG_EXEC_VIA_ESCROW = 5;
 export const TAG_WITHDRAW = 6;
 export const TAG_SET_PAUSED = 7;
 export const TAG_WRITE_PROOF_BUFFER = 8;
@@ -101,6 +102,17 @@ export const TAG_EXEC_BUFFERED = 9;
 export const TAG_CLOSE_PROOF_BUFFER = 10;
 export const TAG_INIT_LANE = 11;
 export const TAG_OPEN_LANE_PAGE = 12;
+
+export const DEPOSIT_FLAG_NATIVE_SOL = 1 << 0;
+export const DEPOSIT_FLAG_FEE_FROM_AMOUNT = 1 << 1;
+
+export const EXEC_FLAG_HAS_CHANGE = 1 << 0;
+export const EXEC_FLAG_ALLOW_PARTIAL_REFUND = 1 << 1;
+export const EXEC_FLAG_FEE_ON_OUTPUT = 1 << 2;
+
+export const WITHDRAW_FLAG_NATIVE_SOL = 1 << 0;
+export const WITHDRAW_FLAG_HAS_CHANGE = 1 << 1;
+export const WITHDRAW_FLAG_UNWRAP_WSOL = 1 << 2;
 
 export const TRIPTYCH_M_ONE_PAGE = 5;
 export const TRIPTYCH_M_TWO_PAGES = 6;
@@ -146,7 +158,7 @@ export enum AudrenError {
   InvalidAuditorProof = 22,
   MissingAuditorKey = 23,
   InvalidEscrowShard = 24,
-  InvalidRouterProgram = 25,
+  InvalidTargetProgram = 25,
   EscrowAuthorityAltered = 26,
   EscrowAccountAltered = 27,
   SlippageExceeded = 28,

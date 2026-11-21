@@ -1,17 +1,17 @@
 //! Instruction builders for all 13 Audren instructions (`InitPool`, `OpenPage`, `Deposit`,
-//! `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `SetPaused`, `WriteProofBuffer`,
+//! `Transfer`, `Merge`, `ExecViaEscrow`, `Withdraw`, `SetPaused`, `WriteProofBuffer`,
 //! `ExecBuffered`, `CloseProofBuffer`, `InitLane`, `OpenLanePage`).
 //!
 //! Verified byte-for-byte against `program/src/lib.rs`.
 
 use crate::keys::{
-    prepare_dynamic_swap_output, prepare_shielded_note, AudrenAddress, PreparedDynamicOutput,
+    prepare_dynamic_output, prepare_shielded_note, AudrenAddress, PreparedDynamicOutput,
     PreparedNote,
 };
 use crate::pda::{
-    derive_ata, derive_epoch_page_pda, derive_lane_pda, derive_lane_rent_vault_pda,
-    derive_nullifier_pda, derive_page_rent_vault_pda, derive_pool_pda, derive_proof_buffer_pda,
-    derive_sol_vault_pda, derive_swap_escrow_pda, derive_vault_auth_pda,
+    derive_ata, derive_epoch_page_pda, derive_escrow_pda, derive_lane_pda,
+    derive_lane_rent_vault_pda, derive_nullifier_pda, derive_page_rent_vault_pda, derive_pool_pda,
+    derive_proof_buffer_pda, derive_sol_vault_pda, derive_unwrap_pda, derive_vault_auth_pda,
 };
 use crate::prover::{
     asset_generator, compress, decompress, h_point, prove_auditor_asset, prove_cross_base_1,
@@ -22,15 +22,18 @@ use crate::scanner::OwnedNote;
 use crate::ClientError;
 use audren_core::{
     instruction::{
-        m_for_input_pages, DYNAMIC_OUTPUT_WIRE_LEN, MAX_MERGE_RING_SLOTS, NOTE_WIRE_LEN,
-        TAG_CLOSE_PROOF_BUFFER, TAG_DEPOSIT, TAG_EXEC_BUFFERED, TAG_INIT_LANE, TAG_INIT_POOL,
-        TAG_MERGE, TAG_OPEN_LANE_PAGE, TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_SWAP_VIA_ROUTER,
-        TAG_TRANSFER, TAG_WITHDRAW, TAG_WRITE_PROOF_BUFFER,
+        m_for_input_pages, DEPOSIT_FLAG_FEE_FROM_AMOUNT, DEPOSIT_FLAG_NATIVE_SOL,
+        DYNAMIC_OUTPUT_WIRE_LEN, EXEC_FLAG_ALLOW_PARTIAL_REFUND, EXEC_FLAG_FEE_ON_OUTPUT,
+        EXEC_FLAG_HAS_CHANGE, MAX_MERGE_RING_SLOTS, NOTE_WIRE_LEN, TAG_CLOSE_PROOF_BUFFER,
+        TAG_DEPOSIT, TAG_EXEC_BUFFERED, TAG_EXEC_VIA_ESCROW, TAG_INIT_LANE, TAG_INIT_POOL,
+        TAG_MERGE, TAG_OPEN_LANE_PAGE, TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_TRANSFER, TAG_WITHDRAW,
+        TAG_WRITE_PROOF_BUFFER, WITHDRAW_FLAG_HAS_CHANGE, WITHDRAW_FLAG_NATIVE_SOL,
+        WITHDRAW_FLAG_UNWRAP_WSOL,
     },
     lane_of_page_id,
     layout::{NoteEntry, PROOF_BUFFER_CHUNK_SIZE, PROOF_BUFFER_MAX_PAYLOAD},
-    page_id_for_lane, seq_of_page_id, PoolMode, NATIVE_SOL_MINT, SYSTEM_PROGRAM_ID,
-    ZK_ELGAMAL_PROOF_PROGRAM_ID,
+    page_id_for_lane, seq_of_page_id, PoolMode, CLASSIC_TOKEN_PROGRAM_ID, NATIVE_SOL_MINT,
+    SYSTEM_PROGRAM_ID, WSOL_MINT, ZK_ELGAMAL_PROOF_PROGRAM_ID,
 };
 use curve25519_dalek::scalar::Scalar;
 use rand::{CryptoRng, RngCore};
@@ -231,6 +234,7 @@ pub fn build_deposit<R: RngCore + CryptoRng>(
         mint,
         amount,
         amount,
+        false,
         spl_accounts,
         &[],
         rng,
@@ -238,7 +242,8 @@ pub fn build_deposit<R: RngCore + CryptoRng>(
 }
 
 /// Tag 2: `Deposit` with explicit net vault amount (for active `TransferFee` Token-2022 mints,
-/// see [`net_deposit_amount`]) and optional trailing `TransferHook` accounts.
+/// see [`net_deposit_amount`]), optional `fee_from_amount` zero-dust Native SOL sweep mode
+/// (`DEPOSIT_FLAG_FEE_FROM_AMOUNT`), and optional trailing `TransferHook` accounts.
 #[allow(clippy::too_many_arguments)]
 pub fn build_deposit_with_options<R: RngCore + CryptoRng>(
     program_id: Address,
@@ -249,14 +254,41 @@ pub fn build_deposit_with_options<R: RngCore + CryptoRng>(
     mint: [u8; 32],
     gross_amount: u64,
     net_amount: u64,
+    fee_from_amount: bool,
     spl_accounts: Option<(Address, Address, Address)>, // (token_program, depositor_ata, vault_ata)
     extra_hook_accounts: &[AudrenAccountMeta],
     rng: &mut R,
 ) -> Result<(AudrenInstruction, PreparedNote), ClientError> {
     let is_native = mint == NATIVE_SOL_MINT;
-    let prepared = prepare_shielded_note(
-        recipient, mint, net_amount, false, None, false, [0u8; 7], rng,
-    )?;
+    if fee_from_amount && !is_native {
+        return Err(ClientError::InvalidProofInput(
+            "fee_from_amount is only valid for Native SOL deposits",
+        ));
+    }
+    let prepared = if fee_from_amount {
+        let dyn_out = prepare_dynamic_output(recipient, mint, net_amount, [0u8; 7], rng)?;
+        let g_mint = asset_generator(&mint);
+        let v_pt = Scalar::from(net_amount) * decompress(&g_mint)?;
+        PreparedNote {
+            entry: NoteEntry {
+                view_tag: dyn_out.view_tag,
+                ephemeral_pk: dyn_out.ephemeral_pk,
+                stealth_pk: dyn_out.stealth_pk,
+                asset_tag: g_mint,
+                commitment: compress(&v_pt),
+                ciphertext: dyn_out.encrypted_memo,
+            },
+            mint,
+            amount: net_amount,
+            asset_blinding: Scalar::ZERO,
+            value_blinding: Scalar::ZERO,
+            stealth_scalar: dyn_out.stealth_scalar,
+        }
+    } else {
+        prepare_shielded_note(
+            recipient, mint, net_amount, false, None, false, [0u8; 7], rng,
+        )?
+    };
 
     let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
     let (out_page, _) = derive_epoch_page_pda(&program_id, pool_id, active_page_id);
@@ -273,9 +305,16 @@ pub fn build_deposit_with_options<R: RngCore + CryptoRng>(
     };
     let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
+    let flags = (if is_native { DEPOSIT_FLAG_NATIVE_SOL } else { 0 })
+        | (if fee_from_amount {
+            DEPOSIT_FLAG_FEE_FROM_AMOUNT
+        } else {
+            0
+        });
+
     let mut data = Vec::with_capacity(1 + 9 + DYNAMIC_OUTPUT_WIRE_LEN);
     data.push(TAG_DEPOSIT);
-    data.push(u8::from(is_native));
+    data.push(flags);
     data.extend_from_slice(&gross_amount.to_le_bytes());
     data.push(prepared.entry.view_tag);
     data.extend_from_slice(&prepared.entry.ephemeral_pk);
@@ -748,8 +787,10 @@ pub fn build_merge<R: RngCore + CryptoRng>(
     ))
 }
 
-/// Parameters for a non-custodial 1-tx router-agnostic private swap (Jupiter, Orca, Raydium, etc.).
-pub struct SwapViaRouterParams<'a> {
+/// Parameters for a non-custodial 1-tx protocol-agnostic shielded DeFi action via isolated escrow
+/// (`ExecViaEscrow`, Tag 5): DEX swaps, Kamino supply lending (`kTokens`), yield vaults,
+/// liquid staking (`JitoSOL`/`INF`), perp LP (`JLP`), or RWA mint/redeem.
+pub struct ExecViaEscrowParams<'a> {
     pub program_id: Address,
     pub payer: Address,
     pub pool_id: u32,
@@ -764,27 +805,38 @@ pub struct SwapViaRouterParams<'a> {
     pub token_program_out: Address,
     pub amount_in: u64,
     pub min_amount_out: u64,
+    /// Optional native relayer fee bound inside `ctx_hash` (0 for direct / subsidized execution).
+    pub relayer_fee: u64,
+    /// When `false` (`fee_side = in`), `relayer_fee` is deducted from `amount_in` in `mint_in`
+    /// before the CPI (`escrow_in` receives `amount_in - relayer_fee`).
+    /// When `true` (`fee_side = out`), `relayer_fee` is deducted from `actual_out` in `mint_out`
+    /// after the CPI before committing `net_out >= min_amount_out`.
+    pub fee_on_output: bool,
+    /// Relayer token account receiving `relayer_fee` (required when `relayer_fee > 0`,
+    /// must match `mint_in` when `!fee_on_output` or `mint_out` when `fee_on_output`).
+    pub fee_recipient_ata: Option<Address>,
     pub allow_partial_refund: bool,
     pub recipient: &'a AudrenAddress,
     pub change_addr: &'a AudrenAddress,
     pub auditor_pk: Option<Point>,
-    /// External DEX / aggregator program ID (e.g., Jupiter v6, Orca, Raydium, Meteora, Phoenix).
-    pub router_program_id: Address,
-    /// Index of `swap_escrow` PDA inside `router_accounts`.
+    /// External Solana DeFi program ID (DEX aggregator, Kamino Lend/Vaults, Sanctum, JLP, etc.).
+    pub target_program_id: Address,
+    /// Index of `escrow_pda` inside `action_accounts`.
     pub escrow_idx: u8,
-    /// Index of `escrow_in` ATA (owned by `swap_escrow`) inside `router_accounts`.
+    /// Index of `escrow_in` ATA (owned by `escrow_pda`) inside `action_accounts`.
     pub escrow_in_idx: u8,
-    /// Index of `escrow_out` ATA (owned by `swap_escrow`) inside `router_accounts`.
+    /// Index of `escrow_out` ATA (owned by `escrow_pda`) inside `action_accounts`.
     pub escrow_out_idx: u8,
-    /// Raw external router instruction data (e.g., from Jupiter `/swap-instructions` or AMM builder).
-    pub router_ix_data: &'a [u8],
-    /// Remaining accounts required by the external router instruction.
-    pub router_accounts: &'a [AudrenAccountMeta],
+    /// Raw external program instruction data.
+    pub target_ix_data: &'a [u8],
+    /// Remaining accounts required by the external program instruction.
+    pub action_accounts: &'a [AudrenAccountMeta],
 }
 
-/// Tag 5: `SwapViaRouter` — 1-tx router-agnostic private swap matching `program/src/lib.rs` byte-for-byte.
-pub fn build_swap_via_router<R: RngCore + CryptoRng>(
-    params: &SwapViaRouterParams<'_>,
+/// Tag 5: `ExecViaEscrow` — 1-tx protocol-agnostic shielded DeFi execution matching
+/// `program/src/lib.rs` byte-for-byte.
+pub fn build_exec_via_escrow<R: RngCore + CryptoRng>(
+    params: &ExecViaEscrowParams<'_>,
     rng: &mut R,
 ) -> Result<
     (
@@ -796,11 +848,32 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     ClientError,
 > {
     if params.amount_in == 0 || params.amount_in > params.input_note.amount {
-        return Err(ClientError::InvalidProofInput("invalid swap amount_in"));
+        return Err(ClientError::InvalidProofInput("invalid amount_in"));
     }
     if params.min_amount_out == 0 {
         return Err(ClientError::InvalidProofInput("min_amount_out must be > 0"));
     }
+    if params.relayer_fee == 0 && params.fee_on_output {
+        return Err(ClientError::InvalidProofInput(
+            "fee_on_output requires relayer_fee > 0",
+        ));
+    }
+    if params.relayer_fee > 0 && !params.fee_on_output && params.relayer_fee >= params.amount_in {
+        return Err(ClientError::InvalidProofInput(
+            "input-side relayer_fee must be strictly less than amount_in",
+        ));
+    }
+    let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
+    let (fee_recipient_meta, fee_recip_bytes) = if params.relayer_fee > 0 {
+        let fee_ata = params.fee_recipient_ata.ok_or(ClientError::InvalidProofInput(
+            "fee_recipient_ata required when relayer_fee > 0",
+        ))?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(fee_ata.as_ref());
+        (AudrenAccountMeta::writable(fee_ata), arr)
+    } else {
+        (AudrenAccountMeta::readonly(sys_prog), [0u8; 32])
+    };
     let m = m_for_input_pages(params.input_page_ids.len())
         .map_err(|_| ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages"))?;
     let spend_x = params
@@ -810,9 +883,19 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
 
     let chg_amount = params.input_note.amount - params.amount_in;
     let has_change = chg_amount > 0;
-    let flags = (u8::from(has_change)) | (u8::from(params.allow_partial_refund) << 1);
+    let flags = (if has_change { EXEC_FLAG_HAS_CHANGE } else { 0 })
+        | (if params.allow_partial_refund {
+            EXEC_FLAG_ALLOW_PARTIAL_REFUND
+        } else {
+            0
+        })
+        | (if params.fee_on_output {
+            EXEC_FLAG_FEE_ON_OUTPUT
+        } else {
+            0
+        });
 
-    let out_desc = prepare_dynamic_swap_output(
+    let out_desc = prepare_dynamic_output(
         params.recipient,
         params.mint_out,
         params.min_amount_out,
@@ -822,7 +905,7 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     let out_desc_wire = encode_dynamic_output_wire(&out_desc);
 
     let refund_desc_opt = if params.allow_partial_refund {
-        Some(prepare_dynamic_swap_output(
+        Some(prepare_dynamic_output(
             params.change_addr,
             params.input_note.mint,
             0,
@@ -881,15 +964,17 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
         .unwrap_or(&[]);
 
     let ctx_hash = transcript_root(&[
-        b"audren/v1/swap_router",
+        b"audren/v1/exec_escrow",
         params.program_id.as_ref(),
         &params.pool_id.to_le_bytes(),
         &[m, params.shard_id, flags],
-        params.router_program_id.as_ref(),
+        params.target_program_id.as_ref(),
         &params.input_note.mint,
         &params.mint_out,
         &params.amount_in.to_le_bytes(),
         &params.min_amount_out.to_le_bytes(),
+        &params.relayer_fee.to_le_bytes(),
+        &fee_recip_bytes,
         &out_desc_wire,
         chg_wire_slice,
         c_chg_slice,
@@ -917,18 +1002,19 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     )?;
 
     let mut data = Vec::with_capacity(
-        25 + DYNAMIC_OUTPUT_WIRE_LEN + 1200 + triptych.proof.len() + params.router_ix_data.len(),
+        33 + DYNAMIC_OUTPUT_WIRE_LEN + 1200 + triptych.proof.len() + params.target_ix_data.len(),
     );
-    data.push(TAG_SWAP_VIA_ROUTER);
+    data.push(TAG_EXEC_VIA_ESCROW);
     data.push(m);
     data.push(params.shard_id);
     data.push(flags);
     data.extend_from_slice(&params.amount_in.to_le_bytes());
     data.extend_from_slice(&params.min_amount_out.to_le_bytes());
+    data.extend_from_slice(&params.relayer_fee.to_le_bytes());
     data.push(params.escrow_idx);
     data.push(params.escrow_in_idx);
     data.push(params.escrow_out_idx);
-    data.extend_from_slice(&(params.router_ix_data.len() as u16).to_le_bytes());
+    data.extend_from_slice(&(params.target_ix_data.len() as u16).to_le_bytes());
     data.extend_from_slice(&out_desc_wire);
 
     let ret_change = if let Some((note_chg, s_chg)) = change_note_opt {
@@ -957,12 +1043,11 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
         data.extend_from_slice(rw);
     }
     data.extend_from_slice(&triptych.proof);
-    data.extend_from_slice(params.router_ix_data);
+    data.extend_from_slice(params.target_ix_data);
 
     let (pool_pda, _) = derive_pool_pda(&params.program_id, params.pool_id);
     let (vault_auth, _) = derive_vault_auth_pda(&params.program_id, params.pool_id);
-    let (swap_escrow, _) =
-        derive_swap_escrow_pda(&params.program_id, params.pool_id, params.shard_id);
+    let (escrow_pda, _) = derive_escrow_pda(&params.program_id, params.pool_id, params.shard_id);
     let (out_page, _) =
         derive_epoch_page_pda(&params.program_id, params.pool_id, params.out_page_id);
     let (nullifier_pda, _) =
@@ -985,7 +1070,6 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     let vault_out = derive_ata(&vault_auth, &params.token_program_out, &mint_out_addr);
 
     let zk_prog = Address::new_from_array(ZK_ELGAMAL_PROOF_PROGRAM_ID);
-    let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
     let mut accounts = vec![
         AudrenAccountMeta::writable_signer(params.payer),
@@ -1002,15 +1086,16 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
         AudrenAccountMeta::readonly(mint_out_addr),
         AudrenAccountMeta::writable(vault_out),
         AudrenAccountMeta::readonly(params.token_program_out),
-        AudrenAccountMeta::readonly(params.router_program_id),
+        AudrenAccountMeta::readonly(params.target_program_id),
+        fee_recipient_meta,
     ];
     for &pid in params.input_page_ids {
         accounts.push(AudrenAccountMeta::readonly(
             derive_epoch_page_pda(&params.program_id, params.pool_id, pid).0,
         ));
     }
-    for meta in params.router_accounts {
-        let is_signer = if meta.pubkey == swap_escrow {
+    for meta in params.action_accounts {
+        let is_signer = if meta.pubkey == escrow_pda {
             false
         } else {
             meta.is_signer
@@ -1034,43 +1119,96 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     ))
 }
 
-/// Tag 6: `Withdraw` — unshield exact `amount` to any recipient address, with optional hidden change note.
-#[allow(clippy::too_many_arguments)]
-pub fn build_withdraw<R: RngCore + CryptoRng>(
-    program_id: Address,
-    payer: Address,
-    pool_id: u32,
-    out_page_id: u64,
-    input_page_ids: &[u64],
-    ring: &[RingSlotWitness],
-    input_note: &OwnedNote,
-    secret_index: usize,
-    recipient_account: Address, // wallet for native SOL, recipient_ata for SPL/Token-2022
-    change_addr: &AudrenAddress,
-    amount: u64,
-    spl_token_program: Option<Address>, // `None` for native SOL, `Some(token_program)` for SPL
-    auditor_pk: Option<Point>,
+/// Parameters for Tag 6 `Withdraw`: unshield Native SOL, SPL / Token-2022, or atomically unwrap
+/// a shielded WSOL note into Native SOL (`unwrap_wsol = true`), with optional native self-paying
+/// `relayer_fee` and hidden change note.
+pub struct WithdrawParams<'a> {
+    pub program_id: Address,
+    pub payer: Address,
+    pub pool_id: u32,
+    pub out_page_id: u64,
+    pub input_page_ids: &'a [u64],
+    pub ring: &'a [RingSlotWitness],
+    pub input_note: &'a OwnedNote,
+    pub secret_index: usize,
+    /// Native SOL wallet when `is_native || unwrap_wsol`, or `recipient_ata` for SPL/Token-2022.
+    pub recipient_account: Address,
+    pub change_addr: &'a AudrenAddress,
+    /// Net amount delivered to `recipient_account`. Total debited from note is `amount + relayer_fee`.
+    pub amount: u64,
+    /// Optional native relayer fee bound inside `ctx_hash` (0 for direct / subsidized withdrawal).
+    pub relayer_fee: u64,
+    /// Relayer Native SOL wallet (when `is_native || unwrap_wsol`) or relayer token ATA (for SPL/Token-2022).
+    pub fee_recipient: Option<Address>,
+    /// Atomically unwrap a shielded WSOL note directly to Native SOL at `recipient_account`
+    /// (and pay `relayer_fee` in Native SOL to `fee_recipient`) with zero recipient ATA needed.
+    pub unwrap_wsol: bool,
+    /// `None` for Native SOL, `Some(token_program)` for SPL/Token-2022 or `unwrap_wsol`.
+    pub spl_token_program: Option<Address>,
+    pub auditor_pk: Option<Point>,
+}
+
+/// Tag 6: `Withdraw` — unshield exact `amount` to any recipient address, with optional native
+/// `relayer_fee`, atomic `unwrap_wsol`, and optional hidden change note.
+pub fn build_withdraw_with_params<R: RngCore + CryptoRng>(
+    params: &WithdrawParams<'_>,
     rng: &mut R,
 ) -> Result<(AudrenInstruction, Option<PreparedNote>), ClientError> {
-    if amount == 0 || amount > input_note.amount {
+    let total_out = params
+        .amount
+        .checked_add(params.relayer_fee)
+        .ok_or(ClientError::InvalidProofInput("withdraw amount overflow"))?;
+    if params.amount == 0 || total_out > params.input_note.amount {
         return Err(ClientError::InvalidProofInput("invalid withdraw amount"));
     }
-    let m = m_for_input_pages(input_page_ids.len())
+    let is_native = params.input_note.mint == NATIVE_SOL_MINT;
+    if params.unwrap_wsol {
+        if is_native || params.input_note.mint != WSOL_MINT {
+            return Err(ClientError::InvalidProofInput(
+                "unwrap_wsol requires a WSOL input note",
+            ));
+        }
+    }
+    let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
+    let (fee_recipient_meta, fee_recip_bytes) = if params.relayer_fee > 0 {
+        let fee_acc = params.fee_recipient.ok_or(ClientError::InvalidProofInput(
+            "fee_recipient required when relayer_fee > 0",
+        ))?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(fee_acc.as_ref());
+        (AudrenAccountMeta::writable(fee_acc), arr)
+    } else {
+        (AudrenAccountMeta::readonly(sys_prog), [0u8; 32])
+    };
+    let m = m_for_input_pages(params.input_page_ids.len())
         .map_err(|_| ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages"))?;
-    let spend_x = input_note
+    let spend_x = params
+        .input_note
         .spend_x
         .ok_or(ClientError::InvalidProofInput("spend_x required"))?;
-    let is_native = input_note.mint == NATIVE_SOL_MINT;
-    let chg_amount = input_note.amount - amount;
+    let chg_amount = params.input_note.amount - total_out;
     let has_change = chg_amount > 0;
+    let flags = (if is_native {
+        WITHDRAW_FLAG_NATIVE_SOL
+    } else {
+        0
+    }) | (if has_change {
+        WITHDRAW_FLAG_HAS_CHANGE
+    } else {
+        0
+    }) | (if params.unwrap_wsol {
+        WITHDRAW_FLAG_UNWRAP_WSOL
+    } else {
+        0
+    });
 
-    let g_mint = asset_generator(&input_note.mint);
+    let g_mint = asset_generator(&params.input_note.mint);
     let g_mint_pt = decompress(&g_mint)?;
 
     let (change_opt, c_chg_opt, range64_opt, v_spend, v_spend_eff_blinding) = if has_change {
         let note_chg = prepare_shielded_note(
-            change_addr,
-            input_note.mint,
+            params.change_addr,
+            params.input_note.mint,
             chg_amount,
             false,
             None,
@@ -1080,7 +1218,8 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
         )?;
         let s_chg = Scalar::random(rng);
         let (range64, c_chg) = prove_range_u64(chg_amount, s_chg)?;
-        let v_spend_pt = Scalar::from(amount) * g_mint_pt + decompress(&note_chg.entry.commitment)?;
+        let v_spend_pt =
+            Scalar::from(total_out) * g_mint_pt + decompress(&note_chg.entry.commitment)?;
         let chg_v_blind = note_chg.value_blinding;
         (
             Some((note_chg, s_chg)),
@@ -1094,7 +1233,7 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
             None,
             None,
             None,
-            compress(&(Scalar::from(amount) * g_mint_pt)),
+            compress(&(Scalar::from(total_out) * g_mint_pt)),
             Scalar::ZERO,
         )
     };
@@ -1105,12 +1244,14 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
 
     let ctx_hash = transcript_root(&[
         b"audren/v1/withdraw",
-        program_id.as_ref(),
-        &pool_id.to_le_bytes(),
-        &[m, u8::from(is_native), u8::from(has_change)],
-        &input_note.mint,
-        recipient_account.as_ref(),
-        &amount.to_le_bytes(),
+        params.program_id.as_ref(),
+        &params.pool_id.to_le_bytes(),
+        &[m, flags],
+        &params.input_note.mint,
+        params.recipient_account.as_ref(),
+        &params.amount.to_le_bytes(),
+        &params.relayer_fee.to_le_bytes(),
+        &fee_recip_bytes,
         chg_wire_slice,
         c_chg_slice,
     ]);
@@ -1118,29 +1259,29 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
     let triptych = prove_triptych(
         &TriptychWitness {
             m,
-            input_page_ids,
-            secret_index,
-            ring,
+            input_page_ids: params.input_page_ids,
+            secret_index: params.secret_index,
+            ring: params.ring,
             spend_x,
-            a_note_blinding: input_note.asset_blinding,
-            value: input_note.amount,
-            v_note_blinding: input_note.value_blinding,
+            a_note_blinding: params.input_note.asset_blinding,
+            value: params.input_note.amount,
+            v_note_blinding: params.input_note.value_blinding,
             a_spend: g_mint,
             a_spend_blinding: Scalar::ZERO,
             v_spend,
             v_spend_eff_blinding,
-            auditor_pk,
+            auditor_pk: params.auditor_pk,
             ctx_hash,
         },
         rng,
     )?;
 
-    let mut data = Vec::with_capacity(12 + 1025 + triptych.proof.len());
+    let mut data = Vec::with_capacity(19 + 1025 + triptych.proof.len());
     data.push(TAG_WITHDRAW);
     data.push(m);
-    data.push(u8::from(is_native));
-    data.push(u8::from(has_change));
-    data.extend_from_slice(&amount.to_le_bytes());
+    data.push(flags);
+    data.extend_from_slice(&params.amount.to_le_bytes());
+    data.extend_from_slice(&params.relayer_fee.to_le_bytes());
 
     let ret_change = if let Some((note_chg, s_chg)) = change_opt {
         let c_chg = c_chg_opt.unwrap();
@@ -1166,25 +1307,26 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
 
     data.extend_from_slice(&triptych.proof);
 
-    let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
-    let (out_page, _) = derive_epoch_page_pda(&program_id, pool_id, out_page_id);
-    let (nullifier_pda, _) = derive_nullifier_pda(&program_id, pool_id, &triptych.nullifier);
-    let out_lane = lane_of_page_id(out_page_id);
+    let (pool_pda, _) = derive_pool_pda(&params.program_id, params.pool_id);
+    let (out_page, _) =
+        derive_epoch_page_pda(&params.program_id, params.pool_id, params.out_page_id);
+    let (nullifier_pda, _) =
+        derive_nullifier_pda(&params.program_id, params.pool_id, &triptych.nullifier);
+    let out_lane = lane_of_page_id(params.out_page_id);
     let pool_meta = if has_change && out_lane == 0 {
         AudrenAccountMeta::writable(pool_pda)
     } else {
         AudrenAccountMeta::readonly(pool_pda)
     };
     let rent_vault = if has_change && out_lane >= 1 {
-        derive_lane_rent_vault_pda(&program_id, pool_id, out_lane).0
+        derive_lane_rent_vault_pda(&params.program_id, params.pool_id, out_lane).0
     } else {
-        derive_page_rent_vault_pda(&program_id, pool_id).0
+        derive_page_rent_vault_pda(&params.program_id, params.pool_id).0
     };
     let zk_prog = Address::new_from_array(ZK_ELGAMAL_PROOF_PROGRAM_ID);
-    let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
     let mut accounts = vec![
-        AudrenAccountMeta::writable_signer(payer),
+        AudrenAccountMeta::writable_signer(params.payer),
         pool_meta,
         if has_change {
             AudrenAccountMeta::writable(out_page)
@@ -1199,40 +1341,97 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
         },
         AudrenAccountMeta::readonly(zk_prog),
         AudrenAccountMeta::readonly(sys_prog),
+        fee_recipient_meta,
     ];
 
     if is_native {
-        let (sol_vault, _) = derive_sol_vault_pda(&program_id, pool_id);
+        let (sol_vault, _) = derive_sol_vault_pda(&params.program_id, params.pool_id);
         accounts.push(AudrenAccountMeta::writable(sol_vault));
-        accounts.push(AudrenAccountMeta::writable(recipient_account));
+        accounts.push(AudrenAccountMeta::writable(params.recipient_account));
+    } else if params.unwrap_wsol {
+        let token_program = params
+            .spl_token_program
+            .unwrap_or_else(|| Address::new_from_array(CLASSIC_TOKEN_PROGRAM_ID));
+        let (vault_auth, _) = derive_vault_auth_pda(&params.program_id, params.pool_id);
+        let mint_addr = Address::new_from_array(params.input_note.mint);
+        let vault_ata = derive_ata(&vault_auth, &token_program, &mint_addr);
+        let (unwrap_pda, _) =
+            derive_unwrap_pda(&params.program_id, params.pool_id, &triptych.nullifier);
+        accounts.push(AudrenAccountMeta::readonly(vault_auth));
+        accounts.push(AudrenAccountMeta::readonly(mint_addr));
+        accounts.push(AudrenAccountMeta::writable(vault_ata));
+        accounts.push(AudrenAccountMeta::writable(params.recipient_account));
+        accounts.push(AudrenAccountMeta::readonly(token_program));
+        accounts.push(AudrenAccountMeta::writable(unwrap_pda));
     } else {
-        let token_program = spl_token_program.ok_or(ClientError::InvalidProofInput(
+        let token_program = params.spl_token_program.ok_or(ClientError::InvalidProofInput(
             "SPL withdraw requires token_program",
         ))?;
-        let (vault_auth, _) = derive_vault_auth_pda(&program_id, pool_id);
-        let mint_addr = Address::new_from_array(input_note.mint);
+        let (vault_auth, _) = derive_vault_auth_pda(&params.program_id, params.pool_id);
+        let mint_addr = Address::new_from_array(params.input_note.mint);
         let vault_ata = derive_ata(&vault_auth, &token_program, &mint_addr);
         accounts.push(AudrenAccountMeta::readonly(vault_auth));
         accounts.push(AudrenAccountMeta::readonly(mint_addr));
         accounts.push(AudrenAccountMeta::writable(vault_ata));
-        accounts.push(AudrenAccountMeta::writable(recipient_account));
+        accounts.push(AudrenAccountMeta::writable(params.recipient_account));
         accounts.push(AudrenAccountMeta::readonly(token_program));
     }
 
-    for &pid in input_page_ids {
+    for &pid in params.input_page_ids {
         accounts.push(AudrenAccountMeta::readonly(
-            derive_epoch_page_pda(&program_id, pool_id, pid).0,
+            derive_epoch_page_pda(&params.program_id, params.pool_id, pid).0,
         ));
     }
 
     Ok((
         AudrenInstruction {
-            program_id,
+            program_id: params.program_id,
             accounts,
             data,
         },
         ret_change,
     ))
+}
+
+/// Convenience wrapper for zero-fee `Withdraw` (calls [`build_withdraw_with_params`]).
+#[allow(clippy::too_many_arguments)]
+pub fn build_withdraw<R: RngCore + CryptoRng>(
+    program_id: Address,
+    payer: Address,
+    pool_id: u32,
+    out_page_id: u64,
+    input_page_ids: &[u64],
+    ring: &[RingSlotWitness],
+    input_note: &OwnedNote,
+    secret_index: usize,
+    recipient_account: Address,
+    change_addr: &AudrenAddress,
+    amount: u64,
+    spl_token_program: Option<Address>,
+    auditor_pk: Option<Point>,
+    rng: &mut R,
+) -> Result<(AudrenInstruction, Option<PreparedNote>), ClientError> {
+    build_withdraw_with_params(
+        &WithdrawParams {
+            program_id,
+            payer,
+            pool_id,
+            out_page_id,
+            input_page_ids,
+            ring,
+            input_note,
+            secret_index,
+            recipient_account,
+            change_addr,
+            amount,
+            relayer_fee: 0,
+            fee_recipient: None,
+            unwrap_wsol: false,
+            spl_token_program,
+            auditor_pk,
+        },
+        rng,
+    )
 }
 
 /// Tag 7: `SetPaused` — emergency deposit/transfer/swap circuit breaker.
@@ -1253,7 +1452,7 @@ pub fn build_set_paused(
     }
 }
 
-/// Split an oversized Audren instruction (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`) that
+/// Split an oversized Audren instruction (`Transfer`, `Merge`, `ExecViaEscrow`, `Withdraw`) that
 /// exceeds Solana Transaction v1's `4,096 B` single-tx limit into `<= 768 B` `WriteProofBuffer`
 /// chunks plus a `2 B` `ExecBuffered` instruction that atomically executes the payload and
 /// refunds 100% of the ephemeral `ProofBuffer` rent back to `payer`.
@@ -1273,10 +1472,10 @@ pub fn build_buffered_execution(
         .ok_or(ClientError::InvalidProofInput("empty inner instruction"))?;
     if !matches!(
         inner_tag,
-        TAG_TRANSFER | TAG_MERGE | TAG_SWAP_VIA_ROUTER | TAG_WITHDRAW
+        TAG_TRANSFER | TAG_MERGE | TAG_EXEC_VIA_ESCROW | TAG_WITHDRAW
     ) {
         return Err(ClientError::InvalidProofInput(
-            "only Transfer, Merge, SwapViaRouter, and Withdraw support ProofBuffer execution",
+            "only Transfer, Merge, ExecViaEscrow, and Withdraw support ProofBuffer execution",
         ));
     }
     if payload.is_empty() || payload.len() > PROOF_BUFFER_MAX_PAYLOAD {

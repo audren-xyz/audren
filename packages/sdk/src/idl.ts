@@ -9,10 +9,10 @@ export const AUDREN_CODAMA_IDL = {
     "kind": "programNode",
     "name": "audren",
     "publicKey": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "origin": "shank",
     "docs": [
-      "Audren \u2014 Multi-Asset Confidential & Full-Private Settlement & Swap Protocol on Solana (Pinocchio + sBPFv3).",
+      "Audren \u2014 Multi-Asset Shielded Settlement & Protocol-Agnostic DeFi Execution Protocol on Solana (Pinocchio + sBPFv3).",
       "Zero trusted setup: pure Ristretto255 Multi-Base Binary Triptych (32/64/128-note rings) + Agave native Bulletproofs."
     ],
     "accounts": [
@@ -1330,15 +1330,15 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "isNativeSol",
+            "name": "flags",
             "type": {
-              "kind": "booleanTypeNode",
-              "size": {
-                "kind": "numberTypeNode",
-                "format": "u8",
-                "endian": "le"
-              }
-            }
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "bit0 = isNativeSol, bit1 = feeFromAmount (Native SOL only: deducts page rent fee from amount so retiring wallets can sweep to 0 lamports)."
+            ]
           },
           {
             "kind": "instructionArgumentNode",
@@ -1795,10 +1795,11 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "instructionNode",
-        "name": "swapViaRouter",
+        "name": "execViaEscrow",
         "docs": [
-          "Tag 5: Single-transaction router-agnostic private DEX swap via sharded isolated swap_escrow PDA.",
-          "Trailing accounts `[15..15+pages]` are read-only input EpochPages; `[15+pages..]` are external router accounts (up to 80) with `swap_escrow`, `escrow_in`, `escrow_out` at arbitrary indices `(escrowIdx, escrowInIdx, escrowOutIdx)`."
+          "Tag 5: Single-transaction protocol-agnostic shielded DeFi action via sharded isolated escrow PDA (DEX swaps, supply lending, yield vaults, liquid staking, perp LP, RWA mint/redeem).",
+          "Supports optional native self-paying relayerFee bound in ctx_hash on either input mint (bit2=0) or output mint (bit2=1).",
+          "Trailing accounts `[16..16+pages]` are read-only input EpochPages; `[16+pages..]` are external target program accounts (up to 80) with `escrow`, `escrow_in`, `escrow_out` at arbitrary indices `(escrowIdx, escrowInIdx, escrowOutIdx)`."
         ],
         "discriminators": [
           {
@@ -1993,12 +1994,22 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionAccountNode",
-            "name": "routerProgram",
+            "name": "targetProgram",
             "isWritable": false,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Executable external DEX / aggregator program."
+              "Executable external DeFi / DEX / vault / lending program."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "feeRecipientAta",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Relayer fee token account (writable when relayerFee > 0; read-only System Program placeholder when 0)."
             ]
           }
         ],
@@ -2035,7 +2046,7 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "Swap escrow shard index 0..16."
+              "Escrow shard index 0..16."
             ]
           },
           {
@@ -2047,7 +2058,7 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "bit0 = hasChange, bit1 = allowPartialRefund."
+              "bit0 = hasChange, bit1 = allowPartialRefund, bit2 = feeOnOutput (0=mintIn fee, 1=mintOut fee)."
             ]
           },
           {
@@ -2070,6 +2081,18 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
+            "name": "relayerFee",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            },
+            "docs": [
+              "Optional relayer fee bound inside ctx_hash (0 for direct / subsidized execution)."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
             "name": "escrowIdx",
             "type": {
               "kind": "numberTypeNode",
@@ -2077,7 +2100,7 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "Index of swap_escrow PDA inside routerAccounts."
+              "Index of escrow PDA inside actionAccounts."
             ]
           },
           {
@@ -2089,7 +2112,7 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "Index of escrow_in ATA inside routerAccounts."
+              "Index of escrow_in ATA inside actionAccounts."
             ]
           },
           {
@@ -2101,12 +2124,12 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "Index of escrow_out ATA inside routerAccounts."
+              "Index of escrow_out ATA inside actionAccounts."
             ]
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "routerDataLen",
+            "name": "targetDataLen",
             "type": {
               "kind": "numberTypeNode",
               "format": "u16",
@@ -2115,7 +2138,7 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "swapOutDesc",
+            "name": "outDesc",
             "type": {
               "kind": "definedTypeLinkNode",
               "name": "dynamicOutputWire"
@@ -2128,7 +2151,7 @@ export const AUDREN_CODAMA_IDL = {
               "kind": "bytesTypeNode"
             },
             "docs": [
-              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(128) + rangeU64(672) if bit0] || [refundDesc(129) if bit1] || triptychProof || routerInstructionData(routerDataLen)."
+              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(160) + rangeU64(672) if bit0] || [refundDesc(129) if bit1] || triptychProof || targetInstructionData(targetDataLen)."
             ]
           }
         ]
@@ -2137,10 +2160,11 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "withdraw",
         "docs": [
-          "Tag 6: Full-private spend to a public SOL or SPL/Token-2022 recipient with optional hidden change note.",
-          "Full withdrawals (hasChange=false) always succeed even when pool.paused=true (non-custodial escape hatch).",
-          "Native SOL accounts `[7..9]`: [solVault (wr), recipient (wr)], followed by input EpochPages.",
-          "SPL/Token-2022 accounts `[7..12]`: [vaultAuth (ro), mint (ro), vaultAta (wr), recipientAta (wr), tokenProgram (ro)], followed by input EpochPages and optional TransferHook accounts."
+          "Tag 6: Full-private spend to a public SOL or SPL/Token-2022 recipient with optional native self-paying relayerFee, atomic WSOL->Native SOL unwrap (unwrapWsol), and optional hidden change note.",
+          "Full withdrawals (hasChange=false) always succeed even when pool.paused=true across all three modes (non-custodial escape hatch).",
+          "Native SOL accounts `[7..10]`: [feeRecipient, solVault (wr), recipient (wr)], followed by input EpochPages.",
+          "SPL/Token-2022 accounts `[7..13]`: [feeRecipient, vaultAuth (ro), mint (ro), vaultAta (wr), recipientAta (wr), tokenProgram (ro)], followed by input EpochPages and optional TransferHook accounts.",
+          "Unwrap WSOL accounts `[7..14]`: [feeRecipient, vaultAuth (ro), wsolMint (ro), vaultAta (wr), recipientWallet (wr), classicTokenProgram (ro), unwrapPda (wr)], followed by input EpochPages."
         ],
         "discriminators": [
           {
@@ -2257,12 +2281,22 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionAccountNode",
+            "name": "feeRecipient",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Relayer fee wallet (Native SOL / unwrapWsol) or token ATA (SPL/Token-2022) when relayerFee > 0; read-only System Program placeholder when 0."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
             "name": "solVaultOrVaultAuth",
             "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Native SOL: solVault (wr); SPL/Token-2022: vaultAuth (ro)."
+              "Native SOL: solVault (wr); SPL/Token-2022/unwrapWsol: vaultAuth (ro)."
             ]
           },
           {
@@ -2272,7 +2306,7 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Native SOL: recipient (wr); SPL/Token-2022: mint (ro)."
+              "Native SOL: recipient (wr); SPL/Token-2022/unwrapWsol: mint (ro)."
             ]
           },
           {
@@ -2282,17 +2316,17 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Native SOL: inputPage0 (ro); SPL/Token-2022: vaultAta (wr)."
+              "Native SOL: inputPage0 (ro); SPL/Token-2022/unwrapWsol: vaultAta (wr)."
             ]
           },
           {
             "kind": "instructionAccountNode",
-            "name": "recipientAta",
+            "name": "recipientOrRecipientAta",
             "isWritable": true,
             "isSigner": false,
             "isOptional": true,
             "docs": [
-              "SPL/Token-2022 only: recipient token account (wr)."
+              "SPL/Token-2022: recipientAta (wr); unwrapWsol: recipient Native SOL wallet (wr)."
             ]
           },
           {
@@ -2302,8 +2336,26 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": false,
             "isOptional": true,
             "docs": [
-              "SPL/Token-2022 only: Classic SPL Token or Token-2022 program."
+              "SPL/Token-2022 / unwrapWsol: Classic SPL Token or Token-2022 program."
             ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "unwrapAcc",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": true,
+            "docs": [
+              "unwrapWsol only: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] created and closed atomically."
+            ],
+            "defaultValue": {
+              "kind": "pdaValueNode",
+              "pda": {
+                "kind": "pdaLinkNode",
+                "name": "unwrap"
+              },
+              "seeds": []
+            }
           }
         ],
         "arguments": [
@@ -2332,27 +2384,15 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "isNativeSol",
+            "name": "flags",
             "type": {
-              "kind": "booleanTypeNode",
-              "size": {
-                "kind": "numberTypeNode",
-                "format": "u8",
-                "endian": "le"
-              }
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "hasChange",
-            "type": {
-              "kind": "booleanTypeNode",
-              "size": {
-                "kind": "numberTypeNode",
-                "format": "u8",
-                "endian": "le"
-              }
-            }
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "bit0 = isNativeSol, bit1 = hasChange, bit2 = unwrapWsol (WSOL note -> Native SOL payout)."
+            ]
           },
           {
             "kind": "instructionArgumentNode",
@@ -2361,7 +2401,22 @@ export const AUDREN_CODAMA_IDL = {
               "kind": "numberTypeNode",
               "format": "u64",
               "endian": "le"
-            }
+            },
+            "docs": [
+              "Net amount delivered to recipient (total spent from note is amountOut + relayerFee)."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "relayerFee",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            },
+            "docs": [
+              "Optional self-paying relayer fee bound inside ctx_hash."
+            ]
           },
           {
             "kind": "instructionArgumentNode",
@@ -2370,7 +2425,7 @@ export const AUDREN_CODAMA_IDL = {
               "kind": "bytesTypeNode"
             },
             "docs": [
-              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(128) + rangeU64(672) if hasChange] || triptychProof."
+              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(160) + rangeU64(672) if hasChange] || triptychProof."
             ]
           }
         ]
@@ -2580,7 +2635,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "execBuffered",
         "docs": [
-          "Tag 9: Execute Transfer (3), Merge (4), SwapViaRouter (5), or Withdraw (6) directly from a completed ProofBuffer PDA, atomically closing the buffer and refunding 100% of rent to payer.",
+          "Tag 9: Execute Transfer (3), Merge (4), ExecViaEscrow (5), or Withdraw (6) directly from a completed ProofBuffer PDA, atomically closing the buffer and refunding 100% of rent to payer.",
           "Accounts: [0] proofBuffer (wr), [1..] exact account list of the inner instruction (where [1] = payer/authority)."
         ],
         "discriminators": [
@@ -2655,7 +2710,7 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "One of: 3 (Transfer), 4 (Merge), 5 (SwapViaRouter), 6 (Withdraw)."
+              "One of: 3 (Transfer), 4 (Merge), 5 (ExecViaEscrow), 6 (Withdraw)."
             ]
           }
         ]
@@ -3126,7 +3181,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "definedTypeNode",
         "name": "dynamicOutputWire",
         "docs": [
-          "129-byte stealth output descriptor used when assetTag and commitment are computed on-chain (Deposit, SwapViaRouter)."
+          "129-byte stealth output descriptor used when assetTag and commitment are computed on-chain (Deposit, ExecViaEscrow)."
         ],
         "type": {
           "kind": "structTypeNode",
@@ -3513,7 +3568,7 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "pdaNode",
-        "name": "swapEscrow",
+        "name": "escrow",
         "seeds": [
           {
             "kind": "constantPdaSeedNode",
@@ -3550,7 +3605,51 @@ export const AUDREN_CODAMA_IDL = {
           }
         ],
         "docs": [
-          "Sharded (0..16) isolated signer PDA for atomic SwapViaRouter external DEX CPIs."
+          "Sharded (0..16) isolated signer PDA for atomic ExecViaEscrow external DeFi CPIs."
+        ]
+      },
+      {
+        "kind": "pdaNode",
+        "name": "unwrap",
+        "seeds": [
+          {
+            "kind": "constantPdaSeedNode",
+            "type": {
+              "kind": "fixedSizeTypeNode",
+              "size": 13,
+              "type": {
+                "kind": "bytesTypeNode"
+              }
+            },
+            "value": {
+              "kind": "bytesValueNode",
+              "encoding": "utf8",
+              "data": "audren_unwrap"
+            }
+          },
+          {
+            "kind": "variablePdaSeedNode",
+            "name": "poolId",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u32",
+              "endian": "le"
+            }
+          },
+          {
+            "kind": "variablePdaSeedNode",
+            "name": "nullifier",
+            "type": {
+              "kind": "fixedSizeTypeNode",
+              "size": 32,
+              "type": {
+                "kind": "bytesTypeNode"
+              }
+            }
+          }
+        ],
+        "docs": [
+          "One-shot WSOL token account PDA created and atomically closed during Withdraw(unwrap_wsol) to deliver Native SOL with zero residual rent."
         ]
       },
       {
@@ -3590,7 +3689,7 @@ export const AUDREN_CODAMA_IDL = {
           }
         ],
         "docs": [
-          "Ephemeral PDA staging oversized (>4 KiB) proof/swap payloads across <=768 B chunks."
+          "Ephemeral PDA staging oversized (>4 KiB) proof/action payloads across <=768 B chunks."
         ]
       },
       {
@@ -3890,25 +3989,25 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "invalidEscrowShard",
         "code": 24,
-        "message": "Swap escrow shard_id must be in 0..16.",
+        "message": "Escrow shard_id must be in 0..16.",
         "docs": [
           "AudrenError::InvalidEscrowShard (Custom error 24)."
         ]
       },
       {
         "kind": "errorNode",
-        "name": "invalidRouterProgram",
+        "name": "invalidTargetProgram",
         "code": 25,
-        "message": "Router program must be executable and cannot be Audren, System, ZK, or Token.",
+        "message": "Target program must be executable and cannot be Audren, System, ZK, or Token.",
         "docs": [
-          "AudrenError::InvalidRouterProgram (Custom error 25)."
+          "AudrenError::InvalidTargetProgram (Custom error 25)."
         ]
       },
       {
         "kind": "errorNode",
         "name": "escrowAuthorityAltered",
         "code": 26,
-        "message": "Swap escrow PDA owner, data length, or lamport balance was altered by router CPI.",
+        "message": "Escrow PDA owner, data length, or lamport balance was altered by target CPI.",
         "docs": [
           "AudrenError::EscrowAuthorityAltered (Custom error 26)."
         ]
@@ -3917,7 +4016,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "escrowAccountAltered",
         "code": 27,
-        "message": "Swap escrow token account owner, delegate, close_authority, or balance was altered.",
+        "message": "Escrow token account owner, delegate, close_authority, or balance was altered.",
         "docs": [
           "AudrenError::EscrowAccountAltered (Custom error 27)."
         ]
@@ -3935,7 +4034,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "unexpectedPartialFill",
         "code": 29,
-        "message": "Router left unspent input tokens when allow_partial_refund flag was not set.",
+        "message": "Target program left unspent input tokens when allow_partial_refund flag was not set.",
         "docs": [
           "AudrenError::UnexpectedPartialFill (Custom error 29)."
         ]
@@ -3985,9 +4084,9 @@ export const AUDREN_ANCHOR_IDL = {
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "spec": "0.1.0",
-    "description": "Audren \u2014 Institutional Confidential & Full-Private Settlement & Swap Program on Solana (Pinocchio + sBPFv3).",
+    "description": "Audren \u2014 Institutional Confidential & Full-Private Settlement and Shielded DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
   },
   "instructions": [
@@ -4231,8 +4330,8 @@ export const AUDREN_ANCHOR_IDL = {
       ],
       "args": [
         {
-          "name": "is_native_sol",
-          "type": "bool"
+          "name": "flags",
+          "type": "u8"
         },
         {
           "name": "amount",
@@ -4503,10 +4602,11 @@ export const AUDREN_ANCHOR_IDL = {
       ]
     },
     {
-      "name": "swap_via_router",
+      "name": "exec_via_escrow",
       "docs": [
-        "Tag 5: Single-transaction router-agnostic private DEX swap via sharded isolated swap_escrow PDA.",
-        "Trailing accounts `[15..15+pages]` are read-only input EpochPages; `[15+pages..]` are external router accounts (up to 80) with `swap_escrow`, `escrow_in`, `escrow_out` at arbitrary indices `(escrowIdx, escrowInIdx, escrowOutIdx)`."
+        "Tag 5: Single-transaction protocol-agnostic shielded DeFi action via sharded isolated escrow PDA (DEX swaps, supply lending, yield vaults, liquid staking, perp LP, RWA mint/redeem).",
+        "Supports optional native self-paying relayerFee bound in ctx_hash on either input mint (bit2=0) or output mint (bit2=1).",
+        "Trailing accounts `[16..16+pages]` are read-only input EpochPages; `[16+pages..]` are external target program accounts (up to 80) with `escrow`, `escrow_in`, `escrow_out` at arbitrary indices `(escrowIdx, escrowInIdx, escrowOutIdx)`."
       ],
       "discriminator": [
         5
@@ -4625,11 +4725,19 @@ export const AUDREN_ANCHOR_IDL = {
           ]
         },
         {
-          "name": "router_program",
+          "name": "target_program",
           "writable": false,
           "signer": false,
           "docs": [
-            "Executable external DEX / aggregator program."
+            "Executable external DeFi / DEX / vault / lending program."
+          ]
+        },
+        {
+          "name": "fee_recipient_ata",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Relayer fee token account (writable when relayerFee > 0; read-only System Program placeholder when 0)."
           ]
         }
       ],
@@ -4655,6 +4763,10 @@ export const AUDREN_ANCHOR_IDL = {
           "type": "u64"
         },
         {
+          "name": "relayer_fee",
+          "type": "u64"
+        },
+        {
           "name": "escrow_idx",
           "type": "u8"
         },
@@ -4667,11 +4779,11 @@ export const AUDREN_ANCHOR_IDL = {
           "type": "u8"
         },
         {
-          "name": "router_data_len",
+          "name": "target_data_len",
           "type": "u16"
         },
         {
-          "name": "swap_out_desc",
+          "name": "out_desc",
           "type": {
             "defined": {
               "name": "DynamicOutputWire"
@@ -4687,10 +4799,11 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "withdraw",
       "docs": [
-        "Tag 6: Full-private spend to a public SOL or SPL/Token-2022 recipient with optional hidden change note.",
-        "Full withdrawals (hasChange=false) always succeed even when pool.paused=true (non-custodial escape hatch).",
-        "Native SOL accounts `[7..9]`: [solVault (wr), recipient (wr)], followed by input EpochPages.",
-        "SPL/Token-2022 accounts `[7..12]`: [vaultAuth (ro), mint (ro), vaultAta (wr), recipientAta (wr), tokenProgram (ro)], followed by input EpochPages and optional TransferHook accounts."
+        "Tag 6: Full-private spend to a public SOL or SPL/Token-2022 recipient with optional native self-paying relayerFee, atomic WSOL->Native SOL unwrap (unwrapWsol), and optional hidden change note.",
+        "Full withdrawals (hasChange=false) always succeed even when pool.paused=true across all three modes (non-custodial escape hatch).",
+        "Native SOL accounts `[7..10]`: [feeRecipient, solVault (wr), recipient (wr)], followed by input EpochPages.",
+        "SPL/Token-2022 accounts `[7..13]`: [feeRecipient, vaultAuth (ro), mint (ro), vaultAta (wr), recipientAta (wr), tokenProgram (ro)], followed by input EpochPages and optional TransferHook accounts.",
+        "Unwrap WSOL accounts `[7..14]`: [feeRecipient, vaultAuth (ro), wsolMint (ro), vaultAta (wr), recipientWallet (wr), classicTokenProgram (ro), unwrapPda (wr)], followed by input EpochPages."
       ],
       "discriminator": [
         6
@@ -4753,11 +4866,19 @@ export const AUDREN_ANCHOR_IDL = {
           ]
         },
         {
+          "name": "fee_recipient",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Relayer fee wallet (Native SOL / unwrapWsol) or token ATA (SPL/Token-2022) when relayerFee > 0; read-only System Program placeholder when 0."
+          ]
+        },
+        {
           "name": "sol_vault_or_vault_auth",
           "writable": true,
           "signer": false,
           "docs": [
-            "Native SOL: solVault (wr); SPL/Token-2022: vaultAuth (ro)."
+            "Native SOL: solVault (wr); SPL/Token-2022/unwrapWsol: vaultAuth (ro)."
           ]
         },
         {
@@ -4765,7 +4886,7 @@ export const AUDREN_ANCHOR_IDL = {
           "writable": true,
           "signer": false,
           "docs": [
-            "Native SOL: recipient (wr); SPL/Token-2022: mint (ro)."
+            "Native SOL: recipient (wr); SPL/Token-2022/unwrapWsol: mint (ro)."
           ]
         },
         {
@@ -4773,16 +4894,16 @@ export const AUDREN_ANCHOR_IDL = {
           "writable": true,
           "signer": false,
           "docs": [
-            "Native SOL: inputPage0 (ro); SPL/Token-2022: vaultAta (wr)."
+            "Native SOL: inputPage0 (ro); SPL/Token-2022/unwrapWsol: vaultAta (wr)."
           ]
         },
         {
-          "name": "recipient_ata",
+          "name": "recipient_or_recipient_ata",
           "writable": true,
           "signer": false,
           "optional": true,
           "docs": [
-            "SPL/Token-2022 only: recipient token account (wr)."
+            "SPL/Token-2022: recipientAta (wr); unwrapWsol: recipient Native SOL wallet (wr)."
           ]
         },
         {
@@ -4791,7 +4912,16 @@ export const AUDREN_ANCHOR_IDL = {
           "signer": false,
           "optional": true,
           "docs": [
-            "SPL/Token-2022 only: Classic SPL Token or Token-2022 program."
+            "SPL/Token-2022 / unwrapWsol: Classic SPL Token or Token-2022 program."
+          ]
+        },
+        {
+          "name": "unwrap_acc",
+          "writable": true,
+          "signer": false,
+          "optional": true,
+          "docs": [
+            "unwrapWsol only: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] created and closed atomically."
           ]
         }
       ],
@@ -4801,15 +4931,15 @@ export const AUDREN_ANCHOR_IDL = {
           "type": "u8"
         },
         {
-          "name": "is_native_sol",
-          "type": "bool"
-        },
-        {
-          "name": "has_change",
-          "type": "bool"
+          "name": "flags",
+          "type": "u8"
         },
         {
           "name": "amount_out",
+          "type": "u64"
+        },
+        {
+          "name": "relayer_fee",
           "type": "u64"
         },
         {
@@ -4907,7 +5037,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "exec_buffered",
       "docs": [
-        "Tag 9: Execute Transfer (3), Merge (4), SwapViaRouter (5), or Withdraw (6) directly from a completed ProofBuffer PDA, atomically closing the buffer and refunding 100% of rent to payer.",
+        "Tag 9: Execute Transfer (3), Merge (4), ExecViaEscrow (5), or Withdraw (6) directly from a completed ProofBuffer PDA, atomically closing the buffer and refunding 100% of rent to payer.",
         "Accounts: [0] proofBuffer (wr), [1..] exact account list of the inner instruction (where [1] = payer/authority)."
       ],
       "discriminator": [
@@ -5270,7 +5400,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "DynamicOutputWire",
       "docs": [
-        "129-byte stealth output descriptor used when assetTag and commitment are computed on-chain (Deposit, SwapViaRouter)."
+        "129-byte stealth output descriptor used when assetTag and commitment are computed on-chain (Deposit, ExecViaEscrow)."
       ],
       "type": {
         "kind": "struct",
@@ -5911,22 +6041,22 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 24,
       "name": "InvalidEscrowShard",
-      "msg": "Swap escrow shard_id must be in 0..16."
+      "msg": "Escrow shard_id must be in 0..16."
     },
     {
       "code": 25,
-      "name": "InvalidRouterProgram",
-      "msg": "Router program must be executable and cannot be Audren, System, ZK, or Token."
+      "name": "InvalidTargetProgram",
+      "msg": "Target program must be executable and cannot be Audren, System, ZK, or Token."
     },
     {
       "code": 26,
       "name": "EscrowAuthorityAltered",
-      "msg": "Swap escrow PDA owner, data length, or lamport balance was altered by router CPI."
+      "msg": "Escrow PDA owner, data length, or lamport balance was altered by target CPI."
     },
     {
       "code": 27,
       "name": "EscrowAccountAltered",
-      "msg": "Swap escrow token account owner, delegate, close_authority, or balance was altered."
+      "msg": "Escrow token account owner, delegate, close_authority, or balance was altered."
     },
     {
       "code": 28,
@@ -5936,7 +6066,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 29,
       "name": "UnexpectedPartialFill",
-      "msg": "Router left unspent input tokens when allow_partial_refund flag was not set."
+      "msg": "Target program left unspent input tokens when allow_partial_refund flag was not set."
     },
     {
       "code": 30,

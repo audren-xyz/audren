@@ -10,6 +10,8 @@
  */
 
 import {
+  DEPOSIT_FLAG_FEE_FROM_AMOUNT,
+  DEPOSIT_FLAG_NATIVE_SOL,
   DYNAMIC_OUTPUT_WIRE_LEN,
   MAX_APPEND_LANES,
   NOTE_CT_LEN,
@@ -85,10 +87,13 @@ export function encodeOpenPageData(): Uint8Array {
  * Encode Tag 2 (`Deposit`) data (`139 B`).
  * Designed for both self-shielding and third-party regulated onramps:
  * no user spend key or ZK proof is required; the on-chain program computes `G_mint`
- * and `V = amount * G_mint` directly.
+ * and `V = net_received * G_mint` directly.
+ * Pass `feeFromAmount: true` (Native SOL only) to deduct any `PageRentVault` fee
+ * from `amount` so retiring session wallets can sweep cleanly to `0` lamports.
  */
 export function encodeDepositData(params: {
   isNativeSol: boolean;
+  feeFromAmount?: boolean;
   amount: bigint;
   output: DynamicOutputDescriptor;
 }): Uint8Array {
@@ -96,14 +101,21 @@ export function encodeDepositData(params: {
   if (params.amount === 0n) {
     throw new RangeError('Deposit amount must be greater than 0');
   }
+  if (params.feeFromAmount && !params.isNativeSol) {
+    throw new RangeError('feeFromAmount is only valid for Native SOL deposits');
+  }
   assertLen('ephemeralPk', params.output.ephemeralPk, 32);
   assertLen('stealthPk', params.output.stealthPk, 32);
   assertLen('ciphertext', params.output.ciphertext, NOTE_CT_LEN);
 
+  const flags =
+    (params.isNativeSol ? DEPOSIT_FLAG_NATIVE_SOL : 0) |
+    (params.feeFromAmount ? DEPOSIT_FLAG_FEE_FROM_AMOUNT : 0);
+
   const out = new Uint8Array(1 + 9 + DYNAMIC_OUTPUT_WIRE_LEN);
   const view = new DataView(out.buffer);
   out[0] = TAG_DEPOSIT;
-  out[1] = params.isNativeSol ? 1 : 0;
+  out[1] = flags;
   view.setBigUint64(2, params.amount, true);
   out[10] = params.output.viewTag & 0xff;
   out.set(params.output.ephemeralPk, 11);
@@ -149,7 +161,7 @@ export function encodeWriteProofBufferChunks(params: {
 /** Encode Tag 9 (`ExecBuffered`, 2 bytes total) — executes inner payload and refunds 100% rent. */
 export function encodeExecBufferedData(innerTag: number): Uint8Array {
   if (!Number.isInteger(innerTag) || innerTag < 3 || innerTag > 6) {
-    throw new RangeError(`ExecBuffered innerTag must be 3 (Transfer), 4 (Merge), 5 (SwapViaRouter), or 6 (Withdraw), got ${innerTag}`);
+    throw new RangeError(`ExecBuffered innerTag must be 3 (Transfer), 4 (Merge), 5 (ExecViaEscrow), or 6 (Withdraw), got ${innerTag}`);
   }
   return new Uint8Array([TAG_EXEC_BUFFERED, innerTag]);
 }

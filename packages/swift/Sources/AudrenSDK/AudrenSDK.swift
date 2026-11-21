@@ -1153,6 +1153,72 @@ public func FfiConverterTypeFfiDataSlice_lower(_ value: FfiDataSlice) -> RustBuf
 }
 
 
+public struct FfiDefiSessionKeypair: Equatable, Hashable {
+    public var sessionIndex: UInt32
+    public var secretSeed: Data
+    public var pubkey: Data
+    public var keypairBytes: Data
+    public var address: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sessionIndex: UInt32, secretSeed: Data, pubkey: Data, keypairBytes: Data, address: String) {
+        self.sessionIndex = sessionIndex
+        self.secretSeed = secretSeed
+        self.pubkey = pubkey
+        self.keypairBytes = keypairBytes
+        self.address = address
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiDefiSessionKeypair: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiDefiSessionKeypair: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDefiSessionKeypair {
+        return
+            try FfiDefiSessionKeypair(
+                sessionIndex: FfiConverterUInt32.read(from: &buf), 
+                secretSeed: FfiConverterData.read(from: &buf), 
+                pubkey: FfiConverterData.read(from: &buf), 
+                keypairBytes: FfiConverterData.read(from: &buf), 
+                address: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiDefiSessionKeypair, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.sessionIndex, into: &buf)
+        FfiConverterData.write(value.secretSeed, into: &buf)
+        FfiConverterData.write(value.pubkey, into: &buf)
+        FfiConverterData.write(value.keypairBytes, into: &buf)
+        FfiConverterString.write(value.address, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiDefiSessionKeypair_lift(_ buf: RustBuffer) throws -> FfiDefiSessionKeypair {
+    return try FfiConverterTypeFfiDefiSessionKeypair.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiDefiSessionKeypair_lower(_ value: FfiDefiSessionKeypair) -> RustBuffer {
+    return FfiConverterTypeFfiDefiSessionKeypair.lower(value)
+}
+
+
 public struct FfiDepositParams: Equatable, Hashable {
     public var programId: String
     public var depositor: String
@@ -1162,13 +1228,14 @@ public struct FfiDepositParams: Equatable, Hashable {
     public var mint32: Data
     public var grossAmount: UInt64
     public var netAmount: UInt64
+    public var feeFromAmount: Bool
     public var tokenProgram: String?
     public var depositorAta: String?
     public var vaultAta: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, depositor: String, poolId: UInt32, activePageId: UInt64, recipientAddress: String, mint32: Data, grossAmount: UInt64, netAmount: UInt64, tokenProgram: String?, depositorAta: String?, vaultAta: String?) {
+    public init(programId: String, depositor: String, poolId: UInt32, activePageId: UInt64, recipientAddress: String, mint32: Data, grossAmount: UInt64, netAmount: UInt64, feeFromAmount: Bool, tokenProgram: String?, depositorAta: String?, vaultAta: String?) {
         self.programId = programId
         self.depositor = depositor
         self.poolId = poolId
@@ -1177,6 +1244,7 @@ public struct FfiDepositParams: Equatable, Hashable {
         self.mint32 = mint32
         self.grossAmount = grossAmount
         self.netAmount = netAmount
+        self.feeFromAmount = feeFromAmount
         self.tokenProgram = tokenProgram
         self.depositorAta = depositorAta
         self.vaultAta = vaultAta
@@ -1206,6 +1274,7 @@ public struct FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer {
                 mint32: FfiConverterData.read(from: &buf), 
                 grossAmount: FfiConverterUInt64.read(from: &buf), 
                 netAmount: FfiConverterUInt64.read(from: &buf), 
+                feeFromAmount: FfiConverterBool.read(from: &buf), 
                 tokenProgram: FfiConverterOptionString.read(from: &buf), 
                 depositorAta: FfiConverterOptionString.read(from: &buf), 
                 vaultAta: FfiConverterOptionString.read(from: &buf)
@@ -1221,6 +1290,7 @@ public struct FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer {
         FfiConverterData.write(value.mint32, into: &buf)
         FfiConverterUInt64.write(value.grossAmount, into: &buf)
         FfiConverterUInt64.write(value.netAmount, into: &buf)
+        FfiConverterBool.write(value.feeFromAmount, into: &buf)
         FfiConverterOptionString.write(value.tokenProgram, into: &buf)
         FfiConverterOptionString.write(value.depositorAta, into: &buf)
         FfiConverterOptionString.write(value.vaultAta, into: &buf)
@@ -1318,6 +1388,160 @@ public func FfiConverterTypeFfiEpochPageHeader_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeFfiEpochPageHeader_lower(_ value: FfiEpochPageHeader) -> RustBuffer {
     return FfiConverterTypeFfiEpochPageHeader.lower(value)
+}
+
+
+public struct FfiExecViaEscrowParams: Equatable, Hashable {
+    public var programId: String
+    public var payer: String
+    public var poolId: UInt32
+    public var outPageId: UInt64
+    public var shardId: UInt8
+    public var inputPageIds: [UInt64]
+    public var inputPagesBytes: [Data]
+    public var inputNote: FfiOwnedNote
+    public var secretIndex: UInt32
+    public var mintOut32: Data
+    public var tokenProgramIn: String
+    public var tokenProgramOut: String
+    public var amountIn: UInt64
+    public var minAmountOut: UInt64
+    public var relayerFee: UInt64
+    public var feeOnOutput: Bool
+    public var feeRecipientAta: String?
+    public var allowPartialRefund: Bool
+    public var recipientAddress: String
+    public var changeAddress: String
+    public var auditorPk32: Data?
+    public var targetProgramId: String
+    public var escrowIdx: UInt8
+    public var escrowInIdx: UInt8
+    public var escrowOutIdx: UInt8
+    public var targetIxData: Data
+    public var actionAccounts: [FfiAccountMeta]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, shardId: UInt8, inputPageIds: [UInt64], inputPagesBytes: [Data], inputNote: FfiOwnedNote, secretIndex: UInt32, mintOut32: Data, tokenProgramIn: String, tokenProgramOut: String, amountIn: UInt64, minAmountOut: UInt64, relayerFee: UInt64, feeOnOutput: Bool, feeRecipientAta: String?, allowPartialRefund: Bool, recipientAddress: String, changeAddress: String, auditorPk32: Data?, targetProgramId: String, escrowIdx: UInt8, escrowInIdx: UInt8, escrowOutIdx: UInt8, targetIxData: Data, actionAccounts: [FfiAccountMeta]) {
+        self.programId = programId
+        self.payer = payer
+        self.poolId = poolId
+        self.outPageId = outPageId
+        self.shardId = shardId
+        self.inputPageIds = inputPageIds
+        self.inputPagesBytes = inputPagesBytes
+        self.inputNote = inputNote
+        self.secretIndex = secretIndex
+        self.mintOut32 = mintOut32
+        self.tokenProgramIn = tokenProgramIn
+        self.tokenProgramOut = tokenProgramOut
+        self.amountIn = amountIn
+        self.minAmountOut = minAmountOut
+        self.relayerFee = relayerFee
+        self.feeOnOutput = feeOnOutput
+        self.feeRecipientAta = feeRecipientAta
+        self.allowPartialRefund = allowPartialRefund
+        self.recipientAddress = recipientAddress
+        self.changeAddress = changeAddress
+        self.auditorPk32 = auditorPk32
+        self.targetProgramId = targetProgramId
+        self.escrowIdx = escrowIdx
+        self.escrowInIdx = escrowInIdx
+        self.escrowOutIdx = escrowOutIdx
+        self.targetIxData = targetIxData
+        self.actionAccounts = actionAccounts
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiExecViaEscrowParams: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExecViaEscrowParams {
+        return
+            try FfiExecViaEscrowParams(
+                programId: FfiConverterString.read(from: &buf), 
+                payer: FfiConverterString.read(from: &buf), 
+                poolId: FfiConverterUInt32.read(from: &buf), 
+                outPageId: FfiConverterUInt64.read(from: &buf), 
+                shardId: FfiConverterUInt8.read(from: &buf), 
+                inputPageIds: FfiConverterSequenceUInt64.read(from: &buf), 
+                inputPagesBytes: FfiConverterSequenceData.read(from: &buf), 
+                inputNote: FfiConverterTypeFfiOwnedNote.read(from: &buf), 
+                secretIndex: FfiConverterUInt32.read(from: &buf), 
+                mintOut32: FfiConverterData.read(from: &buf), 
+                tokenProgramIn: FfiConverterString.read(from: &buf), 
+                tokenProgramOut: FfiConverterString.read(from: &buf), 
+                amountIn: FfiConverterUInt64.read(from: &buf), 
+                minAmountOut: FfiConverterUInt64.read(from: &buf), 
+                relayerFee: FfiConverterUInt64.read(from: &buf), 
+                feeOnOutput: FfiConverterBool.read(from: &buf), 
+                feeRecipientAta: FfiConverterOptionString.read(from: &buf), 
+                allowPartialRefund: FfiConverterBool.read(from: &buf), 
+                recipientAddress: FfiConverterString.read(from: &buf), 
+                changeAddress: FfiConverterString.read(from: &buf), 
+                auditorPk32: FfiConverterOptionData.read(from: &buf), 
+                targetProgramId: FfiConverterString.read(from: &buf), 
+                escrowIdx: FfiConverterUInt8.read(from: &buf), 
+                escrowInIdx: FfiConverterUInt8.read(from: &buf), 
+                escrowOutIdx: FfiConverterUInt8.read(from: &buf), 
+                targetIxData: FfiConverterData.read(from: &buf), 
+                actionAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExecViaEscrowParams, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.programId, into: &buf)
+        FfiConverterString.write(value.payer, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt64.write(value.outPageId, into: &buf)
+        FfiConverterUInt8.write(value.shardId, into: &buf)
+        FfiConverterSequenceUInt64.write(value.inputPageIds, into: &buf)
+        FfiConverterSequenceData.write(value.inputPagesBytes, into: &buf)
+        FfiConverterTypeFfiOwnedNote.write(value.inputNote, into: &buf)
+        FfiConverterUInt32.write(value.secretIndex, into: &buf)
+        FfiConverterData.write(value.mintOut32, into: &buf)
+        FfiConverterString.write(value.tokenProgramIn, into: &buf)
+        FfiConverterString.write(value.tokenProgramOut, into: &buf)
+        FfiConverterUInt64.write(value.amountIn, into: &buf)
+        FfiConverterUInt64.write(value.minAmountOut, into: &buf)
+        FfiConverterUInt64.write(value.relayerFee, into: &buf)
+        FfiConverterBool.write(value.feeOnOutput, into: &buf)
+        FfiConverterOptionString.write(value.feeRecipientAta, into: &buf)
+        FfiConverterBool.write(value.allowPartialRefund, into: &buf)
+        FfiConverterString.write(value.recipientAddress, into: &buf)
+        FfiConverterString.write(value.changeAddress, into: &buf)
+        FfiConverterOptionData.write(value.auditorPk32, into: &buf)
+        FfiConverterString.write(value.targetProgramId, into: &buf)
+        FfiConverterUInt8.write(value.escrowIdx, into: &buf)
+        FfiConverterUInt8.write(value.escrowInIdx, into: &buf)
+        FfiConverterUInt8.write(value.escrowOutIdx, into: &buf)
+        FfiConverterData.write(value.targetIxData, into: &buf)
+        FfiConverterSequenceTypeFfiAccountMeta.write(value.actionAccounts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExecViaEscrowParams_lift(_ buf: RustBuffer) throws -> FfiExecViaEscrowParams {
+    return try FfiConverterTypeFfiExecViaEscrowParams.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExecViaEscrowParams_lower(_ value: FfiExecViaEscrowParams) -> RustBuffer {
+    return FfiConverterTypeFfiExecViaEscrowParams.lower(value)
 }
 
 
@@ -1751,7 +1975,7 @@ public func FfiConverterTypeFfiPoolState_lower(_ value: FfiPoolState) -> RustBuf
 }
 
 
-public struct FfiPreparedRouterAccounts: Equatable, Hashable {
+public struct FfiPreparedEscrowAccounts: Equatable, Hashable {
     public var escrowPda: String
     public var escrowInAta: String
     public var escrowOutAta: String
@@ -1778,16 +2002,16 @@ public struct FfiPreparedRouterAccounts: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiPreparedRouterAccounts: Sendable {}
+extension FfiPreparedEscrowAccounts: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiPreparedRouterAccounts: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPreparedRouterAccounts {
+public struct FfiConverterTypeFfiPreparedEscrowAccounts: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPreparedEscrowAccounts {
         return
-            try FfiPreparedRouterAccounts(
+            try FfiPreparedEscrowAccounts(
                 escrowPda: FfiConverterString.read(from: &buf), 
                 escrowInAta: FfiConverterString.read(from: &buf), 
                 escrowOutAta: FfiConverterString.read(from: &buf), 
@@ -1798,7 +2022,7 @@ public struct FfiConverterTypeFfiPreparedRouterAccounts: FfiConverterRustBuffer 
         )
     }
 
-    public static func write(_ value: FfiPreparedRouterAccounts, into buf: inout [UInt8]) {
+    public static func write(_ value: FfiPreparedEscrowAccounts, into buf: inout [UInt8]) {
         FfiConverterString.write(value.escrowPda, into: &buf)
         FfiConverterString.write(value.escrowInAta, into: &buf)
         FfiConverterString.write(value.escrowOutAta, into: &buf)
@@ -1813,15 +2037,15 @@ public struct FfiConverterTypeFfiPreparedRouterAccounts: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPreparedRouterAccounts_lift(_ buf: RustBuffer) throws -> FfiPreparedRouterAccounts {
-    return try FfiConverterTypeFfiPreparedRouterAccounts.lift(buf)
+public func FfiConverterTypeFfiPreparedEscrowAccounts_lift(_ buf: RustBuffer) throws -> FfiPreparedEscrowAccounts {
+    return try FfiConverterTypeFfiPreparedEscrowAccounts.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPreparedRouterAccounts_lower(_ value: FfiPreparedRouterAccounts) -> RustBuffer {
-    return FfiConverterTypeFfiPreparedRouterAccounts.lower(value)
+public func FfiConverterTypeFfiPreparedEscrowAccounts_lower(_ value: FfiPreparedEscrowAccounts) -> RustBuffer {
+    return FfiConverterTypeFfiPreparedEscrowAccounts.lower(value)
 }
 
 
@@ -1908,148 +2132,6 @@ public func FfiConverterTypeFfiSelectiveDisclosureProof_lift(_ buf: RustBuffer) 
 #endif
 public func FfiConverterTypeFfiSelectiveDisclosureProof_lower(_ value: FfiSelectiveDisclosureProof) -> RustBuffer {
     return FfiConverterTypeFfiSelectiveDisclosureProof.lower(value)
-}
-
-
-public struct FfiSwapViaRouterParams: Equatable, Hashable {
-    public var programId: String
-    public var payer: String
-    public var poolId: UInt32
-    public var outPageId: UInt64
-    public var shardId: UInt8
-    public var inputPageIds: [UInt64]
-    public var inputPagesBytes: [Data]
-    public var inputNote: FfiOwnedNote
-    public var secretIndex: UInt32
-    public var mintOut32: Data
-    public var tokenProgramIn: String
-    public var tokenProgramOut: String
-    public var amountIn: UInt64
-    public var minAmountOut: UInt64
-    public var allowPartialRefund: Bool
-    public var recipientAddress: String
-    public var changeAddress: String
-    public var auditorPk32: Data?
-    public var routerProgramId: String
-    public var escrowIdx: UInt8
-    public var escrowInIdx: UInt8
-    public var escrowOutIdx: UInt8
-    public var routerIxData: Data
-    public var routerAccounts: [FfiAccountMeta]
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, shardId: UInt8, inputPageIds: [UInt64], inputPagesBytes: [Data], inputNote: FfiOwnedNote, secretIndex: UInt32, mintOut32: Data, tokenProgramIn: String, tokenProgramOut: String, amountIn: UInt64, minAmountOut: UInt64, allowPartialRefund: Bool, recipientAddress: String, changeAddress: String, auditorPk32: Data?, routerProgramId: String, escrowIdx: UInt8, escrowInIdx: UInt8, escrowOutIdx: UInt8, routerIxData: Data, routerAccounts: [FfiAccountMeta]) {
-        self.programId = programId
-        self.payer = payer
-        self.poolId = poolId
-        self.outPageId = outPageId
-        self.shardId = shardId
-        self.inputPageIds = inputPageIds
-        self.inputPagesBytes = inputPagesBytes
-        self.inputNote = inputNote
-        self.secretIndex = secretIndex
-        self.mintOut32 = mintOut32
-        self.tokenProgramIn = tokenProgramIn
-        self.tokenProgramOut = tokenProgramOut
-        self.amountIn = amountIn
-        self.minAmountOut = minAmountOut
-        self.allowPartialRefund = allowPartialRefund
-        self.recipientAddress = recipientAddress
-        self.changeAddress = changeAddress
-        self.auditorPk32 = auditorPk32
-        self.routerProgramId = routerProgramId
-        self.escrowIdx = escrowIdx
-        self.escrowInIdx = escrowInIdx
-        self.escrowOutIdx = escrowOutIdx
-        self.routerIxData = routerIxData
-        self.routerAccounts = routerAccounts
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiSwapViaRouterParams: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiSwapViaRouterParams: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSwapViaRouterParams {
-        return
-            try FfiSwapViaRouterParams(
-                programId: FfiConverterString.read(from: &buf), 
-                payer: FfiConverterString.read(from: &buf), 
-                poolId: FfiConverterUInt32.read(from: &buf), 
-                outPageId: FfiConverterUInt64.read(from: &buf), 
-                shardId: FfiConverterUInt8.read(from: &buf), 
-                inputPageIds: FfiConverterSequenceUInt64.read(from: &buf), 
-                inputPagesBytes: FfiConverterSequenceData.read(from: &buf), 
-                inputNote: FfiConverterTypeFfiOwnedNote.read(from: &buf), 
-                secretIndex: FfiConverterUInt32.read(from: &buf), 
-                mintOut32: FfiConverterData.read(from: &buf), 
-                tokenProgramIn: FfiConverterString.read(from: &buf), 
-                tokenProgramOut: FfiConverterString.read(from: &buf), 
-                amountIn: FfiConverterUInt64.read(from: &buf), 
-                minAmountOut: FfiConverterUInt64.read(from: &buf), 
-                allowPartialRefund: FfiConverterBool.read(from: &buf), 
-                recipientAddress: FfiConverterString.read(from: &buf), 
-                changeAddress: FfiConverterString.read(from: &buf), 
-                auditorPk32: FfiConverterOptionData.read(from: &buf), 
-                routerProgramId: FfiConverterString.read(from: &buf), 
-                escrowIdx: FfiConverterUInt8.read(from: &buf), 
-                escrowInIdx: FfiConverterUInt8.read(from: &buf), 
-                escrowOutIdx: FfiConverterUInt8.read(from: &buf), 
-                routerIxData: FfiConverterData.read(from: &buf), 
-                routerAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiSwapViaRouterParams, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.programId, into: &buf)
-        FfiConverterString.write(value.payer, into: &buf)
-        FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.outPageId, into: &buf)
-        FfiConverterUInt8.write(value.shardId, into: &buf)
-        FfiConverterSequenceUInt64.write(value.inputPageIds, into: &buf)
-        FfiConverterSequenceData.write(value.inputPagesBytes, into: &buf)
-        FfiConverterTypeFfiOwnedNote.write(value.inputNote, into: &buf)
-        FfiConverterUInt32.write(value.secretIndex, into: &buf)
-        FfiConverterData.write(value.mintOut32, into: &buf)
-        FfiConverterString.write(value.tokenProgramIn, into: &buf)
-        FfiConverterString.write(value.tokenProgramOut, into: &buf)
-        FfiConverterUInt64.write(value.amountIn, into: &buf)
-        FfiConverterUInt64.write(value.minAmountOut, into: &buf)
-        FfiConverterBool.write(value.allowPartialRefund, into: &buf)
-        FfiConverterString.write(value.recipientAddress, into: &buf)
-        FfiConverterString.write(value.changeAddress, into: &buf)
-        FfiConverterOptionData.write(value.auditorPk32, into: &buf)
-        FfiConverterString.write(value.routerProgramId, into: &buf)
-        FfiConverterUInt8.write(value.escrowIdx, into: &buf)
-        FfiConverterUInt8.write(value.escrowInIdx, into: &buf)
-        FfiConverterUInt8.write(value.escrowOutIdx, into: &buf)
-        FfiConverterData.write(value.routerIxData, into: &buf)
-        FfiConverterSequenceTypeFfiAccountMeta.write(value.routerAccounts, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiSwapViaRouterParams_lift(_ buf: RustBuffer) throws -> FfiSwapViaRouterParams {
-    return try FfiConverterTypeFfiSwapViaRouterParams.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiSwapViaRouterParams_lower(_ value: FfiSwapViaRouterParams) -> RustBuffer {
-    return FfiConverterTypeFfiSwapViaRouterParams.lower(value)
 }
 
 
@@ -2159,12 +2241,15 @@ public struct FfiWithdrawParams: Equatable, Hashable {
     public var recipientAccount: String
     public var changeAddress: String
     public var amount: UInt64
+    public var relayerFee: UInt64
+    public var feeRecipient: String?
+    public var unwrapWsol: Bool
     public var splTokenProgram: String?
     public var auditorPk32: Data?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, inputPageIds: [UInt64], inputPagesBytes: [Data], inputNote: FfiOwnedNote, secretIndex: UInt32, recipientAccount: String, changeAddress: String, amount: UInt64, splTokenProgram: String?, auditorPk32: Data?) {
+    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, inputPageIds: [UInt64], inputPagesBytes: [Data], inputNote: FfiOwnedNote, secretIndex: UInt32, recipientAccount: String, changeAddress: String, amount: UInt64, relayerFee: UInt64, feeRecipient: String?, unwrapWsol: Bool, splTokenProgram: String?, auditorPk32: Data?) {
         self.programId = programId
         self.payer = payer
         self.poolId = poolId
@@ -2176,6 +2261,9 @@ public struct FfiWithdrawParams: Equatable, Hashable {
         self.recipientAccount = recipientAccount
         self.changeAddress = changeAddress
         self.amount = amount
+        self.relayerFee = relayerFee
+        self.feeRecipient = feeRecipient
+        self.unwrapWsol = unwrapWsol
         self.splTokenProgram = splTokenProgram
         self.auditorPk32 = auditorPk32
     }
@@ -2207,6 +2295,9 @@ public struct FfiConverterTypeFfiWithdrawParams: FfiConverterRustBuffer {
                 recipientAccount: FfiConverterString.read(from: &buf), 
                 changeAddress: FfiConverterString.read(from: &buf), 
                 amount: FfiConverterUInt64.read(from: &buf), 
+                relayerFee: FfiConverterUInt64.read(from: &buf), 
+                feeRecipient: FfiConverterOptionString.read(from: &buf), 
+                unwrapWsol: FfiConverterBool.read(from: &buf), 
                 splTokenProgram: FfiConverterOptionString.read(from: &buf), 
                 auditorPk32: FfiConverterOptionData.read(from: &buf)
         )
@@ -2224,6 +2315,9 @@ public struct FfiConverterTypeFfiWithdrawParams: FfiConverterRustBuffer {
         FfiConverterString.write(value.recipientAccount, into: &buf)
         FfiConverterString.write(value.changeAddress, into: &buf)
         FfiConverterUInt64.write(value.amount, into: &buf)
+        FfiConverterUInt64.write(value.relayerFee, into: &buf)
+        FfiConverterOptionString.write(value.feeRecipient, into: &buf)
+        FfiConverterBool.write(value.unwrapWsol, into: &buf)
         FfiConverterOptionString.write(value.splTokenProgram, into: &buf)
         FfiConverterOptionData.write(value.auditorPk32, into: &buf)
     }
@@ -2573,6 +2667,14 @@ public func buildDepositInstruction(params: FfiDepositParams)throws  -> FfiBuilt
     )
 })
 }
+public func buildExecViaEscrowInstruction(params: FfiExecViaEscrowParams)throws  -> FfiBuiltInstruction  {
+    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_build_exec_via_escrow_instruction(
+        FfiConverterTypeFfiExecViaEscrowParams_lower(params),uniffiCallStatus
+    )
+})
+}
 public func buildMergeInstruction(params: FfiMergeParams)throws  -> FfiBuiltInstruction  {
     return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
@@ -2600,14 +2702,6 @@ public func buildOpenPageInstruction(programId: String, payer: String, poolId: U
         FfiConverterString.lower(payer),
         FfiConverterUInt32.lower(poolId),
         FfiConverterUInt64.lower(currentPageId),uniffiCallStatus
-    )
-})
-}
-public func buildSwapViaRouterInstruction(params: FfiSwapViaRouterParams)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_swap_via_router_instruction(
-        FfiConverterTypeFfiSwapViaRouterParams_lower(params),uniffiCallStatus
     )
 })
 }
@@ -2684,12 +2778,31 @@ public func deriveAuditorKeypair(seed32: Data)throws  -> FfiAuditorKeypair  {
     )
 })
 }
+public func deriveDefiSessionKeypair(masterSeed32: Data, sessionIndex: UInt32)throws  -> FfiDefiSessionKeypair  {
+    return try  FfiConverterTypeFfiDefiSessionKeypair_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_defi_session_keypair(
+        FfiConverterData.lower(masterSeed32),
+        FfiConverterUInt32.lower(sessionIndex),uniffiCallStatus
+    )
+})
+}
 public func deriveEpochPagePda(poolId: UInt32, pageId: UInt64, programId: String)throws  -> FfiPda  {
     return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_epoch_page_pda(
         FfiConverterUInt32.lower(poolId),
         FfiConverterUInt64.lower(pageId),
+        FfiConverterString.lower(programId),uniffiCallStatus
+    )
+})
+}
+public func deriveEscrowPda(poolId: UInt32, shardId: UInt8, programId: String)throws  -> FfiPda  {
+    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_escrow_pda(
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt8.lower(shardId),
         FfiConverterString.lower(programId),uniffiCallStatus
     )
 })
@@ -2778,12 +2891,12 @@ public func deriveSubaccountKeys(masterSeed32: Data, accountIndex: UInt32)throws
     )
 })
 }
-public func deriveSwapEscrowPda(poolId: UInt32, shardId: UInt8, programId: String)throws  -> FfiPda  {
+public func deriveUnwrapPda(poolId: UInt32, nullifier32: Data, programId: String)throws  -> FfiPda  {
     return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_derive_swap_escrow_pda(
+    uniffi_audren_ffi_fn_func_derive_unwrap_pda(
         FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt8.lower(shardId),
+        FfiConverterData.lower(nullifier32),
         FfiConverterString.lower(programId),uniffiCallStatus
     )
 })
@@ -2864,17 +2977,17 @@ public func parseAudrenAddress(encoded: String)throws  -> FfiAudrenAddress  {
     )
 })
 }
-public func prepareRouterAccounts(poolId: UInt32, shardId: UInt8, inputMintB58: String, outputMintB58: String, inputTokenProgramB58: String, outputTokenProgramB58: String, routerAccounts: [FfiAccountMeta], programId: String)throws  -> FfiPreparedRouterAccounts  {
-    return try  FfiConverterTypeFfiPreparedRouterAccounts_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func prepareEscrowAccounts(poolId: UInt32, shardId: UInt8, inputMintB58: String, outputMintB58: String, inputTokenProgramB58: String, outputTokenProgramB58: String, actionAccounts: [FfiAccountMeta], programId: String)throws  -> FfiPreparedEscrowAccounts  {
+    return try  FfiConverterTypeFfiPreparedEscrowAccounts_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_prepare_router_accounts(
+    uniffi_audren_ffi_fn_func_prepare_escrow_accounts(
         FfiConverterUInt32.lower(poolId),
         FfiConverterUInt8.lower(shardId),
         FfiConverterString.lower(inputMintB58),
         FfiConverterString.lower(outputMintB58),
         FfiConverterString.lower(inputTokenProgramB58),
         FfiConverterString.lower(outputTokenProgramB58),
-        FfiConverterSequenceTypeFfiAccountMeta.lower(routerAccounts),
+        FfiConverterSequenceTypeFfiAccountMeta.lower(actionAccounts),
         FfiConverterString.lower(programId),uniffiCallStatus
     )
 })
@@ -2966,6 +3079,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_build_deposit_instruction() != 14202) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_audren_ffi_checksum_func_build_exec_via_escrow_instruction() != 47427) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_audren_ffi_checksum_func_build_merge_instruction() != 53530) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2973,9 +3089,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_build_open_page_instruction() != 36337) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_build_swap_via_router_instruction() != 55178) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_build_transfer_instruction() != 43105) {
@@ -3005,7 +3118,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_derive_auditor_keypair() != 4233) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_audren_ffi_checksum_func_derive_defi_session_keypair() != 55393) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_audren_ffi_checksum_func_derive_epoch_page_pda() != 2040) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_derive_escrow_pda() != 47615) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_derive_keys_from_seed() != 28631) {
@@ -3035,7 +3154,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_derive_subaccount_keys() != 20930) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_swap_escrow_pda() != 4939) {
+    if (uniffi_audren_ffi_checksum_func_derive_unwrap_pda() != 23126) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_derive_vault_auth_pda() != 39818) {
@@ -3065,7 +3184,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_parse_audren_address() != 28660) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_prepare_router_accounts() != 40440) {
+    if (uniffi_audren_ffi_checksum_func_prepare_escrow_accounts() != 62178) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_program_id() != 36184) {

@@ -6,12 +6,12 @@ Backed by the single audited Rust core (`crates/audren-client` via `crates/audre
 
 ## The 6 Standardized Building Blocks
 
-1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveSwapEscrowPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `deriveAssociatedTokenAddress`, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`, `pageIdForLane`, `laneOfPageId`, `seqOfPageId`, `netDepositAmount`
+1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
+2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveEscrowPda`, `deriveUnwrapPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `deriveAssociatedTokenAddress`, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`, `pageIdForLane`, `laneOfPageId`, `seqOfPageId`, `netDepositAmount`
 3. **Scanner** — `pageScanDataSlice` (`offset: 64, length: 1056`), `scanPageDataslice`, `scanEpochPage` (read-only FVK or spendable)
-4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildSwapViaRouterInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`, `buildOpenPageInstruction`, `buildOpenLanePageInstruction`
+4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildExecViaEscrowInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`, `buildOpenPageInstruction`, `buildOpenLanePageInstruction`
 5. **Disclosure & Audit** — `createSelectiveDisclosureProof`, `verifySelectiveDisclosureProof`, `verifySelectiveDisclosureOnPage`, `deriveAuditorKeypair`, `auditorDecryptNote`
-6. **Relayer & Router** — `jupiterCpiExcludedDexes`, `defaultRelayUrl`, `prepareRouterAccounts`
+6. **Relayer & Escrow CPI** — `jupiterCpiExcludedDexes`, `defaultRelayUrl`, `prepareEscrowAccounts`
 
 ## Build & Run Conformance Tests Locally
 

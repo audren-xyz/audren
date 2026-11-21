@@ -2,7 +2,7 @@
 
 Audren is **100% relayer-agnostic**. Anyone can run an independent relayer in under 5 minutes on Cloudflare Workers (free or paid plan) with zero shared credentials, zero trust in `relay.audren.xyz`, and full support for private transfers, merges, DEX swaps (Jupiter, Bedrock, DFlow, Titan, OKX), and withdrawals.
 
-A relayer **never** receives user spending keys or viewing keys — it only pays Solana transaction fees & nullifier/page rent, signs as `accounts[0]`, and optionally earns a configurable swap fee on `SwapViaRouter` (`Tag 5`) fills.
+A relayer **never** receives user spending keys or viewing keys — it only pays Solana transaction fees & nullifier/page rent, signs as `accounts[0]`, and optionally earns configurable fees via native `relayer_fee` on `ExecViaEscrow` (`Tag 5`) & `Withdraw` (`Tag 6`) or DEX aggregator platform fees.
 
 ---
 
@@ -158,7 +158,7 @@ console.log('Relayer fee payer:', info.relayerPubkey);
 
 Every `POST /v1/relay/submit` request passes **four zero-trust gates** before your relayer ever signs:
 
-1. **Instruction Firewall (`src/policy/firewall.ts`):** Permits **ONLY** Audren shielded spend tags (`Tag 3 Transfer`, `Tag 4 Merge`, `Tag 5 SwapViaRouter`, `Tag 6 Withdraw`). Rejects `Deposit`, arbitrary programs, extra signers (`accounts[0]` MUST equal your relayer pubkey and be the ONLY signer), and oversized payloads.
+1. **Instruction Firewall (`src/policy/firewall.ts`):** Permits **ONLY** Audren shielded spend tags (`Tag 3 Transfer`, `Tag 4 Merge`, `Tag 5 ExecViaEscrow`, `Tag 6 Withdraw`) plus strictly allowlisted zero-signer `preInstructions` (such as lending reserve refresh or oracle crank) immediately preceding `Tag 5`. Rejects `Deposit`, arbitrary programs, extra signers (`accounts[0]` MUST equal your relayer pubkey and be the ONLY signer), and oversized payloads.
 2. **Pre-Flight Simulation (`simulateV1Transaction`):** Simulates the complete Solana v1 (`0x81`) transaction against your RPC and measures exact relayer lamport outflow + exact output-mint fee token inflow — forged proofs fail at **0 lamports spent**.
 3. **Atomic SQLite Durable Object (`RelayGuard`):** Enforces per-IP cooldowns, sliding hourly/daily quotas, global daily SOL budget, and atomic in-flight nullifier locking to prevent duplicate concurrent submissions.
 4. **Auto-Refill Treasury Cron (`src/cron/refill.ts`):** Every 15 minutes, if native SOL falls below `REFILL_MIN_SOL`, discovers accumulated SPL & Token-2022 fee balances, unwraps WSOL, and swaps fee tokens back to native SOL (simulating every refill transaction before signing).

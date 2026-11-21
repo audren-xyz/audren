@@ -11,14 +11,14 @@ import styles from '@/components/SubpageShell.module.css'
 const INSTRUCTIONS = [
   { tag: '0x00', name: 'InitPool', summary: 'Create PoolState (192 B), EpochPage #0 (6,240 B < 10 KiB CPI cap), sol_vault, and page_rent_vault.' },
   { tag: '0x01', name: 'OpenPage', summary: 'Permissionless rollover sealing current Lane 0 EpochPage and opening page_id + 1 funded by PageRentVault via live Rent::get().' },
-  { tag: '0x02', name: 'Deposit', summary: 'Shield Native SOL, Classic SPL, or transferable Token-2022 directly to any Audren stealth address (commits exact net_received delta; zero spend key or ZK proof required; PoolState stays read-only on parallel lanes 1..15).' },
+  { tag: '0x02', name: 'Deposit', summary: 'Shield Native SOL, Classic SPL, or transferable Token-2022 directly to any Audren stealth address (commits exact net_received delta; DEPOSIT_FLAG_FEE_FROM_AMOUNT deducts rent contribution from deposit for 0-dust session sweeps; zero ZK proof required; PoolState stays read-only on parallel lanes 1..15).' },
   { tag: '0x03', name: 'Transfer', summary: 'Private multi-asset 1-in → 2-out transfer: Triptych (m=5/6/7 with strong Fiat-Shamir ring_root + prefix_counts), CrossBase2 (256 B, unlinkable asset tags), native Solana Bulletproof U128, optional AuditorAssetProof. Fits directly in a single Solana v1 transaction (4,096 B).' },
   { tag: '0x04', name: 'Merge', summary: 'Consolidate two same-asset shielded notes via 2 Triptych proofs (combined cap 128 ring slots) + CrossBase1 (128 B) + native Solana Bulletproof U64.' },
-  { tag: '0x05', name: 'SwapViaRouter', summary: 'Non-custodial 1-tx full or partial private DEX swap through 16 sharded swap_escrow PDAs into a compatible external Solana router, with optional shielded change (flags & 1 + CrossBase1 + Bulletproof U64) and partial-fill refund (flags & 2), executing directly in a single Solana v1 transaction (4,096 B).' },
-  { tag: '0x06', name: 'Withdraw', summary: 'Unshield exact amount to any recipient wallet/ATA with optional shielded change note. Full withdrawals (has_change = false) keep PoolState strictly read-only and bypass the pool pause; proofs, fees, available vault assets and token transfer permissions still apply.' },
-  { tag: '0x07', name: 'SetPaused', summary: 'Emergency authority circuit breaker for deposits, transfers, merges, swaps, and partial withdrawals — never blocks full 100% withdrawals and never grants vault custody.' },
-  { tag: '0x08', name: 'WriteProofBuffer', summary: 'Optional chunked upload into an ephemeral ProofBuffer PDA tracked via u16 bitmask for standard wallet v0 (1,232 B) signing or oversized multi-hop swaps.' },
-  { tag: '0x09', name: 'ExecBuffered', summary: 'Zero-copy execute Transfer, Merge, SwapViaRouter, or Withdraw from a completed ProofBuffer and atomically refund 100% of buffer rent to payer.' },
+  { tag: '0x05', name: 'ExecViaEscrow', summary: 'Protocol-agnostic 1-tx shielded DeFi CPI (DEX swaps, lending supply, yield vaults, LSTs, perp LP, RWAs) through 16 sharded swap_escrow PDAs into any compatible Token A → Token B Solana program, with native relayer_fee (input or output mint), optional shielded change (flags & 1), and partial-fill refund (flags & 2) in one Solana v1 transaction (4,096 B).' },
+  { tag: '0x06', name: 'Withdraw', summary: 'Unshield exact amount to any wallet/ATA or deterministic DeFi Session keypair with optional native relayer_fee, atomic WSOL → Native SOL unwrap via ephemeral audren_unwrap PDA (flags & 2), and optional shielded change. Full withdrawals (has_change = false, including unwrap_wsol) keep PoolState read-only and bypass pool pause.' },
+  { tag: '0x07', name: 'SetPaused', summary: 'Emergency authority circuit breaker for deposits, transfers, merges, ExecViaEscrow, and partial withdrawals — never blocks full 100% withdrawals (including unwrap_wsol) and never grants vault custody.' },
+  { tag: '0x08', name: 'WriteProofBuffer', summary: 'Optional chunked upload into an ephemeral ProofBuffer PDA tracked via u16 bitmask for standard wallet v0 (1,232 B) signing or oversized multi-hop DeFi CPIs.' },
+  { tag: '0x09', name: 'ExecBuffered', summary: 'Zero-copy execute Transfer, Merge, ExecViaEscrow, or Withdraw from a completed ProofBuffer and atomically refund 100% of buffer rent to payer.' },
   { tag: '0x0A', name: 'CloseProofBuffer', summary: 'Reclaim 100% of rent lamports from an abandoned or interrupted ProofBuffer back to its authority.' },
   { tag: '0x0B', name: 'InitLane', summary: 'Authority-signed parallel lane initializer enabling parallel append lanes 1..15 inside an existing pool (page_id = (lane_id << 56) | seq) sharing one unified vault & nullifier namespace.' },
   { tag: '0x0C', name: 'OpenLanePage', summary: 'Permissionless rollover for parallel append lanes 1..15 funded by per-lane LaneRentVault while keeping PoolState strictly read-only.' },
@@ -190,7 +190,7 @@ export function ArchitectureExperience() {
             <div className={styles.diagramStagePaper}>
               <div className={styles.stageHead}>
                 <strong>CU consumption vs. 1,400,000 CU Solana transaction cap</strong>
-                <span>SwapViaRouter leaves ~1.03M CU for DEX CPI</span>
+                <span>ExecViaEscrow leaves ~1.0M CU for external DeFi CPI</span>
               </div>
               <div className={styles.cuList}>
                 {MEASURED_CU_ROWS.map((row) => {
@@ -288,7 +288,7 @@ export function ArchitectureExperience() {
                 <span className={styles.cellIndex}>BOUNDARIES</span>
                 <h3>Public entry/exit &amp; effective anonymity</h3>
                 <ul className={styles.dashList}>
-                  <li>Public deposits, withdrawals, and external DEX legs are intentional boundaries; spending proofs conceal input selection within a candidate set.</li>
+                  <li>Public deposits, withdrawals, external DeFi CPI legs (<code>ExecViaEscrow</code>), and stateful positions opened by deterministic session wallets (<code>Bᵢ</code> via <code>HKDF-SHA256(&quot;audren/v1/defi_session&quot;)</code>) are intentional public boundaries; spending proofs conceal input selection within a candidate set.</li>
                   <li>Ring sizes (32 / 64 / 128) are slot capacities, not guaranteed counts of plausible notes or independent users.</li>
                   <li>More TVL alone does not guarantee more privacy; empty slots, known records, timing, and candidate selection reduce effective anonymity.</li>
                   <li>Public vault balances show held assets; they do not independently prove that every private liability is covered.</li>

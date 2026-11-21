@@ -8,17 +8,17 @@ Every constant, PDA, account decoder, key derivation, scanner, local zero-knowle
 
 | Import | Dependencies | What It Provides |
 |---|---|---|
-| `@audren/sdk` | **Zero** runtime deps | Constants, all 10 PDAs, `aud1…` address parser/formatter, binary decoders (`PoolState`, `AppendLaneState`, `EpochPage`), `dataSlice` RPC/WS scanner payloads, router/relayer clients, Solana v1 (`0x81`) serializer, Codama 1.8.0 & Anchor IDLs |
-| `@audren/sdk/prover` | `@noble/curves`, `@noble/hashes` | Full pure-TypeScript Ristretto255 key hierarchy (`deriveKeysFromSeed`, `deriveSubaccountKeys`, `exportFullViewingKey`, `assetGenerator`), local `dataSlice` note scanner & decryptor, Multi-Base Binary Triptych (`m=5/6/7`), CrossBase 1/2, Batched Bulletproofs (`U64`/`U128`), `Deposit` / `Transfer` / `Merge` / `SwapViaRouter` / `Withdraw` / `ProofBuffer` builders, Mode 1 Selective Disclosure, and Institutional Auditor ElGamal decryption |
+| `@audren/sdk` | **Zero** runtime deps | Constants, all 11 PDAs (incl. `deriveEscrowPda`, `deriveUnwrapPda`), `aud1…` address parser/formatter, binary decoders (`PoolState`, `AppendLaneState`, `EpochPage`), `dataSlice` RPC/WS scanner payloads, escrow/relayer clients, Solana v1 (`0x81`) serializer, Codama 1.8.0 & Anchor IDLs |
+| `@audren/sdk/prover` | `@noble/curves`, `@noble/hashes` | Full pure-TypeScript Ristretto255 key hierarchy (`deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `exportFullViewingKey`, `assetGenerator`), local `dataSlice` note scanner & decryptor, Multi-Base Binary Triptych (`m=5/6/7`), CrossBase 1/2, Batched Bulletproofs (`U64`/`U128`), `Deposit` (incl. `feeFromAmount`) / `Transfer` / `Merge` / `ExecViaEscrow` (incl. native `relayerFee`) / `Withdraw` (incl. native `relayerFee` & atomic `unwrapWsol`) / `ProofBuffer` builders, Mode 1 Selective Disclosure, and Institutional Auditor ElGamal decryption |
 
 ## The 6 Standardized Building Blocks
 
-1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveSwapEscrowPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `decodePoolState`, `decodePageHeader`, `decodeAppendLaneState`
+1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
+2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveEscrowPda`, `deriveUnwrapPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `decodePoolState`, `decodePageHeader`, `decodeAppendLaneState`
 3. **Scanner** — `PAGE_SCAN_OFFSET` (`64`), `PAGE_SCAN_LEN` (`1056`), `PAGE_SCAN_DATA_SLICE`, `scanPageScanSlice`, `scanEpochPage` (read-only FVK or spendable), `scanEpochPageSpendable`, `buildPageSubscribeWsPayload`, `checkNullifiersSpent`
-4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildSwapViaRouterInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`
+4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildExecViaEscrowInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`
 5. **Disclosure & Audit** — `createSelectiveDisclosureProof`, `verifySelectiveDisclosureReceipt`, `verifySelectiveDisclosureOnPage`, `deriveAuditorKeypair`, `auditorDecryptNote`
-6. **Relayer & IDLs** — `AudrenRelayClient`, `AUDREN_DEFAULT_RELAY_URL`, `JUPITER_CPI_EXCLUDED_DEXES`, `prepareRouterAccounts`, `prepareRouterAccountsForAudren`, `compileV1Message`, `serializeV1Transaction`, `AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`
+6. **Relayer & IDLs** — `AudrenRelayClient`, `AUDREN_DEFAULT_RELAY_URL`, `JUPITER_CPI_EXCLUDED_DEXES`, `prepareEscrowAccounts`, `prepareEscrowAccountsForAudren`, `compileV1Message`, `serializeV1Transaction`, `AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`
 
 ## Build, Test & Consume from Source
 

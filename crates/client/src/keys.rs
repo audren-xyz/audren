@@ -12,11 +12,11 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use audren_core::layout::{NoteEntry, NOTE_CT_LEN};
-use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
+use curve25519_dalek::{edwards::EdwardsPoint, ristretto::RistrettoPoint, scalar::Scalar};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256, Sha512};
 use solana_sha256_hasher::hashv;
 
 /// Plaintext flags encoded in the 48-byte AES-256-GCM note payload.
@@ -103,6 +103,51 @@ impl AudrenKeys {
             view_pk: self.view_pk,
         }
     }
+
+    /// Derive a deterministic, unlinkable single-use Ed25519 Solana keypair for stateful DeFi
+    /// sessions (borrowing, leverage, perpetuals on Kamino, Drift, Jupiter Perps, Marginfi, etc.).
+    ///
+    /// Uses `HKDF-SHA256(salt = "audren/v1/defi_session", ikm = master_seed, info = session_index_le4)`
+    /// followed by RFC 8032 Ed25519 public-key derivation so every session wallet is 100%
+    /// recoverable from the user's single master seed while sharing zero on-chain linkage with
+    /// the primary wallet or other session indices.
+    pub fn derive_defi_session_keypair(
+        master_seed: &[u8; 32],
+        session_index: u32,
+    ) -> DefiSessionKeypair {
+        let hk = Hkdf::<Sha256>::new(Some(b"audren/v1/defi_session"), master_seed);
+        let mut secret_seed = [0u8; 32];
+        hk.expand(&session_index.to_le_bytes(), &mut secret_seed)
+            .expect("32-byte HKDF expand");
+        let h = Sha512::digest(secret_seed);
+        let mut clamped = [0u8; 32];
+        clamped.copy_from_slice(&h[..32]);
+        let pubkey = EdwardsPoint::mul_base_clamped(clamped).compress().to_bytes();
+        let mut keypair_bytes = [0u8; 64];
+        keypair_bytes[..32].copy_from_slice(&secret_seed);
+        keypair_bytes[32..].copy_from_slice(&pubkey);
+        let address = bs58::encode(pubkey).into_string();
+        DefiSessionKeypair {
+            session_index,
+            secret_seed,
+            pubkey,
+            keypair_bytes,
+            address,
+        }
+    }
+}
+
+/// Deterministic ephemeral Ed25519 Solana keypair derived from an Audren master seed
+/// for stateful DeFi sessions (borrowing, leverage, perps) funded via `Withdraw`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefiSessionKeypair {
+    pub session_index: u32,
+    pub secret_seed: [u8; 32],
+    pub pubkey: [u8; 32],
+    /// Standard 64-byte Solana Keypair encoding (`secret_seed || pubkey`).
+    pub keypair_bytes: [u8; 64],
+    /// Base58-encoded Solana address for this ephemeral session.
+    pub address: String,
 }
 
 /// Shareable Audren stealth meta-address (`64 B` raw / base58 string).
@@ -465,7 +510,8 @@ pub fn prepare_shielded_note<R: RngCore + CryptoRng>(
     })
 }
 
-/// Prepare a dynamic output descriptor for `SwapViaRouter` (where `actual_out` is committed on-chain).
+/// Prepare a dynamic output descriptor for `ExecViaEscrow` or `fee_from_amount` `Deposit`
+/// where the final committed amount is computed on-chain.
 pub struct PreparedDynamicOutput {
     pub view_tag: u8,
     pub ephemeral_pk: Point,
@@ -474,10 +520,10 @@ pub struct PreparedDynamicOutput {
     pub stealth_scalar: Scalar,
 }
 
-pub fn prepare_dynamic_swap_output<R: RngCore + CryptoRng>(
+pub fn prepare_dynamic_output<R: RngCore + CryptoRng>(
     recipient: &AudrenAddress,
     mint_out: [u8; 32],
-    min_amount_out: u64,
+    expected_min_amount: u64,
     memo_tag: [u8; 7],
     rng: &mut R,
 ) -> Result<PreparedDynamicOutput, ClientError> {
@@ -486,7 +532,7 @@ pub fn prepare_dynamic_swap_output<R: RngCore + CryptoRng>(
         &mat,
         &DecryptedPayload {
             mint: mint_out,
-            amount: min_amount_out,
+            amount: expected_min_amount,
             flags: NOTE_FLAG_DYNAMIC_ONCHAIN_VALUE,
             memo_tag,
         },

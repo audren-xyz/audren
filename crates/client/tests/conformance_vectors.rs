@@ -12,15 +12,15 @@
 use std::path::PathBuf;
 
 use audren_client::{
-    instructions::{build_deposit, build_transfer, build_withdraw},
+    instructions::{build_deposit, build_deposit_with_options, build_transfer, build_withdraw, build_withdraw_with_params, WithdrawParams},
     keys::{
         compute_note_nullifier, prepare_shielded_note, AudrenAddress, AudrenKeys, AuditorKeypair,
         FullViewingKey, SelectiveDisclosureProof,
     },
     pda::{
-        derive_epoch_page_pda, derive_lane_pda, derive_lane_rent_vault_pda, derive_nullifier_pda,
-        derive_page_rent_vault_pda, derive_pool_pda, derive_proof_buffer_pda, derive_sol_vault_pda,
-        derive_swap_escrow_pda, derive_vault_auth_pda,
+        derive_epoch_page_pda, derive_escrow_pda, derive_lane_pda, derive_lane_rent_vault_pda,
+        derive_nullifier_pda, derive_page_rent_vault_pda, derive_pool_pda, derive_proof_buffer_pda,
+        derive_sol_vault_pda, derive_unwrap_pda, derive_vault_auth_pda,
     },
     prover::{asset_generator, compress, decompress, h_point, RingSlotWitness},
     router::JUPITER_CPI_EXCLUDED_DEXES,
@@ -82,6 +82,14 @@ struct SubaccountVector {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DefiSessionVector {
+    session_index: u32,
+    secret_seed_hex: String,
+    pubkey_hex: String,
+    address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PdaVector {
     address: String,
     bump: u8,
@@ -96,7 +104,8 @@ struct PdaSuiteVector {
     sol_vault: PdaVector,
     vault_auth: PdaVector,
     page_rent_vault: PdaVector,
-    swap_escrow_0: PdaVector,
+    escrow_0: PdaVector,
+    unwrap_pda: PdaVector,
     lane_1: PdaVector,
     lane_rent_vault_1: PdaVector,
     proof_buffer_authority: String,
@@ -191,6 +200,7 @@ struct ConformanceVectors {
     program_id: String,
     alice: KeyVector,
     alice_subaccounts: Vec<SubaccountVector>,
+    alice_defi_sessions: Vec<DefiSessionVector>,
     bob: KeyVector,
     pdas: PdaSuiteVector,
     asset_generators: AssetGeneratorsVector,
@@ -222,6 +232,8 @@ fn generate_canonical_vectors() -> ConformanceVectors {
 
     let alice_sub1 = AudrenKeys::from_seed_subaccount(&alice_seed, 1);
     let alice_sub7 = AudrenKeys::from_seed_subaccount(&alice_seed, 7);
+    let alice_sess0 = AudrenKeys::derive_defi_session_keypair(&alice_seed, 0);
+    let alice_sess3 = AudrenKeys::derive_defi_session_keypair(&alice_seed, 3);
 
     // 2. Asset generators (Native SOL, WSOL, Mainnet USDC)
     let usdc_addr: Address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -333,7 +345,8 @@ fn generate_canonical_vectors() -> ConformanceVectors {
     let (sol_vault_pda, sol_vault_bump) = derive_sol_vault_pda(&program_id, pool_id);
     let (vault_auth_pda, vault_auth_bump) = derive_vault_auth_pda(&program_id, pool_id);
     let (rent_vault_pda, rent_vault_bump) = derive_page_rent_vault_pda(&program_id, pool_id);
-    let (escrow0_pda, escrow0_bump) = derive_swap_escrow_pda(&program_id, pool_id, 0);
+    let (escrow0_pda, escrow0_bump) = derive_escrow_pda(&program_id, pool_id, 0);
+    let (unwrap_pda, unwrap_bump) = derive_unwrap_pda(&program_id, pool_id, &nullifier);
     let (lane1_pda, lane1_bump) = derive_lane_pda(&program_id, pool_id, 1);
     let (lane1_rent_pda, lane1_rent_bump) = derive_lane_rent_vault_pda(&program_id, pool_id, 1);
     let buf_auth = Address::new_from_array([0x22u8; 32]);
@@ -401,7 +414,7 @@ fn generate_canonical_vectors() -> ConformanceVectors {
     let _ = h_point();
 
     ConformanceVectors {
-        spec_version: "0.2.0".to_string(),
+        spec_version: "0.3.0".to_string(),
         program_id: program_id.to_string(),
         alice: KeyVector {
             seed_hex: to_hex(&alice_seed),
@@ -428,6 +441,20 @@ fn generate_canonical_vectors() -> ConformanceVectors {
                 view_sk_hex: to_hex(&alice_sub7.view_sk.to_bytes()),
                 view_pk_hex: to_hex(&alice_sub7.view_pk),
                 address: alice_sub7.address().to_base58(),
+            },
+        ],
+        alice_defi_sessions: vec![
+            DefiSessionVector {
+                session_index: alice_sess0.session_index,
+                secret_seed_hex: to_hex(&alice_sess0.secret_seed),
+                pubkey_hex: to_hex(&alice_sess0.pubkey),
+                address: alice_sess0.address.clone(),
+            },
+            DefiSessionVector {
+                session_index: alice_sess3.session_index,
+                secret_seed_hex: to_hex(&alice_sess3.secret_seed),
+                pubkey_hex: to_hex(&alice_sess3.pubkey),
+                address: alice_sess3.address.clone(),
             },
         ],
         bob: KeyVector {
@@ -465,9 +492,13 @@ fn generate_canonical_vectors() -> ConformanceVectors {
                 address: rent_vault_pda.to_string(),
                 bump: rent_vault_bump,
             },
-            swap_escrow_0: PdaVector {
+            escrow_0: PdaVector {
                 address: escrow0_pda.to_string(),
                 bump: escrow0_bump,
+            },
+            unwrap_pda: PdaVector {
+                address: unwrap_pda.to_string(),
+                bump: unwrap_bump,
             },
             lane_1: PdaVector {
                 address: lane1_pda.to_string(),
@@ -735,11 +766,58 @@ fn canonical_conformance_vectors_match_and_prove_end_to_end() {
     )
     .unwrap();
     assert_eq!(wd_ix.data[0], 6); // Tag 6 = Withdraw
-    assert_eq!(wd_ix.data.len(), 1_966);
-    assert_eq!(wd_ix.accounts.len(), 10);
+    assert_eq!(wd_ix.data.len(), 1_973);
+    assert_eq!(wd_ix.accounts.len(), 11);
     assert_eq!(wd_chg.unwrap().amount, 500_000);
 
-    // Router & Relayer helpers
+    // Self-paying Withdraw with relayer_fee
+    let fee_recipient = Address::new_from_array([0x66u8; 32]);
+    let (wd_fee_ix, wd_fee_chg) = build_withdraw_with_params(
+        &WithdrawParams {
+            program_id,
+            payer,
+            pool_id: 0,
+            out_page_id: 1,
+            input_page_ids: &[0],
+            ring: &ring,
+            input_note: &full_note,
+            secret_index: expected.epoch_page.alice_note.slot_index as usize,
+            recipient_account: payer,
+            change_addr: &alice.address(),
+            amount: 900_000,
+            relayer_fee: 100_000,
+            fee_recipient: Some(fee_recipient),
+            unwrap_wsol: false,
+            spl_token_program: None,
+            auditor_pk: None,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    assert_eq!(wd_fee_ix.accounts[7].pubkey, fee_recipient);
+    assert!(wd_fee_ix.accounts[7].is_writable);
+    assert_eq!(wd_fee_chg.unwrap().amount, 500_000);
+
+    // Zero-dust Native SOL sweep Deposit (fee_from_amount = true)
+    let (sweep_ix, _) = build_deposit_with_options(
+        program_id,
+        payer,
+        0,
+        1,
+        &bob_addr,
+        NATIVE_SOL_MINT,
+        500_000,
+        500_000,
+        true,
+        None,
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    assert_eq!(sweep_ix.data[0], 2);
+    assert_eq!(sweep_ix.data[1], 0x03); // DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT
+
+    // Escrow & Relayer helpers
     assert_eq!(
         audren_client::router::DEFAULT_RELAY_URL,
         "https://relay.audren.xyz"
@@ -747,10 +825,10 @@ fn canonical_conformance_vectors_match_and_prove_end_to_end() {
     let classic_tp = Address::new_from_array(audren_core::CLASSIC_TOKEN_PROGRAM_ID);
     let wsol_mint: Address = expected.asset_generators.wsol_mint_b58.parse().unwrap();
     let usdc_mint: Address = expected.asset_generators.usdc_mint_b58.parse().unwrap();
-    let (escrow0, _) = derive_swap_escrow_pda(&program_id, 0, 0);
+    let (escrow0, _) = derive_escrow_pda(&program_id, 0, 0);
     let escrow_in = audren_client::pda::derive_ata(&escrow0, &classic_tp, &wsol_mint);
     let escrow_out = audren_client::pda::derive_ata(&escrow0, &classic_tp, &usdc_mint);
-    let prep = audren_client::router::prepare_router_accounts(
+    let prep = audren_client::router::prepare_escrow_accounts(
         &program_id,
         0,
         0,

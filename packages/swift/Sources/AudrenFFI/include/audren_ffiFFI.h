@@ -268,6 +268,11 @@ RustBuffer uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(RustBu
 RustBuffer uniffi_audren_ffi_fn_func_build_deposit_instruction(RustBuffer params, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_EXEC_VIA_ESCROW_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_EXEC_VIA_ESCROW_INSTRUCTION
+RustBuffer uniffi_audren_ffi_fn_func_build_exec_via_escrow_instruction(RustBuffer params, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_MERGE_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_MERGE_INSTRUCTION
 RustBuffer uniffi_audren_ffi_fn_func_build_merge_instruction(RustBuffer params, RustCallStatus *_Nonnull out_status
@@ -281,11 +286,6 @@ RustBuffer uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(RustBuffer
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
 RustBuffer uniffi_audren_ffi_fn_func_build_open_page_instruction(RustBuffer program_id, RustBuffer payer, uint32_t pool_id, uint64_t current_page_id, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_SWAP_VIA_ROUTER_INSTRUCTION
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_SWAP_VIA_ROUTER_INSTRUCTION
-RustBuffer uniffi_audren_ffi_fn_func_build_swap_via_router_instruction(RustBuffer params, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_TRANSFER_INSTRUCTION
@@ -334,9 +334,19 @@ RustBuffer uniffi_audren_ffi_fn_func_derive_associated_token_address(RustBuffer 
 RustBuffer uniffi_audren_ffi_fn_func_derive_auditor_keypair(RustBuffer seed_32, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_DEFI_SESSION_KEYPAIR
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_DEFI_SESSION_KEYPAIR
+RustBuffer uniffi_audren_ffi_fn_func_derive_defi_session_keypair(RustBuffer master_seed_32, uint32_t session_index, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_EPOCH_PAGE_PDA
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_EPOCH_PAGE_PDA
 RustBuffer uniffi_audren_ffi_fn_func_derive_epoch_page_pda(uint32_t pool_id, uint64_t page_id, RustBuffer program_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ESCROW_PDA
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ESCROW_PDA
+RustBuffer uniffi_audren_ffi_fn_func_derive_escrow_pda(uint32_t pool_id, uint8_t shard_id, RustBuffer program_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_KEYS_FROM_SEED
@@ -384,9 +394,9 @@ RustBuffer uniffi_audren_ffi_fn_func_derive_sol_vault_pda(uint32_t pool_id, Rust
 RustBuffer uniffi_audren_ffi_fn_func_derive_subaccount_keys(RustBuffer master_seed_32, uint32_t account_index, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_SWAP_ESCROW_PDA
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_SWAP_ESCROW_PDA
-RustBuffer uniffi_audren_ffi_fn_func_derive_swap_escrow_pda(uint32_t pool_id, uint8_t shard_id, RustBuffer program_id, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_UNWRAP_PDA
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_UNWRAP_PDA
+RustBuffer uniffi_audren_ffi_fn_func_derive_unwrap_pda(uint32_t pool_id, RustBuffer nullifier_32, RustBuffer program_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_VAULT_AUTH_PDA
@@ -436,9 +446,9 @@ RustBuffer uniffi_audren_ffi_fn_func_page_scan_data_slice(RustCallStatus *_Nonnu
 RustBuffer uniffi_audren_ffi_fn_func_parse_audren_address(RustBuffer encoded, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PREPARE_ROUTER_ACCOUNTS
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PREPARE_ROUTER_ACCOUNTS
-RustBuffer uniffi_audren_ffi_fn_func_prepare_router_accounts(uint32_t pool_id, uint8_t shard_id, RustBuffer input_mint_b58, RustBuffer output_mint_b58, RustBuffer input_token_program_b58, RustBuffer output_token_program_b58, RustBuffer router_accounts, RustBuffer program_id, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PREPARE_ESCROW_ACCOUNTS
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PREPARE_ESCROW_ACCOUNTS
+RustBuffer uniffi_audren_ffi_fn_func_prepare_escrow_accounts(uint32_t pool_id, uint8_t shard_id, RustBuffer input_mint_b58, RustBuffer output_mint_b58, RustBuffer input_token_program_b58, RustBuffer output_token_program_b58, RustBuffer action_accounts, RustBuffer program_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PROGRAM_ID
@@ -762,6 +772,12 @@ uint16_t uniffi_audren_ffi_checksum_func_build_deposit_instruction(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_EXEC_VIA_ESCROW_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_EXEC_VIA_ESCROW_INSTRUCTION
+uint16_t uniffi_audren_ffi_checksum_func_build_exec_via_escrow_instruction(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_MERGE_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_MERGE_INSTRUCTION
 uint16_t uniffi_audren_ffi_checksum_func_build_merge_instruction(void
@@ -777,12 +793,6 @@ uint16_t uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
 uint16_t uniffi_audren_ffi_checksum_func_build_open_page_instruction(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_SWAP_VIA_ROUTER_INSTRUCTION
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_SWAP_VIA_ROUTER_INSTRUCTION
-uint16_t uniffi_audren_ffi_checksum_func_build_swap_via_router_instruction(void
     
 );
 #endif
@@ -840,9 +850,21 @@ uint16_t uniffi_audren_ffi_checksum_func_derive_auditor_keypair(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_DEFI_SESSION_KEYPAIR
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_DEFI_SESSION_KEYPAIR
+uint16_t uniffi_audren_ffi_checksum_func_derive_defi_session_keypair(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_EPOCH_PAGE_PDA
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_EPOCH_PAGE_PDA
 uint16_t uniffi_audren_ffi_checksum_func_derive_epoch_page_pda(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ESCROW_PDA
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ESCROW_PDA
+uint16_t uniffi_audren_ffi_checksum_func_derive_escrow_pda(void
     
 );
 #endif
@@ -900,9 +922,9 @@ uint16_t uniffi_audren_ffi_checksum_func_derive_subaccount_keys(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_SWAP_ESCROW_PDA
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_SWAP_ESCROW_PDA
-uint16_t uniffi_audren_ffi_checksum_func_derive_swap_escrow_pda(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_UNWRAP_PDA
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_UNWRAP_PDA
+uint16_t uniffi_audren_ffi_checksum_func_derive_unwrap_pda(void
     
 );
 #endif
@@ -960,9 +982,9 @@ uint16_t uniffi_audren_ffi_checksum_func_parse_audren_address(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PREPARE_ROUTER_ACCOUNTS
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PREPARE_ROUTER_ACCOUNTS
-uint16_t uniffi_audren_ffi_checksum_func_prepare_router_accounts(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PREPARE_ESCROW_ACCOUNTS
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PREPARE_ESCROW_ACCOUNTS
+uint16_t uniffi_audren_ffi_checksum_func_prepare_escrow_accounts(void
     
 );
 #endif

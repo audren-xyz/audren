@@ -2,7 +2,8 @@
 
 use audren_core::{
     ASSOCIATED_TOKEN_PROGRAM_ID, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, NULLIFIER_SEED,
-    PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, SOL_VAULT_SEED, VAULT_AUTH_SEED,
+    PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, SOL_VAULT_SEED, UNWRAP_SEED,
+    VAULT_AUTH_SEED,
 };
 use solana_address::Address;
 
@@ -64,9 +65,19 @@ pub fn derive_nullifier_pda(
 }
 
 #[inline]
-pub fn derive_swap_escrow_pda(program_id: &Address, pool_id: u32, shard_id: u8) -> (Address, u8) {
+pub fn derive_escrow_pda(program_id: &Address, pool_id: u32, shard_id: u8) -> (Address, u8) {
     let id_le = pool_id.to_le_bytes();
     Address::find_program_address(&[ESCROW_SEED, &id_le, &[shard_id]], program_id)
+}
+
+#[inline]
+pub fn derive_unwrap_pda(
+    program_id: &Address,
+    pool_id: u32,
+    nullifier: &[u8; 32],
+) -> (Address, u8) {
+    let id_le = pool_id.to_le_bytes();
+    Address::find_program_address(&[UNWRAP_SEED, &id_le, nullifier], program_id)
 }
 
 #[inline]

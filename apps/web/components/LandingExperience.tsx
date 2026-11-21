@@ -58,39 +58,39 @@ const RING_CASES: readonly RingCase[] = [
   },
   {
     id: 'swap',
-    tab: 'Swap on DEX',
-    stageTitle: 'Atomic DEX CPI · sharded escrow',
-    stageTag: 'Tag 5 · SwapViaRouter',
-    title: 'Trade via any DEX aggregator. Settle back into the pool.',
+    tab: 'Shielded DeFi',
+    stageTitle: 'Protocol-agnostic CPI · sharded escrow',
+    stageTag: 'Tag 5 · ExecViaEscrow',
+    title: 'Swap, lend, stake, or deploy into Solana DeFi — settle back into the pool.',
     detail:
-      'Swap full or partial notes through any compatible Solana DEX aggregator or AMM (Titan, DFlow, OKX DEX, Jupiter, Raydium, Orca, or custom routers) and sweep proceeds straight back into a fresh pool note. The DEX pair, trade amounts and output record are public; large routes or wallet limits can require proof-upload transactions.',
-    hiddenLabel: 'Spent note within selected candidates',
-    publicLabel: 'External DEX pair, routed amounts, output slot & fee payer',
-    packetLabel: 'SOL → USDC',
-    beamLabel: 'Escrow PDA → DEX',
-    outcomeTitle: 'DEX aggregator CPI',
-    outcomeSub: 'Any compatible router',
+      'ExecViaEscrow turns any Token A → Token B Solana program call into a single shielded transaction: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) are just one example alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA mint/redeem. Native relayer fees settle from input or output tokens; external DeFi amounts, mints and output record remain public.',
+    hiddenLabel: 'Spent note within selected candidates & owner wallet',
+    publicLabel: 'External DeFi program, mints, routed amounts, output slot & fee payer',
+    packetLabel: 'Token A → B',
+    beamLabel: 'Escrow PDA → DeFi CPI',
+    outcomeTitle: 'Any Solana DeFi CPI',
+    outcomeSub: 'DEX · Lend · LST · Vault',
     outcomeCaption: 'Swept back to pool',
-    resultText: 'DEX proceeds settle straight into a fresh pool record.',
+    resultText: 'Output token or yield receipt settles straight into a fresh pool record.',
     txHref: solscanTx(AUDREN.mainnet.swapTx),
-    txLabel: 'Inspect Mainnet private DEX swap',
+    txLabel: 'Inspect Mainnet ExecViaEscrow tx',
   },
   {
     id: 'withdraw',
-    tab: 'Pay public wallet',
-    stageTitle: 'Shared vault · public payout',
+    tab: 'Pay or fund wallet',
+    stageTitle: 'Self-paying payout · atomic WSOL unwrap',
     stageTag: 'Tag 6 · Withdraw',
-    title: 'Pay any Solana address — no Audren account required.',
+    title: 'Pay any address — or fund a fresh DeFi session wallet with zero prior SOL.',
     detail:
-      'Send ordinary SOL or SPL tokens from the shared pool vault directly to any regular Solana wallet or exchange address. The recipient gets normal tokens; the proof conceals the spent note among selected candidates. Public amounts and timing can still support inference.',
-    hiddenLabel: 'Which candidate note funded the payout',
-    publicLabel: 'Destination wallet, token, payout amount & fee payer',
-    packetLabel: 'SOL payout',
-    beamLabel: 'Vault payout · input concealed',
-    outcomeTitle: 'Any Solana wallet',
-    outcomeSub: 'No Audren needed',
+      'Send SOL or SPL tokens from the shared pool to any wallet, exchange, or deterministic Private DeFi Session keypair (B_0, B_1…) for stateful borrow or perp protocols. Pay the relayer directly from the withdrawn note, optionally unwrap WSOL atomically to Native SOL in the same instruction, and later sweep remaining gas back with zero-dust Deposit(fee_from_amount). Public payouts and any stateful DeFi position opened by a session wallet remain public on Solana.',
+    hiddenLabel: 'Which candidate note funded the payout or session wallet',
+    publicLabel: 'Destination wallet, token, payout amount, fee payer & any DeFi positions opened',
+    packetLabel: 'SOL / WSOL',
+    beamLabel: 'Self-paying · atomic unwrap',
+    outcomeTitle: 'Wallet or Session Bᵢ',
+    outcomeSub: '0-SOL bootstrap ready',
     outcomeCaption: 'Public payout',
-    resultText: 'Public payout; the proof conceals its input note.',
+    resultText: 'Public payout or 0-SOL DeFi session funded; proof conceals its input note.',
     txHref: solscanTx(AUDREN.mainnet.withdrawTx),
     txLabel: 'Inspect Mainnet full withdrawal',
   },
@@ -881,8 +881,9 @@ export function LandingExperience() {
             </h1>
             <p>
               Deposit SOL, Classic SPL, or transferable Token-2022 assets without a wrapper token.
-              Make private payments, swap through compatible DEX routes, or withdraw to any regular
-              wallet. Your spending keys stay on your device.
+              Make private payments, compose with Solana DeFi via isolated escrow CPI (DEX swaps,
+              lending supply, liquid staking, yield vaults, RWAs), or fund fresh wallets directly
+              with self-paying fees and atomic WSOL unwrap. Your spending keys stay on your device.
             </p>
             <div className={styles.actions}>
               <Link href="/demo" className="btn-ink">
@@ -898,9 +899,10 @@ export function LandingExperience() {
 
           <p className={styles.heroBoundary}>
             Private transfers conceal the spent record, recipient, token and amount. Deposits,
-            external DEX legs, withdrawals and the fee payer remain public; a separate relayer keeps
-            your wallet off the fee-payer field. Timing and outside information can still create
-            links. <Link href="/faq">Read the privacy model</Link>.
+            external DeFi CPI legs, public withdrawals, stateful session-wallet positions and the
+            fee payer remain public; a separate relayer keeps your wallet off the fee-payer field.
+            Timing and outside information can still create links.{' '}
+            <Link href="/faq">Read the privacy model</Link>.
           </p>
         </section>
 
@@ -998,6 +1000,105 @@ export function LandingExperience() {
           </p>
         </section>
 
+        {/* UNIVERSAL SOLANA DEFI RAIL */}
+        <section className={`container ${styles.defiSection}`} id="defi-primitives">
+          <div className={styles.sectionIntro}>
+            <div>
+              <h2>
+                One escrow primitive.
+                <br />
+                Endless Solana DeFi.
+              </h2>
+            </div>
+            <p>
+              <code>ExecViaEscrow</code> (Tag 5) executes any stateless{' '}
+              <code>Token A → Token B</code> Solana CPI through a sharded escrow PDA and reshields
+              the exact net vault delta on-chain. DEX swaps are only one example — and stateful
+              protocols work cleanly through self-funded ephemeral session wallets.
+            </p>
+          </div>
+
+          <div className={styles.defiLedger}>
+            <article className={styles.defiCell}>
+              <span className={styles.colKicker}>Tag 5 · 1 Tx · Stateless CPI</span>
+              <h3>DEX Aggregators &amp; AMMs</h3>
+              <p>
+                Route across Jupiter, Titan, DFlow, OKX DEX, Raydium, Orca, Meteora, or custom
+                routers with transcript-bound <code>min_amount_out</code> and native input/output
+                relayer fees.
+              </p>
+              <span className={styles.defiFlowTag}>WSOL / SPL → Any SPL → Shielded Note</span>
+            </article>
+
+            <article className={styles.defiCell}>
+              <span className={styles.colKicker}>Tag 5 · 1 Tx · Receipt Token</span>
+              <h3>Lending Supply</h3>
+              <p>
+                Supply USDC or SOL into Solana lending reserves (such as Kamino Lend) and reshield
+                the minted interest-bearing receipt token (<code>kUSDC</code>, <code>kSOL</code>)
+                directly into the shared pool.
+              </p>
+              <span className={styles.defiFlowTag}>USDC → Reserve Deposit → kUSDC Note</span>
+            </article>
+
+            <article className={styles.defiCell}>
+              <span className={styles.colKicker}>Tag 5 · 1 Tx · Yield Share</span>
+              <h3>Yield &amp; Auto-Compounding Vaults</h3>
+              <p>
+                Enter or exit ERC-4626-style Solana vaults (Kamino Vaults, Meteora Dynamic Vaults,
+                Jito Restaking) atomically, sweeping exact share tokens back into a fresh stealth
+                note.
+              </p>
+              <span className={styles.defiFlowTag}>Asset → Vault Deposit → Share Token Note</span>
+            </article>
+
+            <article className={styles.defiCell}>
+              <span className={styles.colKicker}>Tag 5 · 1 Tx · Stake Pool</span>
+              <h3>Liquid Staking (LSTs)</h3>
+              <p>
+                Convert shielded WSOL into yield-bearing liquid staking tokens (<code>JitoSOL</code>
+                , <code>mSOL</code>, Sanctum <code>INF</code>) and hold or unwind them back inside
+                the unified pool.
+              </p>
+              <span className={styles.defiFlowTag}>WSOL → Stake Pool CPI → LST Note</span>
+            </article>
+
+            <article className={styles.defiCell}>
+              <span className={styles.colKicker}>Tag 5 · 1 Tx · LP &amp; Treasury</span>
+              <h3>Perp LP &amp; Tokenized RWAs</h3>
+              <p>
+                Mint or redeem pooled liquidity tokens (such as Jupiter <code>JLP</code>) or
+                permissionless tokenized treasury vaults where the target program issues a standard
+                SPL or Token-2022 receipt token.
+              </p>
+              <span className={styles.defiFlowTag}>USDC → Mint / Redeem → JLP / RWA Note</span>
+            </article>
+
+            <article className={`${styles.defiCell} ${styles.defiCellSession}`}>
+              <span className={styles.colKicker}>Tag 6 + Tag 2 · Stateful Sessions</span>
+              <h3>Borrowing &amp; Perps via Session Wallets</h3>
+              <p>
+                Fund deterministic session wallets (<code>B₀, B₁…</code>) from zero prior SOL via
+                self-paying <code>Withdraw(unwrap_wsol)</code>, trade or borrow on stateful
+                protocols, then sweep every remaining lamport back with zero-dust{' '}
+                <code>Deposit(fee_from_amount)</code>. Positions opened by <code>Bᵢ</code> remain
+                public on Solana.
+              </p>
+              <span className={styles.defiFlowTag}>
+                Withdraw(unwrap_wsol) → Bᵢ DeFi → 0-Dust Sweep
+              </span>
+            </article>
+          </div>
+
+          <p className={styles.editorialNote}>
+            <strong>Clear DeFi privacy boundary.</strong> External CPI legs expose the target
+            program, mints, routed amounts and output slot; stateful positions opened by a session
+            wallet <code>Bᵢ</code> (collateral, debt, margin, liquidations) remain public on that
+            protocol. Audren conceals the funding note inside the pool ring and eliminates the
+            on-chain link to your primary wallet.
+          </p>
+        </section>
+
         {/* COMPARISON LEDGER */}
         <section className={styles.cardsSection} id="why-audren">
           <div className="container">
@@ -1054,7 +1155,7 @@ export function LandingExperience() {
                 <ul className={styles.colList}>
                   <li>Private transfers conceal input record, fresh recipient, token and amount</li>
                   <li>Supports SOL, Classic SPL and transferable Token-2022; issuer controls apply</li>
-                  <li>Compatible DEX router CPI; external DEX assets and amounts remain public</li>
+                  <li>Protocol-agnostic ExecViaEscrow CPI (DEXs, lending, LSTs, vaults) + self-paying WSOL unwrap</li>
                   <li>No protocol-specific indexer or trusted setup; pre-audit and upgradeable</li>
                 </ul>
               </article>
@@ -1233,8 +1334,9 @@ export function LandingExperience() {
             <div>
               <h2>Use it directly. Integrate without permission.</h2>
               <p>
-                Run private transfers and compatible DEX swaps in your browser, or integrate the
-                Rust, TypeScript, Swift (iOS), and Kotlin (Android) SDKs into your own wallet or app.
+                Run private transfers, shielded DeFi via ExecViaEscrow, and self-paying WSOL
+                withdrawals in your browser — or integrate the Rust, TypeScript, Swift (iOS), and
+                Kotlin (Android) SDKs into your own wallet or app.
               </p>
             </div>
             <div className={styles.actions}>

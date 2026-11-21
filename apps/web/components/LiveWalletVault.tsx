@@ -48,10 +48,10 @@ import {
   buildCloseProofBufferInstruction,
   buildCreateAtaIdempotentIx,
   buildDepositInstruction,
+  buildExecViaEscrowInstruction,
   buildMergeInstruction,
   buildOpenLanePageInstruction,
   buildOpenPageInstruction,
-  buildSwapViaRouterInstruction,
   buildTransferInstruction,
   buildWalletUnlockMessage,
   buildWithdrawInstruction,
@@ -60,6 +60,7 @@ import {
   calculateTransferFee,
   clearEncryptedVaultInventory,
   deriveAta,
+  deriveDefiSessionKeypair,
   deriveSeedFromWalletSignature,
   exportEncryptedVaultBackup,
   extractRingFromPage,
@@ -280,6 +281,7 @@ interface AuditRecord {
     | 'Combine Notes'
     | 'DEX Swap'
     | 'Withdraw'
+    | 'Withdraw (Unwrap WSOL)'
     | 'Reclaim Buffer Rent'
   cluster: SolanaCluster
   signature: string
@@ -633,6 +635,29 @@ export function LiveWalletVault({
   const [withdrawToSelf, setWithdrawToSelf] = useState<boolean>(true)
   const [withdrawDest, setWithdrawDest] = useState<string>('')
   const [withdrawAmountDraft, setWithdrawAmountDraft] = useState<string | null>(null)
+  const [withdrawUnwrapWsol, setWithdrawUnwrapWsol] = useState<boolean>(true)
+  const [useDefiSessionDest, setUseDefiSessionDest] = useState<boolean>(false)
+  const [defiSessionIndex, setDefiSessionIndex] = useState<number>(0)
+  const [defiSessionAddr, setDefiSessionAddr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const seed = vaultSeedRef.current
+    if (!audrenKeys || !seed) {
+      setDefiSessionAddr(null)
+      return
+    }
+    void deriveDefiSessionKeypair(seed, defiSessionIndex)
+      .then((kp) => {
+        if (!cancelled) setDefiSessionAddr(kp.address)
+      })
+      .catch(() => {
+        if (!cancelled) setDefiSessionAddr(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [audrenKeys, defiSessionIndex])
 
   // Execution state
   const [busyLabel, setBusyLabel] = useState<string | null>(null)
@@ -3121,7 +3146,7 @@ const depositIx = {
       await new Promise((r) => setTimeout(r, 20))
       const t0 = getPerfNowMs()
       const minAmountOut = BigInt(jupiterQuote.quote.otherAmountThreshold)
-      const { instruction, outDesc } = await buildSwapViaRouterInstruction({
+      const { instruction, outDesc } = await buildExecViaEscrowInstruction({
         payer: payerPubkey,
         poolId: 0,
         outPageId: outputPlan.outPageId,
@@ -3137,9 +3162,9 @@ const depositIx = {
         minAmountOut,
         recipient: { spendPk: audrenKeys.spendPk, viewPk: audrenKeys.viewPk },
         changeAddr: { spendPk: audrenKeys.spendPk, viewPk: audrenKeys.viewPk },
-        routerProgramId: base58Decode(ixJson.swapInstruction.programId),
-        routerIxData: fromBase64(ixJson.swapInstruction.data),
-        routerAccounts: ixJson.swapInstruction.accounts.map((a) => ({
+        targetProgramId: base58Decode(ixJson.swapInstruction.programId),
+        targetIxData: fromBase64(ixJson.swapInstruction.data),
+        actionAccounts: ixJson.swapInstruction.accounts.map((a) => ({
           pubkey: base58Decode(a.pubkey),
           isSigner: a.isSigner,
           isWritable: a.isWritable,
@@ -3216,14 +3241,14 @@ const depositIx = {
         stayedPrivate: chgDisplay
           ? `The proof conceals the selected input note and blinds the change amount. The change asset and swap output asset and amount are public; recipient ownership uses fresh keys.`
           : `The proof conceals the selected input note. Swap output asset and amount are public; its recipient uses a fresh key. Public details can still support correlation.`,
-        sdkCode: `const { instruction } = await buildSwapViaRouterInstruction({
+        sdkCode: `const { instruction } = await buildExecViaEscrowInstruction({
   payer: ${useRelayer ? 'relayerPubkey' : 'walletPubkey'},
   poolId: 0,
   inputNote,
   amountIn: ${amountIn.toString()}n, // ${inDisplay}${chgDisplay ? ` (${chgDisplay} shielded change)` : ''}
   mintOut: '${swapOutMint}',
   minAmountOut: ${minAmountOut.toString()}n,
-  routerProgramId: '${ixJson.swapInstruction.programId}',
+  targetProgramId: '${ixJson.swapInstruction.programId}',
 })`,
       })
 
@@ -3251,7 +3276,11 @@ const depositIx = {
       return
     }
 
-    const destWalletStr = withdrawToSelf ? connected.address : withdrawDest.trim()
+    const destWalletStr = withdrawToSelf
+      ? connected.address
+      : useDefiSessionDest && defiSessionAddr
+        ? defiSessionAddr
+        : withdrawDest.trim()
     let destWalletBytes: Uint8Array
     try {
       destWalletBytes = base58Decode(destWalletStr)
@@ -3271,10 +3300,58 @@ const depositIx = {
       return
     }
 
-    const isPartial = withdrawAmount < activeWithdrawNote.amount
+    const canUnwrapWsol = activeWithdrawNote.mintB58 === WSOL_MINT_STR
+    const doUnwrapWsol = canUnwrapWsol && withdrawUnwrapWsol
+    const isPartialInitial = withdrawAmount < activeWithdrawNote.amount
     setBusyLabel('Creating privacy proof in your browser…')
     await new Promise((r) => setTimeout(r, 20))
     try {
+      // Optional v0.3.0 self-paying native relay fee quote (gracefully falls back to 0 when sponsored).
+      let quotedRelayerFee = 0n
+      let quotedFeeRecipient: Uint8Array | undefined
+      let needsFeeAtaSetup = false
+      if (useRelayer && pool.relayerAddress) {
+        try {
+          const feeUrl =
+            `${relayerUrl}/v1/fee-quote?cluster=${cluster}&op=withdraw` +
+            `&mint=${encodeURIComponent(activeWithdrawNote.isNativeSol ? 'native' : activeWithdrawNote.mintB58)}` +
+            `&amount=${withdrawAmount.toString()}` +
+            `&unwrapWsol=${doUnwrapWsol ? 'true' : 'false'}` +
+            `&hasChange=${isPartialInitial ? 'true' : 'false'}`
+          const fqRes = await fetch(feeUrl)
+          if (fqRes.ok) {
+            const fq = (await fqRes.json()) as {
+              billingMode?: string
+              relayerFee?: string
+              feeRecipient?: string | null
+              needsFeeAtaSetup?: boolean
+            }
+            if (
+              fq.billingMode === 'self_paying' &&
+              fq.relayerFee &&
+              /^\d+$/.test(fq.relayerFee) &&
+              fq.feeRecipient
+            ) {
+              const feeRaw = BigInt(fq.relayerFee)
+              if (feeRaw > 0n && feeRaw < withdrawAmount) {
+                quotedRelayerFee = feeRaw
+                quotedFeeRecipient = base58Decode(fq.feeRecipient)
+                needsFeeAtaSetup = Boolean(fq.needsFeeAtaSetup)
+              }
+            }
+          }
+        } catch {
+          // Graceful fallback to sponsored mode if relay does not expose /v1/fee-quote
+        }
+      }
+
+      // Guarantee `netWithdrawAmount + quotedRelayerFee <= activeWithdrawNote.amount`.
+      const netWithdrawAmount =
+        withdrawAmount + quotedRelayerFee <= activeWithdrawNote.amount
+          ? withdrawAmount
+          : withdrawAmount - quotedRelayerFee
+      const isPartial = netWithdrawAmount + quotedRelayerFee < activeWithdrawNote.amount
+
       const [ringPlan, outputPlan] = await Promise.all([
         buildMultiPageRingForNote(activeWithdrawNote, ringSize),
         resolveOutputPagePlan(isPartial ? 1 : 0, useRelayer),
@@ -3283,9 +3360,10 @@ const depositIx = {
       const tokenProgBytes = base58Decode(meta.tokenProgram)
       const extraPreIxs: SolanaInstruction[] = []
       const extraPostIxs: SolanaInstruction[] = []
+      const setupAtas: Array<{ owner: string; mint: string; tokenProgram: string }> = []
 
       let recipientAccount = destWalletBytes
-      if (!activeWithdrawNote.isNativeSol) {
+      if (!activeWithdrawNote.isNativeSol && !doUnwrapWsol) {
         const recipientAta = await deriveAta(destWalletBytes, tokenProgBytes, activeWithdrawNote.mint)
         recipientAccount = recipientAta
         if (!useRelayer) {
@@ -3298,15 +3376,20 @@ const depositIx = {
               tokenProgram: tokenProgBytes,
             }),
           )
-          // When withdrawing WSOL back to the connected wallet itself in Direct mode,
-          // atomically unwrap WSOL into native SOL and reclaim ATA rent.
-          if (
-            activeWithdrawNote.mintB58 === WSOL_MINT_STR &&
-            destWalletStr === connected.address
-          ) {
-            extraPostIxs.push(await buildCloseWsolAtaInstruction(connected.pubkeyBytes))
-          }
+        } else {
+          setupAtas.push({
+            owner: destWalletStr,
+            mint: activeWithdrawNote.mintB58,
+            tokenProgram: meta.tokenProgram,
+          })
         }
+      }
+      if (useRelayer && needsFeeAtaSetup && !activeWithdrawNote.isNativeSol && !doUnwrapWsol && pool.relayerAddress) {
+        setupAtas.push({
+          owner: pool.relayerAddress,
+          mint: activeWithdrawNote.mintB58,
+          tokenProgram: meta.tokenProgram,
+        })
       }
 
       const { instruction } = await buildWithdrawInstruction({
@@ -3319,7 +3402,10 @@ const depositIx = {
         secretIndex: ringPlan.secretIndex,
         recipientAccount,
         changeAddr: { spendPk: audrenKeys.spendPk, viewPk: audrenKeys.viewPk },
-        amount: withdrawAmount,
+        amount: netWithdrawAmount,
+        relayerFee: quotedRelayerFee,
+        feeRecipient: quotedFeeRecipient,
+        unwrapWsol: doUnwrapWsol,
         splTokenProgram: activeWithdrawNote.isNativeSol ? undefined : tokenProgBytes,
       })
       const proverMs = Math.round(getPerfNowMs() - t0)
@@ -3343,21 +3429,13 @@ const depositIx = {
         extraPostIxs,
         openPageIx: outputPlan.openPageIx,
         rolloverFromPageId: outputPlan.rolloverFromPageId,
-        setupAtas:
-          useRelayer && !activeWithdrawNote.isNativeSol
-            ? [
-                {
-                  owner: destWalletStr,
-                  mint: activeWithdrawNote.mintB58,
-                  tokenProgram: meta.tokenProgram,
-                },
-              ]
-            : undefined,
+        setupAtas: setupAtas.length > 0 ? setupAtas : undefined,
       })
 
-      const uiDisplay = `${formatUnits(withdrawAmount, meta.decimals)} ${meta.symbol}`
+      const outSymbol = doUnwrapWsol ? 'SOL' : meta.symbol
+      const uiDisplay = `${formatUnits(netWithdrawAmount, meta.decimals)} ${outSymbol}`
       pushAudit({
-        action: 'Withdraw',
+        action: doUnwrapWsol ? 'Withdraw (Unwrap WSOL)' : 'Withdraw',
         cluster,
         signature: res.signature,
         slot: res.slot,
@@ -3368,9 +3446,11 @@ const depositIx = {
         feePayerAddress: res.feePayerAddress,
         priorityLabel: `${PRIORITY_TIERS[priorityTier].label} (${PRIORITY_TIERS[priorityTier].desc})`,
         proverMs,
-        summary: `Withdrew ${uiDisplay} to ${shortAddr(destWalletStr)}`,
+        summary: doUnwrapWsol
+          ? `Unwrapped & withdrew ${uiDisplay} (Native SOL) to ${shortAddr(destWalletStr)}`
+          : `Withdrew ${uiDisplay} to ${shortAddr(destWalletStr)}`,
         publicSaw: useRelayer
-          ? `Shared Audren Pool sent ${uiDisplay} to ${shortAddr(destWalletStr)}. The destination, token, amount and relay fee payer are public by design.`
+          ? `Shared Audren Pool sent ${uiDisplay} to ${shortAddr(destWalletStr)}${quotedRelayerFee > 0n ? ` (self-paying relay fee ${formatUnits(quotedRelayerFee, meta.decimals)} ${outSymbol})` : ''}. The destination, token, amount and relay fee payer are public by design.`
           : `Shared Audren Pool sent ${uiDisplay} to ${shortAddr(destWalletStr)}. The destination, token, amount and your wallet as fee payer are public by design.`,
         stayedPrivate: `The proof conceals the selected input note${isPartial ? ` and blinds the change amount` : ''}. Public amounts, timing and candidate composition can still connect activity.`,
         sdkCode: `const { instruction } = await buildWithdrawInstruction({
@@ -3378,7 +3458,7 @@ const depositIx = {
   poolId: 0,
   inputNote,
   recipientAccount: '${destWalletStr}',
-  amount: ${withdrawAmount.toString()}n, // ${uiDisplay}
+  amount: ${netWithdrawAmount.toString()}n, // ${uiDisplay}${quotedRelayerFee > 0n ? `\n  relayerFee: ${quotedRelayerFee.toString()}n,` : ''}${doUnwrapWsol ? `\n  unwrapWsol: true, // atomic WSOL -> Native SOL` : ''}
 })`,
       })
 
@@ -5483,20 +5563,90 @@ const depositIx = {
                           <button
                             type="button"
                             className={`lv-chip-btn ${withdrawToSelf ? 'is-active' : ''}`}
-                            onClick={() => setWithdrawToSelf(true)}
+                            onClick={() => {
+                              setWithdrawToSelf(true)
+                              setUseDefiSessionDest(false)
+                            }}
                           >
                             Back to My {connected.name}
                           </button>
                           <button
                             type="button"
-                            className={`lv-chip-btn ${!withdrawToSelf ? 'is-active' : ''}`}
-                            onClick={() => setWithdrawToSelf(false)}
+                            className={`lv-chip-btn ${!withdrawToSelf && !useDefiSessionDest ? 'is-active' : ''}`}
+                            onClick={() => {
+                              setWithdrawToSelf(false)
+                              setUseDefiSessionDest(false)
+                            }}
                           >
-                            Any Fresh Solana Address
+                            Any Fresh Address
+                          </button>
+                          <button
+                            type="button"
+                            className={`lv-chip-btn ${!withdrawToSelf && useDefiSessionDest ? 'is-active' : ''}`}
+                            onClick={() => {
+                              setWithdrawToSelf(false)
+                              setUseDefiSessionDest(true)
+                            }}
+                          >
+                            DeFi Session B_{defiSessionIndex}
                           </button>
                         </div>
 
-                        {!withdrawToSelf && (
+                        {activeWithdrawNote?.mintB58 === WSOL_MINT_STR && (
+                          <div className="lv-toggle-row">
+                            <button
+                              type="button"
+                              className={`lv-chip-btn ${withdrawUnwrapWsol ? 'is-active' : ''}`}
+                              onClick={() => setWithdrawUnwrapWsol(true)}
+                            >
+                              Unwrap WSOL → Native SOL
+                            </button>
+                            <button
+                              type="button"
+                              className={`lv-chip-btn ${!withdrawUnwrapWsol ? 'is-active' : ''}`}
+                              onClick={() => setWithdrawUnwrapWsol(false)}
+                            >
+                              Keep as WSOL (SPL)
+                            </button>
+                          </div>
+                        )}
+
+                        {!withdrawToSelf && useDefiSessionDest && (
+                          <div className="lv-field-block">
+                            <div className="lv-label-row">
+                              <span className="lv-label mono">
+                                DETERMINISTIC DEFI SESSION WALLET (B_{defiSessionIndex})
+                              </span>
+                              <div className="lv-toggle-row">
+                                <button
+                                  type="button"
+                                  className="lv-chip-btn"
+                                  onClick={() => setDefiSessionIndex((i) => Math.max(0, i - 1))}
+                                >
+                                  −
+                                </button>
+                                <button
+                                  type="button"
+                                  className="lv-chip-btn"
+                                  onClick={() => setDefiSessionIndex((i) => i + 1)}
+                                >
+                                  + Next Session
+                                </button>
+                              </div>
+                            </div>
+                            <input
+                              type="text"
+                              readOnly
+                              className="lv-input mono"
+                              value={defiSessionAddr ?? 'Deriving session address…'}
+                            />
+                            <p className="lv-change-hint mono">
+                              Derived deterministically from your Audren seed (HKDF-SHA256) with no on-chain link to your main wallet. Note: public DeFi positions opened by this address (collateral size, borrow, liquidation threshold) remain public on Solana.
+                            </p>
+                          </div>
+                        )}
+
+                        {!withdrawToSelf && !useDefiSessionDest && (
                           <div className="lv-field-block">
                             <label className="lv-label mono" htmlFor="lv-wd-dest">
                               DESTINATION SOLANA ADDRESS

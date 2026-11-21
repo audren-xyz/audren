@@ -1,9 +1,9 @@
 {
   "name": "audren-relay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Standalone, router-agnostic Solana privacy relayer for Audren (relay.audren.xyz)",
+  "description": "Standalone, protocol-agnostic Solana privacy relayer for Audren (relay.audren.xyz)",
   "scripts": {
     "dev": "wrangler dev --port 8788",
     "typecheck": "tsc --noEmit",

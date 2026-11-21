@@ -101,9 +101,9 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
     ],
   },
   swap: {
-    label: 'DEX swap',
-    headline: 'Trading through public Solana DEX liquidity',
-    note: 'Ordinary Solana AMMs and aggregators are public state machines: external DEX pools always observe the token pair and trade amounts. The difference is whether your wallet signs publicly or settles back into a shielded pool.',
+    label: 'Shielded DeFi',
+    headline: 'Composing with public Solana DeFi (DEXs, lending, LSTs, vaults)',
+    note: 'Solana DEXs, lending markets, liquid staking pools, and perp protocols are public state machines: external calls always observe the target program, mints, and routed amounts. The difference is whether your primary wallet signs publicly or settles atomically via sharded escrow (ExecViaEscrow) or a self-funded deterministic session wallet.',
     rows: [
       {
         method: 'Ordinary Solana',
@@ -131,12 +131,12 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
       },
       {
         method: 'Audren',
-        sub: 'Atomic SwapViaRouter (Tag 5) via sharded escrow',
+        sub: 'Atomic ExecViaEscrow (Tag 5) + Self-Paying DeFi Sessions (Tag 6 + Tag 2)',
         highlight: true,
-        senderRecipient: { text: 'Hidden input · shared escrow CPI · fresh output note', state: 'partial' },
-        token: { text: 'Public DEX pair', state: 'public' },
-        amount: { text: 'Public DEX amounts (optional blinded change)', state: 'public' },
-        assets: 'Compatible PDA-signing DEX routes',
+        senderRecipient: { text: 'Hidden input · shared escrow CPI (or Bᵢ session) · fresh output note', state: 'partial' },
+        token: { text: 'Public external DeFi mints', state: 'public' },
+        amount: { text: 'Public external DeFi amounts (optional blinded change)', state: 'public' },
+        assets: 'Any compatible Token A → B DeFi CPI (DEX, lend, LST, vault, RWA) + stateful Bᵢ sessions',
       },
     ],
   },

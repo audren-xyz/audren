@@ -8,13 +8,16 @@ pub const TAG_OPEN_PAGE: u8 = 1;
 pub const TAG_DEPOSIT: u8 = 2;
 pub const TAG_TRANSFER: u8 = 3;
 pub const TAG_MERGE: u8 = 4;
-pub const TAG_SWAP_VIA_ROUTER: u8 = 5;
+/// Single-transaction protocol-agnostic shielded execution (`Token A -> isolated escrow CPI -> Token B`)
+/// supporting DEX swaps, supply lending, vault shares, liquid staking, perp LP, and RWA mint/redeem,
+/// with native `ctx_hash`-bound relayer fees on either the input or output mint.
+pub const TAG_EXEC_VIA_ESCROW: u8 = 5;
 pub const TAG_WITHDRAW: u8 = 6;
 pub const TAG_SET_PAUSED: u8 = 7;
-/// Upload one `<= 768 B` chunk of an oversized proof/swap payload (exceeding Solana Transaction v1's
+/// Upload one `<= 768 B` chunk of an oversized proof/execution payload (exceeding Solana Transaction v1's
 /// `4,096 B` budget) into an ephemeral `ProofBuffer` PDA.
 pub const TAG_WRITE_PROOF_BUFFER: u8 = 8;
-/// Execute `TAG_TRANSFER`, `TAG_MERGE`, `TAG_SWAP_VIA_ROUTER`, or `TAG_WITHDRAW` using a
+/// Execute `TAG_TRANSFER`, `TAG_MERGE`, `TAG_EXEC_VIA_ESCROW`, or `TAG_WITHDRAW` using a
 /// completed `ProofBuffer` PDA, atomically closing the buffer and refunding 100% of rent to `payer`.
 pub const TAG_EXEC_BUFFERED: u8 = 9;
 /// Reclaim 100% of rent from an abandoned/unexecuted `ProofBuffer` PDA back to its `authority`.
@@ -24,6 +27,26 @@ pub const TAG_CLOSE_PROOF_BUFFER: u8 = 10;
 pub const TAG_INIT_LANE: u8 = 11;
 /// Permissionless self-funding rollover for parallel append lanes (`1..15`) with read-only `PoolState`.
 pub const TAG_OPEN_LANE_PAGE: u8 = 12;
+
+/// Bit flags for `TAG_DEPOSIT` (`data[0]` after tag).
+pub const DEPOSIT_FLAG_NATIVE_SOL: u8 = 1 << 0;
+/// Native SOL only: deduct `collect_page_rent_fee` from `amount` rather than charging on top,
+/// enabling exact sweep-to-zero shielding from ephemeral DeFi session wallets.
+pub const DEPOSIT_FLAG_FEE_FROM_AMOUNT: u8 = 1 << 1;
+
+/// Bit flags for `TAG_EXEC_VIA_ESCROW` (`data[2]` after tag).
+pub const EXEC_FLAG_HAS_CHANGE: u8 = 1 << 0;
+pub const EXEC_FLAG_ALLOW_PARTIAL_REFUND: u8 = 1 << 1;
+/// When `relayer_fee > 0`: `0` deducts fee from `mint_in` (`vault_in -> fee_recipient_ata`) before CPI;
+/// `1` deducts fee from `mint_out` (`escrow_out -> fee_recipient_ata`) after CPI.
+pub const EXEC_FLAG_FEE_ON_OUTPUT: u8 = 1 << 2;
+
+/// Bit flags for `TAG_WITHDRAW` (`data[1]` after tag).
+pub const WITHDRAW_FLAG_NATIVE_SOL: u8 = 1 << 0;
+pub const WITHDRAW_FLAG_HAS_CHANGE: u8 = 1 << 1;
+/// Input note is Classic SPL WSOL; atomically unwrap via 1-shot `["audren_unwrap", pool_id, J]` PDA
+/// and deliver Native SOL lamports directly to `recipient` (and `fee_recipient` when `relayer_fee > 0`).
+pub const WITHDRAW_FLAG_UNWRAP_WSOL: u8 = 1 << 2;
 
 /// Supported binary Triptych exponents (`PAGE_CAPACITY = 32`):
 /// - `m = 5`: 1 `EpochPage` (`2^5 = 32` anonymity set)
@@ -110,11 +133,11 @@ pub const fn m_for_input_pages(pages: usize) -> Result<u8, AudrenError> {
     }
 }
 
-/// Output note wire block passed in `Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`:
+/// Output note wire block passed in `Deposit`, `Transfer`, `Merge`, `ExecViaEscrow`, `Withdraw`:
 /// `view_tag (1) || ephemeral_pk (32) || stealth_pk (32) || asset_tag (32) || commitment (32) || ciphertext (64) = 193 B`.
 pub const NOTE_WIRE_LEN: usize = 1 + 32 + 32 + 32 + 32 + 64;
 
-/// Stealth output descriptor for dynamic-amount swap outputs (`SwapViaRouter`) where `asset_tag`
-/// and `commitment = actual_out * G_{mint_out}` are computed on-chain after the external router CPI:
+/// Stealth output descriptor for dynamic-amount outputs (`Deposit`, `ExecViaEscrow`) where `asset_tag`
+/// and `commitment = net_amount * G_{mint}` are computed on-chain:
 /// `view_tag (1) || ephemeral_pk (32) || stealth_pk (32) || ciphertext (64) = 129 B`.
 pub const DYNAMIC_OUTPUT_WIRE_LEN: usize = 1 + 32 + 32 + 64;

@@ -10,6 +10,7 @@ import type { RouterAccountMeta, RouterSwapInstruction } from './swap.ts';
 export type RelayCluster = 'mainnet' | 'devnet';
 export type RelayAggregatorId = 'jupiter' | 'bedrock' | 'dflow' | 'titan' | 'okx';
 export type RelayAggregatorProvider = 'auto' | RelayAggregatorId;
+export type RelayFeeSide = 'in' | 'out';
 
 export interface RelayRentSchedule {
   nullifierRentLamports: string;
@@ -24,6 +25,30 @@ export interface RelayInfoResponse {
   balanceSol: number | null;
   rentSchedule: RelayRentSchedule | null;
   aggregators?: unknown;
+  allowedCrankPrograms?: string[];
+  [key: string]: unknown;
+}
+
+export interface RelayFeeQuoteRequest {
+  cluster?: RelayCluster;
+  action: 'withdraw' | 'exec_escrow';
+  mint: string;
+  tokenProgram?: string;
+  amount: string;
+  unwrapWsol?: boolean;
+  feeSide?: RelayFeeSide;
+  hasChange?: boolean;
+  missingAtaCount?: number;
+}
+
+export interface RelayFeeQuoteResponse {
+  cluster: RelayCluster;
+  action: 'withdraw' | 'exec_escrow';
+  feeMint: string;
+  feeRecipient: string;
+  relayerFee: string;
+  feeBps: number;
+  estimatedRentLamports: string;
   [key: string]: unknown;
 }
 
@@ -38,6 +63,7 @@ export interface RelaySwapQuoteRequest {
   onlyDirectRoutes?: boolean;
   maxAccounts?: number;
   includeFee?: boolean;
+  feeSide?: RelayFeeSide;
 }
 
 export interface RelaySwapInstructionsRequest {
@@ -48,6 +74,7 @@ export interface RelaySwapInstructionsRequest {
   cluster?: RelayCluster;
   shardId?: number;
   includeFee?: boolean;
+  feeSide?: RelayFeeSide;
 }
 
 export interface RelayMissingAtaPlan {
@@ -74,6 +101,8 @@ export interface RelaySwapInstructionsResponse {
   tokenProgramIn?: string;
   tokenProgramOut?: string;
   relayerFeeAta?: string | null;
+  relayerFeeLamports?: string | null;
+  feeSide?: RelayFeeSide;
   platformFeeBps?: number;
   [key: string]: unknown;
 }
@@ -89,6 +118,8 @@ export interface RelaySubmitRequest {
   instructionDataB64: string;
   accounts: RouterAccountMeta[];
   setupAtas?: RelaySetupAta[];
+  /** Optional zero-signer crank pre-instructions allowlisted strictly for `ExecViaEscrow` (Tag 5). */
+  preInstructions?: RouterSwapInstruction[];
   computeUnitLimit?: number;
   priorityFeeLamports?: string;
   vaultOutAta?: string;
@@ -143,6 +174,23 @@ export class AudrenRelayClient {
     return this.requestJson<Record<string, unknown>>('/v1/stats');
   }
 
+  async quoteFee(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
+    const qs = new URLSearchParams({
+      action: params.action,
+      mint: params.mint,
+      amount: params.amount,
+      ...(params.cluster ? { cluster: params.cluster } : {}),
+      ...(params.tokenProgram ? { tokenProgram: params.tokenProgram } : {}),
+      ...(params.unwrapWsol !== undefined ? { unwrapWsol: String(params.unwrapWsol) } : {}),
+      ...(params.feeSide ? { feeSide: params.feeSide } : {}),
+      ...(params.hasChange !== undefined ? { hasChange: String(params.hasChange) } : {}),
+      ...(params.missingAtaCount !== undefined
+        ? { missingAtaCount: String(params.missingAtaCount) }
+        : {}),
+    });
+    return this.requestJson<RelayFeeQuoteResponse>(`/v1/fee-quote?${qs.toString()}`);
+  }
+
   async quoteSwap(params: RelaySwapQuoteRequest): Promise<Record<string, unknown>> {
     const qs = new URLSearchParams({
       inputMint: params.inputMint,
@@ -157,6 +205,7 @@ export class AudrenRelayClient {
         : {}),
       ...(params.maxAccounts !== undefined ? { maxAccounts: String(params.maxAccounts) } : {}),
       ...(params.includeFee !== undefined ? { includeFee: String(params.includeFee) } : {}),
+      ...(params.feeSide ? { feeSide: params.feeSide } : {}),
     });
     return this.requestJson<Record<string, unknown>>(`/v1/swap/quote?${qs.toString()}`);
   }

@@ -18,28 +18,32 @@ const SNIPPETS: Record<SnippetId, { tab: string; file: string; code: string }> =
   AUDREN_PROGRAM_ID,
   PAGE_SCAN_DATA_SLICE,
   derivePoolPda,
-  deriveEpochPagePda,
+  deriveEscrowPda,
+  deriveUnwrapPda,
   AudrenRelayClient,
   AUDREN_DEFAULT_RELAY_URL,
 } from '@audren/sdk';
 import {
   deriveKeysFromSeed,
   deriveSubaccountKeys,
+  deriveDefiSessionKeypair,
   scanEpochPageSpendable,
   createSelectiveDisclosureProof,
   verifySelectiveDisclosureOnPage,
 } from '@audren/sdk/prover';
 
-// 1. Keys & isolated sub-accounts (matching Rust, Swift & Kotlin byte-for-byte)
+// 1. Keys, sub-accounts & deterministic Private DeFi Sessions (B_0, B_1…)
 const alice   = await deriveKeysFromSeed(seed32);
 const trading = await deriveSubaccountKeys(seed32, 1);
+const session = await deriveDefiSessionKeypair(seed32, 0); // Ed25519 B_0
 
-// 2. Canonical PDAs & standard RPC dataSlice filter (offset: 64, length: 1056)
-const { address: poolPda } = await derivePoolPda(0, AUDREN_PROGRAM_ID);
-const { address: page0 }   = await deriveEpochPagePda(0, 0n, AUDREN_PROGRAM_ID);
-const { offset, length }   = PAGE_SCAN_DATA_SLICE;
+// 2. Canonical PDAs (Pool, 16 sharded Escrows, ephemeral WSOL unwrap PDA)
+const { address: poolPda }   = await derivePoolPda(0, AUDREN_PROGRAM_ID);
+const { address: escrowPda } = await deriveEscrowPda(0, 0, AUDREN_PROGRAM_ID);
+const { address: unwrapPda } = await deriveUnwrapPda(0, nullifier32, AUDREN_PROGRAM_ID);
+const { offset, length }     = PAGE_SCAN_DATA_SLICE;
 
-// 3. Decrypt notes, verify Mode 1 receipt, and connect to any Audren relay
+// 3. Decrypt notes, verify Mode 1 receipt, and quote native relay fees
 const notes = await scanEpochPageSpendable(alice, pageBytes, 0);
 const proof = createSelectiveDisclosureProof(notes[0]);
 const check = await verifySelectiveDisclosureOnPage(proof, pageBytes);
@@ -49,30 +53,32 @@ const relay = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);`,
     tab: 'Rust (Cargo)',
     file: 'crates/client · native ~50 ms local proving & RPC/WS scanner',
     code: `use audren_client::{
-    keys::{AudrenKeys, SelectiveDisclosureProof},
-    pda::{derive_epoch_page_pda, derive_pool_pda},
+    keys::{AudrenKeys, DefiSessionKeypair, SelectiveDisclosureProof},
+    pda::{derive_escrow_pda, derive_pool_pda, derive_unwrap_pda},
     router::DEFAULT_RELAY_URL,
     scanner::{decrypt_owned_note, scan_page_dataslice},
 };
 use audren_core::AUDREN_PROGRAM_ID;
 use solana_address::Address;
 
-// 1. Master spend/view keys + stream-scoped sub-accounts
+// 1. Master spend/view keys, sub-accounts & deterministic DeFi Session B_0
 let alice   = AudrenKeys::from_seed(&seed_32);
 let trading = AudrenKeys::from_seed_subaccount(&seed_32, 1);
+let session = DefiSessionKeypair::derive(&seed_32, 0);
 let fvk     = trading.full_viewing_key();
 
-// 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scanning
+// 2. Canonical PDAs (Pool, ExecViaEscrow shard, atomic WSOL unwrap PDA)
 let pid = Address::new_from_array(AUDREN_PROGRAM_ID);
-let (pool_pda, _) = derive_pool_pda(&pid, 0);
-let (page0, _)    = derive_epoch_page_pda(&pid, 0, 0);
+let (pool_pda, _)   = derive_pool_pda(&pid, 0);
+let (escrow_pda, _) = derive_escrow_pda(&pid, 0, 0);
+let (unwrap_pda, _) = derive_unwrap_pda(&pid, 0, &nullifier_32);
 let hits = scan_page_dataslice(&fvk, 0, &slice_1056)?;
 
 // 3. Decrypt owned notes, verify Mode 1 receipt & submit via optional relay
 let note    = decrypt_owned_note(&fvk, Some(&trading), &pid, 0, &page_bytes, hits[0].slot_index, None)?.unwrap();
 let receipt = SelectiveDisclosureProof::from_owned_note(&note);
 assert!(receipt.verify_against_page(&page_bytes)?);
-println!("Relayer: {DEFAULT_RELAY_URL}");`,
+println!("Session B_0: {} · Relay: {DEFAULT_RELAY_URL}", session.address());`,
   },
   swift: {
     tab: 'Swift (iOS / macOS)',
@@ -80,20 +86,22 @@ println!("Relayer: {DEFAULT_RELAY_URL}");`,
     code: `import AudrenSDK
 import Foundation
 
-// 1. Master keys, sub-accounts & read-only Full Viewing Key
+// 1. Master keys, sub-accounts & deterministic DeFi Session keypair B_0
 let alice   = try deriveKeysFromSeed(seed32: seed32)
 let trading = try deriveSubaccountKeys(masterSeed32: seed32, accountIndex: 1)
+let session = try deriveDefiSessionKeypair(masterSeed32: seed32, sessionIndex: 0)
 let fvk     = try exportFullViewingKey(seed32: seed32, accountIndex: 1)
 
 // 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scan
-let pid   = programId()
-let pool  = try derivePoolPda(poolId: 0, programId: pid)
-let slice = pageScanDataSlice() // offset: 64, length: 1056
-let hits  = try scanPageDataslice(
+let pid    = programId()
+let pool   = try derivePoolPda(poolId: 0, programId: pid)
+let escrow = try deriveEscrowPda(poolId: 0, shard: 0, programId: pid)
+let unwrap = try deriveUnwrapPda(poolId: 0, nullifier32: nullifier, programId: pid)
+let hits   = try scanPageDataslice(
     pageId: 0, slice1056: sliceBytes, spendPk32: alice.spendPk, viewSk32: alice.viewSk
 )
 
-// 3. Decrypt notes, verify Mode 1 receipt, or prove Transfer locally
+// 3. Decrypt notes & verify single-note Mode 1 receipt locally
 let notes = try scanEpochPage(
     poolId: 0, pageBytes: pageBytes,
     spendSk32: alice.spendSk, spendPk32: alice.spendPk, viewSk32: alice.viewSk, programId: pid
@@ -106,18 +114,20 @@ let valid   = try verifySelectiveDisclosureOnPage(proof: receipt, pageBytes: pag
     file: 'packages/kotlin · xyz.audren.sdk via UniFFI + JNA (~50 ms native)',
     code: `import xyz.audren.sdk.*
 
-// 1. Master keys, sub-accounts & read-only Full Viewing Key
+// 1. Master keys, sub-accounts & deterministic DeFi Session keypair B_0
 val alice   = deriveKeysFromSeed(seed32)
 val trading = deriveSubaccountKeys(seed32, 1u)
+val session = deriveDefiSessionKeypair(seed32, 0u)
 val fvk     = exportFullViewingKey(seed32, 1u)
 
 // 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scan
-val pid   = programId()
-val pool  = derivePoolPda(0u, pid)
-val slice = pageScanDataSlice() // offset: 64, length: 1056
-val hits  = scanPageDataslice(0uL, sliceBytes, alice.spendPk, alice.viewSk)
+val pid    = programId()
+val pool   = derivePoolPda(0u, pid)
+val escrow = deriveEscrowPda(0u, 0u, pid)
+val unwrap = deriveUnwrapPda(0u, nullifier, pid)
+val hits   = scanPageDataslice(0uL, sliceBytes, alice.spendPk, alice.viewSk)
 
-// 3. Decrypt notes, verify Mode 1 receipt, or prove Transfer locally
+// 3. Decrypt notes & verify single-note Mode 1 receipt locally
 val notes = scanEpochPage(0u, pageBytes, alice.spendSk, alice.spendPk, alice.viewSk, pid)
 val receipt = createSelectiveDisclosureProof(notes[0])
 val valid   = verifySelectiveDisclosureOnPage(receipt, pageBytes)`,
@@ -499,17 +509,18 @@ export function DevelopersExperience() {
           <div className="container">
             <div className={styles.ledger2}>
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>EXAMPLES &amp; ROUTER CPI</span>
+                <span className={styles.cellIndex}>EXAMPLES &amp; ESCROW DEFI CPI</span>
                 <h3>Runnable examples across all 4 languages.</h3>
                 <p className={styles.cellLead}>
                   <code>audren-xyz/examples</code> mirrors the same canonical flows — keys,
-                  sub-accounts, <code>dataSlice</code> scanning, local proving, selective
-                  disclosure, and <code>SwapViaRouter</code> account planning — in Rust,
-                  TypeScript, Swift, and Kotlin.
+                  sub-accounts, deterministic DeFi Sessions (<code>B₀, B₁…</code>),{' '}
+                  <code>dataSlice</code> scanning, local proving, selective disclosure, and{' '}
+                  <code>ExecViaEscrow</code> account planning — in Rust, TypeScript, Swift, and
+                  Kotlin.
                 </p>
                 <ul className={styles.dashList}>
-                  <li><code>SwapViaRouter</code> accepts compatible PDA-signing router instructions and enforces escrow ownership, zero delegates, lamport invariants, and exact vault deltas.</li>
-                  <li>External DEX legs expose the token pair, trade amounts, and output record.</li>
+                  <li><code>ExecViaEscrow</code> (Tag 5) accepts any compatible PDA-signing Token A → Token B CPI (DEX routers, lending supply, yield vaults, LSTs, RWAs) with native input/output <code>relayer_fee</code>, enforcing escrow ownership, zero delegates, lamport invariants, and exact vault deltas.</li>
+                  <li>Self-paying <code>Withdraw</code> (Tag 6) supports atomic <code>unwrap_wsol</code> via <code>audren_unwrap</code> PDA to fund 0-SOL wallets or session keypairs, paired with zero-dust <code>Deposit(fee_from_amount)</code> sweeps.</li>
                   <li>All four example folders consume the official Audren SDKs directly — zero hand-rolled constants or byte offsets.</li>
                 </ul>
                 <div className={styles.cellFoot}>

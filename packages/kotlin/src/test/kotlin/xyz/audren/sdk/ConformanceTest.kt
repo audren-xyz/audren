@@ -64,6 +64,15 @@ class ConformanceTest {
             assertEquals(sub.getString("address"), derived.address)
         }
 
+        val sessions = v.getJSONArray("alice_defi_sessions")
+        for (i in 0 until sessions.length()) {
+            val sess = sessions.getJSONObject(i)
+            val derived = deriveDefiSessionKeypair(aliceSeed, sess.getInt("session_index").toUInt())
+            assertEquals(sess.getString("secret_seed_hex"), bytesToHex(derived.secretSeed))
+            assertEquals(sess.getString("pubkey_hex"), bytesToHex(derived.pubkey))
+            assertEquals(sess.getString("address"), derived.address)
+        }
+
         val gens = v.getJSONObject("asset_generators")
         assertEquals(
             gens.getString("native_sol_gen_hex"),
@@ -85,7 +94,11 @@ class ConformanceTest {
         assertEquals(pdas.getJSONObject("sol_vault").getString("address"), deriveSolVaultPda(0u, pid).address)
         assertEquals(pdas.getJSONObject("vault_auth").getString("address"), deriveVaultAuthPda(0u, pid).address)
         assertEquals(pdas.getJSONObject("page_rent_vault").getString("address"), derivePageRentVaultPda(0u, pid).address)
-        assertEquals(pdas.getJSONObject("swap_escrow_0").getString("address"), deriveSwapEscrowPda(0u, 0u, pid).address)
+        assertEquals(pdas.getJSONObject("escrow_0").getString("address"), deriveEscrowPda(0u, 0u, pid).address)
+        assertEquals(
+            pdas.getJSONObject("unwrap_pda").getString("address"),
+            deriveUnwrapPda(0u, hexToBytes(v.getJSONObject("epoch_page").getJSONObject("alice_note").getString("nullifier_hex")), pid).address,
+        )
         assertEquals(pdas.getJSONObject("lane_1").getString("address"), deriveLanePda(0u, 1u, pid).address)
         assertEquals(pdas.getJSONObject("lane_rent_vault_1").getString("address"), deriveLaneRentVaultPda(0u, 1u, pid).address)
         assertEquals(
@@ -173,6 +186,7 @@ class ConformanceTest {
                 mint32 = ByteArray(32),
                 grossAmount = 500_000uL,
                 netAmount = 500_000uL,
+                feeFromAmount = false,
                 tokenProgram = null,
                 depositorAta = null,
                 vaultAta = null,
@@ -287,13 +301,16 @@ class ConformanceTest {
                 recipientAccount = payer,
                 changeAddress = alice.address,
                 amount = 1_000_000uL,
+                relayerFee = 0uL,
+                feeRecipient = null,
+                unwrapWsol = false,
                 splTokenProgram = null,
                 auditorPk32 = null,
             ),
         )
         assertEquals(6.toByte(), wdIx.data[0])
-        assertEquals(1_966, wdIx.data.size)
-        assertEquals(10, wdIx.accounts.size)
+        assertEquals(1_973, wdIx.data.size)
+        assertEquals(11, wdIx.accounts.size)
 
         val wdFullIx = buildWithdrawInstruction(
             FfiWithdrawParams(
@@ -308,12 +325,15 @@ class ConformanceTest {
                 recipientAccount = payer,
                 changeAddress = alice.address,
                 amount = note.amount,
+                relayerFee = 0uL,
+                feeRecipient = null,
+                unwrapWsol = false,
                 splTokenProgram = null,
                 auditorPk32 = null,
             ),
         )
         assertEquals(6.toByte(), wdFullIx.data[0])
-        assertEquals(941, wdFullIx.data.size)
+        assertEquals(948, wdFullIx.data.size)
         assertFalse(wdFullIx.accounts[1].isWritable)
 
         // 5. Selective Disclosure & Institutional Auditor Decrypt
@@ -338,17 +358,17 @@ class ConformanceTest {
         assertEquals(audJson.getString("expected_spent_pk_hex"), bytesToHex(dec.spentStealthPk))
         assertEquals(audJson.getString("expected_asset_gen_hex"), bytesToHex(dec.assetGenerator))
 
-        // 6. Router & Relayer (including prepareRouterAccounts + ATA derivation + signer stripping)
+        // 6. Escrow & Relayer (including prepareEscrowAccounts + ATA derivation + signer stripping)
         assertEquals(v.getString("jupiter_cpi_excluded_dexes"), jupiterCpiExcludedDexes().joinToString(","))
         assertEquals("https://relay.audren.xyz", defaultRelayUrl())
 
         val classicTp = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        val escrow0 = pdas.getJSONObject("swap_escrow_0").getString("address")
+        val escrow0 = pdas.getJSONObject("escrow_0").getString("address")
         val wsolMint = gens.getString("wsol_mint_b58")
         val usdcMint = gens.getString("usdc_mint_b58")
         val escrowInAta = deriveAssociatedTokenAddress(escrow0, wsolMint, classicTp)
         val escrowOutAta = deriveAssociatedTokenAddress(escrow0, usdcMint, classicTp)
-        val prep = prepareRouterAccounts(
+        val prep = prepareEscrowAccounts(
             0u,
             0u,
             wsolMint,

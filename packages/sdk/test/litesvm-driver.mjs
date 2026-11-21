@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import {
   PAGE_SCAN_OFFSET,
   PAGE_SCAN_LEN,
-  prepareRouterAccounts,
+  prepareEscrowAccounts,
 } from '../dist/index.js';
 import {
   base58Decode,
@@ -19,8 +19,8 @@ import {
   buildBufferedExecutionPlan,
   buildCloseProofBufferInstruction,
   buildDepositInstruction,
+  buildExecViaEscrowInstruction,
   buildMergeInstruction,
-  buildSwapViaRouterInstruction,
   buildTransferInstruction,
   buildWithdrawInstruction,
   createSelectiveDisclosureProof,
@@ -82,6 +82,7 @@ switch (req.op) {
       recipient: req.recipientAddr,
       mint: fromHex(req.mintHex),
       amount: BigInt(req.amount),
+      feeFromAmount: Boolean(req.feeFromAmount),
       tokenProgram: req.tokenProgram ? base58Decode(req.tokenProgram) : undefined,
       memoText: req.memoText ?? 'TS',
       createVaultAtaIfMissing: Boolean(req.createVaultAtaIfMissing),
@@ -175,23 +176,24 @@ switch (req.op) {
     break;
   }
 
+  case 'exec_escrow':
   case 'swap': {
     const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
     const pages = req.pagesHex.map(fromHex);
     const ring = pages.flatMap((p) => extractRingFromPage(p));
     const owned = await scanEpochPageSpendable(keys, pages[0], req.poolId);
     const note = owned.find((n) => n.slotIndex === req.noteSlot);
-    if (!note) throw new Error(`TS scan did not find swap note at slot ${req.noteSlot}`);
-    const prep = await prepareRouterAccounts({
+    if (!note) throw new Error(`TS scan did not find exec_escrow note at slot ${req.noteSlot}`);
+    const prep = await prepareEscrowAccounts({
       poolId: req.poolId,
       shardId: req.shardId,
       inputMint: req.inputMintB58,
       outputMint: req.outputMintB58,
       inputTokenProgram: req.tokenProgramIn,
       outputTokenProgram: req.tokenProgramOut,
-      routerAccounts: req.routerAccounts,
+      actionAccounts: req.actionAccounts ?? req.routerAccounts,
     });
-    const res = await buildSwapViaRouterInstruction({
+    const res = await buildExecViaEscrowInstruction({
       payer: base58Decode(req.payer),
       poolId: req.poolId,
       outPageId: BigInt(req.outPageId),
@@ -205,11 +207,15 @@ switch (req.op) {
       tokenProgramOut: base58Decode(req.tokenProgramOut),
       amountIn: BigInt(req.amountIn),
       minAmountOut: BigInt(req.minAmountOut),
+      relayerFee: req.relayerFee ? BigInt(req.relayerFee) : 0n,
+      feeOnOutput: Boolean(req.feeOnOutput),
+      feeRecipientAta: req.feeRecipientAta ? base58Decode(req.feeRecipientAta) : undefined,
+      allowPartialRefund: Boolean(req.allowPartialRefund),
       recipient: req.recipientAddr,
       changeAddr: req.changeAddr,
-      routerProgramId: base58Decode(req.routerProgramId),
-      routerIxData: fromHex(req.routerIxDataHex),
-      routerAccounts: prep.accounts.map((a) => ({
+      targetProgramId: base58Decode(req.targetProgramId ?? req.routerProgramId),
+      targetIxData: fromHex(req.targetIxDataHex ?? req.routerIxDataHex),
+      actionAccounts: prep.accounts.map((a) => ({
         pubkey: base58Decode(a.pubkey),
         isSigner: a.isSigner,
         isWritable: a.isWritable,
@@ -217,7 +223,7 @@ switch (req.op) {
       escrowIdx: prep.escrowIdx,
       escrowInIdx: prep.escrowInIdx,
       escrowOutIdx: prep.escrowOutIdx,
-      memoText: 'TSSWP',
+      memoText: 'TSEXEC',
     });
     out = {
       instruction: serializeIx(res.instruction),
@@ -245,6 +251,9 @@ switch (req.op) {
       recipientAccount: base58Decode(req.recipientAccount),
       changeAddr: req.changeAddr,
       amount: BigInt(req.amount),
+      relayerFee: req.relayerFee ? BigInt(req.relayerFee) : 0n,
+      feeRecipient: req.feeRecipient ? base58Decode(req.feeRecipient) : undefined,
+      unwrapWsol: Boolean(req.unwrapWsol),
       splTokenProgram: req.splTokenProgram ? base58Decode(req.splTokenProgram) : undefined,
     });
     out = {

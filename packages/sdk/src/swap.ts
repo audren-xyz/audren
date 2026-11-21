@@ -1,17 +1,18 @@
 import { AUDREN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID } from './constants.ts';
-import { deriveAssociatedTokenAddress, deriveSwapEscrowPda } from './pda.ts';
+import { deriveAssociatedTokenAddress, deriveEscrowPda } from './pda.ts';
 
 /**
- * Router-Agnostic Private Swap Client & Stateless Relayer Helper.
+ * Protocol-Agnostic Shielded DeFi Execution (`ExecViaEscrow`) & Aggregator Route Helpers.
  *
- * Works with compatible PDA-signing Solana routers that satisfy Audren custody
- * checks and transaction limits. Hosted route availability is provider-specific.
+ * Works with any compatible PDA-signing Solana program (DEX aggregators, supply lending,
+ * yield vaults, liquid staking, perp LP, RWA mint/redeem) that satisfies Audren custody
+ * checks and transaction limits.
  */
 
 /**
  * Jupiter DEX labels that reject PDA CPI callers (e.g. `InvalidRealUser` / top-level
  * instruction sysvar introspection) and are excluded by default when routing through
- * Audren's isolated `swap_escrow` PDA.
+ * Audren's isolated `escrow` PDA.
  */
 export const JUPITER_CPI_EXCLUDED_DEXES: readonly string[] = [
   'Kipseli',
@@ -62,13 +63,13 @@ export interface ResolvedEscrowIndices {
 
 /**
  * Request a quote + `swap-instructions` payload from a Jupiter-compatible aggregator API
- * targeting Audren's shared sharded `swap_escrow` PDA (e.g. `https://api.jup.ag/swap/v1`
+ * targeting Audren's shared sharded `escrow` PDA (e.g. `https://api.jup.ag/swap/v1`
  * or any self-hosted / custom aggregator endpoint).
  */
 export async function fetchAggregatorPrivateSwapRoute(
   aggregatorBaseUrl: string,
   quoteParams: RouterQuoteParams,
-  swapEscrowAddress: string,
+  escrowAddress: string,
 ): Promise<{
   quote: Record<string, unknown>;
   swap: RouterSwapInstructionsResponse;
@@ -95,7 +96,7 @@ export async function fetchAggregatorPrivateSwapRoute(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       quoteResponse: quote,
-      userPublicKey: swapEscrowAddress,
+      userPublicKey: escrowAddress,
       wrapAndUnwrapSol: false,
       useSharedAccounts: false,
       dynamicComputeUnitLimit: false,
@@ -110,42 +111,42 @@ export async function fetchAggregatorPrivateSwapRoute(
 }
 
 /**
- * Locate `(escrowIdx, escrowInIdx, escrowOutIdx)` inside an arbitrary external router
- * account list for compatible PDA-signing routes accepted by Audren's `SwapViaRouter` instruction.
+ * Locate `(escrowIdx, escrowInIdx, escrowOutIdx)` inside an arbitrary external program
+ * account list for compatible PDA-signing instructions accepted by Audren's `ExecViaEscrow`.
  */
-export function resolveRouterEscrowIndices(
-  routerAccounts: readonly RouterAccountMeta[],
-  swapEscrowAddress: string,
+export function resolveEscrowIndices(
+  actionAccounts: readonly RouterAccountMeta[],
+  escrowAddress: string,
   escrowInAta: string,
   escrowOutAta: string,
 ): ResolvedEscrowIndices {
-  const escrowIdx = routerAccounts.findIndex((m) => m.pubkey === swapEscrowAddress);
-  const escrowInIdx = routerAccounts.findIndex((m) => m.pubkey === escrowInAta);
-  const escrowOutIdx = routerAccounts.findIndex((m) => m.pubkey === escrowOutAta);
+  const escrowIdx = actionAccounts.findIndex((m) => m.pubkey === escrowAddress);
+  const escrowInIdx = actionAccounts.findIndex((m) => m.pubkey === escrowInAta);
+  const escrowOutIdx = actionAccounts.findIndex((m) => m.pubkey === escrowOutAta);
   if (escrowIdx < 0 || escrowInIdx < 0 || escrowOutIdx < 0) {
     throw new Error(
-      `Missing escrow account in router instruction (escrow=${escrowIdx}, in=${escrowInIdx}, out=${escrowOutIdx})`,
+      `Missing escrow account in action instruction (escrow=${escrowIdx}, in=${escrowInIdx}, out=${escrowOutIdx})`,
     );
   }
   return { escrowIdx, escrowInIdx, escrowOutIdx };
 }
 
 /**
- * Strip the external signer bit on `swapEscrowAddress` before attaching router accounts
- * to Audren's `SwapViaRouter` instruction (Audren signs `swap_escrow` via `invoke_signed`).
+ * Strip the external signer bit on `escrowAddress` before attaching action accounts
+ * to Audren's `ExecViaEscrow` instruction (Audren signs `escrow` via `invoke_signed`).
  */
-export function prepareRouterAccountsForAudren(
-  routerAccounts: readonly RouterAccountMeta[],
-  swapEscrowAddress: string,
+export function prepareEscrowAccountsForAudren(
+  actionAccounts: readonly RouterAccountMeta[],
+  escrowAddress: string,
 ): RouterAccountMeta[] {
-  return routerAccounts.map((meta) => ({
+  return actionAccounts.map((meta) => ({
     pubkey: meta.pubkey,
-    isSigner: meta.pubkey === swapEscrowAddress ? false : meta.isSigner,
+    isSigner: meta.pubkey === escrowAddress ? false : meta.isSigner,
     isWritable: meta.isWritable,
   }));
 }
 
-export interface PreparedRouterAccounts {
+export interface PreparedEscrowAccounts {
   escrowPda: string;
   escrowInAta: string;
   escrowOutAta: string;
@@ -156,25 +157,25 @@ export interface PreparedRouterAccounts {
 }
 
 /**
- * High-level cross-SDK helper (mirrors Rust `prepare_router_accounts`, Swift `prepareRouterAccounts`,
- * and Kotlin `prepareRouterAccounts`): derives the sharded `swap_escrow` PDA and its input/output
+ * High-level cross-SDK helper (mirrors Rust `prepare_escrow_accounts`, Swift `prepareEscrowAccounts`,
+ * and Kotlin `prepareEscrowAccounts`): derives the sharded `escrow` PDA and its input/output
  * ATAs, locates `(escrowIdx, escrowInIdx, escrowOutIdx)`, and strips the external signer bit on
- * `swap_escrow` so Audren can sign via `invoke_signed`.
+ * `escrow` so Audren can sign via `invoke_signed`.
  */
-export async function prepareRouterAccounts(params: {
+export async function prepareEscrowAccounts(params: {
   poolId: number;
   shardId: number;
   inputMint: string;
   outputMint: string;
   inputTokenProgram?: string;
   outputTokenProgram?: string;
-  routerAccounts: readonly RouterAccountMeta[];
+  actionAccounts: readonly RouterAccountMeta[];
   programId?: string;
-}): Promise<PreparedRouterAccounts> {
+}): Promise<PreparedEscrowAccounts> {
   const programId = params.programId ?? AUDREN_PROGRAM_ID;
   const inputTp = params.inputTokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID;
   const outputTp = params.outputTokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID;
-  const { address: escrowPda } = await deriveSwapEscrowPda(params.poolId, params.shardId, programId);
+  const { address: escrowPda } = await deriveEscrowPda(params.poolId, params.shardId, programId);
   const { address: escrowInAta } = await deriveAssociatedTokenAddress(
     escrowPda,
     params.inputMint,
@@ -185,13 +186,13 @@ export async function prepareRouterAccounts(params: {
     params.outputMint,
     outputTp,
   );
-  const { escrowIdx, escrowInIdx, escrowOutIdx } = resolveRouterEscrowIndices(
-    params.routerAccounts,
+  const { escrowIdx, escrowInIdx, escrowOutIdx } = resolveEscrowIndices(
+    params.actionAccounts,
     escrowPda,
     escrowInAta,
     escrowOutAta,
   );
-  const accounts = prepareRouterAccountsForAudren(params.routerAccounts, escrowPda);
+  const accounts = prepareEscrowAccountsForAudren(params.actionAccounts, escrowPda);
   return {
     escrowPda,
     escrowInAta,

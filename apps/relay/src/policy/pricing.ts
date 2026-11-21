@@ -1,7 +1,7 @@
 import type { Env, RelayPolicyConfig } from '../env'
 import { WSOL_MINT_STR } from '../solana/codec'
 import type { LiveRentSchedule } from '../solana/rpc'
-import type { SwapFeePlan } from '../types'
+import type { Cluster, NativeFeeQuote, SwapFeePlan } from '../types'
 
 interface CachedPrice {
   usd: number
@@ -75,15 +75,6 @@ export async function fetchMintPricesUsd(
 /**
  * Compute the dynamic swap fee plan for any Solana output mint (Classic SPL or Token-2022)
  * using live on-chain rent from Solana RPC and live token USD prices.
- *
- * Works for ANY token on Solana — ZERO hardcoded mint list, ZERO hardcoded rent numbers:
- *   - If `feeAccountExists` is true: cost = `rentSchedule.swapBaselineLamports` (+ priority buffer).
- *   - If `feeAccountExists` is false (brand-new output mint):
- *       - If the swap's max fee covers `(swapBaseline + ataRent)` on-chain, the relay sets
- *         `needsFeeAtaSetup = true` so the client includes `relayerFeeAta` in `setupAtas` and the
- *         relayer creates its fee ATA atomically inside the swap tx!
- *       - Otherwise (small swap into an uninitialized mint where ATA rent exceeds the fee),
- *         `platformFeeBps = 0` (`billingMode = 'sponsored'`) so ANY token swap still succeeds!
  */
 export function computeSwapFeePlan(params: {
   cfg: RelayPolicyConfig
@@ -108,8 +99,6 @@ export function computeSwapFeePlan(params: {
     feeAccountExists,
   } = params
 
-  // Include 15,000 lamport priority fee cushion in the pre-simulation quote estimate;
-  // at `/v1/relay/submit` time, exact lamports come straight from `simulateTransaction`!
   const baseSwapLamports = rentSchedule.swapBaselineLamports + 15_000n
   const totalLamportsIfCreatingAta = baseSwapLamports + rentSchedule.ataRentLamports
   const costSol = Number(baseSwapLamports) / 1e9
@@ -129,11 +118,10 @@ export function computeSwapFeePlan(params: {
       estimatedRelayCostUsd,
       estimatedSwapUsd: null,
       estimatedFeeUsd: 0,
-      reason: 'Relayer fee account unavailable on this cluster; swap sponsored under rate limits.',
+      reason: 'Relayer fee account unavailable on this cluster; action sponsored under rate limits.',
     }
   }
 
-  // If swapping directly INTO WSOL, we know the exact SOL value without needing any USD oracle!
   let swapSolValue: number | null = null
   if (outputMint === WSOL_MINT_STR) {
     swapSolValue = Number(estimatedOutAmount) / 1e9
@@ -156,7 +144,6 @@ export function computeSwapFeePlan(params: {
 
   const marginMult = cfg.selfPayMarginBps / 10_000
 
-  // Case 1: Relayer fee ATA does NOT exist yet for this output mint
   if (!feeAccountExists) {
     const neededSolWithAta = (Number(totalLamportsIfCreatingAta) / 1e9) * marginMult
     if (swapSolValue !== null && swapSolValue > 0) {
@@ -184,7 +171,6 @@ export function computeSwapFeePlan(params: {
         }
       }
     }
-    // Small swap into a mint with no existing relayer fee ATA: don't burn ATA rent, sponsor cleanly!
     return {
       billingMode: 'sponsored',
       platformFeeBps: 0,
@@ -201,7 +187,6 @@ export function computeSwapFeePlan(params: {
     }
   }
 
-  // Case 2: Relayer fee ATA already exists on-chain (zero ATA rent!)
   if (swapSolValue === null || swapSolValue <= 0) {
     return {
       billingMode: 'sponsored',
@@ -256,5 +241,174 @@ export function computeSwapFeePlan(params: {
     estimatedSwapUsd,
     estimatedFeeUsd,
     reason: `${(feeBps / 100).toFixed(2)}% relay fee + relay rent subsidy for small swap (rate-limited).`,
+  }
+}
+
+/**
+ * Compute an exact v0.3.0 native protocol fee quote (`GET /v1/fee-quote`) for either:
+ *   - `withdraw` (Native SOL, atomic `unwrap_wsol`, or SPL/Token-2022)
+ *   - `exec_escrow` (any DEX swap, Kamino supply, yield vault, LST mint, RWA vault, etc.)
+ *
+ * Uses live on-chain rent from RPC + live token prices; falls back to `sponsored` cleanly
+ * when an action is too small to self-pay without exceeding `maxSelfPayBps`.
+ */
+export function computeNativeFeeQuote(params: {
+  cluster: Cluster
+  op: 'withdraw' | 'exec_escrow'
+  cfg: RelayPolicyConfig
+  rentSchedule: LiveRentSchedule
+  isNativeSolFee: boolean
+  feeMint: string
+  feeTokenProgram: string | null
+  feeDecimals: number
+  amount: bigint
+  hasChange: boolean
+  feeRecipient: string | null
+  feeRecipientExists: boolean
+  solPriceUsd: number | null
+  feeTokenPriceUsd: number | null
+}): NativeFeeQuote {
+  const {
+    cluster,
+    op,
+    cfg,
+    rentSchedule,
+    isNativeSolFee,
+    feeMint,
+    feeTokenProgram,
+    feeDecimals,
+    amount,
+    hasChange,
+    feeRecipient,
+    feeRecipientExists,
+    solPriceUsd,
+    feeTokenPriceUsd,
+  } = params
+
+  const pageRent = hasChange || op === 'exec_escrow' ? rentSchedule.pageRentPerNoteLamports : 0n
+  const extraPageNote = op === 'exec_escrow' && hasChange ? rentSchedule.pageRentPerNoteLamports : 0n
+  const txBaseLamports =
+    rentSchedule.nullifierRentLamports + pageRent + extraPageNote + 20_000n
+  const withAtaLamports = txBaseLamports + rentSchedule.ataRentLamports
+  const marginMult = cfg.selfPayMarginBps / 10_000
+
+  const costUsd = (lamports: bigint) =>
+    solPriceUsd && solPriceUsd > 0 ? (Number(lamports) / 1e9) * solPriceUsd : null
+
+  if (!feeRecipient || amount <= 0n) {
+    return {
+      ok: true,
+      cluster,
+      op,
+      billingMode: 'sponsored',
+      feeMint,
+      feeTokenProgram,
+      feeRecipient: null,
+      feeRecipientExists: false,
+      needsFeeAtaSetup: false,
+      relayerFee: '0',
+      feeBps: 0,
+      estimatedRelayCostLamports: txBaseLamports.toString(),
+      estimatedRelayCostUsd: costUsd(txBaseLamports),
+      reason: 'Relayer fee recipient unavailable; sponsored under rate limits.',
+    }
+  }
+
+  // Native SOL fee (Native SOL Withdraw OR atomic `unwrap_wsol` Withdraw!): exact lamports, zero oracle!
+  if (isNativeSolFee) {
+    const neededLamports = BigInt(Math.ceil(Number(txBaseLamports) * marginMult))
+    const pctFee = (amount * BigInt(cfg.baseSwapFeeBps)) / 10_000n
+    const candidateFee = neededLamports > pctFee ? neededLamports : pctFee
+    const effBps = Number((candidateFee * 10_000n) / amount)
+    if (candidateFee < amount && effBps <= cfg.maxSelfPayBps) {
+      return {
+        ok: true,
+        cluster,
+        op,
+        billingMode: 'self_paying',
+        feeMint,
+        feeTokenProgram: null,
+        feeRecipient,
+        feeRecipientExists: true,
+        needsFeeAtaSetup: false,
+        relayerFee: candidateFee.toString(),
+        feeBps: Math.max(1, effBps),
+        estimatedRelayCostLamports: txBaseLamports.toString(),
+        estimatedRelayCostUsd: costUsd(txBaseLamports),
+        reason: 'Self-paying Native SOL relay fee covers nullifier rent & gas — zero SOL needed in caller wallet.',
+      }
+    }
+    return {
+      ok: true,
+      cluster,
+      op,
+      billingMode: 'sponsored',
+      feeMint,
+      feeTokenProgram: null,
+      feeRecipient,
+      feeRecipientExists: true,
+      needsFeeAtaSetup: false,
+      relayerFee: '0',
+      feeBps: 0,
+      estimatedRelayCostLamports: txBaseLamports.toString(),
+      estimatedRelayCostUsd: costUsd(txBaseLamports),
+      reason: 'Small withdrawal sponsored under relay rate limits.',
+    }
+  }
+
+  // SPL / Token-2022 fee mint (WSOL self-prices 1:1 with SOL; other mints use live USD price)
+  const effectiveLamports = feeRecipientExists ? txBaseLamports : withAtaLamports
+  const neededSol = (Number(effectiveLamports) / 1e9) * marginMult
+  let neededTokenUnits: bigint | null = null
+  if (feeMint === WSOL_MINT_STR) {
+    neededTokenUnits = BigInt(Math.ceil(neededSol * 1e9))
+  } else if (solPriceUsd && solPriceUsd > 0 && feeTokenPriceUsd && feeTokenPriceUsd > 0) {
+    const neededUi = (neededSol * solPriceUsd) / feeTokenPriceUsd
+    if (Number.isFinite(neededUi) && neededUi > 0) {
+      neededTokenUnits = BigInt(Math.max(1, Math.ceil(neededUi * Math.pow(10, feeDecimals))))
+    }
+  }
+
+  if (neededTokenUnits !== null) {
+    const pctFee = (amount * BigInt(cfg.baseSwapFeeBps)) / 10_000n
+    const candidateFee = neededTokenUnits > pctFee ? neededTokenUnits : pctFee
+    const effBps = Number((candidateFee * 10_000n) / amount)
+    if (candidateFee < amount && effBps <= cfg.maxSelfPayBps) {
+      return {
+        ok: true,
+        cluster,
+        op,
+        billingMode: 'self_paying',
+        feeMint,
+        feeTokenProgram,
+        feeRecipient,
+        feeRecipientExists,
+        needsFeeAtaSetup: !feeRecipientExists,
+        relayerFee: candidateFee.toString(),
+        feeBps: Math.max(1, effBps),
+        estimatedRelayCostLamports: effectiveLamports.toString(),
+        estimatedRelayCostUsd: costUsd(effectiveLamports),
+        reason: feeRecipientExists
+          ? 'Self-paying protocol relay fee fully covers Solana rent & gas.'
+          : 'Self-paying protocol relay fee covers first-time relayer fee ATA creation + Solana rent.',
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    cluster,
+    op,
+    billingMode: 'sponsored',
+    feeMint,
+    feeTokenProgram,
+    feeRecipient,
+    feeRecipientExists,
+    needsFeeAtaSetup: false,
+    relayerFee: '0',
+    feeBps: 0,
+    estimatedRelayCostLamports: txBaseLamports.toString(),
+    estimatedRelayCostUsd: costUsd(txBaseLamports),
+    reason: 'Small or unpriced token action sponsored under relay rate limits.',
   }
 }

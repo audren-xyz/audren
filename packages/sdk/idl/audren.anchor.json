@@ -2,9 +2,9 @@
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "spec": "0.1.0",
-    "description": "Audren \u2014 Institutional Confidential & Full-Private Settlement & Swap Program on Solana (Pinocchio + sBPFv3).",
+    "description": "Audren \u2014 Institutional Confidential & Full-Private Settlement and Shielded DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
   },
   "instructions": [
@@ -248,8 +248,8 @@
       ],
       "args": [
         {
-          "name": "is_native_sol",
-          "type": "bool"
+          "name": "flags",
+          "type": "u8"
         },
         {
           "name": "amount",
@@ -520,10 +520,11 @@
       ]
     },
     {
-      "name": "swap_via_router",
+      "name": "exec_via_escrow",
       "docs": [
-        "Tag 5: Single-transaction router-agnostic private DEX swap via sharded isolated swap_escrow PDA.",
-        "Trailing accounts `[15..15+pages]` are read-only input EpochPages; `[15+pages..]` are external router accounts (up to 80) with `swap_escrow`, `escrow_in`, `escrow_out` at arbitrary indices `(escrowIdx, escrowInIdx, escrowOutIdx)`."
+        "Tag 5: Single-transaction protocol-agnostic shielded DeFi action via sharded isolated escrow PDA (DEX swaps, supply lending, yield vaults, liquid staking, perp LP, RWA mint/redeem).",
+        "Supports optional native self-paying relayerFee bound in ctx_hash on either input mint (bit2=0) or output mint (bit2=1).",
+        "Trailing accounts `[16..16+pages]` are read-only input EpochPages; `[16+pages..]` are external target program accounts (up to 80) with `escrow`, `escrow_in`, `escrow_out` at arbitrary indices `(escrowIdx, escrowInIdx, escrowOutIdx)`."
       ],
       "discriminator": [
         5
@@ -642,11 +643,19 @@
           ]
         },
         {
-          "name": "router_program",
+          "name": "target_program",
           "writable": false,
           "signer": false,
           "docs": [
-            "Executable external DEX / aggregator program."
+            "Executable external DeFi / DEX / vault / lending program."
+          ]
+        },
+        {
+          "name": "fee_recipient_ata",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Relayer fee token account (writable when relayerFee > 0; read-only System Program placeholder when 0)."
           ]
         }
       ],
@@ -672,6 +681,10 @@
           "type": "u64"
         },
         {
+          "name": "relayer_fee",
+          "type": "u64"
+        },
+        {
           "name": "escrow_idx",
           "type": "u8"
         },
@@ -684,11 +697,11 @@
           "type": "u8"
         },
         {
-          "name": "router_data_len",
+          "name": "target_data_len",
           "type": "u16"
         },
         {
-          "name": "swap_out_desc",
+          "name": "out_desc",
           "type": {
             "defined": {
               "name": "DynamicOutputWire"
@@ -704,10 +717,11 @@
     {
       "name": "withdraw",
       "docs": [
-        "Tag 6: Full-private spend to a public SOL or SPL/Token-2022 recipient with optional hidden change note.",
-        "Full withdrawals (hasChange=false) always succeed even when pool.paused=true (non-custodial escape hatch).",
-        "Native SOL accounts `[7..9]`: [solVault (wr), recipient (wr)], followed by input EpochPages.",
-        "SPL/Token-2022 accounts `[7..12]`: [vaultAuth (ro), mint (ro), vaultAta (wr), recipientAta (wr), tokenProgram (ro)], followed by input EpochPages and optional TransferHook accounts."
+        "Tag 6: Full-private spend to a public SOL or SPL/Token-2022 recipient with optional native self-paying relayerFee, atomic WSOL->Native SOL unwrap (unwrapWsol), and optional hidden change note.",
+        "Full withdrawals (hasChange=false) always succeed even when pool.paused=true across all three modes (non-custodial escape hatch).",
+        "Native SOL accounts `[7..10]`: [feeRecipient, solVault (wr), recipient (wr)], followed by input EpochPages.",
+        "SPL/Token-2022 accounts `[7..13]`: [feeRecipient, vaultAuth (ro), mint (ro), vaultAta (wr), recipientAta (wr), tokenProgram (ro)], followed by input EpochPages and optional TransferHook accounts.",
+        "Unwrap WSOL accounts `[7..14]`: [feeRecipient, vaultAuth (ro), wsolMint (ro), vaultAta (wr), recipientWallet (wr), classicTokenProgram (ro), unwrapPda (wr)], followed by input EpochPages."
       ],
       "discriminator": [
         6
@@ -770,11 +784,19 @@
           ]
         },
         {
+          "name": "fee_recipient",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Relayer fee wallet (Native SOL / unwrapWsol) or token ATA (SPL/Token-2022) when relayerFee > 0; read-only System Program placeholder when 0."
+          ]
+        },
+        {
           "name": "sol_vault_or_vault_auth",
           "writable": true,
           "signer": false,
           "docs": [
-            "Native SOL: solVault (wr); SPL/Token-2022: vaultAuth (ro)."
+            "Native SOL: solVault (wr); SPL/Token-2022/unwrapWsol: vaultAuth (ro)."
           ]
         },
         {
@@ -782,7 +804,7 @@
           "writable": true,
           "signer": false,
           "docs": [
-            "Native SOL: recipient (wr); SPL/Token-2022: mint (ro)."
+            "Native SOL: recipient (wr); SPL/Token-2022/unwrapWsol: mint (ro)."
           ]
         },
         {
@@ -790,16 +812,16 @@
           "writable": true,
           "signer": false,
           "docs": [
-            "Native SOL: inputPage0 (ro); SPL/Token-2022: vaultAta (wr)."
+            "Native SOL: inputPage0 (ro); SPL/Token-2022/unwrapWsol: vaultAta (wr)."
           ]
         },
         {
-          "name": "recipient_ata",
+          "name": "recipient_or_recipient_ata",
           "writable": true,
           "signer": false,
           "optional": true,
           "docs": [
-            "SPL/Token-2022 only: recipient token account (wr)."
+            "SPL/Token-2022: recipientAta (wr); unwrapWsol: recipient Native SOL wallet (wr)."
           ]
         },
         {
@@ -808,7 +830,16 @@
           "signer": false,
           "optional": true,
           "docs": [
-            "SPL/Token-2022 only: Classic SPL Token or Token-2022 program."
+            "SPL/Token-2022 / unwrapWsol: Classic SPL Token or Token-2022 program."
+          ]
+        },
+        {
+          "name": "unwrap_acc",
+          "writable": true,
+          "signer": false,
+          "optional": true,
+          "docs": [
+            "unwrapWsol only: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] created and closed atomically."
           ]
         }
       ],
@@ -818,15 +849,15 @@
           "type": "u8"
         },
         {
-          "name": "is_native_sol",
-          "type": "bool"
-        },
-        {
-          "name": "has_change",
-          "type": "bool"
+          "name": "flags",
+          "type": "u8"
         },
         {
           "name": "amount_out",
+          "type": "u64"
+        },
+        {
+          "name": "relayer_fee",
           "type": "u64"
         },
         {
@@ -924,7 +955,7 @@
     {
       "name": "exec_buffered",
       "docs": [
-        "Tag 9: Execute Transfer (3), Merge (4), SwapViaRouter (5), or Withdraw (6) directly from a completed ProofBuffer PDA, atomically closing the buffer and refunding 100% of rent to payer.",
+        "Tag 9: Execute Transfer (3), Merge (4), ExecViaEscrow (5), or Withdraw (6) directly from a completed ProofBuffer PDA, atomically closing the buffer and refunding 100% of rent to payer.",
         "Accounts: [0] proofBuffer (wr), [1..] exact account list of the inner instruction (where [1] = payer/authority)."
       ],
       "discriminator": [
@@ -1287,7 +1318,7 @@
     {
       "name": "DynamicOutputWire",
       "docs": [
-        "129-byte stealth output descriptor used when assetTag and commitment are computed on-chain (Deposit, SwapViaRouter)."
+        "129-byte stealth output descriptor used when assetTag and commitment are computed on-chain (Deposit, ExecViaEscrow)."
       ],
       "type": {
         "kind": "struct",
@@ -1928,22 +1959,22 @@
     {
       "code": 24,
       "name": "InvalidEscrowShard",
-      "msg": "Swap escrow shard_id must be in 0..16."
+      "msg": "Escrow shard_id must be in 0..16."
     },
     {
       "code": 25,
-      "name": "InvalidRouterProgram",
-      "msg": "Router program must be executable and cannot be Audren, System, ZK, or Token."
+      "name": "InvalidTargetProgram",
+      "msg": "Target program must be executable and cannot be Audren, System, ZK, or Token."
     },
     {
       "code": 26,
       "name": "EscrowAuthorityAltered",
-      "msg": "Swap escrow PDA owner, data length, or lamport balance was altered by router CPI."
+      "msg": "Escrow PDA owner, data length, or lamport balance was altered by target CPI."
     },
     {
       "code": 27,
       "name": "EscrowAccountAltered",
-      "msg": "Swap escrow token account owner, delegate, close_authority, or balance was altered."
+      "msg": "Escrow token account owner, delegate, close_authority, or balance was altered."
     },
     {
       "code": 28,
@@ -1953,7 +1984,7 @@
     {
       "code": 29,
       "name": "UnexpectedPartialFill",
-      "msg": "Router left unspent input tokens when allow_partial_refund flag was not set."
+      "msg": "Target program left unspent input tokens when allow_partial_refund flag was not set."
     },
     {
       "code": 30,

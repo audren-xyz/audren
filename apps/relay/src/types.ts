@@ -3,7 +3,7 @@ export type Cluster = 'mainnet' | 'devnet'
 export type AggregatorId = 'jupiter' | 'bedrock' | 'dflow' | 'titan' | 'okx'
 export type AggregatorSelection = AggregatorId | 'auto'
 
-export type AudrenOpKind = 'transfer' | 'merge' | 'swap' | 'withdraw'
+export type AudrenOpKind = 'transfer' | 'merge' | 'exec_escrow' | 'withdraw'
 
 export type BillingMode = 'self_paying' | 'sponsored'
 
@@ -48,12 +48,30 @@ export interface SwapFeePlan {
   feeSide: 'output' | 'input'
   feeAccount: string | null
   feeAccountExists: boolean
-  /** True when the swap is large enough to fund first-time creation of `feeAccount` atomically. */
+  /** True when the action is large enough to fund first-time creation of `feeAccount` atomically. */
   needsFeeAtaSetup: boolean
   estimatedRelayCostLamports: string
   estimatedRelayCostUsd: number | null
   estimatedSwapUsd: number | null
   estimatedFeeUsd: number | null
+  reason: string
+}
+
+export interface NativeFeeQuote {
+  ok: true
+  cluster: Cluster
+  op: 'withdraw' | 'exec_escrow'
+  billingMode: BillingMode
+  feeMint: string
+  feeTokenProgram: string | null
+  feeRecipient: string | null
+  feeRecipientExists: boolean
+  needsFeeAtaSetup: boolean
+  /** Native on-chain `relayer_fee` in raw base units of `feeMint` (lamports for Native SOL / unwrap_wsol). */
+  relayerFee: string
+  feeBps: number
+  estimatedRelayCostLamports: string
+  estimatedRelayCostUsd: number | null
   reason: string
 }
 
@@ -99,6 +117,11 @@ export interface RelaySubmitRequest {
   instructionDataB64: string
   accounts: SolanaAccountMetaJson[]
   setupAtas?: Array<{ owner: string; mint: string; tokenProgram: string }>
+  /**
+   * Optional strictly-allowlisted zero-signer DeFi refresh cranks prepended BEFORE
+   * Tag 5 (`ExecViaEscrow`), e.g. Kamino `RefreshReserve` / Pyth oracle updates.
+   */
+  preInstructions?: EncodedRouterInstruction[]
   computeUnitLimit?: number
   priorityFeeLamports?: string
   vaultOutAta?: string

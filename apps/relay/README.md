@@ -56,9 +56,10 @@ wrangler.jsonc                Self-hostable open-source Cloudflare Worker config
 | `GET` | `/v1/info?cluster=mainnet\|devnet` | Relayer pubkey, live SOL balance, live on-chain rent schedule, active aggregators, and policy limits |
 | `GET` | `/v1/aggregators` | Configured DEX aggregators and per-adapter capabilities |
 | `GET` | `/v1/stats` | Daily aggregate relay counts and remaining sponsor budget (zero PII) |
+| `GET` | `/v1/fee-quote` | Dynamic native `relayer_fee` quote for self-paying `ExecViaEscrow` (`Tag 5`) & `Withdraw` (`Tag 6`, incl. `unwrap_wsol`) |
 | `GET` / `POST` | `/v1/swap/quote` | Multi-aggregator swap quote (`jupiter`, `bedrock`, `dflow`, `titan`, `okx`, or `auto` parallel race) + dynamic `SwapFeePlan` |
-| `POST` | `/v1/swap/instructions` | Normalized `swapInstruction`, `missingAtas`, `lookupTables`, and fee-account wiring for `SwapViaRouter` |
-| `POST` | `/v1/relay/submit` | Firewall -> `simulateV1Transaction` -> atomic `RelayGuard` reserve -> Solana `v1 (0x81)` sign, send & confirm |
+| `POST` | `/v1/swap/instructions` | Normalized `swapInstruction`, `missingAtas`, `lookupTables`, and fee-account wiring for `ExecViaEscrow` |
+| `POST` | `/v1/relay/submit` | Firewall (incl. allowlisted zero-signer `preInstructions` before Tag 5) -> `simulateV1Transaction` -> atomic `RelayGuard` reserve -> Solana `v1 (0x81)` sign, send & confirm |
 | `POST` | `/v1/admin/refill` | Manual treasury auto-refill trigger (authenticated via constant-time `x-admin-token`) |
 
 ## Pluggable aggregators & fee economics

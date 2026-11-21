@@ -57,6 +57,14 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
         assert_eq!(sk.address, sub["address"].as_str().unwrap());
     }
 
+    for sess in v["alice_defi_sessions"].as_array().unwrap() {
+        let idx = sess["session_index"].as_u64().unwrap() as u32;
+        let kp = derive_defi_session_keypair(alice_seed.clone(), idx).unwrap();
+        assert_eq!(to_hex(&kp.secret_seed), sess["secret_seed_hex"].as_str().unwrap());
+        assert_eq!(to_hex(&kp.pubkey), sess["pubkey_hex"].as_str().unwrap());
+        assert_eq!(kp.address, sess["address"].as_str().unwrap());
+    }
+
     let native_sol_gen = asset_generator(vec![0u8; 32]).unwrap();
     assert_eq!(
         to_hex(&native_sol_gen),
@@ -72,7 +80,11 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
     assert_eq!(derive_sol_vault_pda(0, pid.clone()).unwrap().address, pdas["sol_vault"]["address"].as_str().unwrap());
     assert_eq!(derive_vault_auth_pda(0, pid.clone()).unwrap().address, pdas["vault_auth"]["address"].as_str().unwrap());
     assert_eq!(derive_page_rent_vault_pda(0, pid.clone()).unwrap().address, pdas["page_rent_vault"]["address"].as_str().unwrap());
-    assert_eq!(derive_swap_escrow_pda(0, 0, pid.clone()).unwrap().address, pdas["swap_escrow_0"]["address"].as_str().unwrap());
+    assert_eq!(derive_escrow_pda(0, 0, pid.clone()).unwrap().address, pdas["escrow_0"]["address"].as_str().unwrap());
+    assert_eq!(
+        derive_unwrap_pda(0, from_hex(v["epoch_page"]["alice_note"]["nullifier_hex"].as_str().unwrap()), pid.clone()).unwrap().address,
+        pdas["unwrap_pda"]["address"].as_str().unwrap()
+    );
     assert_eq!(derive_lane_pda(0, 1, pid.clone()).unwrap().address, pdas["lane_1"]["address"].as_str().unwrap());
     assert_eq!(derive_lane_rent_vault_pda(0, 1, pid.clone()).unwrap().address, pdas["lane_rent_vault_1"]["address"].as_str().unwrap());
     assert_eq!(
@@ -169,6 +181,7 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
         mint_32: vec![0u8; 32],
         gross_amount: 500_000,
         net_amount: 500_000,
+        fee_from_amount: false,
         token_program: None,
         depositor_ata: None,
         vault_ata: None,
@@ -285,13 +298,16 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
         recipient_account: payer.clone(),
         change_address: alice.address.clone(),
         amount: 1_000_000,
+        relayer_fee: 0,
+        fee_recipient: None,
+        unwrap_wsol: false,
         spl_token_program: None,
         auditor_pk_32: None,
     })
     .unwrap();
     assert_eq!(wd.data[0], 6);
-    assert_eq!(wd.data.len(), 1_966);
-    assert_eq!(wd.accounts.len(), 10);
+    assert_eq!(wd.data.len(), 1_973);
+    assert_eq!(wd.accounts.len(), 11);
 
     let wd_full = build_withdraw_instruction(FfiWithdrawParams {
         program_id: pid.clone(),
@@ -305,12 +321,15 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
         recipient_account: payer,
         change_address: alice.address.clone(),
         amount: note.amount,
+        relayer_fee: 0,
+        fee_recipient: None,
+        unwrap_wsol: false,
         spl_token_program: None,
         auditor_pk_32: None,
     })
     .unwrap();
     assert_eq!(wd_full.data[0], 6);
-    assert_eq!(wd_full.data.len(), 941);
+    assert_eq!(wd_full.data.len(), 948);
     assert!(!wd_full.accounts[1].is_writable, "Full withdraw must keep PoolState read-only");
 
     // 5. Selective Disclosure & Auditor Decrypt
@@ -340,7 +359,7 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
         v["auditor"]["expected_asset_gen_hex"].as_str().unwrap()
     );
 
-    // 6. Router & Relayer (including prepare_router_accounts + ATA derivation + signer stripping)
+    // 6. Escrow & Relayer (including prepare_escrow_accounts + ATA derivation + signer stripping)
     assert_eq!(
         jupiter_cpi_excluded_dexes().join(","),
         v["jupiter_cpi_excluded_dexes"].as_str().unwrap()
@@ -350,12 +369,12 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
     let classic_tp = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string();
     let wsol_mint = v["asset_generators"]["wsol_mint_b58"].as_str().unwrap().to_string();
     let usdc_mint = v["asset_generators"]["usdc_mint_b58"].as_str().unwrap().to_string();
-    let escrow0 = pdas["swap_escrow_0"]["address"].as_str().unwrap().to_string();
+    let escrow0 = pdas["escrow_0"]["address"].as_str().unwrap().to_string();
     let escrow_in_ata =
         derive_associated_token_address(escrow0.clone(), wsol_mint.clone(), classic_tp.clone()).unwrap();
     let escrow_out_ata =
         derive_associated_token_address(escrow0.clone(), usdc_mint.clone(), classic_tp.clone()).unwrap();
-    let prep = prepare_router_accounts(
+    let prep = prepare_escrow_accounts(
         0,
         0,
         wsol_mint,
@@ -374,5 +393,5 @@ fn ffi_layer_matches_canonical_vectors_and_builds_proofs() {
     assert_eq!(prep.escrow_in_ata, escrow_in_ata);
     assert_eq!(prep.escrow_out_ata, escrow_out_ata);
     assert_eq!((prep.escrow_idx, prep.escrow_in_idx, prep.escrow_out_idx), (1, 0, 2));
-    assert!(!prep.accounts[1].is_signer, "swap_escrow signer bit must be stripped");
+    assert!(!prep.accounts[1].is_signer, "escrow signer bit must be stripped");
 }

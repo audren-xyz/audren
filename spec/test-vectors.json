@@ -1,5 +1,5 @@
 {
-  "spec_version": "0.2.0",
+  "spec_version": "0.3.0",
   "program_id": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "alice": {
     "seed_hex": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da",
@@ -26,6 +26,20 @@
       "view_sk_hex": "22e7e7faba095b7813d7981cd15d8b94d178e7e1ee3e62d93f7dcf8c8829cf08",
       "view_pk_hex": "be4091fb69a878ffd11b9af0029252b2bb45813c5021ec0778d0debc8459f229",
       "address": "aud13e4zyveFHbgSmrCsKWaSWjkjX6qsztp35XejDAjXzEwHvr7DqWgXJSfvx2hYgz6m7ush6htQHzbpJeisifhRRNun"
+    }
+  ],
+  "alice_defi_sessions": [
+    {
+      "session_index": 0,
+      "secret_seed_hex": "88927b0cbde9ee03aac37394b595244e1de6020240758f4020a9a3a4df79b844",
+      "pubkey_hex": "a5bf194a1675ecb8e30252e528035914e280ef528940ff32b19f981e31faae6c",
+      "address": "CA1HB7AwTURCLHcL7tFqMTVaPV2k5tEoq4b62aSUcJ3D"
+    },
+    {
+      "session_index": 3,
+      "secret_seed_hex": "5c6392e8c30e296a406acee83d254378002a3065a9edd458ab1e0e4d505320f5",
+      "pubkey_hex": "41fc1901cc9a20b1891e9368030e7f3293ee87130d37a9d86bc98be07d12dcca",
+      "address": "5SaTVkq9rrUq9CrbZeyBb9ifWwMSboPgLFtS9HQ2Yuhb"
     }
   ],
   "bob": {
@@ -63,9 +77,13 @@
       "address": "GyByGQ6ukLVvxiQ8VQjvnR7cWEi8iAuS8r6MdupR3hmV",
       "bump": 255
     },
-    "swap_escrow_0": {
+    "escrow_0": {
       "address": "AJFrTGiSbJsiXfQA5cZQVF566NEU15yBYzLRTU7J2Hay",
       "bump": 254
+    },
+    "unwrap_pda": {
+      "address": "DWqSiMdkBmZPSb81guW4Av2x8R2oA6zaUVY9mBSynBbE",
+      "bump": 255
     },
     "lane_1": {
       "address": "7W6DhkuNDzWjaF2wyevZzzSLCtnwX5cCNUKywVPC2E2o",

@@ -14,7 +14,8 @@ import {
   deriveEpochPagePda,
   deriveVaultAuthPda,
   deriveSolVaultPda,
-  deriveSwapEscrowPda,
+  deriveEscrowPda,
+  deriveUnwrapPda,
   deriveLanePda,
   deriveAssociatedTokenAddress,
   parseAudrenAddress,
@@ -87,7 +88,7 @@ test('zero-dependency PDA derivations match deployed Solana Mainnet PDAs byte-fo
     deriveEpochPagePda(0, 0n),
     deriveVaultAuthPda(0),
     deriveSolVaultPda(0),
-    deriveSwapEscrowPda(0, 0),
+    deriveEscrowPda(0, 0),
     deriveLanePda(0, 1),
   ]);
   assert.equal(pool0.address, '5Bvt5f5QMfsVb9TyX8bzkRMvAX6JSWwRtnymGveF9U3G');
@@ -96,6 +97,8 @@ test('zero-dependency PDA derivations match deployed Solana Mainnet PDAs byte-fo
   assert.equal(solVault.address, 'EhVt54eHXmWzDqngDiBXhw6ePWa9eEoBAHsMfnNCn5nr');
   assert.equal(escrow0.address, 'AJFrTGiSbJsiXfQA5cZQVF566NEU15yBYzLRTU7J2Hay');
   assert.equal(lane1.addressBytes.byteLength, 32);
+  const unwrap = await deriveUnwrapPda(0, new Uint8Array(32).fill(7));
+  assert.equal(unwrap.addressBytes.byteLength, 32);
 
   // Base58 roundtrip (including all-zero System Program ID) & ATA derivation
   assert.equal(base58Encode(new Uint8Array(32)), SYSTEM_PROGRAM_ID);
@@ -157,6 +160,6 @@ test('published Codama and Anchor IDLs match JSON artifacts and protocol counts'
   assert.equal(AUDREN_ANCHOR_IDL.address, AUDREN_PROGRAM_ID);
   assert.equal(AUDREN_CODAMA_IDL.program.instructions.length, 13);
   assert.equal(AUDREN_CODAMA_IDL.program.accounts.length, 7);
-  assert.equal(AUDREN_CODAMA_IDL.program.pdas.length, 10);
+  assert.equal(AUDREN_CODAMA_IDL.program.pdas.length, 11);
   assert.equal(AUDREN_CODAMA_IDL.program.errors.length, 33);
 });

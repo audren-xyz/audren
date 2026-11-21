@@ -1,10 +1,10 @@
 [package]
 name = "audren-mock-router"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
-description = "Minimal Pinocchio sBPFv3 mock DEX router for Audren SwapViaRouter integration tests."
+description = "Minimal Pinocchio sBPFv3 mock target program for Audren ExecViaEscrow integration tests."
 
 [lib]
 name = "audren_mock_router"

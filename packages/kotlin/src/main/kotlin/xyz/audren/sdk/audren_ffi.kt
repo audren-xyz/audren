@@ -684,13 +684,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_deposit_instruction(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_build_exec_via_escrow_instruction(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_build_merge_instruction(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_open_page_instruction(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_swap_via_router_instruction(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_transfer_instruction(
     ): Int
@@ -710,7 +710,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_auditor_keypair(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_defi_session_keypair(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_epoch_page_pda(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_escrow_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_keys_from_seed(
     ): Int
@@ -730,7 +734,7 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_subaccount_keys(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_swap_escrow_pda(
+    external fun uniffi_audren_ffi_checksum_func_derive_unwrap_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_vault_auth_pda(
     ): Int
@@ -750,7 +754,7 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_parse_audren_address(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_prepare_router_accounts(
+    external fun uniffi_audren_ffi_checksum_func_prepare_escrow_accounts(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_program_id(
     ): Int
@@ -789,13 +793,13 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_deposit_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_build_exec_via_escrow_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_merge_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`currentPageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_open_page_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`currentPageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_swap_via_router_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_transfer_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -815,7 +819,11 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_auditor_keypair(`seed32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_derive_defi_session_keypair(`masterSeed32`: RustBuffer.ByValue,`sessionIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_epoch_page_pda(`poolId`: Int,`pageId`: Long,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_derive_escrow_pda(`poolId`: Int,`shardId`: Byte,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_keys_from_seed(`seed32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -835,7 +843,7 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_subaccount_keys(`masterSeed32`: RustBuffer.ByValue,`accountIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_swap_escrow_pda(`poolId`: Int,`shardId`: Byte,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_unwrap_pda(`poolId`: Int,`nullifier32`: RustBuffer.ByValue,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_vault_auth_pda(`poolId`: Int,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -855,7 +863,7 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_parse_audren_address(`encoded`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_prepare_router_accounts(`poolId`: Int,`shardId`: Byte,`inputMintB58`: RustBuffer.ByValue,`outputMintB58`: RustBuffer.ByValue,`inputTokenProgramB58`: RustBuffer.ByValue,`outputTokenProgramB58`: RustBuffer.ByValue,`routerAccounts`: RustBuffer.ByValue,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_prepare_escrow_accounts(`poolId`: Int,`shardId`: Byte,`inputMintB58`: RustBuffer.ByValue,`outputMintB58`: RustBuffer.ByValue,`inputTokenProgramB58`: RustBuffer.ByValue,`outputTokenProgramB58`: RustBuffer.ByValue,`actionAccounts`: RustBuffer.ByValue,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_program_id(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1003,6 +1011,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_build_deposit_instruction() and 0xFFFF) != 14202) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_build_exec_via_escrow_instruction() and 0xFFFF) != 47427) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_build_merge_instruction() and 0xFFFF) != 53530) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1010,9 +1021,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_build_open_page_instruction() and 0xFFFF) != 36337) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_swap_via_router_instruction() and 0xFFFF) != 55178) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_build_transfer_instruction() and 0xFFFF) != 43105) {
@@ -1042,7 +1050,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_derive_auditor_keypair() and 0xFFFF) != 4233) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_defi_session_keypair() and 0xFFFF) != 55393) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_derive_epoch_page_pda() and 0xFFFF) != 2040) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_escrow_pda() and 0xFFFF) != 47615) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_derive_keys_from_seed() and 0xFFFF) != 28631) {
@@ -1072,7 +1086,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_derive_subaccount_keys() and 0xFFFF) != 20930) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_swap_escrow_pda() and 0xFFFF) != 4939) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_unwrap_pda() and 0xFFFF) != 23126) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_derive_vault_auth_pda() and 0xFFFF) != 39818) {
@@ -1102,7 +1116,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_parse_audren_address() and 0xFFFF) != 28660) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_prepare_router_accounts() and 0xFFFF) != 40440) {
+    if ((lib.uniffi_audren_ffi_checksum_func_prepare_escrow_accounts() and 0xFFFF) != 62178) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_program_id() and 0xFFFF) != 36184) {
@@ -1824,6 +1838,59 @@ public object FfiConverterTypeFfiDataSlice: FfiConverterRustBuffer<FfiDataSlice>
 
 
 
+data class FfiDefiSessionKeypair (
+    var `sessionIndex`: kotlin.UInt
+    , 
+    var `secretSeed`: kotlin.ByteArray
+    , 
+    var `pubkey`: kotlin.ByteArray
+    , 
+    var `keypairBytes`: kotlin.ByteArray
+    , 
+    var `address`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiDefiSessionKeypair: FfiConverterRustBuffer<FfiDefiSessionKeypair> {
+    override fun read(buf: ByteBuffer): FfiDefiSessionKeypair {
+        return FfiDefiSessionKeypair(
+            FfiConverterUInt.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiDefiSessionKeypair) = (
+            FfiConverterUInt.allocationSize(value.`sessionIndex`) +
+            FfiConverterByteArray.allocationSize(value.`secretSeed`) +
+            FfiConverterByteArray.allocationSize(value.`pubkey`) +
+            FfiConverterByteArray.allocationSize(value.`keypairBytes`) +
+            FfiConverterString.allocationSize(value.`address`)
+    )
+
+    override fun write(value: FfiDefiSessionKeypair, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`sessionIndex`, buf)
+            FfiConverterByteArray.write(value.`secretSeed`, buf)
+            FfiConverterByteArray.write(value.`pubkey`, buf)
+            FfiConverterByteArray.write(value.`keypairBytes`, buf)
+            FfiConverterString.write(value.`address`, buf)
+    }
+}
+
+
+
 data class FfiDepositParams (
     var `programId`: kotlin.String
     , 
@@ -1840,6 +1907,8 @@ data class FfiDepositParams (
     var `grossAmount`: kotlin.ULong
     , 
     var `netAmount`: kotlin.ULong
+    , 
+    var `feeFromAmount`: kotlin.Boolean
     , 
     var `tokenProgram`: kotlin.String?
     , 
@@ -1870,6 +1939,7 @@ public object FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer<FfiDeposi
             FfiConverterByteArray.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -1885,6 +1955,7 @@ public object FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer<FfiDeposi
             FfiConverterByteArray.allocationSize(value.`mint32`) +
             FfiConverterULong.allocationSize(value.`grossAmount`) +
             FfiConverterULong.allocationSize(value.`netAmount`) +
+            FfiConverterBoolean.allocationSize(value.`feeFromAmount`) +
             FfiConverterOptionalString.allocationSize(value.`tokenProgram`) +
             FfiConverterOptionalString.allocationSize(value.`depositorAta`) +
             FfiConverterOptionalString.allocationSize(value.`vaultAta`)
@@ -1899,6 +1970,7 @@ public object FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer<FfiDeposi
             FfiConverterByteArray.write(value.`mint32`, buf)
             FfiConverterULong.write(value.`grossAmount`, buf)
             FfiConverterULong.write(value.`netAmount`, buf)
+            FfiConverterBoolean.write(value.`feeFromAmount`, buf)
             FfiConverterOptionalString.write(value.`tokenProgram`, buf)
             FfiConverterOptionalString.write(value.`depositorAta`, buf)
             FfiConverterOptionalString.write(value.`vaultAta`, buf)
@@ -1970,6 +2042,169 @@ public object FfiConverterTypeFfiEpochPageHeader: FfiConverterRustBuffer<FfiEpoc
             FfiConverterULong.write(value.`pageId`, buf)
             FfiConverterULong.write(value.`createdSlot`, buf)
             FfiConverterULong.write(value.`closedSlot`, buf)
+    }
+}
+
+
+
+data class FfiExecViaEscrowParams (
+    var `programId`: kotlin.String
+    , 
+    var `payer`: kotlin.String
+    , 
+    var `poolId`: kotlin.UInt
+    , 
+    var `outPageId`: kotlin.ULong
+    , 
+    var `shardId`: kotlin.UByte
+    , 
+    var `inputPageIds`: List<kotlin.ULong>
+    , 
+    var `inputPagesBytes`: List<kotlin.ByteArray>
+    , 
+    var `inputNote`: FfiOwnedNote
+    , 
+    var `secretIndex`: kotlin.UInt
+    , 
+    var `mintOut32`: kotlin.ByteArray
+    , 
+    var `tokenProgramIn`: kotlin.String
+    , 
+    var `tokenProgramOut`: kotlin.String
+    , 
+    var `amountIn`: kotlin.ULong
+    , 
+    var `minAmountOut`: kotlin.ULong
+    , 
+    var `relayerFee`: kotlin.ULong
+    , 
+    var `feeOnOutput`: kotlin.Boolean
+    , 
+    var `feeRecipientAta`: kotlin.String?
+    , 
+    var `allowPartialRefund`: kotlin.Boolean
+    , 
+    var `recipientAddress`: kotlin.String
+    , 
+    var `changeAddress`: kotlin.String
+    , 
+    var `auditorPk32`: kotlin.ByteArray?
+    , 
+    var `targetProgramId`: kotlin.String
+    , 
+    var `escrowIdx`: kotlin.UByte
+    , 
+    var `escrowInIdx`: kotlin.UByte
+    , 
+    var `escrowOutIdx`: kotlin.UByte
+    , 
+    var `targetIxData`: kotlin.ByteArray
+    , 
+    var `actionAccounts`: List<FfiAccountMeta>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<FfiExecViaEscrowParams> {
+    override fun read(buf: ByteBuffer): FfiExecViaEscrowParams {
+        return FfiExecViaEscrowParams(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterSequenceULong.read(buf),
+            FfiConverterSequenceByteArray.read(buf),
+            FfiConverterTypeFfiOwnedNote.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiExecViaEscrowParams) = (
+            FfiConverterString.allocationSize(value.`programId`) +
+            FfiConverterString.allocationSize(value.`payer`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterULong.allocationSize(value.`outPageId`) +
+            FfiConverterUByte.allocationSize(value.`shardId`) +
+            FfiConverterSequenceULong.allocationSize(value.`inputPageIds`) +
+            FfiConverterSequenceByteArray.allocationSize(value.`inputPagesBytes`) +
+            FfiConverterTypeFfiOwnedNote.allocationSize(value.`inputNote`) +
+            FfiConverterUInt.allocationSize(value.`secretIndex`) +
+            FfiConverterByteArray.allocationSize(value.`mintOut32`) +
+            FfiConverterString.allocationSize(value.`tokenProgramIn`) +
+            FfiConverterString.allocationSize(value.`tokenProgramOut`) +
+            FfiConverterULong.allocationSize(value.`amountIn`) +
+            FfiConverterULong.allocationSize(value.`minAmountOut`) +
+            FfiConverterULong.allocationSize(value.`relayerFee`) +
+            FfiConverterBoolean.allocationSize(value.`feeOnOutput`) +
+            FfiConverterOptionalString.allocationSize(value.`feeRecipientAta`) +
+            FfiConverterBoolean.allocationSize(value.`allowPartialRefund`) +
+            FfiConverterString.allocationSize(value.`recipientAddress`) +
+            FfiConverterString.allocationSize(value.`changeAddress`) +
+            FfiConverterOptionalByteArray.allocationSize(value.`auditorPk32`) +
+            FfiConverterString.allocationSize(value.`targetProgramId`) +
+            FfiConverterUByte.allocationSize(value.`escrowIdx`) +
+            FfiConverterUByte.allocationSize(value.`escrowInIdx`) +
+            FfiConverterUByte.allocationSize(value.`escrowOutIdx`) +
+            FfiConverterByteArray.allocationSize(value.`targetIxData`) +
+            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`actionAccounts`)
+    )
+
+    override fun write(value: FfiExecViaEscrowParams, buf: ByteBuffer) {
+            FfiConverterString.write(value.`programId`, buf)
+            FfiConverterString.write(value.`payer`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterULong.write(value.`outPageId`, buf)
+            FfiConverterUByte.write(value.`shardId`, buf)
+            FfiConverterSequenceULong.write(value.`inputPageIds`, buf)
+            FfiConverterSequenceByteArray.write(value.`inputPagesBytes`, buf)
+            FfiConverterTypeFfiOwnedNote.write(value.`inputNote`, buf)
+            FfiConverterUInt.write(value.`secretIndex`, buf)
+            FfiConverterByteArray.write(value.`mintOut32`, buf)
+            FfiConverterString.write(value.`tokenProgramIn`, buf)
+            FfiConverterString.write(value.`tokenProgramOut`, buf)
+            FfiConverterULong.write(value.`amountIn`, buf)
+            FfiConverterULong.write(value.`minAmountOut`, buf)
+            FfiConverterULong.write(value.`relayerFee`, buf)
+            FfiConverterBoolean.write(value.`feeOnOutput`, buf)
+            FfiConverterOptionalString.write(value.`feeRecipientAta`, buf)
+            FfiConverterBoolean.write(value.`allowPartialRefund`, buf)
+            FfiConverterString.write(value.`recipientAddress`, buf)
+            FfiConverterString.write(value.`changeAddress`, buf)
+            FfiConverterOptionalByteArray.write(value.`auditorPk32`, buf)
+            FfiConverterString.write(value.`targetProgramId`, buf)
+            FfiConverterUByte.write(value.`escrowIdx`, buf)
+            FfiConverterUByte.write(value.`escrowInIdx`, buf)
+            FfiConverterUByte.write(value.`escrowOutIdx`, buf)
+            FfiConverterByteArray.write(value.`targetIxData`, buf)
+            FfiConverterSequenceTypeFfiAccountMeta.write(value.`actionAccounts`, buf)
     }
 }
 
@@ -2365,7 +2600,7 @@ public object FfiConverterTypeFfiPoolState: FfiConverterRustBuffer<FfiPoolState>
 
 
 
-data class FfiPreparedRouterAccounts (
+data class FfiPreparedEscrowAccounts (
     var `escrowPda`: kotlin.String
     , 
     var `escrowInAta`: kotlin.String
@@ -2392,9 +2627,9 @@ data class FfiPreparedRouterAccounts (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiPreparedRouterAccounts: FfiConverterRustBuffer<FfiPreparedRouterAccounts> {
-    override fun read(buf: ByteBuffer): FfiPreparedRouterAccounts {
-        return FfiPreparedRouterAccounts(
+public object FfiConverterTypeFfiPreparedEscrowAccounts: FfiConverterRustBuffer<FfiPreparedEscrowAccounts> {
+    override fun read(buf: ByteBuffer): FfiPreparedEscrowAccounts {
+        return FfiPreparedEscrowAccounts(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
@@ -2405,7 +2640,7 @@ public object FfiConverterTypeFfiPreparedRouterAccounts: FfiConverterRustBuffer<
         )
     }
 
-    override fun allocationSize(value: FfiPreparedRouterAccounts) = (
+    override fun allocationSize(value: FfiPreparedEscrowAccounts) = (
             FfiConverterString.allocationSize(value.`escrowPda`) +
             FfiConverterString.allocationSize(value.`escrowInAta`) +
             FfiConverterString.allocationSize(value.`escrowOutAta`) +
@@ -2415,7 +2650,7 @@ public object FfiConverterTypeFfiPreparedRouterAccounts: FfiConverterRustBuffer<
             FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`accounts`)
     )
 
-    override fun write(value: FfiPreparedRouterAccounts, buf: ByteBuffer) {
+    override fun write(value: FfiPreparedEscrowAccounts, buf: ByteBuffer) {
             FfiConverterString.write(value.`escrowPda`, buf)
             FfiConverterString.write(value.`escrowInAta`, buf)
             FfiConverterString.write(value.`escrowOutAta`, buf)
@@ -2501,154 +2736,6 @@ public object FfiConverterTypeFfiSelectiveDisclosureProof: FfiConverterRustBuffe
             FfiConverterULong.write(value.`amount`, buf)
             FfiConverterString.write(value.`assetBlindingB58`, buf)
             FfiConverterString.write(value.`valueBlindingB58`, buf)
-    }
-}
-
-
-
-data class FfiSwapViaRouterParams (
-    var `programId`: kotlin.String
-    , 
-    var `payer`: kotlin.String
-    , 
-    var `poolId`: kotlin.UInt
-    , 
-    var `outPageId`: kotlin.ULong
-    , 
-    var `shardId`: kotlin.UByte
-    , 
-    var `inputPageIds`: List<kotlin.ULong>
-    , 
-    var `inputPagesBytes`: List<kotlin.ByteArray>
-    , 
-    var `inputNote`: FfiOwnedNote
-    , 
-    var `secretIndex`: kotlin.UInt
-    , 
-    var `mintOut32`: kotlin.ByteArray
-    , 
-    var `tokenProgramIn`: kotlin.String
-    , 
-    var `tokenProgramOut`: kotlin.String
-    , 
-    var `amountIn`: kotlin.ULong
-    , 
-    var `minAmountOut`: kotlin.ULong
-    , 
-    var `allowPartialRefund`: kotlin.Boolean
-    , 
-    var `recipientAddress`: kotlin.String
-    , 
-    var `changeAddress`: kotlin.String
-    , 
-    var `auditorPk32`: kotlin.ByteArray?
-    , 
-    var `routerProgramId`: kotlin.String
-    , 
-    var `escrowIdx`: kotlin.UByte
-    , 
-    var `escrowInIdx`: kotlin.UByte
-    , 
-    var `escrowOutIdx`: kotlin.UByte
-    , 
-    var `routerIxData`: kotlin.ByteArray
-    , 
-    var `routerAccounts`: List<FfiAccountMeta>
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiSwapViaRouterParams: FfiConverterRustBuffer<FfiSwapViaRouterParams> {
-    override fun read(buf: ByteBuffer): FfiSwapViaRouterParams {
-        return FfiSwapViaRouterParams(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterSequenceByteArray.read(buf),
-            FfiConverterTypeFfiOwnedNote.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterOptionalByteArray.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterSequenceTypeFfiAccountMeta.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiSwapViaRouterParams) = (
-            FfiConverterString.allocationSize(value.`programId`) +
-            FfiConverterString.allocationSize(value.`payer`) +
-            FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`outPageId`) +
-            FfiConverterUByte.allocationSize(value.`shardId`) +
-            FfiConverterSequenceULong.allocationSize(value.`inputPageIds`) +
-            FfiConverterSequenceByteArray.allocationSize(value.`inputPagesBytes`) +
-            FfiConverterTypeFfiOwnedNote.allocationSize(value.`inputNote`) +
-            FfiConverterUInt.allocationSize(value.`secretIndex`) +
-            FfiConverterByteArray.allocationSize(value.`mintOut32`) +
-            FfiConverterString.allocationSize(value.`tokenProgramIn`) +
-            FfiConverterString.allocationSize(value.`tokenProgramOut`) +
-            FfiConverterULong.allocationSize(value.`amountIn`) +
-            FfiConverterULong.allocationSize(value.`minAmountOut`) +
-            FfiConverterBoolean.allocationSize(value.`allowPartialRefund`) +
-            FfiConverterString.allocationSize(value.`recipientAddress`) +
-            FfiConverterString.allocationSize(value.`changeAddress`) +
-            FfiConverterOptionalByteArray.allocationSize(value.`auditorPk32`) +
-            FfiConverterString.allocationSize(value.`routerProgramId`) +
-            FfiConverterUByte.allocationSize(value.`escrowIdx`) +
-            FfiConverterUByte.allocationSize(value.`escrowInIdx`) +
-            FfiConverterUByte.allocationSize(value.`escrowOutIdx`) +
-            FfiConverterByteArray.allocationSize(value.`routerIxData`) +
-            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`routerAccounts`)
-    )
-
-    override fun write(value: FfiSwapViaRouterParams, buf: ByteBuffer) {
-            FfiConverterString.write(value.`programId`, buf)
-            FfiConverterString.write(value.`payer`, buf)
-            FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`outPageId`, buf)
-            FfiConverterUByte.write(value.`shardId`, buf)
-            FfiConverterSequenceULong.write(value.`inputPageIds`, buf)
-            FfiConverterSequenceByteArray.write(value.`inputPagesBytes`, buf)
-            FfiConverterTypeFfiOwnedNote.write(value.`inputNote`, buf)
-            FfiConverterUInt.write(value.`secretIndex`, buf)
-            FfiConverterByteArray.write(value.`mintOut32`, buf)
-            FfiConverterString.write(value.`tokenProgramIn`, buf)
-            FfiConverterString.write(value.`tokenProgramOut`, buf)
-            FfiConverterULong.write(value.`amountIn`, buf)
-            FfiConverterULong.write(value.`minAmountOut`, buf)
-            FfiConverterBoolean.write(value.`allowPartialRefund`, buf)
-            FfiConverterString.write(value.`recipientAddress`, buf)
-            FfiConverterString.write(value.`changeAddress`, buf)
-            FfiConverterOptionalByteArray.write(value.`auditorPk32`, buf)
-            FfiConverterString.write(value.`routerProgramId`, buf)
-            FfiConverterUByte.write(value.`escrowIdx`, buf)
-            FfiConverterUByte.write(value.`escrowInIdx`, buf)
-            FfiConverterUByte.write(value.`escrowOutIdx`, buf)
-            FfiConverterByteArray.write(value.`routerIxData`, buf)
-            FfiConverterSequenceTypeFfiAccountMeta.write(value.`routerAccounts`, buf)
     }
 }
 
@@ -2765,6 +2852,12 @@ data class FfiWithdrawParams (
     , 
     var `amount`: kotlin.ULong
     , 
+    var `relayerFee`: kotlin.ULong
+    , 
+    var `feeRecipient`: kotlin.String?
+    , 
+    var `unwrapWsol`: kotlin.Boolean
+    , 
     var `splTokenProgram`: kotlin.String?
     , 
     var `auditorPk32`: kotlin.ByteArray?
@@ -2795,6 +2888,9 @@ public object FfiConverterTypeFfiWithdrawParams: FfiConverterRustBuffer<FfiWithd
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalByteArray.read(buf),
         )
@@ -2812,6 +2908,9 @@ public object FfiConverterTypeFfiWithdrawParams: FfiConverterRustBuffer<FfiWithd
             FfiConverterString.allocationSize(value.`recipientAccount`) +
             FfiConverterString.allocationSize(value.`changeAddress`) +
             FfiConverterULong.allocationSize(value.`amount`) +
+            FfiConverterULong.allocationSize(value.`relayerFee`) +
+            FfiConverterOptionalString.allocationSize(value.`feeRecipient`) +
+            FfiConverterBoolean.allocationSize(value.`unwrapWsol`) +
             FfiConverterOptionalString.allocationSize(value.`splTokenProgram`) +
             FfiConverterOptionalByteArray.allocationSize(value.`auditorPk32`)
     )
@@ -2828,6 +2927,9 @@ public object FfiConverterTypeFfiWithdrawParams: FfiConverterRustBuffer<FfiWithd
             FfiConverterString.write(value.`recipientAccount`, buf)
             FfiConverterString.write(value.`changeAddress`, buf)
             FfiConverterULong.write(value.`amount`, buf)
+            FfiConverterULong.write(value.`relayerFee`, buf)
+            FfiConverterOptionalString.write(value.`feeRecipient`, buf)
+            FfiConverterBoolean.write(value.`unwrapWsol`, buf)
             FfiConverterOptionalString.write(value.`splTokenProgram`, buf)
             FfiConverterOptionalByteArray.write(value.`auditorPk32`, buf)
     }
@@ -3214,6 +3316,18 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
+    @Throws(AudrenFfiException::class) fun `buildExecViaEscrowInstruction`(`params`: FfiExecViaEscrowParams): FfiBuiltInstruction {
+            return FfiConverterTypeFfiBuiltInstruction.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_build_exec_via_escrow_instruction(
+    
+        
+        FfiConverterTypeFfiExecViaEscrowParams.lower(`params`),_status)
+}
+    )
+    }
+    
+
     @Throws(AudrenFfiException::class) fun `buildMergeInstruction`(`params`: FfiMergeParams): FfiBuiltInstruction {
             return FfiConverterTypeFfiBuiltInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
@@ -3251,18 +3365,6 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
         FfiConverterString.lower(`payer`),
         FfiConverterUInt.lower(`poolId`),
         FfiConverterULong.lower(`currentPageId`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `buildSwapViaRouterInstruction`(`params`: FfiSwapViaRouterParams): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_swap_via_router_instruction(
-    
-        
-        FfiConverterTypeFfiSwapViaRouterParams.lower(`params`),_status)
 }
     )
     }
@@ -3375,6 +3477,19 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
+    @Throws(AudrenFfiException::class) fun `deriveDefiSessionKeypair`(`masterSeed32`: kotlin.ByteArray, `sessionIndex`: kotlin.UInt): FfiDefiSessionKeypair {
+            return FfiConverterTypeFfiDefiSessionKeypair.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_defi_session_keypair(
+    
+        
+        FfiConverterByteArray.lower(`masterSeed32`),
+        FfiConverterUInt.lower(`sessionIndex`),_status)
+}
+    )
+    }
+    
+
     @Throws(AudrenFfiException::class) fun `deriveEpochPagePda`(`poolId`: kotlin.UInt, `pageId`: kotlin.ULong, `programId`: kotlin.String): FfiPda {
             return FfiConverterTypeFfiPda.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
@@ -3383,6 +3498,20 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
         
         FfiConverterUInt.lower(`poolId`),
         FfiConverterULong.lower(`pageId`),
+        FfiConverterString.lower(`programId`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveEscrowPda`(`poolId`: kotlin.UInt, `shardId`: kotlin.UByte, `programId`: kotlin.String): FfiPda {
+            return FfiConverterTypeFfiPda.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_escrow_pda(
+    
+        
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`shardId`),
         FfiConverterString.lower(`programId`),_status)
 }
     )
@@ -3509,14 +3638,14 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveSwapEscrowPda`(`poolId`: kotlin.UInt, `shardId`: kotlin.UByte, `programId`: kotlin.String): FfiPda {
+    @Throws(AudrenFfiException::class) fun `deriveUnwrapPda`(`poolId`: kotlin.UInt, `nullifier32`: kotlin.ByteArray, `programId`: kotlin.String): FfiPda {
             return FfiConverterTypeFfiPda.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_swap_escrow_pda(
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_unwrap_pda(
     
         
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterUByte.lower(`shardId`),
+        FfiConverterByteArray.lower(`nullifier32`),
         FfiConverterString.lower(`programId`),_status)
 }
     )
@@ -3631,10 +3760,10 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
-    @Throws(AudrenFfiException::class) fun `prepareRouterAccounts`(`poolId`: kotlin.UInt, `shardId`: kotlin.UByte, `inputMintB58`: kotlin.String, `outputMintB58`: kotlin.String, `inputTokenProgramB58`: kotlin.String, `outputTokenProgramB58`: kotlin.String, `routerAccounts`: List<FfiAccountMeta>, `programId`: kotlin.String): FfiPreparedRouterAccounts {
-            return FfiConverterTypeFfiPreparedRouterAccounts.lift(
+    @Throws(AudrenFfiException::class) fun `prepareEscrowAccounts`(`poolId`: kotlin.UInt, `shardId`: kotlin.UByte, `inputMintB58`: kotlin.String, `outputMintB58`: kotlin.String, `inputTokenProgramB58`: kotlin.String, `outputTokenProgramB58`: kotlin.String, `actionAccounts`: List<FfiAccountMeta>, `programId`: kotlin.String): FfiPreparedEscrowAccounts {
+            return FfiConverterTypeFfiPreparedEscrowAccounts.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_prepare_router_accounts(
+    UniffiLib.uniffi_audren_ffi_fn_func_prepare_escrow_accounts(
     
         
         FfiConverterUInt.lower(`poolId`),
@@ -3643,7 +3772,7 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
         FfiConverterString.lower(`outputMintB58`),
         FfiConverterString.lower(`inputTokenProgramB58`),
         FfiConverterString.lower(`outputTokenProgramB58`),
-        FfiConverterSequenceTypeFfiAccountMeta.lower(`routerAccounts`),
+        FfiConverterSequenceTypeFfiAccountMeta.lower(`actionAccounts`),
         FfiConverterString.lower(`programId`),_status)
 }
     )

@@ -326,6 +326,41 @@ export async function generateAudrenKeys(seedInput?: Uint8Array): Promise<Audren
   }
 }
 
+export interface DefiSessionKeypair {
+  sessionIndex: number
+  secretSeed: Uint8Array
+  pubkey: Uint8Array
+  /** Standard 64-byte Solana Keypair encoding (`secretSeed || pubkey`). */
+  keypairBytes: Uint8Array
+  address: string
+}
+
+/**
+ * Derive a deterministic, unlinkable single-use Ed25519 Solana keypair for stateful DeFi
+ * sessions (borrowing, leverage, perps) matching `crates/client/src/keys.rs` byte-for-byte.
+ */
+export async function deriveDefiSessionKeypair(
+  masterSeed: Uint8Array,
+  sessionIndex: number,
+): Promise<DefiSessionKeypair> {
+  if (masterSeed.byteLength !== 32) {
+    throw new RangeError(`masterSeed must be 32 bytes, got ${masterSeed.byteLength}`)
+  }
+  if (!Number.isInteger(sessionIndex) || sessionIndex < 0 || sessionIndex > 0xffff_ffff) {
+    throw new RangeError(`sessionIndex must be a u32 integer, got ${sessionIndex}`)
+  }
+  const secretSeed = await hkdfExpand(masterSeed, utf8('audren/v1/defi_session'), u32le(sessionIndex), 32)
+  const pubkey = ed25519.getPublicKey(secretSeed)
+  const keypairBytes = concatBytes(secretSeed, pubkey)
+  return {
+    sessionIndex,
+    secretSeed,
+    pubkey,
+    keypairBytes,
+    address: base58Encode(pubkey),
+  }
+}
+
 export interface StealthMaterial {
   ephemeralPk: Uint8Array
   stealthPk: Uint8Array

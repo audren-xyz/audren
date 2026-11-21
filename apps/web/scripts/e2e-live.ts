@@ -39,8 +39,8 @@ import {
   buildCloseWsolAtaInstruction,
   buildCreateAtaIdempotentIx,
   buildDepositInstruction,
+  buildExecViaEscrowInstruction,
   buildMergeInstruction,
-  buildSwapViaRouterInstruction,
   buildTransferInstruction,
   buildWalletUnlockMessage,
   buildWithdrawInstruction,
@@ -654,7 +654,7 @@ async function main() {
 
     const ring = extractRingFromPage(state.pageBytesById.get(swapIn.pageId.toString())!)
     const t0 = performance.now()
-    const { instruction, outDesc } = await buildSwapViaRouterInstruction({
+    const { instruction, outDesc } = await buildExecViaEscrowInstruction({
       payer: signer.pubkey,
       poolId: 0,
       outPageId: BigInt(state.pool.currentPageId),
@@ -670,9 +670,9 @@ async function main() {
       minAmountOut: BigInt(q.quote.otherAmountThreshold),
       recipient: { spendPk: keys.spendPk, viewPk: keys.viewPk },
       changeAddr: { spendPk: keys.spendPk, viewPk: keys.viewPk },
-      routerProgramId: base58Decode(ixData.swapInstruction.programId),
-      routerIxData: fromBase64(ixData.swapInstruction.data),
-      routerAccounts: ixData.swapInstruction.accounts.map((a) => ({
+      targetProgramId: base58Decode(ixData.swapInstruction.programId),
+      targetIxData: fromBase64(ixData.swapInstruction.data),
+      actionAccounts: ixData.swapInstruction.accounts.map((a) => ({
         pubkey: base58Decode(a.pubkey),
         isSigner: a.isSigner,
         isWritable: a.isWritable,
