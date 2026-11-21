@@ -74,6 +74,10 @@ export const PAGE_OFF_VIEW_TAGS = 64;
 export const PAGE_OFF_EPHEMERAL_PKS = 96;
 export const PAGE_SCAN_OFFSET = 64;
 export const PAGE_SCAN_LEN = 1_056;
+export const PAGE_SCAN_DATA_SLICE = {
+  offset: PAGE_SCAN_OFFSET,
+  length: PAGE_SCAN_LEN,
+} as const;
 export const PAGE_OFF_STEALTH_PKS = 1_120;
 export const PAGE_OFF_ASSET_TAGS = 2_144;
 export const PAGE_OFF_COMMITMENTS = 3_168;

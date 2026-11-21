@@ -269,6 +269,11 @@ test('5. disclosure & auditor: Rust-generated SelectiveDisclosure & Auditor ElGa
   assert.equal(bytesToHex(decrypted.assetGenerator), vectors.auditor.expected_asset_gen_hex);
 });
 
-test('6. router & relayer: Jupiter CPI excluded DEXes match Rust canonical constant', () => {
+test('6. router & relayer: Jupiter CPI excluded DEXes, default relay URL & dataSlice match canonical constants', () => {
   assert.equal(core.JUPITER_CPI_EXCLUDED_DEXES.join(','), vectors.jupiter_cpi_excluded_dexes);
+  assert.equal(core.AUDREN_DEFAULT_RELAY_URL, 'https://relay.audren.xyz');
+  assert.deepEqual(core.PAGE_SCAN_DATA_SLICE, {
+    offset: vectors.epoch_page.scan_offset,
+    length: vectors.epoch_page.scan_length,
+  });
 });

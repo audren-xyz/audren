@@ -103,10 +103,12 @@ export interface RelaySubmitResponse {
   [key: string]: unknown;
 }
 
+export const AUDREN_DEFAULT_RELAY_URL = 'https://relay.audren.xyz';
+
 export class AudrenRelayClient {
   readonly baseUrl: string;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string = AUDREN_DEFAULT_RELAY_URL) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
   }
 
