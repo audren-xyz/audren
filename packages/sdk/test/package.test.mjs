@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hkdfSync } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   pageIdForLane,
   laneOfPageId,
@@ -27,6 +28,8 @@ import {
   compileV1Message,
   serializeV1Transaction,
   AUDREN_PROGRAM_ID,
+  AUDREN_CODAMA_IDL,
+  AUDREN_ANCHOR_IDL,
   SYSTEM_PROGRAM_ID,
   WSOL_MINT,
   AudrenError,
@@ -144,4 +147,16 @@ test('v1 compiler preserves message prefix and rejects invalid signatures', () =
   const wire = serializeV1Transaction(compiled, [new Uint8Array(64)]);
   assert.equal(wire.length, compiled.messageBytes.length + 64);
   assert.deepEqual(wire.subarray(0, compiled.messageBytes.length), compiled.messageBytes);
+});
+test('published Codama and Anchor IDLs match JSON artifacts and protocol counts', () => {
+  const codamaJson = JSON.parse(readFileSync(new URL('../idl/audren.codama.json', import.meta.url), 'utf8'));
+  const anchorJson = JSON.parse(readFileSync(new URL('../idl/audren.anchor.json', import.meta.url), 'utf8'));
+  assert.deepEqual(AUDREN_CODAMA_IDL, codamaJson);
+  assert.deepEqual(AUDREN_ANCHOR_IDL, anchorJson);
+  assert.equal(AUDREN_CODAMA_IDL.program.publicKey, AUDREN_PROGRAM_ID);
+  assert.equal(AUDREN_ANCHOR_IDL.address, AUDREN_PROGRAM_ID);
+  assert.equal(AUDREN_CODAMA_IDL.program.instructions.length, 13);
+  assert.equal(AUDREN_CODAMA_IDL.program.accounts.length, 7);
+  assert.equal(AUDREN_CODAMA_IDL.program.pdas.length, 10);
+  assert.equal(AUDREN_CODAMA_IDL.program.errors.length, 33);
 });

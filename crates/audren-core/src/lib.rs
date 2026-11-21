@@ -1,6 +1,6 @@
 //! Audren Core — shared `#![no_std]` layouts, PDA seeds, proof framing, and error codes.
 //!
-//! Consumed verbatim by both the sBPFv3 on-chain program (`program`)
+//! Consumed verbatim by both the sBPFv3 on-chain program (`program/`)
 //! and off-chain clients (`crates/client`, TypeScript SDK, relayers) so account layouts,
 //! proof byte counts, and domain separators can never drift.
 
@@ -26,9 +26,9 @@ pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_ESCROW_SHARDS: u8 = 16;
 
 /// Maximum number of independent concurrent append lanes per logical pool (`0..16`).
-/// Lane `0` uses page IDs `0, 1, 2, ...` (`(0 << 56) | seq`, 100% compatible with legacy Pool 0).
+/// Lane `0` uses page IDs `0, 1, 2, ...` (`(0 << 56) | seq`, default pool lane).
 /// Lanes `1..15` use page IDs `(lane_id << 56) | seq`, allowing lock-free parallel appends with
-/// read-only `PoolState`, per-lane `LaneRentVault`, and ONE unified pool + canonical `NullifierPDA`!
+/// read-only `PoolState`, per-lane `LaneRentVault`, and a unified custody pool + `NullifierPDA` namespace.
 pub const MAX_APPEND_LANES: u8 = 16;
 
 /// Mask for the 56-bit per-lane page sequence number inside a `page_id: u64`.

@@ -1,4 +1,4 @@
-//! Deterministic PDA derivation helpers matching `program/src/state.rs` byte-for-byte.
+//! Deterministic PDA derivation helpers matching `programs/audren/program/src/state.rs` byte-for-byte.
 
 use audren_core::{
     ASSOCIATED_TOKEN_PROGRAM_ID, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, NULLIFIER_SEED,

@@ -1,0 +1,1979 @@
+{
+  "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
+  "metadata": {
+    "name": "audren",
+    "version": "0.2.0",
+    "spec": "0.1.0",
+    "description": "Audren \u2014 Institutional Confidential & Full-Private Settlement & Swap Program on Solana (Pinocchio + sBPFv3).",
+    "repository": "https://github.com/audren-xyz/audren"
+  },
+  "instructions": [
+    {
+      "name": "init_pool",
+      "docs": [
+        "Tag 0: Initialize a shielded pool, Lane 0 page 0, SOL vault, and self-balancing page-rent vault."
+      ],
+      "discriminator": [
+        0
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Pool authority and rent payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA ['audren_pool', poolId]."
+          ]
+        },
+        {
+          "name": "page0",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Initial EpochPage PDA ['audren_page', poolId, 0u64]."
+          ]
+        },
+        {
+          "name": "sol_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "SOL vault sentinel PDA ['audren_sol', poolId]."
+          ]
+        },
+        {
+          "name": "page_rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Lane 0 rent vault sentinel PDA ['audren_rent', poolId]."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "pool_id",
+          "type": "u32"
+        },
+        {
+          "name": "mode",
+          "type": {
+            "defined": {
+              "name": "PoolMode"
+            }
+          }
+        },
+        {
+          "name": "auditor_locked",
+          "type": "bool"
+        },
+        {
+          "name": "page_rent_fee_lamports",
+          "type": "u64"
+        },
+        {
+          "name": "auditor_pk",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "open_page",
+      "docs": [
+        "Tag 1: Permissionlessly seal Lane 0's current EpochPage (when <=4 slots remain) and self-fund the next page."
+      ],
+      "discriminator": [
+        1
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Permissionless cranker / fallback rent payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA."
+          ]
+        },
+        {
+          "name": "current_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Current Lane 0 EpochPage PDA (permanently sealed)."
+          ]
+        },
+        {
+          "name": "next_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Next Lane 0 EpochPage PDA (currentPageId + 1)."
+          ]
+        },
+        {
+          "name": "page_rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Lane 0 PageRentVault PDA."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "deposit",
+      "docs": [
+        "Tag 2: Shield Native SOL (6 accounts) or Classic SPL / Token-2022 tokens (9+ accounts) into a stealth note.",
+        "For Native SOL: [depositor, pool, outPage, solVault, rentVault, systemProgram].",
+        "For SPL / Token-2022: [depositor, pool, outPage, mint, depositorAta, vaultAta, tokenProgram, rentVault, systemProgram, ...optionalTransferHookAccounts].",
+        "On parallel Lanes 1..15, `pool` is read-only."
+      ],
+      "discriminator": [
+        2
+      ],
+      "accounts": [
+        {
+          "name": "depositor",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Source funds authority and rent-fee payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA (writable on Lane 0, read-only on Lanes 1..15)."
+          ]
+        },
+        {
+          "name": "out_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Active target EpochPage PDA."
+          ]
+        },
+        {
+          "name": "sol_vault_or_mint",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Native SOL: solVault (wr); SPL/Token-2022: mint (ro)."
+          ]
+        },
+        {
+          "name": "rent_vault_or_depositor_ata",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Native SOL: rentVault (wr); SPL/Token-2022: depositorAta (wr)."
+          ]
+        },
+        {
+          "name": "system_program_or_vault_ata",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Native SOL: systemProgram (ro); SPL/Token-2022: vaultAta (wr)."
+          ]
+        },
+        {
+          "name": "token_program",
+          "writable": false,
+          "signer": false,
+          "optional": true,
+          "docs": [
+            "SPL/Token-2022 only: Classic SPL Token or Token-2022 program."
+          ]
+        },
+        {
+          "name": "spl_rent_vault",
+          "writable": true,
+          "signer": false,
+          "optional": true,
+          "docs": [
+            "SPL/Token-2022 only: PageRentVault or LaneRentVault PDA."
+          ]
+        },
+        {
+          "name": "spl_system_program",
+          "writable": false,
+          "signer": false,
+          "optional": true,
+          "docs": [
+            "SPL/Token-2022 only: Solana System Program."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "is_native_sol",
+          "type": "bool"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "output",
+          "type": {
+            "defined": {
+              "name": "DynamicOutputWire"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "transfer",
+      "docs": [
+        "Tag 3: Full-private 1-in -> 2-out multi-asset transfer hiding sender, recipient, token mint, and amount.",
+        "Trailing accounts `[7..7+pages]` are 1 (m=5), 2 (m=6), or 4 (m=7) read-only input EpochPages in ascending pageId order.",
+        "On parallel Lanes 1..15, `pool` is read-only."
+      ],
+      "discriminator": [
+        3
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Relayer or user fee payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA (writable on Lane 0, read-only on Lanes 1..15)."
+          ]
+        },
+        {
+          "name": "out_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Active output EpochPage PDA."
+          ]
+        },
+        {
+          "name": "nullifier",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Uninitialized NullifierPDA ['audren_null', poolId, J]."
+          ]
+        },
+        {
+          "name": "rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PageRentVault (Lane 0) or LaneRentVault (Lanes 1..15)."
+          ]
+        },
+        {
+          "name": "zk_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Agave native ZK ElGamal Proof program."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        },
+        {
+          "name": "input_page0",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "First input EpochPage (followed by 0, 1, or 3 more input pages for m=5/6/7)."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "m",
+          "type": "u8"
+        },
+        {
+          "name": "note_pay",
+          "type": {
+            "defined": {
+              "name": "NoteWire"
+            }
+          }
+        },
+        {
+          "name": "note_chg",
+          "type": {
+            "defined": {
+              "name": "NoteWire"
+            }
+          }
+        },
+        {
+          "name": "c_pay",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "c_chg",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "proof_bundle_and_pq_envelope",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "merge",
+      "docs": [
+        "Tag 4: Full-private 2-in -> 1-out consolidation of two same-asset notes.",
+        "Trailing accounts `[8..]` carry `inputPages(m1)` + `inputPages(m2)` read-only EpochPages (combined ring <= 128 slots)."
+      ],
+      "discriminator": [
+        4
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Relayer or user fee payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA (writable on Lane 0, read-only on Lanes 1..15)."
+          ]
+        },
+        {
+          "name": "out_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Active output EpochPage PDA."
+          ]
+        },
+        {
+          "name": "nullifier1",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "First NullifierPDA."
+          ]
+        },
+        {
+          "name": "nullifier2",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Second NullifierPDA (must differ from nullifier1)."
+          ]
+        },
+        {
+          "name": "rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PageRentVault or LaneRentVault PDA."
+          ]
+        },
+        {
+          "name": "zk_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Agave native ZK ElGamal Proof program."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        },
+        {
+          "name": "input_page_leg1_0",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Leg 1 input EpochPage(s), followed by Leg 2 input EpochPage(s)."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "m1",
+          "type": "u8"
+        },
+        {
+          "name": "m2",
+          "type": "u8"
+        },
+        {
+          "name": "note_out",
+          "type": {
+            "defined": {
+              "name": "NoteWire"
+            }
+          }
+        },
+        {
+          "name": "v_in1",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "v_in2",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "c_out",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "proof_bundle",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "swap_via_router",
+      "docs": [
+        "Tag 5: Single-transaction router-agnostic private DEX swap via sharded isolated swap_escrow PDA.",
+        "Trailing accounts `[15..15+pages]` are read-only input EpochPages; `[15+pages..]` are external router accounts (up to 80) with `swap_escrow`, `escrow_in`, `escrow_out` at arbitrary indices `(escrowIdx, escrowInIdx, escrowOutIdx)`."
+      ],
+      "discriminator": [
+        5
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Relayer or user fee payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA (writable on Lane 0, read-only on Lanes 1..15)."
+          ]
+        },
+        {
+          "name": "out_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Active output EpochPage PDA."
+          ]
+        },
+        {
+          "name": "nullifier",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Uninitialized NullifierPDA."
+          ]
+        },
+        {
+          "name": "rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PageRentVault or LaneRentVault PDA."
+          ]
+        },
+        {
+          "name": "zk_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Agave native ZK ElGamal Proof program."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        },
+        {
+          "name": "vault_auth",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Pool vault authority PDA ['audren_vault', poolId]."
+          ]
+        },
+        {
+          "name": "mint_in",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Input SPL / Token-2022 mint."
+          ]
+        },
+        {
+          "name": "vault_in",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Pool vault ATA for mintIn."
+          ]
+        },
+        {
+          "name": "token_program_in",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Token program for mintIn."
+          ]
+        },
+        {
+          "name": "mint_out",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Output SPL / Token-2022 mint (must differ from mintIn)."
+          ]
+        },
+        {
+          "name": "vault_out",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Pool vault ATA for mintOut."
+          ]
+        },
+        {
+          "name": "token_program_out",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Token program for mintOut."
+          ]
+        },
+        {
+          "name": "router_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Executable external DEX / aggregator program."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "m",
+          "type": "u8"
+        },
+        {
+          "name": "shard_id",
+          "type": "u8"
+        },
+        {
+          "name": "flags",
+          "type": "u8"
+        },
+        {
+          "name": "amount_in",
+          "type": "u64"
+        },
+        {
+          "name": "min_amount_out",
+          "type": "u64"
+        },
+        {
+          "name": "escrow_idx",
+          "type": "u8"
+        },
+        {
+          "name": "escrow_in_idx",
+          "type": "u8"
+        },
+        {
+          "name": "escrow_out_idx",
+          "type": "u8"
+        },
+        {
+          "name": "router_data_len",
+          "type": "u16"
+        },
+        {
+          "name": "swap_out_desc",
+          "type": {
+            "defined": {
+              "name": "DynamicOutputWire"
+            }
+          }
+        },
+        {
+          "name": "variable_tail",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "docs": [
+        "Tag 6: Full-private spend to a public SOL or SPL/Token-2022 recipient with optional hidden change note.",
+        "Full withdrawals (hasChange=false) always succeed even when pool.paused=true (non-custodial escape hatch).",
+        "Native SOL accounts `[7..9]`: [solVault (wr), recipient (wr)], followed by input EpochPages.",
+        "SPL/Token-2022 accounts `[7..12]`: [vaultAuth (ro), mint (ro), vaultAta (wr), recipientAta (wr), tokenProgram (ro)], followed by input EpochPages and optional TransferHook accounts."
+      ],
+      "discriminator": [
+        6
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Relayer or user fee payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA (writable on Lane 0 with change; read-only on Lanes 1..15 or full withdraw)."
+          ]
+        },
+        {
+          "name": "out_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Output EpochPage PDA (writable only when hasChange=true)."
+          ]
+        },
+        {
+          "name": "nullifier",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Uninitialized NullifierPDA."
+          ]
+        },
+        {
+          "name": "rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PageRentVault or LaneRentVault PDA."
+          ]
+        },
+        {
+          "name": "zk_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Agave native ZK ElGamal Proof program."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        },
+        {
+          "name": "sol_vault_or_vault_auth",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Native SOL: solVault (wr); SPL/Token-2022: vaultAuth (ro)."
+          ]
+        },
+        {
+          "name": "recipient_or_mint",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Native SOL: recipient (wr); SPL/Token-2022: mint (ro)."
+          ]
+        },
+        {
+          "name": "input_page0_or_vault_ata",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Native SOL: inputPage0 (ro); SPL/Token-2022: vaultAta (wr)."
+          ]
+        },
+        {
+          "name": "recipient_ata",
+          "writable": true,
+          "signer": false,
+          "optional": true,
+          "docs": [
+            "SPL/Token-2022 only: recipient token account (wr)."
+          ]
+        },
+        {
+          "name": "token_program",
+          "writable": false,
+          "signer": false,
+          "optional": true,
+          "docs": [
+            "SPL/Token-2022 only: Classic SPL Token or Token-2022 program."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "m",
+          "type": "u8"
+        },
+        {
+          "name": "is_native_sol",
+          "type": "bool"
+        },
+        {
+          "name": "has_change",
+          "type": "bool"
+        },
+        {
+          "name": "amount_out",
+          "type": "u64"
+        },
+        {
+          "name": "change_and_triptych_proof",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "set_paused",
+      "docs": [
+        "Tag 7: Governance emergency pause/unpause. Never grants custody or blocks full withdrawals."
+      ],
+      "discriminator": [
+        7
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": false,
+          "signer": true,
+          "docs": [
+            "PoolState::authority signer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "write_proof_buffer",
+      "docs": [
+        "Tag 8: Upload one <=768 B chunk (in any order) into an ephemeral ProofBuffer PDA (max 9,984 B payload)."
+      ],
+      "discriminator": [
+        8
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Buffer authority and rent payer."
+          ]
+        },
+        {
+          "name": "proof_buffer",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "ProofBuffer PDA ['audren_buf', payer, nonce]."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "total_len",
+          "type": "u32"
+        },
+        {
+          "name": "chunk_index",
+          "type": "u8"
+        },
+        {
+          "name": "chunk",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "exec_buffered",
+      "docs": [
+        "Tag 9: Execute Transfer (3), Merge (4), SwapViaRouter (5), or Withdraw (6) directly from a completed ProofBuffer PDA, atomically closing the buffer and refunding 100% of rent to payer.",
+        "Accounts: [0] proofBuffer (wr), [1..] exact account list of the inner instruction (where [1] = payer/authority)."
+      ],
+      "discriminator": [
+        9
+      ],
+      "accounts": [
+        {
+          "name": "proof_buffer",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Completed ProofBuffer PDA (closed atomically after execution)."
+          ]
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Buffer authority & inner instruction payer (followed by remaining inner instruction accounts)."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "inner_tag",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "close_proof_buffer",
+      "docs": [
+        "Tag 10: Close an abandoned/unexecuted ProofBuffer PDA and reclaim 100% of its rent to authority."
+      ],
+      "discriminator": [
+        10
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Buffer authority and rent refund recipient."
+          ]
+        },
+        {
+          "name": "proof_buffer",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "ProofBuffer PDA to close."
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_lane",
+      "docs": [
+        "Tag 11: Sequentially activate parallel append lane 1..15 inside an existing pool for lock-free concurrent writes."
+      ],
+      "discriminator": [
+        11
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "PoolState::authority and rent payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "PoolState PDA."
+          ]
+        },
+        {
+          "name": "lane_state",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "AppendLaneState PDA ['audren_lane', poolId, laneId]."
+          ]
+        },
+        {
+          "name": "lane_page0",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Initial EpochPage PDA for this lane (pageId = (laneId << 56) | 0)."
+          ]
+        },
+        {
+          "name": "lane_rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "LaneRentVault sentinel PDA ['audren_lrent', poolId, laneId]."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "lane_id",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "open_lane_page",
+      "docs": [
+        "Tag 12: Permissionlessly seal a parallel lane's current EpochPage (when <=4 slots remain) and self-fund the next page with read-only PoolState."
+      ],
+      "discriminator": [
+        12
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true,
+          "docs": [
+            "Permissionless cranker / fallback rent payer."
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "PoolState PDA (read-only!)."
+          ]
+        },
+        {
+          "name": "lane_state",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "AppendLaneState PDA."
+          ]
+        },
+        {
+          "name": "current_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Current lane EpochPage PDA (permanently sealed)."
+          ]
+        },
+        {
+          "name": "next_page",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "Next lane EpochPage PDA ((laneId << 56) | (seq + 1))."
+          ]
+        },
+        {
+          "name": "lane_rent_vault",
+          "writable": true,
+          "signer": false,
+          "docs": [
+            "LaneRentVault PDA."
+          ]
+        },
+        {
+          "name": "system_program",
+          "writable": false,
+          "signer": false,
+          "docs": [
+            "Solana System Program."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "lane_id",
+          "type": "u8"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "PoolState",
+      "discriminator": [
+        65,
+        85,
+        68,
+        82,
+        78,
+        80,
+        76,
+        49
+      ]
+    },
+    {
+      "name": "EpochPage",
+      "discriminator": [
+        65,
+        85,
+        68,
+        82,
+        78,
+        80,
+        71,
+        49
+      ]
+    },
+    {
+      "name": "AppendLaneState",
+      "discriminator": [
+        65,
+        85,
+        68,
+        82,
+        78,
+        76,
+        78,
+        49
+      ]
+    },
+    {
+      "name": "SolVaultSentinel",
+      "discriminator": [
+        65,
+        85,
+        68,
+        82,
+        78,
+        83,
+        76,
+        49
+      ]
+    },
+    {
+      "name": "PageRentSentinel",
+      "discriminator": [
+        65,
+        85,
+        68,
+        82,
+        78,
+        82,
+        78,
+        49
+      ]
+    },
+    {
+      "name": "ProofBufferHeader",
+      "discriminator": [
+        65,
+        85,
+        68,
+        82,
+        78,
+        66,
+        70,
+        49
+      ]
+    },
+    {
+      "name": "NullifierPda",
+      "discriminator": []
+    }
+  ],
+  "types": [
+    {
+      "name": "PoolMode",
+      "docs": [
+        "Pool privacy/compliance operating mode."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Permissionless"
+          },
+          {
+            "name": "InstitutionalAudited"
+          }
+        ]
+      }
+    },
+    {
+      "name": "NoteWire",
+      "docs": [
+        "193-byte note wire block (viewTag + ephemeralPk + stealthPk + assetTag + commitment + 64 B ciphertext)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "view_tag",
+            "type": "u8"
+          },
+          {
+            "name": "ephemeral_pk",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "stealth_pk",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "asset_tag",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "commitment",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "ciphertext",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "DynamicOutputWire",
+      "docs": [
+        "129-byte stealth output descriptor used when assetTag and commitment are computed on-chain (Deposit, SwapViaRouter)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "view_tag",
+            "type": "u8"
+          },
+          {
+            "name": "ephemeral_pk",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "stealth_pk",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "ciphertext",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PageHeader",
+      "docs": [
+        "64-byte EpochPage header stored at byte offsets 0..64."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "magic",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "closed",
+            "type": "bool"
+          },
+          {
+            "name": "count",
+            "type": "u8"
+          },
+          {
+            "name": "pool_id",
+            "type": "u32"
+          },
+          {
+            "name": "page_id",
+            "type": "u64"
+          },
+          {
+            "name": "created_slot",
+            "type": "u64"
+          },
+          {
+            "name": "closed_slot",
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                24
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoolState",
+      "docs": [
+        "Root pool state PDA (192 bytes, magic 'AUDRNPL1')."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "magic",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "PoolMode"
+              }
+            }
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          },
+          {
+            "name": "pool_id",
+            "type": "u32"
+          },
+          {
+            "name": "current_page_id",
+            "type": "u64"
+          },
+          {
+            "name": "total_notes",
+            "type": "u64"
+          },
+          {
+            "name": "total_spends",
+            "type": "u64"
+          },
+          {
+            "name": "page_rent_fee_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "auditor_pk",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "auditor_locked",
+            "type": "bool"
+          },
+          {
+            "name": "vault_auth_bump",
+            "type": "u8"
+          },
+          {
+            "name": "sol_vault_bump",
+            "type": "u8"
+          },
+          {
+            "name": "page_rent_bump",
+            "type": "u8"
+          },
+          {
+            "name": "active_lanes",
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                75
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "EpochPage",
+      "docs": [
+        "Structure-of-Arrays note page PDA (6,240 bytes, 32 notes/page, magic 'AUDRNPG1').",
+        "Pure-RPC scan slice: dataSlice { offset: 64, length: 1056 } reads viewTags[32] + ephemeralPks[32]."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "magic",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "closed",
+            "type": "bool"
+          },
+          {
+            "name": "count",
+            "type": "u8"
+          },
+          {
+            "name": "pool_id",
+            "type": "u32"
+          },
+          {
+            "name": "page_id",
+            "type": "u64"
+          },
+          {
+            "name": "created_slot",
+            "type": "u64"
+          },
+          {
+            "name": "closed_slot",
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                24
+              ]
+            }
+          },
+          {
+            "name": "view_tags",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "ephemeral_pks",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                32
+              ]
+            }
+          },
+          {
+            "name": "stealth_pks",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                32
+              ]
+            }
+          },
+          {
+            "name": "asset_tags",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                32
+              ]
+            }
+          },
+          {
+            "name": "commitments",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                32
+              ]
+            }
+          },
+          {
+            "name": "ciphertexts",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    64
+                  ]
+                },
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AppendLaneState",
+      "docs": [
+        "Parallel append lane metadata PDA (64 bytes, magic 'AUDRNLN1') for lanes 1..15."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "magic",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "lane_id",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "rent_vault_bump",
+            "type": "u8"
+          },
+          {
+            "name": "pool_id",
+            "type": "u32"
+          },
+          {
+            "name": "current_page_id",
+            "type": "u64"
+          },
+          {
+            "name": "created_slot",
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SolVaultSentinel",
+      "docs": [
+        "Native SOL vault sentinel PDA (16 bytes, magic 'AUDRNSL1')."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "magic",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PageRentSentinel",
+      "docs": [
+        "Self-balancing page-rent vault sentinel PDA (16 bytes, magic 'AUDRNRN1') used by Lane 0 and Lanes 1..15."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "magic",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProofBufferHeader",
+      "docs": [
+        "48-byte ProofBuffer header followed by `expectedLen` payload bytes (max 9,984 B)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "magic",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "expected_len",
+            "type": "u32"
+          },
+          {
+            "name": "written_mask",
+            "type": "u16"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                2
+              ]
+            }
+          },
+          {
+            "name": "payload",
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "NullifierPda",
+      "docs": [
+        "0-byte program-owned marker account proving a note nullifier has been spent."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": []
+      }
+    }
+  ],
+  "errors": [
+    {
+      "code": 1,
+      "name": "InvalidInstruction",
+      "msg": "Malformed instruction tag, length, or argument encoding."
+    },
+    {
+      "code": 2,
+      "name": "InvalidAccount",
+      "msg": "Missing, unwritable, wrong-owner, or aliased account."
+    },
+    {
+      "code": 3,
+      "name": "InvalidPda",
+      "msg": "Account address does not match expected PDA derivation."
+    },
+    {
+      "code": 4,
+      "name": "InvalidMagic",
+      "msg": "Account 8-byte ASCII magic discriminator mismatch."
+    },
+    {
+      "code": 5,
+      "name": "UnsupportedVersion",
+      "msg": "Account protocol_version is not supported by this program build."
+    },
+    {
+      "code": 6,
+      "name": "PoolPaused",
+      "msg": "Pool is paused by governance authority (full withdrawals remain open)."
+    },
+    {
+      "code": 7,
+      "name": "Unauthorized",
+      "msg": "Required signer is missing or does not match pool/buffer authority."
+    },
+    {
+      "code": 8,
+      "name": "UnsupportedTokenProgram",
+      "msg": "Token program must be Classic SPL Token or Token-2022."
+    },
+    {
+      "code": 9,
+      "name": "UnsafeMintExtension",
+      "msg": "Mint carries an unsupported or unsafe extension."
+    },
+    {
+      "code": 10,
+      "name": "ZeroAmount",
+      "msg": "Deposit, swap, or withdrawal amount must be strictly greater than zero."
+    },
+    {
+      "code": 11,
+      "name": "PageFull",
+      "msg": "Target EpochPage is already closed or has reached PAGE_CAPACITY (32 notes)."
+    },
+    {
+      "code": 12,
+      "name": "PageNotReady",
+      "msg": "Current EpochPage still has more than PAGE_ROLLOVER_HEADROOM (4) free slots."
+    },
+    {
+      "code": 13,
+      "name": "PageEmpty",
+      "msg": "Input EpochPage contains zero notes and cannot form a Triptych ring."
+    },
+    {
+      "code": 14,
+      "name": "DuplicateOrUnorderedPages",
+      "msg": "Input EpochPage IDs must be strictly ascending without duplicates."
+    },
+    {
+      "code": 15,
+      "name": "WrongPool",
+      "msg": "EpochPage or lane belongs to a different pool_id or wrong active page_id."
+    },
+    {
+      "code": 16,
+      "name": "NullifierAlreadySpent",
+      "msg": "NullifierPDA already exists (note is already spent or duplicated in Merge)."
+    },
+    {
+      "code": 17,
+      "name": "InvalidPoint",
+      "msg": "Bytes are not a canonical compressed Ristretto255 curve point (or forbidden identity)."
+    },
+    {
+      "code": 18,
+      "name": "InvalidScalar",
+      "msg": "Bytes are not a canonical Curve25519 scalar (< L)."
+    },
+    {
+      "code": 19,
+      "name": "InvalidTriptychProof",
+      "msg": "Multi-Base Binary Triptych ring proof verification failed."
+    },
+    {
+      "code": 20,
+      "name": "InvalidCrossBaseProof",
+      "msg": "Cross-base Pedersen bridge proof (1-output or 2-output) verification failed."
+    },
+    {
+      "code": 21,
+      "name": "InvalidRangeProof",
+      "msg": "Native Agave Bulletproof range proof CPI verification failed."
+    },
+    {
+      "code": 22,
+      "name": "InvalidAuditorProof",
+      "msg": "Verifiable Auditor ElGamal asset-tag proof verification failed."
+    },
+    {
+      "code": 23,
+      "name": "MissingAuditorKey",
+      "msg": "InstitutionalAudited pool requires a valid non-identity auditor_pk."
+    },
+    {
+      "code": 24,
+      "name": "InvalidEscrowShard",
+      "msg": "Swap escrow shard_id must be in 0..16."
+    },
+    {
+      "code": 25,
+      "name": "InvalidRouterProgram",
+      "msg": "Router program must be executable and cannot be Audren, System, ZK, or Token."
+    },
+    {
+      "code": 26,
+      "name": "EscrowAuthorityAltered",
+      "msg": "Swap escrow PDA owner, data length, or lamport balance was altered by router CPI."
+    },
+    {
+      "code": 27,
+      "name": "EscrowAccountAltered",
+      "msg": "Swap escrow token account owner, delegate, close_authority, or balance was altered."
+    },
+    {
+      "code": 28,
+      "name": "SlippageExceeded",
+      "msg": "Net output received in pool vault is below min_amount_out (or zero)."
+    },
+    {
+      "code": 29,
+      "name": "UnexpectedPartialFill",
+      "msg": "Router left unspent input tokens when allow_partial_refund flag was not set."
+    },
+    {
+      "code": 30,
+      "name": "ArithmeticOverflow",
+      "msg": "Checked integer arithmetic overflow or underflow."
+    },
+    {
+      "code": 31,
+      "name": "InsufficientPageRent",
+      "msg": "Insufficient lamports to fund page rent."
+    },
+    {
+      "code": 32,
+      "name": "InvalidProofBuffer",
+      "msg": "Invalid ProofBuffer header, authority, chunk index, length, or completion mask."
+    },
+    {
+      "code": 33,
+      "name": "InvalidLane",
+      "msg": "Invalid parallel append lane_id (must be 1..16 and sequentially initialized)."
+    }
+  ]
+}

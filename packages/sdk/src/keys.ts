@@ -1,6 +1,6 @@
 /**
  * Deterministic HKDF-SHA256 sub-account seed derivation matching
- * `crates/client/src/keys.rs::AudrenKeys::from_seed_subaccount` byte-for-byte.
+ * `programs/audren/crates/client/src/keys.rs::AudrenKeys::from_seed_subaccount` byte-for-byte.
  *
  * Uses native Web Crypto (`crypto.subtle`) in Node.js 22+ and browsers with zero npm dependencies.
  */

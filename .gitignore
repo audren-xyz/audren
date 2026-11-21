@@ -1,12 +1,41 @@
-/target
-**/target
-node_modules
-.DS_Store
-*.so
+# Rust & Solana build artifacts
+target/
+**/target/
+.scratch/
+**/*.so
+**/*.build.json
+!**/tsconfig.build.json
+
+# Node / Next.js / Wrangler artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.next/
+**/.next/
+out/
+**/out/
+.wrangler/
+**/.wrangler/
+
+# Local secrets, operator keypairs & production Wrangler overrides (NEVER commit!)
+.credentials/
+credentials/
 *.keypair.json
+*secret*.json
 .env
 .env.*
+!.env.example
+.dev.vars
+**/.dev.vars
+!**/.dev.vars.example
+**/wrangler.prod.jsonc
+**/wrangler.local.jsonc
 
-.scratch/
-**/dist/
-*.tgz
+# OS / Python / TypeScript cache noise
+.DS_Store
+**/.DS_Store
+*.log
+**/__pycache__/
+*.pyc
+**/*.tsbuildinfo

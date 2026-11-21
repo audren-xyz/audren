@@ -142,7 +142,7 @@ impl PoolState {
         self.mode == PoolMode::InstitutionalAudited && self.auditor_pk != [0u8; 32]
     }
 
-    /// Effective number of active append lanes (`>= 1`; legacy `0` means Lane 0 only).
+    /// Effective number of active append lanes (`>= 1`; `0` or `1` means Lane 0 only).
     #[inline]
     pub fn effective_lane_count(&self) -> u8 {
         if self.active_lanes == 0 {

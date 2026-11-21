@@ -1,0 +1,43 @@
+{
+  "name": "audren-web",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "next dev --port 3040",
+    "build": "next build",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm lint && pnpm build",
+    "deploy": "pnpm check && wrangler deploy",
+    "deploy:prod": "pnpm check && wrangler deploy --config wrangler.prod.jsonc",
+    "e2e:api": "npx tsx scripts/e2e-live.ts",
+    "e2e:ui": "npx tsx scripts/e2e-web-ui.ts",
+    "e2e:audit": "npx tsx scripts/e2e-full-audit.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@solana/kit": "^8.6.0",
+    "@solana/wallet-standard-chains": "^1.1.2",
+    "@solana/wallet-standard-features": "^1.5.0",
+    "@wallet-standard/app": "^1.1.1",
+    "lucide-react": "^1.32.0",
+    "next": "16.3.8",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "16.3.8",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "wrangler": "4.152.0"
+  }
+}

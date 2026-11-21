@@ -1,0 +1,17 @@
+{
+  "name": "Audren",
+  "logo": "https://audren.xyz/icon.svg",
+  "description": "Zero-setup multi-asset shielded pool, router-agnostic private DEX swap engine, and verifiable compliance protocol on Solana.",
+  "sdk": "https://github.com/audren-xyz/audren/tree/main/packages/sdk",
+  "project_url": "https://audren.xyz",
+  "contacts": [
+    "email:security@audren.xyz"
+  ],
+  "policy": "https://github.com/audren-xyz/audren/blob/main/SECURITY.md",
+  "preferred_languages": [
+    "en"
+  ],
+  "source_code": "https://github.com/audren-xyz/audren",
+  "source_release": "v0.2.0",
+  "version": "0.2.0"
+}

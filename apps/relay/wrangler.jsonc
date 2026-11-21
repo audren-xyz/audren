@@ -1,0 +1,58 @@
+{
+  // Open-source self-hostable Cloudflare Worker configuration for Audren Privacy Relayer.
+  // Anyone can deploy their own relayer in < 5 minutes — see ../../docs/DEPLOY_YOUR_OWN_RELAY.md
+  //
+  // Quickstart:
+  //   1. wrangler login
+  //   2. wrangler secret put MAINNET_RPC_URL
+  //   3. wrangler secret put MAINNET_RELAYER_SECRET_B64
+  //   4. (Optional) wrangler secret put DEVNET_RPC_URL / DEVNET_RELAYER_SECRET_B64 / JUPITER_API_KEY
+  //   5. pnpm deploy
+  //
+  // To attach a custom domain or private account_id, copy this file to `wrangler.prod.jsonc`
+  // (gitignored) and deploy with `pnpm deploy:prod`.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "audren-relay",
+  "main": "./src/index.ts",
+  "compatibility_date": "2026-11-20",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RELAY_GUARD",
+        "class_name": "RelayGuard"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RelayGuard"]
+    }
+  ],
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "vars": {
+    "DEFAULT_AGGREGATOR": "jupiter",
+    "ENABLED_AGGREGATORS": "jupiter,bedrock,dflow,titan,okx",
+    "BASE_SWAP_FEE_BPS": "25",
+    "MAX_SELF_PAY_BPS": "450",
+    "MICRO_SWAP_FEE_BPS": "50",
+    "ALLOW_MICRO_SWAP_SUBSIDY": "true",
+    "SELF_PAY_MARGIN_BPS": "11000",
+    "MAX_DAILY_SPONSORED_SOL_MAINNET": "0.05",
+    "MAX_DAILY_SPONSORED_SOL_DEVNET": "1.0",
+    "SPONSORED_PER_IP_PER_HOUR_MAINNET": "12",
+    "SPONSORED_PER_IP_PER_DAY_MAINNET": "25",
+    "SPONSORED_COOLDOWN_SEC_MAINNET": "12",
+    "SELF_PAY_PER_IP_PER_10M": "40",
+    "REFILL_MIN_SOL": "0.08",
+    "REFILL_MIN_TOKEN_USD": "5.0",
+    "CORS_ORIGINS": "*"
+  }
+}

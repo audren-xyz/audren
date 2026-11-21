@@ -59,7 +59,7 @@ export interface ResolvedEscrowIndices {
 
 /**
  * Request a quote + `swap-instructions` payload from a Jupiter-compatible aggregator API
- * targeting Audren's shared sharded `swap_escrow` PDA (e.g. `https://lite-api.jup.ag/swap/v1`
+ * targeting Audren's shared sharded `swap_escrow` PDA (e.g. `https://api.jup.ag/swap/v1`
  * or any self-hosted / custom aggregator endpoint).
  */
 export async function fetchAggregatorPrivateSwapRoute(

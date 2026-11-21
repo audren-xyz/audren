@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://audren.xyz/sitemap.xml

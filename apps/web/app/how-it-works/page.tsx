@@ -1,0 +1,58 @@
+import type { Metadata } from 'next'
+import Link from 'next/link'
+import { ArrowLeft } from 'lucide-react'
+import { SiteHeader } from '@/components/SiteHeader'
+import { SiteFooter } from '@/components/SiteFooter'
+import { HowAudrenWorksVisual } from '@/components/HowAudrenWorksVisual'
+import styles from '@/components/SubpageShell.module.css'
+
+export const metadata: Metadata = {
+  title: 'How Audren works',
+  description:
+    'Follow existing assets, private ownership records, local proofs and public settlement through Audren.',
+  alternates: { canonical: 'https://audren.xyz/how-it-works/' },
+}
+
+export default function HowItWorksPage() {
+  return (
+    <div className={`page-shell ${styles.page}`}>
+      <SiteHeader current="how-it-works" />
+      <main>
+        <section className={`container ${styles.hero}`}>
+          <Link href="/" className={styles.backLink}>
+            <ArrowLeft size={12} /> audren.xyz
+          </Link>
+          <div className={styles.heroSingle}>
+            <h1>Public assets. Private ownership.</h1>
+            <p className={styles.heroLead}>
+              The shared vault holds original Solana assets while your device holds the spending
+              key. Step through one reusable <code>aud1…</code> address, four real-world flows, and
+              the six checks Solana enforces on-chain.
+            </p>
+          </div>
+          <div className={styles.heroMetaStrip}>
+            <div className={styles.heroMetaCell}>
+              <span>Receiving address</span>
+              <strong>1 reusable <code>aud1…</code> → 1-time keys</strong>
+            </div>
+            <div className={styles.heroMetaCell}>
+              <span>Spend proof</span>
+              <strong>32 / 64 / 128-slot ring + Bulletproofs</strong>
+            </div>
+            <div className={styles.heroMetaCell}>
+              <span>Trusted setup</span>
+              <strong>None (transparent Ristretto255)</strong>
+            </div>
+            <div className={styles.heroMetaCell}>
+              <span>Public boundaries</span>
+              <strong>Deposits, DEX legs, withdrawals &amp; fee payer</strong>
+            </div>
+          </div>
+        </section>
+
+        <HowAudrenWorksVisual />
+      </main>
+      <SiteFooter current="how-it-works" />
+    </div>
+  )
+}

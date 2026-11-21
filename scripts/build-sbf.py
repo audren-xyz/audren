@@ -31,7 +31,7 @@ BUILDER_VERSION = "4.3.0"
 TOOLS_VERSION = "v1.57"
 HOST_VERSION = "1.97.1"
 ARCH = "v3"
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 INSTALL = ROOT / ".scratch" / "sbf" / BUILDER_VERSION
 BUILDER = INSTALL / "bin" / "cargo-build-sbf"
 
@@ -67,6 +67,7 @@ def main():
     parser.add_argument("--jobs", type=int)
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--check", type=Path, metavar="ELF")
+    parser.add_argument("--check-elf", type=Path, metavar="ELF")
     parser.add_argument("cargo_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.version:
@@ -74,6 +75,9 @@ def main():
         return
     if args.check:
         print(json.dumps(check_build(args.check), indent=2))
+        return
+    if args.check_elf:
+        print(json.dumps(check_elf(args.check_elf), indent=2))
         return
     if not args.manifest_path or not args.sbf_out_dir:
         parser.error("--manifest-path and --sbf-out-dir are required")

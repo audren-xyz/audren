@@ -2213,7 +2213,7 @@ fn test_security_frozen_heart_prefix_immunity_and_change_binding() {
     let v1_pt = Scalar::from(1u64) * g_sol;
     let v_spend_bytes = compress(&v0_pt);
 
-    // Build an algebraically consistent Frozen Heart forgery (omitting ring_root from xi, as in the old weak FS).
+    // Build an algebraically consistent Frozen Heart forgery (weak Fiat-Shamir omitting ring_root from xi).
     let m = 5usize;
     let ctx_hash = transcript_root(&[
         b"audren/v1/withdraw",

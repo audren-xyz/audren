@@ -1,0 +1,235 @@
+{
+  "kind": "rootNode",
+  "standard": "codama",
+  "version": "1.8.0",
+  "program": {
+    "kind": "programNode",
+    "name": "audrenMockRouter",
+    "publicKey": "11111111111111111111111111111111",
+    "version": "0.2.0",
+    "origin": "shank",
+    "docs": [
+      "Minimal zero-alloc Pinocchio sBPFv3 mock DEX router used by Audren SwapViaRouter integration tests.",
+      "Not deployed to Mainnet; tests assign an ephemeral LiteSVM program ID."
+    ],
+    "accounts": [],
+    "definedTypes": [],
+    "pdas": [
+      {
+        "kind": "pdaNode",
+        "name": "mockPoolAuthority",
+        "seeds": [
+          {
+            "kind": "constantPdaSeedNode",
+            "type": {
+              "kind": "fixedSizeTypeNode",
+              "size": 9,
+              "type": {
+                "kind": "bytesTypeNode"
+              }
+            },
+            "value": {
+              "kind": "bytesValueNode",
+              "encoding": "utf8",
+              "data": "mock_pool"
+            }
+          }
+        ],
+        "docs": [
+          "PDA signing pool_out -> escrow_out token transfers."
+        ]
+      }
+    ],
+    "errors": [],
+    "instructions": [
+      {
+        "kind": "instructionNode",
+        "name": "executeMockSwap",
+        "docs": [
+          "Execute honest swap (mode=0) or adversarial custody attack simulation (mode=1 delegate, mode=2 set_authority, mode=3 lamport drain)."
+        ],
+        "accounts": [
+          {
+            "kind": "instructionAccountNode",
+            "name": "poolAuthority",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "PDA ['mock_pool']."
+            ],
+            "defaultValue": {
+              "kind": "pdaValueNode",
+              "pda": {
+                "kind": "pdaLinkNode",
+                "name": "mockPoolAuthority"
+              },
+              "seeds": []
+            }
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "escrowIn",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Audren swap_escrow input ATA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "poolIn",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Mock pool input liquidity ATA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "swapEscrow",
+            "isWritable": true,
+            "isSigner": true,
+            "isOptional": false,
+            "docs": [
+              "Audren swap_escrow PDA signer."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "escrowOut",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Audren swap_escrow output ATA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "poolOut",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Mock pool output liquidity ATA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "tokenProgramIn",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "SPL / Token-2022 program for input mint."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "tokenProgramOut",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "SPL / Token-2022 program for output mint."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "mintIn",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Input mint."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "mintOut",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Output mint."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "attacker",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": true,
+            "docs": [
+              "Adversarial target account (modes 1, 2, 3 only)."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "systemProgram",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": true,
+            "docs": [
+              "System Program (mode 3 only)."
+            ]
+          }
+        ],
+        "arguments": [
+          {
+            "kind": "instructionArgumentNode",
+            "name": "mode",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "0=honest, 1=approve_delegate, 2=hijack_owner, 3=drain_lamports."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "spendIn",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "payOut",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "decIn",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "decOut",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "additionalPrograms": []
+}

@@ -5,7 +5,7 @@
  * `InitLane` (11), and `OpenLanePage` (12).
  *
  * Zero-knowledge proving instructions (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`)
- * invoke the Rust prover (`crates/client`) or a compatible client-side Ristretto255 prover.
+ * invoke the Rust prover (`programs/audren/crates/client`) or browser prover (`apps/audren-web/lib`).
  */
 
 import {

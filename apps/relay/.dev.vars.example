@@ -1,0 +1,35 @@
+# Copy to `.dev.vars` (gitignored) for local `pnpm dev`, or set in production via:
+#   npx wrangler secret put <KEY>
+#
+# NEVER commit `.dev.vars` or real private keys / RPC URLs!
+
+# --- Required for Mainnet relaying ---
+MAINNET_RPC_URL="https://YOUR-SOLANA-MAINNET-RPC-ENDPOINT/"
+# Base64-encoded 32-byte Ed25519 seed (or 64-byte Solana CLI keypair bytes).
+# Generate one cleanly:
+#   solana-keygen new --no-bip39-passphrase -o .credentials/relayer-mainnet.json
+#   node -e "const k=JSON.parse(require('fs').readFileSync('.credentials/relayer-mainnet.json','utf8')); console.log(Buffer.from(k.slice(0,32)).toString('base64'))"
+MAINNET_RELAYER_SECRET_B64=""
+
+# --- Optional: enable Devnet relaying ---
+DEVNET_RPC_URL="https://YOUR-SOLANA-DEVNET-RPC-ENDPOINT/"
+DEVNET_RELAYER_SECRET_B64=""
+
+# --- DEX aggregator API credentials (configure the providers you want active!) ---
+# Each adapter follows the same standard pattern: <PROVIDER>_API_KEY (and optional <PROVIDER>_API_URL).
+# Configure at least one aggregator (e.g. Jupiter, DFlow, Titan, Bedrock, or OKX) to enable Tag 5 private swaps.
+JUPITER_API_KEY=""
+# JUPITER_API_URL="https://api.jup.ag"
+# BEDROCK_API_URL=""
+# BEDROCK_API_KEY=""
+# DFLOW_API_URL=""
+# DFLOW_API_KEY=""
+# TITAN_API_URL=""
+# TITAN_API_KEY=""
+# OKX_API_URL=""
+# OKX_API_KEY=""
+# OKX_SECRET_KEY=""
+# OKX_PASSPHRASE=""
+
+# --- Optional: bearer token for POST /v1/admin/refill ---
+# RELAY_ADMIN_TOKEN=""

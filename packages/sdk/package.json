@@ -1,14 +1,15 @@
 {
   "name": "@audren/sdk",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
   "type": "module",
-  "description": "Zero-dependency TypeScript SDK for Audren \u2014 instruction codecs, EpochPage decoders, standard RPC/WS dataSlice scanner, and router-agnostic private swap helpers",
+  "description": "Zero-dependency TypeScript SDK and published Codama/Anchor IDLs for Audren \u2014 instruction codecs, EpochPage decoders, standard RPC/WS dataSlice scanner, and router-agnostic private swap helpers",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./idl/codama.json": "./idl/audren.codama.json",
+    "./idl/anchor.json": "./idl/audren.anchor.json"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -20,6 +21,7 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "idl",
     "README.md",
     "LICENSE"
   ],

@@ -1,5 +1,5 @@
 /**
- * Canonical Audren protocol constants matching `crates/audren-core/src/lib.rs`
+ * Canonical Audren protocol constants matching `programs/audren/crates/audren-core/src/lib.rs`
  * and `layout.rs` byte-for-byte.
  */
 

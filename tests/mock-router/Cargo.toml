@@ -1,17 +1,39 @@
 [package]
 name = "audren-mock-router"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+license = "Apache-2.0"
 publish = false
+description = "Minimal Pinocchio sBPFv3 mock DEX router for Audren SwapViaRouter integration tests."
 
 [lib]
+name = "audren_mock_router"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-solana-account-info = "3.1.0"
-solana-address = "2.7.0"
-solana-cpi = "3.1.0"
-solana-program-entrypoint = "3.1.0"
-solana-program-error = "3.0.0"
-solana-system-interface = { version = "3.3.0", features = ["bincode"] }
-spl-token-2022-interface = "3.1.0"
+pinocchio = { version = "=0.11.1", default-features = false, features = ["copy", "cpi", "sha2"] }
+pinocchio-system = "=0.6.1"
+
+[target.'cfg(not(any(target_os = "solana", target_arch = "bpf")))'.dependencies]
+solana-address = { version = "~2.7.0", features = ["curve25519"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))', 'cfg(target_arch, values("bpf"))'] }
+
+[workspace]
+resolver = "2"
+members = ["."]
+
+[workspace.metadata.cli]
+solana = "4.3.0"
+
+[profile.release]
+overflow-checks = true
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+overflow-checks = true

@@ -17,6 +17,7 @@ All constants, account layouts, instruction tags, and error codes match [`crates
 | `src/swap.ts` | Router-agnostic `SwapViaRouter` helpers (`fetchAggregatorPrivateSwapRoute`, `resolveRouterEscrowIndices`, `prepareRouterAccountsForAudren`) with default PDA-CPI exclusion list `JUPITER_CPI_EXCLUDED_DEXES` |
 | `src/relayer.ts` | `AudrenRelayClient` — zero-dependency typed HTTP client for any Audren-compatible Privacy Relayer (`/v1/info`, `/v1/aggregators`, `/v1/stats`, `/v1/swap/quote`, `/v1/swap/instructions`, `/v1/relay/submit`) |
 | `src/tx-v1.ts` | Zero-dependency Solana Transaction Version 1 (`SIMD-0385`, `0x81`, `<= 4,096 B`) compiler and serializer (`compileV1Message`, `serializeV1Transaction`) with inline `TransactionConfig` |
+| `src/idl.ts` | Deterministic Codama v1.8.0 (`AUDREN_CODAMA_IDL`) and Anchor v0.30+ (`AUDREN_ANCHOR_IDL`) schemas verified against `crates/audren-core` |
 
 > Zero-knowledge proving instructions (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`) and full Ristretto255 spend/view keypair operations live in the Rust SDK ([`crates/client`](../../crates/client/src/lib.rs)); this TypeScript package provides zero-dependency PDA derivation, `aud1…` parsing, HKDF sub-account seed derivation (`deriveSubAccountSeed`), account decoders, wire encoders, RPC scan helpers, relayer & router clients, and Solana v1 transaction serialization with zero runtime npm dependencies.
 

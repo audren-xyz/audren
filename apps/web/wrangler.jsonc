@@ -1,0 +1,24 @@
+{
+  // Open-source self-hostable Cloudflare Worker configuration for the Audren Web App.
+  //
+  // Quickstart:
+  //   1. wrangler login
+  //   2. wrangler secret put MAINNET_RPC_URL
+  //   3. (Optional) wrangler secret put DEVNET_RPC_URL / DEVNET_DEMO_SECRET_B64 / JUPITER_API_KEY
+  //   4. (Optional) NEXT_PUBLIC_AUDREN_RELAY_URL="https://your-relay.workers.dev" pnpm build
+  //   5. pnpm deploy
+  //
+  // To attach a custom domain or private service bindings, copy this file to
+  // `wrangler.prod.jsonc` (gitignored) and deploy with `pnpm deploy:prod`.
+  "name": "audren-web",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./out",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash",
+    "run_worker_first": true
+  }
+}

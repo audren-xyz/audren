@@ -1,0 +1,20 @@
+# Copy to `.dev.vars` (gitignored) for local `wrangler dev`, or set in production via:
+#   npx wrangler secret put <KEY>
+#
+# NEVER commit `.dev.vars` or real private keys / RPC URLs!
+
+# Required: Solana Mainnet RPC endpoint (QuickNode, Helius, Triton, or self-hosted validator)
+MAINNET_RPC_URL="https://YOUR-SOLANA-MAINNET-RPC-ENDPOINT/"
+
+# Optional: Solana Devnet RPC endpoint (enables Devnet Wallet Mode & Devnet Sandbox)
+DEVNET_RPC_URL="https://YOUR-SOLANA-DEVNET-RPC-ENDPOINT/"
+
+# Optional: Base64-encoded 32-byte Ed25519 seed for the no-wallet Free Devnet Sandbox faucet
+# DEVNET_DEMO_SECRET_B64=""
+
+# Jupiter API key (and optional base URL override) for Direct Self-Pay swaps and token metadata lookup
+JUPITER_API_KEY=""
+# JUPITER_API_URL="https://api.jup.ag"
+
+# Optional build-time Next.js variable (set in shell or `.env.local`) to point the UI at your own relayer:
+# NEXT_PUBLIC_AUDREN_RELAY_URL="https://your-relay.workers.dev"

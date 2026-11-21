@@ -1,6 +1,6 @@
 # Audren Protocol Architecture & Cryptographic Specification
 
-This specification documents the on-chain state machine, account byte layouts, cryptographic soundness proofs, swap custody isolation invariants, and wire framing implemented by this repository (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`).
+This specification documents the on-chain state machine, account byte layouts, cryptographic soundness proofs, swap custody isolation invariants, and wire framing implemented by `program/` (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`).
 
 ---
 
@@ -177,3 +177,17 @@ Why value conservation alone is not sufficient: in `Transfer`, the prover must p
 - **Solana Transaction Version 1 (`0x81`, `4,096 B`) + `ProofBuffer` (`Tags 8 / 9 / 10`):**
   - Relayers and native SDK clients can settle supported payloads for `Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, and `Withdraw` in **one Solana v1 transaction**, subject to client support and transaction limits (`<= 4,096 B`, inline `TransactionConfig` compute budget and priority fee, zero `ComputeBudgetInstruction`).
   - Browser wallets restricted to `v0` (`1,232 B`) or oversized multi-hop swaps upload `<= 768 B` chunks via `WriteProofBuffer` (`Tag 8`) tracked by a `u16` `written_mask`, execute zero-copy via `ExecBuffered` (`Tag 9`), and atomically zero magic, shrink to `0 B`, reassign to the System Program, and refund 100% of buffer rent to `payer` in the same transaction. `CloseProofBuffer` (`Tag 10`) recovers 100% of rent from abandoned uploads.
+
+---
+
+## 5. On-Chain Runtime Implementation
+
+`program/` is compiled for Solana `sBPFv3` as a `#![no_std]` crate on `pinocchio 0.11.1` with `[profile.release]` `lto = "fat"`, `opt-level = 3`, `codegen-units = 1`, `panic = "abort"`, and `strip = "symbols"`:
+
+- **Zero-copy entrypoint & stack discipline:** Entrypoint capacity is bounded to `128` accounts (`SIMD-0596` TxV1 + headroom). Fixed-size CPI account arrays (`MAX_ROUTER_CPI_ACCOUNTS = 80`, `MAX_HOOK_CPI_ACCOUNTS = 64`) live in `#[inline(never)]` leaf helpers so every instruction stays well within Solana's `4,096 B` SBF stack frame limit.
+- **Zero-allocator static SBF heap arenas:** The program runs with `pinocchio::no_allocator!()` (zero `liballoc`) and partitions Solana's `32 KiB` default heap into three compile-time-checked disjoint arenas: `TriptychScratch` (`[0 .. 16 KiB)`, reused across both legs of `Merge`), `WatchedEscrowBuf` (`[16 .. 24 KiB)`), and `CpiAccount` router slices (`[24 .. 32 KiB)`).
+- **Compile-time cryptographic constants:** `G`, `H`, `U`, and Triptych generators `H_0..H_6` are embedded as precomputed canonical compressed Ristretto255 byte arrays (`program/src/crypto.rs`), avoiding runtime hash-to-curve derivations on every spend.
+- **Exact integer `SysvarRent` calculation (`SIMD-0194`):** `rent_minimum_balance` reads the raw 17-byte `SysvarRent` (`lamports_per_byte_year: u64` and `exemption_threshold: f64` bit pattern) via `get_sysvar` and computes exact rent-exempt minimums in checked integer arithmetic for both `1.0` (`SIMD-0194`) and `2.0` threshold clusters without floating-point instructions.
+- **Single-shot PDA validation & DoS-safe creation:** Every PDA check validates against stored canonical bumps via `Address::create_program_address`. Account creation uses a single `CreateAccount` CPI when target lamports are zero and falls back to `Transfer` + `Allocate` + `Assign` whenever lamports were pre-funded, preventing lamport-griefing DoS.
+- **On-chain metadata & security disclosure:** Canonical Codama v1.8.0 IDL (`idl/audren.codama.json`) and security metadata (`idl/security.json`, `security@audren.xyz`) are published via Solana Program Metadata (`ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S`), and `program/src/lib.rs` embeds a zero-CU `.security.txt` V1 static section directly in the sBPFv3 ELF.
+

@@ -1,0 +1,25 @@
+{
+  "name": "audren-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone, router-agnostic Solana privacy relayer for Audren (relay.audren.xyz)",
+  "scripts": {
+    "dev": "wrangler dev --port 8788",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types",
+    "deploy": "wrangler deploy",
+    "deploy:prod": "wrangler deploy --config wrangler.prod.jsonc",
+    "e2e": "tsx scripts/e2e-relay.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261120.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.166.0"
+  }
+}

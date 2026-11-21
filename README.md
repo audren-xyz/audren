@@ -1,70 +1,108 @@
 # Audren
 
-Private ownership and payments with existing Solana assets. Spending keys remain with the user; Solana verifies locally generated proofs.
+Zero-setup multi-asset shielded pool, router-agnostic private DEX swap engine, and verifiable compliance protocol on Solana (`sBPFv3`, `pinocchio 0.11.1`, `#![no_std]`).
 
-[Try the demo](https://audren.xyz/demo/) · [How it works](https://audren.xyz/how-it-works/) · [Compare privacy models](https://audren.xyz/compare/) · [Specification](ARCHITECTURE.md)
+Native SOL, Classic SPL tokens, and transferable Token-2022 mints share a single shielded pool (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`). Users shield assets, send private transfers across 32/64/128-slot proof rings, execute single-transaction private swaps through compatible PDA-signing Solana routers, and produce selective disclosure or institutional audit proofs — with no trusted setup and no off-chain indexer.
 
-## What you can do
+## Privacy and accounting boundaries
 
-- Deposit native SOL, classic SPL tokens and transferable Token-2022 assets into shared on-chain vaults without an Audren-issued wrapper token.
-- Send privately to a reusable Audren receiving address. Private Transfer proofs conceal the spent record; fresh recipient keys and blinded commitments protect recipient linkage, token and amount.
-- Merge records, swap through a compatible PDA-signing router, withdraw to a public wallet, or share a selected note receipt.
-- Discover records through standard Solana account RPC and WebSocket subscriptions. No protocol-specific indexer or trusted-setup ceremony is required.
+Public deposits, withdrawals and external DEX trades are intentional boundaries: their accounts, tokens and amounts remain observable. Private proofs conceal input selection within a candidate set; they do not guarantee that outside information cannot reconnect activity. Compatible relayers are permissionless and optional, hold no user spending keys, and can observe request metadata. Direct submission exposes its fee payer.
 
-Deposits, public withdrawals and external DEX execution expose tokens and amounts. Withdrawals expose the destination. Fee payers and transaction metadata are public; a separate relayer avoids attaching the user's own wallet as fee payer but can observe network metadata. Candidate sets, timing and external information affect unlinkability. Greater TVL alone is not a privacy guarantee. Public entry and exit are intentional boundaries; the privacy objective is to conceal which candidate note funds a spend. The 32/64/128 ring sizes are slot capacities, not guaranteed numbers of plausible inputs. See [privacy boundaries and effective anonymity](ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity).
+Ring capacity is not a count of equally plausible notes or independent users. Empty slots, candidate selection and known public records affect effective anonymity. More TVL alone does not guarantee more privacy. Visible vault assets do not independently prove coverage of private liabilities. See [the specification](ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity) for the operation-specific scope and security assumptions.
 
-Assets remain in program-controlled vaults, and the spending key authorizes private records. Vault balances are inspectable; they alone do not prove coverage of all private liabilities. Token issuer controls still apply.
+## How Audren fits together
 
-## Start building
-
-| Component | Purpose |
-| --- | --- |
-| [crates/client](crates/client) | Rust key management, local proving, scanner and transaction builders |
-| [packages/sdk](packages/sdk) | Zero-runtime-dependency TypeScript PDA/ATA derivations, RFC 9496 `aud1…` validation, HKDF sub-account seed derivation, codecs, account readers, RPC helpers, relayer & router clients, and Solana v1 serialization; built ESM and declarations |
-| [crates/audren-core](crates/audren-core) | Shared wire constants, account layouts, instruction tags and errors |
-| [program](program) | Isolated on-chain sBPFv3 program |
-| [tests/mock-router](tests/mock-router) | Adversarial router fixture for LiteSVM |
-| [build-sbf.py](build-sbf.py) | Pinned standalone sBPFv3 builder |
-
-The TypeScript package does **not** include a prover or wallet key management and is not advertised as an npm registry release. Build and pack it from source using its [SDK guide](packages/sdk/README.md). Use the Rust client for full proof generation. [Examples](https://github.com/audren-xyz/examples) distinguish offline planning from live transaction lifecycles.
-
-## Deployment and trust boundaries
-
-Program on Solana Mainnet and Devnet: `AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`.
-
-- [Program and current authority](https://solscan.io/account/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3)
-- [Pool 0 configuration](https://solscan.io/account/5Bvt5f5QMfsVb9TyX8bzkRMvAX6JSWwRtnymGveF9U3G)
-- [Native SOL vault](https://solscan.io/account/EhVt54eHXmWzDqngDiBXhw6ePWa9eEoBAHsMfnNCn5nr)
-- [Token vault authority holdings](https://solscan.io/account/7rQ6vQNMwBwzAFK1gcwFuJwK4DybLUGVBfxJfgVw8X9o#portfolio)
-
-The deployment is pre-audit and upgradeable. The current program lets full-note withdrawals bypass its pool pause; valid proofs, available assets, fees, network operation and applicable token permissions are still required. Partial withdrawals remain pause-gated. Upgrade authority can change program behavior.
-
-This source repository is not a reproducible-build attestation for the deployed binary. A successful source build or a local artifact hash match alone does not establish source-to-deployment equivalence. Independently verify the source revision, pinned build environment, resulting ELF and on-chain ProgramData before relying on such equivalence.
-
-## Build and verify
-
-Host Rust is pinned by `rust-toolchain.toml`; Node 22+ is required for the TypeScript package. From the repository root:
-
-```bash
-cargo check --workspace --all-targets --locked
-cargo check --manifest-path program/Cargo.toml --locked
-cargo test --workspace --lib --locked
-pnpm --dir packages/sdk install --frozen-lockfile
-pnpm --dir packages/sdk typecheck
-pnpm --dir packages/sdk test
+```text
+  Browser / SDK / Rust Client
+    │  1. Scans EpochPage dataSlices via standard Solana RPC
+    │  2. Builds Ristretto255 Multi-Base Triptych + Agave Bulletproof locally
+    ▼
+  Optional Pluggable Privacy Relayer (`apps/relay/`, self-hostable or `relay.audren.xyz` — or Direct wallet)
+    │  3. Submits single Solana v1 (0x81) tx (or ProofBuffer chunks via v0 wallet)
+    ▼
+  Audren sBPFv3 Program (`program/`, AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3)
+       • `#![no_std]` Pinocchio 0.11.1 zero-copy entrypoint & stack CPIs
+       • Verifies Triptych via native `sol_curve_multiscalar_mul` + precomputed NUMS generators
+       • Verifies 64-bit Bulletproofs via native `ZkE1Gama1Proof` CPI
+       • Enforces NullifierPDA uniqueness & SwapViaRouter escrow isolation
 ```
 
-Compile both SBF fixtures before running LiteSVM. The builder uses host Rust 1.97.1 independently of the host workspace pin. Python 3.11+ and access to the pinned builder/tool downloads are required. Use a dedicated builder for release artifacts.
+## Repository layout
 
-```bash
-rustup toolchain install 1.97.1 --profile minimal
-python3 build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy
-python3 build-sbf.py --manifest-path tests/mock-router/Cargo.toml --sbf-out-dir target/deploy
-cargo test --test litesvm_e2e --locked -- --nocapture
+```text
+program/              On-chain sBPFv3 Solana program (#![no_std], pinocchio 0.11.1, lto = "fat")
+crates/audren-core/   #![no_std] account layouts, PDA seeds, wire sizes, and AudrenError codes
+crates/client/        Rust SDK (provers, RPC/WS scanner, router swap builder, LiteSVM & live tests)
+idl/                  Published Codama v1.8.0 & Anchor v0.30+ IDLs, security.json, and verifier
+packages/sdk/         Zero-dependency TypeScript ESM SDK (@audren/sdk) + bundled IDLs
+apps/relay/           Open-source, self-hostable Cloudflare Worker Privacy Relayer
+apps/web/             Next.js 16 + Cloudflare Worker web app, Wallet Vault & Devnet sandbox
+tests/mock-router/    Isolated Pinocchio sBPFv3 mock router for adversarial SwapViaRouter tests
+scripts/              Deterministic sBPFv3 build helper (`build-sbf.py`) & upgrade/metadata script
+docs/                 Self-host relayer guide and canonical deployment addresses
+ARCHITECTURE.md       Account byte layouts, cryptographic soundness proofs, and runtime specification
+SECURITY.md           Responsible disclosure policy (`security@audren.xyz`)
 ```
 
-The builder pins cargo-build-sbf and platform-tools, checks sBPFv3 ELF headers and writes an artifact stamp. Its stamp is not a source digest or deployment attestation. The Devnet lifecycle test spends Devnet SOL; Mainnet smoke tests spend real assets and network fees. Live tests are opt-in; use a dedicated funded Devnet key and your configured RPC endpoint. Never commit keys or RPC credentials.
+## Published IDLs, Security & Documentation
+
+- **Published IDLs & On-Chain Metadata (`idl/`):** Deterministic Codama v1.8.0 ([`idl/audren.codama.json`](idl/audren.codama.json)) and Anchor v0.30+ ([`idl/audren.anchor.json`](idl/audren.anchor.json)) schemas covering all 13 instructions, 7 account layouts, 10 PDA seeds, and 33 errors — mirrored into `@audren/sdk` (`AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`) and published on-chain on Mainnet and Devnet via Solana Program Metadata ([`idl/README.md`](idl/README.md)).
+- **Security & Disclosure:** [`SECURITY.md`](SECURITY.md) and canonical on-chain security metadata ([`idl/security.json`](idl/security.json), `security@audren.xyz`), published via Solana Program Metadata (`GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj`) and embedded in the sBPFv3 program binary.
+- **Verified Builds:** Reproducible Docker sBPFv3 builds pinned to the Solana Foundation Agave `4.3.0` (`v1.57`) verifiable build image (`solana-verify`) with automated PDA attestation and compliance checks via [`scripts/upgrade-program.sh`](scripts/upgrade-program.sh) ([`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md#solana-verified-builds-verifycly8mb96wd9wqq3wdxqwm4ou6r42th37db9fc)).
+- **Protocol Architecture:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — account layouts, Ristretto255 Multi-Base Triptych soundness proofs, swap custody isolation, Token-2022 solvency, and sBPFv3 runtime engineering.
+- **Deploy Your Own Relayer:** [`docs/DEPLOY_YOUR_OWN_RELAY.md`](docs/DEPLOY_YOUR_OWN_RELAY.md) — step-by-step guide to deploy an independent Audren relayer with zero shared credentials.
+- **Canonical Deployments:** [`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md) — Mainnet & Devnet Program ID, Pool #0 PDA, Program Metadata PDAs, and reference endpoints.
+
+## Instruction set
+
+| Tag | Instruction | Description |
+| --- | --- | --- |
+| `0x00` | `InitPool` | Create `PoolState` (`192 B`), `EpochPage #0` (`6,240 B`), `sol_vault`, `page_rent_vault` |
+| `0x01` | `OpenPage` | Permissionless Lane `0` rollover allocating `page_id + 1` funded by `PageRentVault` |
+| `0x02` | `Deposit` | Shield Native SOL, Classic SPL, or Token-2022 to any stealth address (zero ZK proof) |
+| `0x03` | `Transfer` | Private 1-in → 2-out transfer (`m = 5/6/7`, Triptych + CrossBase2 + `BatchedRangeProofU128`) |
+| `0x04` | `Merge` | Consolidate 2 shielded notes of the same hidden asset into 1 note |
+| `0x05` | `SwapViaRouter` | Full or partial shielded swap via isolated `swap_escrow` CPI (`flags & 1` shielded change; `flags & 2` refund) |
+| `0x06` | `Withdraw` | Unshield exact amount to a public wallet/ATA; full withdrawals keep `PoolState` read-only and bypass `SetPaused` |
+| `0x07` | `SetPaused` | Emergency pause toggle by pool authority (zero vault custody) |
+| `0x08` | `WriteProofBuffer` | Upload `<= 768 B` payload chunk into ephemeral `ProofBuffer` PDA (`<= 10,032 B`) |
+| `0x09` | `ExecBuffered` | Execute buffered instruction zero-copy and atomically refund 100% of buffer rent |
+| `0x0A` | `CloseProofBuffer` | Reclaim 100% of rent from an abandoned `ProofBuffer` PDA |
+| `0x0B` | `InitLane` | Initialize parallel append lane `1..15` (`AppendLaneState` + `LaneRentVault` + initial page) |
+| `0x0C` | `OpenLanePage` | Permissionless self-funding rollover for parallel lane `1..15` with read-only `PoolState` |
+
+## Quickstart: Verification, Build & Testing
+
+### 1. Fast host checks (Rust + IDLs + TypeScript)
+```bash
+# Rust typechecks (isolated sBPFv3 manifests + host workspace)
+cargo check --manifest-path program/Cargo.toml
+cargo check --manifest-path program/Cargo.toml --features no-entrypoint
+cargo check --manifest-path tests/mock-router/Cargo.toml
+cargo check --workspace --tests
+
+# Verify IDLs match crates/audren-core byte-for-byte
+python3 idl/verify-idl.py
+
+# TypeScript SDK, Relayer, and Web UI checks
+pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
+pnpm --dir apps/relay typecheck
+pnpm --dir apps/web typecheck
+```
+
+### 2. Compile sBPFv3 `.so` artifacts & run LiteSVM E2E tests
+```bash
+# Build deterministic sBPFv3 artifacts
+python3 scripts/build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy
+python3 scripts/build-sbf.py --manifest-path tests/mock-router/Cargo.toml --sbf-out-dir target/deploy
+
+# Run all 7 LiteSVM integration & adversarial suites
+cargo test --test litesvm_e2e -- --nocapture
+```
+
+### 3. Cluster deployment, Program Metadata & Verified Builds
+See [`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md) and [`idl/README.md`](idl/README.md) for deployment addresses, atomic program upgrades (`scripts/upgrade-program.sh`), Solana Program Metadata (`idl` & `security`), and Solana Verified Build attestation. Keep local keypairs in gitignored `.credentials/` and private operator Wrangler configs in gitignored `wrangler.prod.jsonc`.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE). Contributor invariants and checks live in [AGENTS.md](AGENTS.md).
+Apache-2.0 — see [`LICENSE`](LICENSE).

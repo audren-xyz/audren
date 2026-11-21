@@ -1,7 +1,7 @@
 //! Live Solana End-to-End Verification for Audren (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`)
 //! using Solana Transaction Version 1 (SIMD-0385, `0x81`, 4,096 B, inline `TransactionConfig`).
 //!
-//! Run explicitly against a QuickNode Devnet or Mainnet RPC:
+//! Run explicitly against a Solana Devnet or Mainnet RPC:
 //! ```bash
 //! AUDREN_RPC_URL="https://your-devnet-rpc-endpoint" \
 //! AUDREN_KEYPAIR_PATH="/path/to/funder.json" \
