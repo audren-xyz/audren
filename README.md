@@ -11,7 +11,7 @@ Private ownership and payments with existing Solana assets. Spending keys remain
 - Merge records, swap through a compatible PDA-signing router, withdraw to a public wallet, or share a selected note receipt.
 - Discover records through standard Solana account RPC and WebSocket subscriptions. No protocol-specific indexer or trusted-setup ceremony is required.
 
-Deposits, public withdrawals and external DEX execution expose tokens and amounts. Withdrawals expose the destination. Fee payers and transaction metadata are public; a separate relayer avoids attaching the user's own wallet as fee payer but can observe network metadata. Candidate sets, timing and external information affect unlinkability. Greater TVL alone is not a privacy guarantee.
+Deposits, public withdrawals and external DEX execution expose tokens and amounts. Withdrawals expose the destination. Fee payers and transaction metadata are public; a separate relayer avoids attaching the user's own wallet as fee payer but can observe network metadata. Candidate sets, timing and external information affect unlinkability. Greater TVL alone is not a privacy guarantee. Public entry and exit are intentional boundaries; the privacy objective is to conceal which candidate note funds a spend. The 32/64/128 ring sizes are slot capacities, not guaranteed numbers of plausible inputs. See [privacy boundaries and effective anonymity](ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity).
 
 Assets remain in program-controlled vaults, and the spending key authorizes private records. Vault balances are inspectable; they alone do not prove coverage of all private liabilities. Token issuer controls still apply.
 

@@ -44,3 +44,7 @@ Use the Rust client for key derivation and proofs. Router helpers prepare compat
 
 `test/package.test.mjs` checks built-package imports, lane wire vectors, fee rounding and v1 serialization boundaries.
 Generated `dist/`, package archives and `node_modules/` are build outputs and are not committed.
+
+## Privacy responsibilities
+
+Deposits, withdrawals and ordinary DEX execution have public account, asset and amount boundaries by design. Relayers are optional and permissionless; they need no user spending keys but can observe request metadata. Ring slots are not guaranteed anonymous users. Evaluate candidate selection, RPC queries and fee-payer exposure together. Visible vault assets are not an independent proof of all private liabilities. See the [protocol privacy model](../../ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity).
