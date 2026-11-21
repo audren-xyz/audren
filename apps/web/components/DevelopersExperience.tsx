@@ -53,7 +53,7 @@ const relay = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);`,
     tab: 'Rust (Cargo)',
     file: 'crates/client · native ~50 ms local proving & RPC/WS scanner',
     code: `use audren_client::{
-    keys::{AudrenKeys, DefiSessionKeypair, SelectiveDisclosureProof},
+    keys::{AudrenKeys, SelectiveDisclosureProof},
     pda::{derive_escrow_pda, derive_pool_pda, derive_unwrap_pda},
     router::DEFAULT_RELAY_URL,
     scanner::{decrypt_owned_note, scan_page_dataslice},
@@ -64,7 +64,7 @@ use solana_address::Address;
 // 1. Master spend/view keys, sub-accounts & deterministic DeFi Session B_0
 let alice   = AudrenKeys::from_seed(&seed_32);
 let trading = AudrenKeys::from_seed_subaccount(&seed_32, 1);
-let session = DefiSessionKeypair::derive(&seed_32, 0);
+let session = AudrenKeys::derive_defi_session_keypair(&seed_32, 0);
 let fvk     = trading.full_viewing_key();
 
 // 2. Canonical PDAs (Pool, ExecViaEscrow shard, atomic WSOL unwrap PDA)
@@ -78,7 +78,7 @@ let hits = scan_page_dataslice(&fvk, 0, &slice_1056)?;
 let note    = decrypt_owned_note(&fvk, Some(&trading), &pid, 0, &page_bytes, hits[0].slot_index, None)?.unwrap();
 let receipt = SelectiveDisclosureProof::from_owned_note(&note);
 assert!(receipt.verify_against_page(&page_bytes)?);
-println!("Session B_0: {} · Relay: {DEFAULT_RELAY_URL}", session.address());`,
+println!("Session B_0: {} · Relay: {DEFAULT_RELAY_URL}", session.address);`,
   },
   swift: {
     tab: 'Swift (iOS / macOS)',
@@ -95,7 +95,7 @@ let fvk     = try exportFullViewingKey(seed32: seed32, accountIndex: 1)
 // 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scan
 let pid    = programId()
 let pool   = try derivePoolPda(poolId: 0, programId: pid)
-let escrow = try deriveEscrowPda(poolId: 0, shard: 0, programId: pid)
+let escrow = try deriveEscrowPda(poolId: 0, shardId: 0, programId: pid)
 let unwrap = try deriveUnwrapPda(poolId: 0, nullifier32: nullifier, programId: pid)
 let hits   = try scanPageDataslice(
     pageId: 0, slice1056: sliceBytes, spendPk32: alice.spendPk, viewSk32: alice.viewSk
