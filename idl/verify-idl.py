@@ -357,6 +357,16 @@ def main() -> None:
     assert f"releases/tag/v{prog_version}" in readme_txt, (
         f"README.md release badge must reference releases/tag/v{prog_version}"
     )
+    ci_txt = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    for deprecated_action in (
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/setup-node@v4",
+        "pnpm/action-setup@v4",
+    ):
+        assert deprecated_action not in ci_txt, (
+            f".github/workflows/ci.yml uses deprecated Node 20 action: {deprecated_action}"
+        )
 
     print(
         f"verify-idl: ok (v{prog_version}, {len(ix_tags)} instructions, {len(expected_sizes)} fixed accounts + ProofBuffer, "
