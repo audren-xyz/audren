@@ -62,6 +62,24 @@ impl AudrenKeys {
         }
     }
 
+    /// Derive a cryptographically isolated sub-account keypair from a 32-byte master seed.
+    ///
+    /// - `account_index == 0` returns the primary account (`Self::from_seed(seed)`).
+    /// - `account_index >= 1` derives a child seed via
+    ///   `HKDF-SHA256(salt = "audren/v1/subaccount", ikm = seed, info = account_index_le4)`
+    ///   yielding an unlinkable `aud1…` address and scoped `FullViewingKey` that cannot
+    ///   decrypt the primary account or any other sub-account.
+    pub fn from_seed_subaccount(seed: &[u8; 32], account_index: u32) -> Self {
+        if account_index == 0 {
+            return Self::from_seed(seed);
+        }
+        let hk = Hkdf::<Sha256>::new(Some(b"audren/v1/subaccount"), seed);
+        let mut child_seed = [0u8; 32];
+        hk.expand(&account_index.to_le_bytes(), &mut child_seed)
+            .expect("32-byte HKDF expand");
+        Self::from_seed(&child_seed)
+    }
+
     /// Generate a fresh random Audren keypair.
     pub fn random<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
         let mut seed = [0u8; 32];
@@ -110,6 +128,9 @@ impl AudrenAddress {
         let mut view_pk = [0u8; 32];
         spend_pk.copy_from_slice(&bytes[..32]);
         view_pk.copy_from_slice(&bytes[32..]);
+        if spend_pk == [0u8; 32] || view_pk == [0u8; 32] {
+            return Err(ClientError::InvalidEncoding("address keys cannot be zero"));
+        }
         let _ = decompress(&spend_pk)?;
         let _ = decompress(&view_pk)?;
         Ok(Self { spend_pk, view_pk })

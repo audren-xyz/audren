@@ -93,20 +93,38 @@ pub fn locate_escrow_indices(
     ))
 }
 
-/// Stateless relayer submission envelope for gasless shielded sends/swaps/withdrawals.
+/// Setup ATA specification passed to `/v1/relay/submit` so the relayer can prepend
+/// idempotent ATA creation when vault, escrow, fee, or recipient ATAs do not exist yet.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayerSetupAta {
+    pub owner: String,
+    pub mint: String,
+    pub token_program: String,
+}
+
+/// Stateless relayer submission envelope matching `audren-relay` (`POST /v1/relay/submit`).
 /// The relayer pays Solana tx fees and `NullifierPDA` / `EpochPage` rent without ever
 /// learning the sender's identity, note secret, or spend key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayerSubmitRequest {
-    pub pool_id: u32,
-    pub program_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
     /// Base64-encoded Audren instruction bytes (`Transfer` / `Merge` / `SwapViaRouter` / `Withdraw`).
     pub instruction_data_b64: String,
-    pub account_metas: Vec<RouterAccountMeta>,
+    pub accounts: Vec<RouterAccountMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub address_lookup_tables: Option<Vec<String>>,
-    /// Optional priority fee ceiling in microlamports per CU.
+    pub setup_atas: Option<Vec<RelayerSetupAta>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_priority_fee_microlamports: Option<u64>,
+    pub compute_unit_limit: Option<u32>,
+    /// Decimal string lamports for Solana v1 `priorityFeeLamports`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority_fee_lamports: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault_out_ata: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollover_from_page_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }

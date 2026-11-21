@@ -27,6 +27,8 @@ export interface RouterQuoteParams {
   amount: string;
   slippageBps: number;
   onlyDirectRoutes?: boolean;
+  /** Cap total route accounts to fit inside Solana Transaction v1's 64-account budget (default 28). */
+  maxAccounts?: number;
   /** Override DEX exclusions (defaults to `JUPITER_CPI_EXCLUDED_DEXES`; pass `[]` to disable). */
   excludeDexes?: readonly string[];
 }
@@ -75,6 +77,7 @@ export async function fetchAggregatorPrivateSwapRoute(
     outputMint: quoteParams.outputMint,
     amount: quoteParams.amount,
     slippageBps: String(quoteParams.slippageBps),
+    maxAccounts: String(quoteParams.maxAccounts ?? 28),
     ...(quoteParams.onlyDirectRoutes ? { onlyDirectRoutes: 'true' } : {}),
     ...(excluded.length > 0 ? { excludeDexes: excluded.join(',') } : {}),
   });
@@ -92,6 +95,8 @@ export async function fetchAggregatorPrivateSwapRoute(
       userPublicKey: swapEscrowAddress,
       wrapAndUnwrapSol: false,
       useSharedAccounts: false,
+      dynamicComputeUnitLimit: false,
+      skipUserAccountsRpcCalls: true,
     }),
   });
   if (!swapRes.ok) {

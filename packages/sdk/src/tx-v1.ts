@@ -160,17 +160,23 @@ export function compileV1Message(params: {
   let configMask = 0;
   const configValues: Uint8Array[] = [];
   if (config.priorityFeeLamports !== undefined) {
-    if (config.priorityFeeLamports < 0n) {
-      throw new Error(`Invalid negative priorityFeeLamports: ${config.priorityFeeLamports}`);
+    if (config.priorityFeeLamports < 0n || config.priorityFeeLamports > 0xffff_ffff_ffff_ffffn) {
+      throw new RangeError(`Invalid priorityFeeLamports (must be u64): ${config.priorityFeeLamports}`);
     }
     configMask |= CONFIG_MASK_PRIORITY_FEE;
     configValues.push(u64le(config.priorityFeeLamports));
+  }
+  if (!Number.isInteger(config.computeUnitLimit) || config.computeUnitLimit < 0 || config.computeUnitLimit > 0xffff_ffff) {
+    throw new RangeError(`Invalid computeUnitLimit (must be u32): ${config.computeUnitLimit}`);
   }
   configMask |= CONFIG_MASK_COMPUTE_UNIT_LIMIT;
   configValues.push(u32le(config.computeUnitLimit));
 
   const loadedLimit =
     config.loadedAccountsDataSizeLimit ?? SOLANA_TX_V1_DEFAULT_LOADED_ACCOUNTS_DATA_SIZE;
+  if (!Number.isInteger(loadedLimit) || loadedLimit < 0 || loadedLimit > 0xffff_ffff) {
+    throw new RangeError(`Invalid loadedAccountsDataSizeLimit (must be u32): ${loadedLimit}`);
+  }
   configMask |= CONFIG_MASK_LOADED_ACCOUNTS_DATA_SIZE;
   configValues.push(u32le(loadedLimit));
 

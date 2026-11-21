@@ -2,6 +2,7 @@
 name = "audren"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 publish = false
 description = "Audren — Institutional Confidential & Full-Private Settlement Program on Solana (sBPFv3)."
 
@@ -32,7 +33,7 @@ spl-token-2022-interface = "=3.1.2"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))', 'cfg(feature, values("custom-heap", "custom-panic"))'] }
 
-# Isolated on-chain workspace with its own Cargo.lock (`programs/README.md`, one layout per program).
+# Isolated on-chain workspace with its own Cargo.lock.
 [workspace]
 resolver = "2"
 members = ["."]

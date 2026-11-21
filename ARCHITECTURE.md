@@ -136,8 +136,8 @@ Why value conservation alone is not sufficient: in `Transfer`, the prover must p
   - **Selective Disclosure Receipt:** A user proves `(amount, mint, pageId, slotIndex)` for a single note by disclosing the opening `(v, a, r_v)` verified directly against the on-chain `EpochPage` commitment bytes (`V == v * A + r_v * H`, `A == G_mint + a * H`). Tampering with even 1 base unit fails commitment equality immediately.
   - **Scoped Sub-Account & Full Viewing Keys:** Exporting `(view_sk, S)` grants read-only scanning of incoming notes with zero spend capability (`s` stays private). For stream-scoped disclosure (e.g., an isolated invoice or payroll address without exposing a primary treasury), SDK callers derive an independent child seed via `HKDF-SHA256(salt = "audren/v1/subaccount", ikm = master_seed, info = u32_le(index))` (`index >= 1`; `index == 0` is the primary account).
 - **`PoolMode::InstitutionalAudited`:**
-  - Every spend verifies Triptych Equations 6–7 (`(S_1, S_2)` encrypting `P_l` under `K_aud`) plus `AuditorAssetProof` (`192 B`, DLEQ proving `(M_1, M_2) = (r_m * G, G_mint + r_m * K_aud)`).
-  - The auditor decrypts `P_l = S_2 - k_aud * S_1` and `G_mint = M_2 - k_aud * M_1` offline with zero freeze, pause, or withdrawal power.
+  - Every spend verifies Triptych Equations 6–7 (`(S_1, S_2)` encrypting `P_l` under `K_aud`); hidden-asset spends (`Transfer` and `Merge`) additionally verify `AuditorAssetProof` (`192 B`, DLEQ proving `(M_1, M_2) = (r_m * G, G_mint + r_m * K_aud)`), whereas `SwapViaRouter` and `Withdraw` carry their mint(s) as public instruction accounts.
+  - The auditor decrypts `P_l = S_2 - k_aud * S_1` (and `G_mint = M_2 - k_aud * M_1` on `Transfer`/`Merge`) offline with zero freeze, pause, or withdrawal power.
 
 ---
 

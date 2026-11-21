@@ -20,7 +20,7 @@ Assets remain in program-controlled vaults, and the spending key authorizes priv
 | Component | Purpose |
 | --- | --- |
 | [crates/client](crates/client) | Rust key management, local proving, scanner and transaction builders |
-| [packages/sdk](packages/sdk) | Zero-runtime-dependency TypeScript codecs, account readers, RPC helpers, router planning and Solana v1 serialization; built ESM and declarations |
+| [packages/sdk](packages/sdk) | Zero-runtime-dependency TypeScript PDA/ATA derivations, RFC 9496 `aud1…` validation, HKDF sub-account seed derivation, codecs, account readers, RPC helpers, relayer & router clients, and Solana v1 serialization; built ESM and declarations |
 | [crates/audren-core](crates/audren-core) | Shared wire constants, account layouts, instruction tags and errors |
 | [program](program) | Isolated on-chain sBPFv3 program |
 | [tests/mock-router](tests/mock-router) | Adversarial router fixture for LiteSVM |

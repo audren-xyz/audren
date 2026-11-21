@@ -5,7 +5,7 @@
  * `InitLane` (11), and `OpenLanePage` (12).
  *
  * Zero-knowledge proving instructions (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`)
- * invoke the Rust prover (`crates/client`).
+ * invoke the Rust prover (`crates/client`) or a compatible client-side Ristretto255 prover.
  */
 
 import {
@@ -39,6 +39,18 @@ function assertLen(name: string, buf: Uint8Array, expected: number): void {
   }
 }
 
+function assertU32(name: string, n: number): void {
+  if (!Number.isInteger(n) || n < 0 || n > 0xffff_ffff) {
+    throw new RangeError(`${name} must be a u32 integer, got ${n}`);
+  }
+}
+
+function assertU64(name: string, n: bigint): void {
+  if (n < 0n || n > 0xffff_ffff_ffff_ffffn) {
+    throw new RangeError(`${name} must be a u64 bigint, got ${n.toString()}`);
+  }
+}
+
 export function encodeInitPoolData(params: {
   poolId: number;
   mode: PoolMode;
@@ -46,6 +58,11 @@ export function encodeInitPoolData(params: {
   pageRentFeeLamports: bigint;
   auditorPk?: Uint8Array;
 }): Uint8Array {
+  assertU32('poolId', params.poolId);
+  assertU64('pageRentFeeLamports', params.pageRentFeeLamports);
+  if (params.mode !== PoolMode.Permissionless && params.mode !== PoolMode.InstitutionalAudited) {
+    throw new RangeError(`Invalid PoolMode: ${String(params.mode)}`);
+  }
   const auditorPk = params.auditorPk ?? new Uint8Array(32);
   assertLen('auditorPk', auditorPk, 32);
   const out = new Uint8Array(47);
@@ -74,6 +91,10 @@ export function encodeDepositData(params: {
   amount: bigint;
   output: DynamicOutputDescriptor;
 }): Uint8Array {
+  assertU64('amount', params.amount);
+  if (params.amount === 0n) {
+    throw new RangeError('Deposit amount must be greater than 0');
+  }
   assertLen('ephemeralPk', params.output.ephemeralPk, 32);
   assertLen('stealthPk', params.output.stealthPk, 32);
   assertLen('ciphertext', params.output.ciphertext, NOTE_CT_LEN);
@@ -126,7 +147,10 @@ export function encodeWriteProofBufferChunks(params: {
 
 /** Encode Tag 9 (`ExecBuffered`, 2 bytes total) — executes inner payload and refunds 100% rent. */
 export function encodeExecBufferedData(innerTag: number): Uint8Array {
-  return new Uint8Array([TAG_EXEC_BUFFERED, innerTag & 0xff]);
+  if (!Number.isInteger(innerTag) || innerTag < 3 || innerTag > 6) {
+    throw new RangeError(`ExecBuffered innerTag must be 3 (Transfer), 4 (Merge), 5 (SwapViaRouter), or 6 (Withdraw), got ${innerTag}`);
+  }
+  return new Uint8Array([TAG_EXEC_BUFFERED, innerTag]);
 }
 
 /**
@@ -134,7 +158,7 @@ export function encodeExecBufferedData(innerTag: number): Uint8Array {
  * using Token-2022's exact ceiling division (`feeBps / 10_000`, capped at `maxFee`).
  */
 export function calculateTransferFee(amount: bigint, feeBps: number, maxFee: bigint): bigint {
-  if (feeBps <= 0 || amount <= 0n) return 0n;
+  if (feeBps <= 0 || amount <= 0n || maxFee <= 0n) return 0n;
   const bps = BigInt(Math.min(Math.floor(feeBps), 10_000));
   const raw = bps === 10_000n ? amount : (amount * bps + 9_999n) / 10_000n;
   const capped = raw < maxFee ? raw : maxFee;

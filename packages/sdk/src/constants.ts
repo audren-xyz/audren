@@ -165,11 +165,13 @@ export function triptychProofLen(m: 5 | 6 | 7, audited: boolean): number {
 export function inputPagesForM(m: 5 | 6 | 7): 1 | 2 | 4 {
   if (m === 5) return 1;
   if (m === 6) return 2;
-  return 4;
+  if (m === 7) return 4;
+  throw new RangeError(`Unsupported Triptych m=${String(m)} (expected 5, 6, or 7)`);
 }
 
 export function mForInputPages(pages: 1 | 2 | 4): 5 | 6 | 7 {
   if (pages === 1) return TRIPTYCH_M_ONE_PAGE;
   if (pages === 2) return TRIPTYCH_M_TWO_PAGES;
-  return TRIPTYCH_M_FOUR_PAGES;
+  if (pages === 4) return TRIPTYCH_M_FOUR_PAGES;
+  throw new RangeError(`Unsupported input page count ${String(pages)} (expected 1, 2, or 4)`);
 }

@@ -169,32 +169,48 @@ interface RpcAccountEntry {
 }
 
 /**
- * Fetch up to 100 `EpochPage` scan slices (`3,200` notes, ~`106 KB`) in a single pure Solana RPC call.
+ * Fetch arbitrary numbers of `EpochPage` scan slices (`1,056 B` each, automatically chunked in
+ * batches of 100 = `3,200` notes / ~`106 KB` per RPC call), verifying account ownership.
  */
 export async function fetchPageScanSlices(
   rpcUrl: string,
   pageAddresses: readonly string[],
   commitment: 'confirmed' | 'finalized' = 'confirmed',
+  programId: string = AUDREN_PROGRAM_ID,
 ): Promise<(PageScanSlice | null)[]> {
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(buildPageScanRpcPayload(pageAddresses, 1, commitment)),
-  });
-  if (!res.ok) {
-    throw new Error(`Solana RPC error: HTTP ${res.status}`);
+  if (pageAddresses.length === 0) return [];
+  const results: (PageScanSlice | null)[] = [];
+  for (let i = 0; i < pageAddresses.length; i += MAX_RPC_MULTI_ACCOUNTS) {
+    const chunk = pageAddresses.slice(i, i + MAX_RPC_MULTI_ACCOUNTS);
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(buildPageScanRpcPayload(chunk, 1, commitment)),
+    });
+    if (!res.ok) {
+      throw new Error(`Solana RPC error: HTTP ${res.status}`);
+    }
+    const json = (await res.json()) as {
+      result?: { value: (RpcAccountEntry | null)[] };
+      error?: { message: string };
+    };
+    if (json.error || !json.result) {
+      throw new Error(json.error?.message ?? 'Missing getMultipleAccounts result');
+    }
+    if (!Array.isArray(json.result.value) || json.result.value.length !== chunk.length) {
+      throw new Error(
+        `Unexpected page slice count: expected ${chunk.length}, got ${json.result.value?.length ?? 0}`,
+      );
+    }
+    for (const acc of json.result.value) {
+      if (!acc || acc.owner !== programId) {
+        results.push(null);
+      } else {
+        results.push(decodePageScanSlice(decodeBase64(acc.data[0])));
+      }
+    }
   }
-  const json = (await res.json()) as {
-    result?: { value: (RpcAccountEntry | null)[] };
-    error?: { message: string };
-  };
-  if (json.error || !json.result) {
-    throw new Error(json.error?.message ?? 'Missing getMultipleAccounts result');
-  }
-  return json.result.value.map((acc) => {
-    if (!acc) return null;
-    return decodePageScanSlice(decodeBase64(acc.data[0]));
-  });
+  return results;
 }
 
 /**
