@@ -38,6 +38,10 @@ if [[ -f "$ROOT/.credentials/operator.env" ]]; then
   source "$ROOT/.credentials/operator.env"
 fi
 
+if [[ -d "$HOME/.cargo/bin" && ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then
+  export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
 # Pinned build & verification parameters (cross-checked by `idl/verify-idl.py`).
 AGAVE_VERSION="4.3.0"
 TOOLS_VERSION="v1.57"
@@ -89,6 +93,49 @@ resolve_rpc() {
 
 require_keypair() {
   [[ -f "$KEYPAIR" ]] || { echo "Error: keypair not found at $KEYPAIR" >&2; exit 1; }
+}
+
+resolve_solana_cli() {
+  local candidate=""
+  if [[ -n "${AUDREN_SOLANA_BIN:-}" && -x "$AUDREN_SOLANA_BIN" ]]; then
+    echo "$AUDREN_SOLANA_BIN"
+    return 0
+  fi
+  if command -v solana >/dev/null 2>&1; then
+    local ver major
+    ver="$(solana --version 2>/dev/null | awk '{print $2}' || true)"
+    major="${ver%%.*}"
+    if [[ "$major" =~ ^[0-9]+$ && "$major" -ge 3 ]]; then
+      command -v solana
+      return 0
+    fi
+  fi
+  # Fall back to the highest Agave >= 3.x release installed under ~/.local/share/solana/install/releases
+  candidate="$(python3 - <<'PY'
+import pathlib, re
+root = pathlib.Path.home() / ".local/share/solana/install/releases"
+best = None
+if root.is_dir():
+    for entry in root.iterdir():
+        m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", entry.name)
+        if not m:
+            continue
+        ver = tuple(int(x) for x in m.groups())
+        if ver[0] < 3:
+            continue
+        bin_path = entry / "solana-release/bin/solana"
+        if bin_path.is_file() and (best is None or ver > best[0]):
+            best = (ver, str(bin_path))
+if best:
+    print(best[1])
+PY
+)"
+  if [[ -n "$candidate" && -x "$candidate" ]]; then
+    echo "$candidate"
+    return 0
+  fi
+  echo "Error: Agave CLI >= 3.x is required to deploy sBPFv3 programs (active solana is too old). Set AUDREN_SOLANA_BIN or install Agave 4.x." >&2
+  exit 1
 }
 
 require_solana_verify() {
@@ -149,12 +196,28 @@ publish_security() {
   verify_onchain_metadata security "$rpc_url" "$SECURITY_PATH"
 }
 
+list_metadata_buffers() {
+  local rpc_url="$1"
+  npx --yes @solana-program/program-metadata@latest list-buffers \
+    --keypair "$KEYPAIR" \
+    --rpc "$rpc_url" 2>/dev/null | python3 -c '
+import re, sys
+for m in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", sys.stdin.read()):
+    print(m)
+' || true
+}
+
 publish_idl() {
   local cluster="$1"
   local rpc_url="$2"
   local min_idl
   min_idl="$(mktemp /tmp/audren-idl-XXXXXX.json)"
   python3 -c "import json, pathlib, sys; pathlib.Path(sys.argv[2]).write_text(json.dumps(json.loads(pathlib.Path(sys.argv[1]).read_text()), separators=(',',':')))" "$IDL_PATH" "$min_idl"
+
+  local authority
+  authority="$(solana-keygen pubkey "$KEYPAIR")"
+  local before_buffers
+  before_buffers="$(list_metadata_buffers "$rpc_url")"
 
   echo "Publishing canonical Codama IDL ($IDL_PATH) for $PROGRAM_ID on $cluster..."
   if ! npx --yes @solana-program/program-metadata@latest write idl \
@@ -163,12 +226,43 @@ publish_idl() {
     --format json \
     --keypair "$KEYPAIR" \
     --rpc "$rpc_url"; then
-    rm -f "$min_idl"
-    echo "Direct multi-tx upload hit RPC propagation lag; checking for pre-created buffer..." >&2
-    npx --yes @solana-program/program-metadata@latest list-buffers \
+    echo "Direct multi-tx upload hit RPC propagation lag; recovering via pre-created buffer..." >&2
+    sleep 2
+    local after_buffers new_buffer
+    after_buffers="$(list_metadata_buffers "$rpc_url")"
+    new_buffer="$(python3 - "$authority" "$before_buffers" "$after_buffers" <<'PY'
+import sys
+authority = sys.argv[1].strip()
+before = set(sys.argv[2].split()) | {authority}
+after = [x for x in sys.argv[3].split() if x not in before]
+if after:
+    print(after[-1])
+PY
+)"
+    if [[ -z "$new_buffer" ]]; then
+      rm -f "$min_idl"
+      echo "Error: direct IDL upload failed and no new buffer account was found." >&2
+      exit 1
+    fi
+    echo "Populating buffer $new_buffer and finalizing canonical IDL..." >&2
+    if ! npx --yes @solana-program/program-metadata@latest update-buffer \
+      "$new_buffer" \
+      "$min_idl" \
+      --format json \
       --keypair "$KEYPAIR" \
-      --rpc "$rpc_url" >&2 || true
-    exit 1
+      --rpc "$rpc_url"; then
+      rm -f "$min_idl"
+      exit 1
+    fi
+    if ! npx --yes @solana-program/program-metadata@latest write idl \
+      "$PROGRAM_ID" \
+      --buffer "$new_buffer" \
+      --close-buffer \
+      --keypair "$KEYPAIR" \
+      --rpc "$rpc_url"; then
+      rm -f "$min_idl"
+      exit 1
+    fi
   fi
   rm -f "$min_idl"
   verify_onchain_metadata idl "$rpc_url" "$IDL_PATH"
@@ -395,8 +489,9 @@ case "$1" in
       COMMIT_SHA="$(resolve_verified_commit "$COMMIT_ARG" 1)"
     fi
 
-    echo "Step 1/3: Upgrading $PROGRAM_ID on $CLUSTER..."
-    solana program deploy "$SO_PATH" \
+    SOLANA_BIN="$(resolve_solana_cli)"
+    echo "Step 1/3: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN)..."
+    "$SOLANA_BIN" program deploy "$SO_PATH" \
       --program-id "$PROGRAM_ID" \
       --upgrade-authority "$KEYPAIR" \
       --keypair "$KEYPAIR" \

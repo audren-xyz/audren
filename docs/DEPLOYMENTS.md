@@ -32,6 +32,7 @@ Mainnet releases use deterministic Linux/Docker builds via the Solana Foundation
 | **Base Docker Image** | `solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd` (Agave `4.3.0`, platform-tools `v1.57`) |
 | **Target Architecture** | `sBPFv3` (`--arch v3 --cargo-build-sbf-args="--tools-version v1.57"`) |
 | **Workspace / Library** | `--workspace-path program --library-name audren` |
+| **Otter Verify PDA (Mainnet)** | `FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt` |
 | **Source Repository** | `https://github.com/audren-xyz/audren` |
 | **Explorer / OtterSec Status** | [Mainnet Verified Build](https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build) · [`verify.osec.io`](https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3) |
 
