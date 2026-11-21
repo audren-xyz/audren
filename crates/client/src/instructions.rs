@@ -1,6 +1,6 @@
-//! Instruction builders for all 11 Audren instructions (`InitPool`, `OpenPage`, `Deposit`,
+//! Instruction builders for all 13 Audren instructions (`InitPool`, `OpenPage`, `Deposit`,
 //! `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `SetPaused`, `WriteProofBuffer`,
-//! `ExecBuffered`, `CloseProofBuffer`).
+//! `ExecBuffered`, `CloseProofBuffer`, `InitLane`, `OpenLanePage`).
 //!
 //! Verified byte-for-byte against `program/src/lib.rs`.
 
@@ -544,6 +544,13 @@ pub fn build_merge<R: RngCore + CryptoRng>(
     if note1.mint != note2.mint {
         return Err(ClientError::InvalidProofInput(
             "merge inputs must share same mint",
+        ));
+    }
+    if (note1.nullifier.is_some() && note1.nullifier == note2.nullifier)
+        || note1.stealth_pk == note2.stealth_pk
+    {
+        return Err(ClientError::InvalidProofInput(
+            "cannot merge a note with itself",
         ));
     }
     let total_amount = note1
@@ -1406,4 +1413,49 @@ pub fn build_open_lane_page(
         ],
         data: vec![TAG_OPEN_LANE_PAGE, lane_id],
     })
+}
+
+/// Extract the `(S_1, S_2, M_1, M_2)` ElGamal auditor ciphertexts from an audited `Transfer`
+/// (`Tag 3`) instruction payload, following the exact `audren-core` wire layout:
+/// `tag(1) | m(1) | out1(226) | out2(226) | c_pay(32) | c_chg(32) | triptych_audited | cross_base_2(256) | range_u128(736) | auditor_asset(192) | [pq_envelope]`.
+///
+/// Returns `Ok((s1, s2, m1, m2))` ready to pass directly to [`crate::keys::AuditorKeypair::decrypt_spent_pubkey`]
+/// and [`crate::keys::AuditorKeypair::decrypt_asset_generator`].
+pub fn extract_transfer_auditor_ciphertexts(
+    ix_data: &[u8],
+) -> Result<([u8; 32], [u8; 32], [u8; 32], [u8; 32]), ClientError> {
+    let trip_off = 2 + 2 * NOTE_WIRE_LEN + 64;
+    if ix_data.len() < trip_off {
+        return Err(ClientError::InvalidEncoding("Transfer payload too short"));
+    }
+    if ix_data[0] != TAG_TRANSFER {
+        return Err(ClientError::InvalidEncoding("expected Transfer tag (3)"));
+    }
+    let m = ix_data[1];
+    let trip_base_len = audren_core::instruction::triptych_proof_len(m, false)
+        .map_err(|_| ClientError::InvalidEncoding("invalid Triptych m"))?;
+    let trip_audited_len = audren_core::instruction::triptych_proof_len(m, true)
+        .map_err(|_| ClientError::InvalidEncoding("invalid audited Triptych m"))?;
+    let auditor_asset_off = trip_off
+        + trip_audited_len
+        + audren_core::instruction::CROSS_BASE_2_LEN
+        + audren_core::instruction::RANGE_U128_PROOF_LEN;
+    if ix_data.len() < auditor_asset_off + audren_core::instruction::AUDITOR_ASSET_PROOF_LEN {
+        return Err(ClientError::InvalidEncoding(
+            "Transfer payload does not contain audited Triptych + AuditorAssetProof",
+        ));
+    }
+    let s1: [u8; 32] = ix_data[trip_off + trip_base_len..trip_off + trip_base_len + 32]
+        .try_into()
+        .map_err(|_| ClientError::InvalidEncoding("invalid S_1 slice"))?;
+    let s2: [u8; 32] = ix_data[trip_off + trip_base_len + 32..trip_off + trip_base_len + 64]
+        .try_into()
+        .map_err(|_| ClientError::InvalidEncoding("invalid S_2 slice"))?;
+    let m1: [u8; 32] = ix_data[auditor_asset_off..auditor_asset_off + 32]
+        .try_into()
+        .map_err(|_| ClientError::InvalidEncoding("invalid M_1 slice"))?;
+    let m2: [u8; 32] = ix_data[auditor_asset_off + 32..auditor_asset_off + 64]
+        .try_into()
+        .map_err(|_| ClientError::InvalidEncoding("invalid M_2 slice"))?;
+    Ok((s1, s2, m1, m2))
 }

@@ -149,6 +149,19 @@ impl AudrenAddress {
     }
 }
 
+impl std::fmt::Display for AudrenAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_base58())
+    }
+}
+
+impl std::str::FromStr for AudrenAddress {
+    type Err = ClientError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_base58(s)
+    }
+}
+
 /// Mode 2: Exportable Read-Only Full Viewing Key (zero spend authority).
 #[derive(Clone)]
 pub struct FullViewingKey {
@@ -504,7 +517,7 @@ pub fn compute_note_nullifier(
 /// Mode 1: Selective Per-Transaction Disclosure Proof (zero keys revealed).
 /// Proves to any third party that on-chain note `(stealth_pk, asset_tag, commitment)`
 /// holds exact `(mint, amount)` without disclosing any other notes or keys.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectiveDisclosureProof {
     pub version: u8,
     pub page_id: u64,
@@ -519,6 +532,39 @@ pub struct SelectiveDisclosureProof {
 }
 
 impl SelectiveDisclosureProof {
+    /// Construct a canonical Mode 1 selective disclosure proof from a decrypted [`crate::scanner::OwnedNote`].
+    pub fn from_owned_note(note: &crate::scanner::OwnedNote) -> Self {
+        Self {
+            version: 1,
+            page_id: note.page_id,
+            slot_index: note.slot_index as u8,
+            stealth_pk_b58: bs58::encode(note.stealth_pk).into_string(),
+            asset_tag_b58: bs58::encode(note.asset_tag).into_string(),
+            commitment_b58: bs58::encode(note.commitment).into_string(),
+            mint_b58: bs58::encode(note.mint).into_string(),
+            amount: note.amount,
+            asset_blinding_b58: bs58::encode(note.asset_blinding.to_bytes()).into_string(),
+            value_blinding_b58: bs58::encode(note.value_blinding.to_bytes()).into_string(),
+        }
+    }
+
+    /// Construct a canonical Mode 1 selective disclosure proof from a locally prepared output note
+    /// together with its on-chain `(page_id, slot_index)`.
+    pub fn from_prepared_note(page_id: u64, slot_index: u8, note: &PreparedNote) -> Self {
+        Self {
+            version: 1,
+            page_id,
+            slot_index,
+            stealth_pk_b58: bs58::encode(note.entry.stealth_pk).into_string(),
+            asset_tag_b58: bs58::encode(note.entry.asset_tag).into_string(),
+            commitment_b58: bs58::encode(note.entry.commitment).into_string(),
+            mint_b58: bs58::encode(note.mint).into_string(),
+            amount: note.amount,
+            asset_blinding_b58: bs58::encode(note.asset_blinding.to_bytes()).into_string(),
+            value_blinding_b58: bs58::encode(note.value_blinding.to_bytes()).into_string(),
+        }
+    }
+
     /// Independently verify a selective disclosure proof against on-chain note points.
     pub fn verify(&self) -> Result<bool, ClientError> {
         let a_pt = decompress(&decode_b58_32(&self.asset_tag_b58)?)?;

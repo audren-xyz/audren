@@ -11,8 +11,10 @@
 
 use audren_client::{
     instructions::{
-        build_buffered_execution, build_deposit_with_options, build_merge, build_swap_via_router,
-        build_transfer, build_withdraw, AudrenAccountMeta, AudrenInstruction, SwapViaRouterParams,
+        build_buffered_execution, build_close_proof_buffer, build_deposit_with_options,
+        build_merge, build_open_lane_page, build_open_page, build_swap_via_router, build_transfer,
+        build_withdraw, net_deposit_amount as rust_net_deposit_amount, AudrenAccountMeta,
+        AudrenInstruction, SwapViaRouterParams,
     },
     keys::{
         AudrenAddress, AudrenKeys, AuditorKeypair, FullViewingKey, SelectiveDisclosureProof,
@@ -30,12 +32,15 @@ use audren_client::{
         derive_vault_auth_pda as rust_derive_vault_auth_pda,
     },
     prover::{asset_generator as rust_asset_generator, extract_ring_from_page},
-    router::{locate_escrow_indices, JUPITER_CPI_EXCLUDED_DEXES},
+    router::{locate_escrow_indices, DEFAULT_RELAY_URL, JUPITER_CPI_EXCLUDED_DEXES},
     scanner::{decrypt_owned_note as rust_decrypt_owned_note, scan_page_dataslice as rust_scan_slice, OwnedNote},
     ClientError,
 };
 use audren_core::{
-    layout::{PageHeader, PoolState, PAGE_SCAN_LEN, PAGE_SCAN_OFFSET},
+    lane_of_page_id as core_lane_of_page_id,
+    layout::{AppendLaneState, PageHeader, PoolState, PAGE_SCAN_LEN, PAGE_SCAN_OFFSET},
+    page_id_for_lane as core_page_id_for_lane,
+    seq_of_page_id as core_seq_of_page_id,
     AUDREN_PROGRAM_ID,
 };
 use curve25519_dalek::scalar::Scalar;
@@ -392,6 +397,17 @@ pub fn decode_pool_state(data: Vec<u8>) -> Result<FfiPoolState, AudrenFfiError> 
     })
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FfiAppendLaneState {
+    pub version: u8,
+    pub lane_id: u8,
+    pub bump: u8,
+    pub rent_vault_bump: u8,
+    pub pool_id: u32,
+    pub current_page_id: u64,
+    pub created_slot: u64,
+}
+
 #[uniffi::export]
 pub fn decode_epoch_page_header(data: Vec<u8>) -> Result<FfiEpochPageHeader, AudrenFfiError> {
     let hdr = PageHeader::decode(&data).map_err(|_| AudrenFfiError::InvalidInput {
@@ -407,6 +423,56 @@ pub fn decode_epoch_page_header(data: Vec<u8>) -> Result<FfiEpochPageHeader, Aud
         created_slot: hdr.created_slot,
         closed_slot: hdr.closed_slot,
     })
+}
+
+#[uniffi::export]
+pub fn decode_append_lane_state(data: Vec<u8>) -> Result<FfiAppendLaneState, AudrenFfiError> {
+    let lane = AppendLaneState::decode(&data).map_err(|_| AudrenFfiError::InvalidInput {
+        reason: "invalid AppendLaneState bytes".to_string(),
+    })?;
+    Ok(FfiAppendLaneState {
+        version: lane.version,
+        lane_id: lane.lane_id,
+        bump: lane.bump,
+        rent_vault_bump: lane.rent_vault_bump,
+        pool_id: lane.pool_id,
+        current_page_id: lane.current_page_id,
+        created_slot: lane.created_slot,
+    })
+}
+
+#[uniffi::export]
+pub fn derive_associated_token_address(
+    owner_b58: String,
+    mint_b58: String,
+    token_program_b58: String,
+) -> Result<String, AudrenFfiError> {
+    let owner = parse_address(&owner_b58, "owner")?;
+    let mint = parse_address(&mint_b58, "mint")?;
+    let tp = parse_address(&token_program_b58, "token_program")?;
+    Ok(derive_ata(&owner, &tp, &mint).to_string())
+}
+
+#[uniffi::export]
+pub fn page_id_for_lane(lane_id: u8, seq: u64) -> Result<u64, AudrenFfiError> {
+    core_page_id_for_lane(lane_id, seq).ok_or_else(|| AudrenFfiError::InvalidInput {
+        reason: format!("invalid lane_id ({lane_id}) or seq ({seq})"),
+    })
+}
+
+#[uniffi::export]
+pub fn lane_of_page_id(page_id: u64) -> u8 {
+    core_lane_of_page_id(page_id)
+}
+
+#[uniffi::export]
+pub fn seq_of_page_id(page_id: u64) -> u64 {
+    core_seq_of_page_id(page_id)
+}
+
+#[uniffi::export]
+pub fn net_deposit_amount(gross_amount: u64, fee_bps: u16, max_fee: u64) -> u64 {
+    rust_net_deposit_amount(gross_amount, fee_bps, max_fee)
 }
 
 // ============================================================================
@@ -538,7 +604,9 @@ pub fn scan_epoch_page(
     };
     let mut notes = Vec::new();
     for slot in 0..(hdr.count as usize) {
-        if let Some(owned) = rust_decrypt_owned_note(
+        // Isolate per-slot decode/decryption failures so one adversarial or corrupted decoy
+        // slot on an EpochPage can never abort scanning and blind later owned notes.
+        if let Ok(Some(owned)) = rust_decrypt_owned_note(
             &fvk,
             spend_keys.as_ref(),
             &pid,
@@ -546,7 +614,7 @@ pub fn scan_epoch_page(
             &page_bytes,
             slot,
             None,
-        )? {
+        ) {
             notes.push(owned_note_to_ffi(&owned));
         }
     }
@@ -928,6 +996,51 @@ pub fn build_buffered_execution_plan(
     })
 }
 
+#[uniffi::export]
+pub fn build_close_proof_buffer_instruction(
+    program_id: String,
+    payer: String,
+    nonce: u64,
+) -> Result<FfiBuiltInstruction, AudrenFfiError> {
+    let pid = default_program_id_or(&program_id)?;
+    let payer_addr = parse_address(&payer, "payer")?;
+    Ok(ix_to_ffi(&build_close_proof_buffer(pid, payer_addr, nonce)))
+}
+
+#[uniffi::export]
+pub fn build_open_page_instruction(
+    program_id: String,
+    payer: String,
+    pool_id: u32,
+    current_page_id: u64,
+) -> Result<FfiBuiltInstruction, AudrenFfiError> {
+    let pid = default_program_id_or(&program_id)?;
+    let payer_addr = parse_address(&payer, "payer")?;
+    Ok(ix_to_ffi(&build_open_page(
+        pid,
+        payer_addr,
+        pool_id,
+        current_page_id,
+    )))
+}
+
+#[uniffi::export]
+pub fn build_open_lane_page_instruction(
+    program_id: String,
+    payer: String,
+    pool_id: u32,
+    current_page_id: u64,
+) -> Result<FfiBuiltInstruction, AudrenFfiError> {
+    let pid = default_program_id_or(&program_id)?;
+    let payer_addr = parse_address(&payer, "payer")?;
+    Ok(ix_to_ffi(&build_open_lane_page(
+        pid,
+        payer_addr,
+        pool_id,
+        current_page_id,
+    )?))
+}
+
 // ============================================================================
 // 5. Selective Disclosure & Institutional Audit
 // ============================================================================
@@ -1062,7 +1175,7 @@ pub fn jupiter_cpi_excluded_dexes() -> Vec<String> {
 
 #[uniffi::export]
 pub fn default_relay_url() -> String {
-    "https://relay.audren.xyz".to_string()
+    DEFAULT_RELAY_URL.to_string()
 }
 
 #[uniffi::export]

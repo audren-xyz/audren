@@ -142,7 +142,24 @@ class ConformanceTest {
         assertEquals(noteJson.getString("nullifier_hex"), bytesToHex(assertNotNull(note.nullifier)))
         assertEquals(noteJson.getString("nullifier_pda"), note.nullifierPda)
 
-        // 4. Local ZK Proof Generation (Deposit, Transfer m=5, ProofBuffer, Withdraw)
+        // Read-only FVK scan (spendSk32 = null) + corrupted decoy slot isolation
+        val poisonedPage = pageBytes.copyOf()
+        for (idx in 96 until 128) poisonedPage[idx] = 0xff.toByte()
+        val fvkNotes = scanEpochPage(0u, poisonedPage, null, alice.spendPk, alice.viewSk, pid)
+        assertEquals(1, fvkNotes.size)
+        assertEquals(5.toUByte(), fvkNotes[0].slotIndex)
+        assertEquals(note.amount, fvkNotes[0].amount)
+        assertEquals(null, fvkNotes[0].nullifier)
+
+        // Lane helpers & Token-2022 transfer fee ceiling math
+        val lane1Seq7 = pageIdForLane(1u, 7uL)
+        assertEquals((1uL shl 56) or 7uL, lane1Seq7)
+        assertEquals(1.toUByte(), laneOfPageId(lane1Seq7))
+        assertEquals(7uL, seqOfPageId(lane1Seq7))
+        assertEquals(990_000uL, netDepositAmount(1_000_000uL, 250u, 10_000uL))
+        assertEquals(1_000_000uL, netDepositAmount(1_000_000uL, 250u, 0uL))
+
+        // 4. Local ZK Proof Generation (exact wire lengths + account counts)
         val payer = pdas.getString("proof_buffer_authority")
         val bobAddr = v.getJSONObject("bob").getString("address")
 
@@ -162,6 +179,8 @@ class ConformanceTest {
             ),
         )
         assertEquals(2.toByte(), depIx.data[0])
+        assertEquals(139, depIx.data.size)
+        assertEquals(6, depIx.accounts.size)
 
         val xferIx = buildTransferInstruction(
             FfiTransferParams(
@@ -180,11 +199,80 @@ class ConformanceTest {
             ),
         )
         assertEquals(3.toByte(), xferIx.data[0])
-        assertTrue(xferIx.data.size > 2_000)
+        assertEquals(2_373, xferIx.data.size)
+        assertEquals(8, xferIx.accounts.size)
+
+        // Merge two distinct Bob SOL notes + assert self-merge rejection!
+        val bob = deriveKeysFromSeed(hexToBytes(v.getJSONObject("bob").getString("seed_hex")))
+        val zeroMint = ByteArray(32)
+        val bobSol = scanEpochPage(0u, pageBytes, bob.spendSk, bob.spendPk, bob.viewSk, pid)
+            .filter { it.mint.contentEquals(zeroMint) }
+        assertTrue(bobSol.size >= 2)
+        var selfMergeRejected = false
+        try {
+            buildMergeInstruction(
+                FfiMergeParams(
+                    programId = pid,
+                    payer = payer,
+                    poolId = 0u,
+                    outPageId = 1uL,
+                    input1PageIds = listOf(0uL),
+                    input1PagesBytes = listOf(pageBytes),
+                    note1 = note,
+                    secretIndex1 = note.slotIndex.toUInt(),
+                    input2PageIds = listOf(0uL),
+                    input2PagesBytes = listOf(pageBytes),
+                    note2 = note,
+                    secretIndex2 = note.slotIndex.toUInt(),
+                    ownerAddress = alice.address,
+                    auditorPk32 = null,
+                ),
+            )
+        } catch (_: AudrenFfiException) {
+            selfMergeRejected = true
+        }
+        assertTrue(selfMergeRejected)
+
+        val mergeIx = buildMergeInstruction(
+            FfiMergeParams(
+                programId = pid,
+                payer = payer,
+                poolId = 0u,
+                outPageId = 1uL,
+                input1PageIds = listOf(0uL),
+                input1PagesBytes = listOf(pageBytes),
+                note1 = bobSol[0],
+                secretIndex1 = bobSol[0].slotIndex.toUInt(),
+                input2PageIds = listOf(0uL),
+                input2PagesBytes = listOf(pageBytes),
+                note2 = bobSol[1],
+                secretIndex2 = bobSol[1].slotIndex.toUInt(),
+                ownerAddress = bob.address,
+                auditorPk32 = null,
+            ),
+        )
+        assertEquals(4.toByte(), mergeIx.data[0])
+        assertEquals(2_950, mergeIx.data.size)
+        assertEquals(10, mergeIx.accounts.size)
 
         val plan = buildBufferedExecutionPlan(42uL, xferIx)
-        assertTrue(plan.uploadChunks.size >= 3)
-        assertEquals(9.toByte(), plan.executeIx.data[0])
+        assertEquals(4, plan.uploadChunks.size)
+        assertContentEquals(byteArrayOf(9, 3), plan.executeIx.data)
+        assertEquals(pdas.getJSONObject("proof_buffer").getString("address"), plan.proofBufferPda)
+
+        val closeIx = buildCloseProofBufferInstruction(pid, payer, 42uL)
+        assertContentEquals(byteArrayOf(10), closeIx.data)
+        assertEquals(2, closeIx.accounts.size)
+        assertEquals(plan.proofBufferPda, closeIx.accounts[1].pubkey)
+
+        val openIx = buildOpenPageInstruction(pid, payer, 0u, 0uL)
+        assertContentEquals(byteArrayOf(1), openIx.data)
+        assertEquals(6, openIx.accounts.size)
+
+        val openLaneIx = buildOpenLanePageInstruction(pid, payer, 0u, 1uL shl 56)
+        assertContentEquals(byteArrayOf(12, 1), openLaneIx.data)
+        assertEquals(7, openLaneIx.accounts.size)
+        assertFalse(openLaneIx.accounts[1].isWritable)
 
         val wdIx = buildWithdrawInstruction(
             FfiWithdrawParams(
@@ -204,7 +292,29 @@ class ConformanceTest {
             ),
         )
         assertEquals(6.toByte(), wdIx.data[0])
-        assertTrue(wdIx.data.size > 1_800)
+        assertEquals(1_966, wdIx.data.size)
+        assertEquals(10, wdIx.accounts.size)
+
+        val wdFullIx = buildWithdrawInstruction(
+            FfiWithdrawParams(
+                programId = pid,
+                payer = payer,
+                poolId = 0u,
+                outPageId = 1uL,
+                inputPageIds = listOf(0uL),
+                inputPagesBytes = listOf(pageBytes),
+                inputNote = note,
+                secretIndex = note.slotIndex.toUInt(),
+                recipientAccount = payer,
+                changeAddress = alice.address,
+                amount = note.amount,
+                splTokenProgram = null,
+                auditorPk32 = null,
+            ),
+        )
+        assertEquals(6.toByte(), wdFullIx.data[0])
+        assertEquals(941, wdFullIx.data.size)
+        assertFalse(wdFullIx.accounts[1].isWritable)
 
         // 5. Selective Disclosure & Institutional Auditor Decrypt
         val sd = createSelectiveDisclosureProof(note)
@@ -228,8 +338,36 @@ class ConformanceTest {
         assertEquals(audJson.getString("expected_spent_pk_hex"), bytesToHex(dec.spentStealthPk))
         assertEquals(audJson.getString("expected_asset_gen_hex"), bytesToHex(dec.assetGenerator))
 
-        // 6. Router & Relayer
+        // 6. Router & Relayer (including prepareRouterAccounts + ATA derivation + signer stripping)
         assertEquals(v.getString("jupiter_cpi_excluded_dexes"), jupiterCpiExcludedDexes().joinToString(","))
         assertEquals("https://relay.audren.xyz", defaultRelayUrl())
+
+        val classicTp = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        val escrow0 = pdas.getJSONObject("swap_escrow_0").getString("address")
+        val wsolMint = gens.getString("wsol_mint_b58")
+        val usdcMint = gens.getString("usdc_mint_b58")
+        val escrowInAta = deriveAssociatedTokenAddress(escrow0, wsolMint, classicTp)
+        val escrowOutAta = deriveAssociatedTokenAddress(escrow0, usdcMint, classicTp)
+        val prep = prepareRouterAccounts(
+            0u,
+            0u,
+            wsolMint,
+            usdcMint,
+            classicTp,
+            classicTp,
+            listOf(
+                FfiAccountMeta(escrowInAta, false, true),
+                FfiAccountMeta(escrow0, true, true),
+                FfiAccountMeta(escrowOutAta, false, true),
+            ),
+            pid,
+        )
+        assertEquals(escrow0, prep.escrowPda)
+        assertEquals(escrowInAta, prep.escrowInAta)
+        assertEquals(escrowOutAta, prep.escrowOutAta)
+        assertEquals(1.toUByte(), prep.escrowIdx)
+        assertEquals(0.toUByte(), prep.escrowInIdx)
+        assertEquals(2.toUByte(), prep.escrowOutIdx)
+        assertFalse(prep.accounts[1].isSigner)
     }
 }

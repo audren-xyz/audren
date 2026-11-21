@@ -5,7 +5,8 @@
  * `InitLane` (11), and `OpenLanePage` (12).
  *
  * Zero-knowledge proving instructions (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`)
- * invoke the Rust prover (`crates/client`) or browser prover (`apps/web/lib`).
+ * invoke `@audren/sdk/prover` (`packages/sdk/src/prover.ts`), the Rust prover
+ * (`crates/client`), or the UniFFI native mobile prover (`crates/audren-ffi`).
  */
 
 import {

@@ -290,7 +290,31 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(dataToHex(note.nullifier!), v.epoch_page.alice_note.nullifier_hex)
         XCTAssertEqual(note.nullifierPda, v.epoch_page.alice_note.nullifier_pda)
 
-        // 4. Local ZK Proof Generation (Deposit, Transfer m=5, ProofBuffer, Withdraw)
+        // Read-only FVK scan (spendSk32 = nil) + corrupted decoy slot isolation
+        var poisonedPage = pageBytes
+        poisonedPage.replaceSubrange(96..<128, with: Data(repeating: 0xff, count: 32))
+        let fvkNotes = try scanEpochPage(
+            poolId: 0,
+            pageBytes: poisonedPage,
+            spendSk32: nil,
+            spendPk32: alice.spendPk,
+            viewSk32: alice.viewSk,
+            programId: pid
+        )
+        XCTAssertEqual(fvkNotes.count, 1)
+        XCTAssertEqual(fvkNotes[0].slotIndex, 5)
+        XCTAssertEqual(fvkNotes[0].amount, note.amount)
+        XCTAssertNil(fvkNotes[0].nullifier)
+
+        // Lane helpers & Token-2022 transfer fee ceiling math
+        let lane1Seq7 = try pageIdForLane(laneId: 1, seq: 7)
+        XCTAssertEqual(lane1Seq7, (1 << 56) | 7)
+        XCTAssertEqual(laneOfPageId(pageId: lane1Seq7), 1)
+        XCTAssertEqual(seqOfPageId(pageId: lane1Seq7), 7)
+        XCTAssertEqual(netDepositAmount(grossAmount: 1_000_000, feeBps: 250, maxFee: 10_000), 990_000)
+        XCTAssertEqual(netDepositAmount(grossAmount: 1_000_000, feeBps: 250, maxFee: 0), 1_000_000)
+
+        // 4. Local ZK Proof Generation (exact wire lengths + account counts)
         let payer = v.pdas.proof_buffer_authority
         let depIx = try buildDepositInstruction(params: FfiDepositParams(
             programId: pid,
@@ -306,6 +330,8 @@ final class ConformanceTests: XCTestCase {
             vaultAta: nil
         ))
         XCTAssertEqual(depIx.data.first, 2)
+        XCTAssertEqual(depIx.data.count, 139)
+        XCTAssertEqual(depIx.accounts.count, 6)
 
         let xferIx = try buildTransferInstruction(params: FfiTransferParams(
             programId: pid,
@@ -322,11 +348,74 @@ final class ConformanceTests: XCTestCase {
             auditorPk32: nil
         ))
         XCTAssertEqual(xferIx.data.first, 3)
-        XCTAssertGreaterThan(xferIx.data.count, 2_000)
+        XCTAssertEqual(xferIx.data.count, 2_373)
+        XCTAssertEqual(xferIx.accounts.count, 8)
+
+        // Merge two distinct Bob SOL notes + assert self-merge rejection!
+        let bob = try deriveKeysFromSeed(seed32: hexToData(v.bob.seed_hex))
+        let bobSol = try scanEpochPage(
+            poolId: 0,
+            pageBytes: pageBytes,
+            spendSk32: bob.spendSk,
+            spendPk32: bob.spendPk,
+            viewSk32: bob.viewSk,
+            programId: pid
+        ).filter { $0.mint == Data(repeating: 0, count: 32) }
+        XCTAssertGreaterThanOrEqual(bobSol.count, 2)
+        XCTAssertThrowsError(try buildMergeInstruction(params: FfiMergeParams(
+            programId: pid,
+            payer: payer,
+            poolId: 0,
+            outPageId: 1,
+            input1PageIds: [0],
+            input1PagesBytes: [pageBytes],
+            note1: note,
+            secretIndex1: UInt32(note.slotIndex),
+            input2PageIds: [0],
+            input2PagesBytes: [pageBytes],
+            note2: note,
+            secretIndex2: UInt32(note.slotIndex),
+            ownerAddress: alice.address,
+            auditorPk32: nil
+        )))
+        let mergeIx = try buildMergeInstruction(params: FfiMergeParams(
+            programId: pid,
+            payer: payer,
+            poolId: 0,
+            outPageId: 1,
+            input1PageIds: [0],
+            input1PagesBytes: [pageBytes],
+            note1: bobSol[0],
+            secretIndex1: UInt32(bobSol[0].slotIndex),
+            input2PageIds: [0],
+            input2PagesBytes: [pageBytes],
+            note2: bobSol[1],
+            secretIndex2: UInt32(bobSol[1].slotIndex),
+            ownerAddress: bob.address,
+            auditorPk32: nil
+        ))
+        XCTAssertEqual(mergeIx.data.first, 4)
+        XCTAssertEqual(mergeIx.data.count, 2_950)
+        XCTAssertEqual(mergeIx.accounts.count, 10)
 
         let plan = try buildBufferedExecutionPlan(nonce: 42, inner: xferIx)
-        XCTAssertGreaterThanOrEqual(plan.uploadChunks.count, 3)
-        XCTAssertEqual(plan.executeIx.data.first, 9)
+        XCTAssertEqual(plan.uploadChunks.count, 4)
+        XCTAssertEqual(plan.executeIx.data, Data([9, 3]))
+        XCTAssertEqual(plan.proofBufferPda, v.pdas.proof_buffer.address)
+
+        let closeIx = try buildCloseProofBufferInstruction(programId: pid, payer: payer, nonce: 42)
+        XCTAssertEqual(closeIx.data, Data([10]))
+        XCTAssertEqual(closeIx.accounts.count, 2)
+        XCTAssertEqual(closeIx.accounts[1].pubkey, plan.proofBufferPda)
+
+        let openIx = try buildOpenPageInstruction(programId: pid, payer: payer, poolId: 0, currentPageId: 0)
+        XCTAssertEqual(openIx.data, Data([1]))
+        XCTAssertEqual(openIx.accounts.count, 6)
+
+        let openLaneIx = try buildOpenLanePageInstruction(programId: pid, payer: payer, poolId: 0, currentPageId: 1 << 56)
+        XCTAssertEqual(openLaneIx.data, Data([12, 1]))
+        XCTAssertEqual(openLaneIx.accounts.count, 7)
+        XCTAssertFalse(openLaneIx.accounts[1].isWritable)
 
         let wdIx = try buildWithdrawInstruction(params: FfiWithdrawParams(
             programId: pid,
@@ -344,7 +433,27 @@ final class ConformanceTests: XCTestCase {
             auditorPk32: nil
         ))
         XCTAssertEqual(wdIx.data.first, 6)
-        XCTAssertGreaterThan(wdIx.data.count, 1_800)
+        XCTAssertEqual(wdIx.data.count, 1_966)
+        XCTAssertEqual(wdIx.accounts.count, 10)
+
+        let wdFullIx = try buildWithdrawInstruction(params: FfiWithdrawParams(
+            programId: pid,
+            payer: payer,
+            poolId: 0,
+            outPageId: 1,
+            inputPageIds: [0],
+            inputPagesBytes: [pageBytes],
+            inputNote: note,
+            secretIndex: UInt32(note.slotIndex),
+            recipientAccount: payer,
+            changeAddress: alice.address,
+            amount: note.amount,
+            splTokenProgram: nil,
+            auditorPk32: nil
+        ))
+        XCTAssertEqual(wdFullIx.data.first, 6)
+        XCTAssertEqual(wdFullIx.data.count, 941)
+        XCTAssertFalse(wdFullIx.accounts[1].isWritable)
 
         // 5. Selective Disclosure & Institutional Auditor Decrypt
         let sd = createSelectiveDisclosureProof(note: note)
@@ -378,8 +487,42 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(dataToHex(dec.spentStealthPk), v.auditor.expected_spent_pk_hex)
         XCTAssertEqual(dataToHex(dec.assetGenerator), v.auditor.expected_asset_gen_hex)
 
-        // 6. Router & Relayer
+        // 6. Router & Relayer (including prepareRouterAccounts + ATA derivation + signer stripping)
         XCTAssertEqual(jupiterCpiExcludedDexes().joined(separator: ","), v.jupiter_cpi_excluded_dexes)
         XCTAssertEqual(defaultRelayUrl(), "https://relay.audren.xyz")
+
+        let classicTp = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        let escrow0 = v.pdas.swap_escrow_0.address
+        let escrowInAta = try deriveAssociatedTokenAddress(
+            ownerB58: escrow0,
+            mintB58: v.asset_generators.wsol_mint_b58,
+            tokenProgramB58: classicTp
+        )
+        let escrowOutAta = try deriveAssociatedTokenAddress(
+            ownerB58: escrow0,
+            mintB58: v.asset_generators.usdc_mint_b58,
+            tokenProgramB58: classicTp
+        )
+        let prep = try prepareRouterAccounts(
+            poolId: 0,
+            shardId: 0,
+            inputMintB58: v.asset_generators.wsol_mint_b58,
+            outputMintB58: v.asset_generators.usdc_mint_b58,
+            inputTokenProgramB58: classicTp,
+            outputTokenProgramB58: classicTp,
+            routerAccounts: [
+                FfiAccountMeta(pubkey: escrowInAta, isSigner: false, isWritable: true),
+                FfiAccountMeta(pubkey: escrow0, isSigner: true, isWritable: true),
+                FfiAccountMeta(pubkey: escrowOutAta, isSigner: false, isWritable: true),
+            ],
+            programId: pid
+        )
+        XCTAssertEqual(prep.escrowPda, escrow0)
+        XCTAssertEqual(prep.escrowInAta, escrowInAta)
+        XCTAssertEqual(prep.escrowOutAta, escrowOutAta)
+        XCTAssertEqual(prep.escrowIdx, 1)
+        XCTAssertEqual(prep.escrowInIdx, 0)
+        XCTAssertEqual(prep.escrowOutIdx, 2)
+        XCTAssertFalse(prep.accounts[1].isSigner)
     }
 }

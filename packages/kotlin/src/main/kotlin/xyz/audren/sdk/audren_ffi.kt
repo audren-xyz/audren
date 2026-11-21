@@ -680,9 +680,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_buffered_execution_plan(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_build_close_proof_buffer_instruction(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_build_deposit_instruction(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_merge_instruction(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_build_open_page_instruction(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_swap_via_router_instruction(
     ): Int
@@ -692,11 +698,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_create_selective_disclosure_proof(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_decode_append_lane_state(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_decode_epoch_page_header(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_decode_pool_state(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_default_relay_url(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_associated_token_address(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_auditor_keypair(
     ): Int
@@ -730,6 +740,12 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_lane_of_page_id(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_net_deposit_amount(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_page_id_for_lane(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_page_scan_data_slice(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_parse_audren_address(
@@ -741,6 +757,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_audren_ffi_checksum_func_scan_epoch_page(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_scan_page_dataslice(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_seq_of_page_id(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_verify_selective_disclosure_on_page(
     ): Int
@@ -767,9 +785,15 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_buffered_execution_plan(`nonce`: Long,`inner`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`nonce`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_deposit_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_merge_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`currentPageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_build_open_page_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`currentPageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_swap_via_router_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -779,11 +803,15 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_create_selective_disclosure_proof(`note`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_decode_append_lane_state(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_decode_epoch_page_header(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_decode_pool_state(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_default_relay_url(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_derive_associated_token_address(`ownerB58`: RustBuffer.ByValue,`mintB58`: RustBuffer.ByValue,`tokenProgramB58`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_auditor_keypair(`seed32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -817,6 +845,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_jupiter_cpi_excluded_dexes(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_lane_of_page_id(`pageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_audren_ffi_fn_func_net_deposit_amount(`grossAmount`: Long,`feeBps`: Short,`maxFee`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_audren_ffi_fn_func_page_id_for_lane(`laneId`: Byte,`seq`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_audren_ffi_fn_func_page_scan_data_slice(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_parse_audren_address(`encoded`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -829,6 +863,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_scan_page_dataslice(`pageId`: Long,`slice1056`: RustBuffer.ByValue,`spendPk32`: RustBuffer.ByValue,`viewSk32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_seq_of_page_id(`pageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_audren_ffi_fn_func_verify_selective_disclosure_on_page(`proof`: RustBuffer.ByValue,`pageBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_audren_ffi_fn_func_verify_selective_disclosure_proof(`proof`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -961,10 +997,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_build_buffered_execution_plan() and 0xFFFF) != 8649) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_build_close_proof_buffer_instruction() and 0xFFFF) != 39797) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_build_deposit_instruction() and 0xFFFF) != 14202) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_build_merge_instruction() and 0xFFFF) != 53530) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction() and 0xFFFF) != 8415) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_build_open_page_instruction() and 0xFFFF) != 36337) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_build_swap_via_router_instruction() and 0xFFFF) != 55178) {
@@ -979,6 +1024,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_create_selective_disclosure_proof() and 0xFFFF) != 10976) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_decode_append_lane_state() and 0xFFFF) != 27838) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_decode_epoch_page_header() and 0xFFFF) != 29208) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -986,6 +1034,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_default_relay_url() and 0xFFFF) != 15592) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_associated_token_address() and 0xFFFF) != 29979) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_derive_auditor_keypair() and 0xFFFF) != 4233) {
@@ -1036,6 +1087,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes() and 0xFFFF) != 47827) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_lane_of_page_id() and 0xFFFF) != 3031) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_net_deposit_amount() and 0xFFFF) != 42006) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_page_id_for_lane() and 0xFFFF) != 27348) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_page_scan_data_slice() and 0xFFFF) != 2480) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1052,6 +1112,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_scan_page_dataslice() and 0xFFFF) != 54765) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_seq_of_page_id() and 0xFFFF) != 51006) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_verify_selective_disclosure_on_page() and 0xFFFF) != 38521) {
@@ -1177,6 +1240,33 @@ public object FfiConverterUByte: FfiConverter<UByte, Byte> {
 
     override fun write(value: UByte, buf: ByteBuffer) {
         buf.put(value.toByte())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUShort: FfiConverter<UShort, Short> {
+    override fun lift(value: Short): UShort {
+        return value.toUShort()
+    }
+
+    fun lift(value: Int): UShort {
+        return value.toUShort()
+    }
+
+    override fun read(buf: ByteBuffer): UShort {
+        return lift(buf.getShort())
+    }
+
+    override fun lower(value: UShort): Short {
+        return value.toShort()
+    }
+
+    override fun allocationSize(value: UShort) = 2UL
+
+    override fun write(value: UShort, buf: ByteBuffer) {
+        buf.putShort(value.toShort())
     }
 }
 
@@ -1365,6 +1455,69 @@ public object FfiConverterTypeFfiAccountMeta: FfiConverterRustBuffer<FfiAccountM
             FfiConverterString.write(value.`pubkey`, buf)
             FfiConverterBoolean.write(value.`isSigner`, buf)
             FfiConverterBoolean.write(value.`isWritable`, buf)
+    }
+}
+
+
+
+data class FfiAppendLaneState (
+    var `version`: kotlin.UByte
+    , 
+    var `laneId`: kotlin.UByte
+    , 
+    var `bump`: kotlin.UByte
+    , 
+    var `rentVaultBump`: kotlin.UByte
+    , 
+    var `poolId`: kotlin.UInt
+    , 
+    var `currentPageId`: kotlin.ULong
+    , 
+    var `createdSlot`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiAppendLaneState: FfiConverterRustBuffer<FfiAppendLaneState> {
+    override fun read(buf: ByteBuffer): FfiAppendLaneState {
+        return FfiAppendLaneState(
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiAppendLaneState) = (
+            FfiConverterUByte.allocationSize(value.`version`) +
+            FfiConverterUByte.allocationSize(value.`laneId`) +
+            FfiConverterUByte.allocationSize(value.`bump`) +
+            FfiConverterUByte.allocationSize(value.`rentVaultBump`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterULong.allocationSize(value.`currentPageId`) +
+            FfiConverterULong.allocationSize(value.`createdSlot`)
+    )
+
+    override fun write(value: FfiAppendLaneState, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`version`, buf)
+            FfiConverterUByte.write(value.`laneId`, buf)
+            FfiConverterUByte.write(value.`bump`, buf)
+            FfiConverterUByte.write(value.`rentVaultBump`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterULong.write(value.`currentPageId`, buf)
+            FfiConverterULong.write(value.`createdSlot`, buf)
     }
 }
 
@@ -3035,6 +3188,20 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
+    @Throws(AudrenFfiException::class) fun `buildCloseProofBufferInstruction`(`programId`: kotlin.String, `payer`: kotlin.String, `nonce`: kotlin.ULong): FfiBuiltInstruction {
+            return FfiConverterTypeFfiBuiltInstruction.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterString.lower(`payer`),
+        FfiConverterULong.lower(`nonce`),_status)
+}
+    )
+    }
+    
+
     @Throws(AudrenFfiException::class) fun `buildDepositInstruction`(`params`: FfiDepositParams): FfiBuiltInstruction {
             return FfiConverterTypeFfiBuiltInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
@@ -3054,6 +3221,36 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     
         
         FfiConverterTypeFfiMergeParams.lower(`params`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `buildOpenLanePageInstruction`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `currentPageId`: kotlin.ULong): FfiBuiltInstruction {
+            return FfiConverterTypeFfiBuiltInstruction.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterString.lower(`payer`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterULong.lower(`currentPageId`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `buildOpenPageInstruction`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `currentPageId`: kotlin.ULong): FfiBuiltInstruction {
+            return FfiConverterTypeFfiBuiltInstruction.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_build_open_page_instruction(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterString.lower(`payer`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterULong.lower(`currentPageId`),_status)
 }
     )
     }
@@ -3106,6 +3303,18 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
+    @Throws(AudrenFfiException::class) fun `decodeAppendLaneState`(`data`: kotlin.ByteArray): FfiAppendLaneState {
+            return FfiConverterTypeFfiAppendLaneState.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_decode_append_lane_state(
+    
+        
+        FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
     @Throws(AudrenFfiException::class) fun `decodeEpochPageHeader`(`data`: kotlin.ByteArray): FfiEpochPageHeader {
             return FfiConverterTypeFfiEpochPageHeader.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
@@ -3135,6 +3344,20 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     UniffiLib.uniffi_audren_ffi_fn_func_default_relay_url(
     
         _status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveAssociatedTokenAddress`(`ownerB58`: kotlin.String, `mintB58`: kotlin.String, `tokenProgramB58`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_associated_token_address(
+    
+        
+        FfiConverterString.lower(`ownerB58`),
+        FfiConverterString.lower(`mintB58`),
+        FfiConverterString.lower(`tokenProgramB58`),_status)
 }
     )
     }
@@ -3348,6 +3571,43 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     )
     }
     
+ fun `laneOfPageId`(`pageId`: kotlin.ULong): kotlin.UByte {
+            return FfiConverterUByte.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_lane_of_page_id(
+    
+        
+        FfiConverterULong.lower(`pageId`),_status)
+}
+    )
+    }
+    
+ fun `netDepositAmount`(`grossAmount`: kotlin.ULong, `feeBps`: kotlin.UShort, `maxFee`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_net_deposit_amount(
+    
+        
+        FfiConverterULong.lower(`grossAmount`),
+        FfiConverterUShort.lower(`feeBps`),
+        FfiConverterULong.lower(`maxFee`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `pageIdForLane`(`laneId`: kotlin.UByte, `seq`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_page_id_for_lane(
+    
+        
+        FfiConverterUByte.lower(`laneId`),
+        FfiConverterULong.lower(`seq`),_status)
+}
+    )
+    }
+    
  fun `pageScanDataSlice`(): FfiDataSlice {
             return FfiConverterTypeFfiDataSlice.lift(
     uniffiRustCall() { _status ->
@@ -3427,6 +3687,17 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
         FfiConverterByteArray.lower(`slice1056`),
         FfiConverterByteArray.lower(`spendPk32`),
         FfiConverterByteArray.lower(`viewSk32`),_status)
+}
+    )
+    }
+    
+ fun `seqOfPageId`(`pageId`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_seq_of_page_id(
+    
+        
+        FfiConverterULong.lower(`pageId`),_status)
 }
     )
     }

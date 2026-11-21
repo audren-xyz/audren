@@ -8,6 +8,10 @@ use solana_address::Address;
 
 use crate::instructions::AudrenAccountMeta;
 
+/// Default open-source Audren privacy relayer endpoint (relayer-agnostic; any self-hosted
+/// `apps/relay` instance implements the exact same HTTP contract).
+pub const DEFAULT_RELAY_URL: &str = "https://relay.audren.xyz";
+
 /// Jupiter DEX labels that reject PDA CPI callers (e.g. `InvalidRealUser` / sysvar top-level
 /// instruction introspection) and must be excluded when routing through `SwapViaRouter`.
 pub const JUPITER_CPI_EXCLUDED_DEXES: &str =
@@ -91,6 +95,63 @@ pub fn locate_escrow_indices(
         u8::try_from(in_idx).ok()?,
         u8::try_from(out_idx).ok()?,
     ))
+}
+
+/// Prepared router accounts ready for [`crate::instructions::build_swap_via_router`].
+/// Mirrors TypeScript `PreparedRouterAccounts`, Swift `FfiPreparedRouterAccounts`, and Kotlin.
+#[derive(Clone, Debug)]
+pub struct PreparedRouterAccounts {
+    pub escrow_pda: Address,
+    pub escrow_in_ata: Address,
+    pub escrow_out_ata: Address,
+    pub escrow_idx: u8,
+    pub escrow_in_idx: u8,
+    pub escrow_out_idx: u8,
+    pub accounts: Vec<AudrenAccountMeta>,
+}
+
+/// Derive `(swap_escrow, escrow_in_ata, escrow_out_ata)`, locate `(escrow_idx, escrow_in_idx, escrow_out_idx)`
+/// inside `router_accounts`, and strip the external signer bit on `swap_escrow` (Audren signs via `invoke_signed`).
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_router_accounts(
+    program_id: &Address,
+    pool_id: u32,
+    shard_id: u8,
+    input_mint: &Address,
+    output_mint: &Address,
+    input_token_program: &Address,
+    output_token_program: &Address,
+    router_accounts: &[AudrenAccountMeta],
+) -> Result<PreparedRouterAccounts, crate::ClientError> {
+    let (escrow_pda, _) = crate::pda::derive_swap_escrow_pda(program_id, pool_id, shard_id);
+    let escrow_in_ata = crate::pda::derive_ata(&escrow_pda, input_token_program, input_mint);
+    let escrow_out_ata = crate::pda::derive_ata(&escrow_pda, output_token_program, output_mint);
+    let (escrow_idx, escrow_in_idx, escrow_out_idx) =
+        locate_escrow_indices(router_accounts, &escrow_pda, &escrow_in_ata, &escrow_out_ata)
+            .ok_or(crate::ClientError::InvalidProofInput(
+                "router_accounts must contain swap_escrow, escrow_in_ata, and escrow_out_ata",
+            ))?;
+    let accounts = router_accounts
+        .iter()
+        .map(|m| AudrenAccountMeta {
+            pubkey: m.pubkey,
+            is_signer: if m.pubkey == escrow_pda {
+                false
+            } else {
+                m.is_signer
+            },
+            is_writable: m.is_writable,
+        })
+        .collect();
+    Ok(PreparedRouterAccounts {
+        escrow_pda,
+        escrow_in_ata,
+        escrow_out_ata,
+        escrow_idx,
+        escrow_in_idx,
+        escrow_out_idx,
+        accounts,
+    })
 }
 
 /// Setup ATA specification passed to `/v1/relay/submit` so the relayer can prepend

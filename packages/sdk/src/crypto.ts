@@ -598,32 +598,55 @@ function decodeCanonicalScalar32(b58: string, label: string): bigint {
   return value
 }
 
+const MAX_SAFE_U64 = BigInt(Number.MAX_SAFE_INTEGER)
+
+function encodeSafeU64Json(v: bigint | number | string): number | string {
+  const bi = typeof v === 'bigint' ? v : BigInt(v)
+  return bi >= 0n && bi <= MAX_SAFE_U64 ? Number(bi) : bi.toString()
+}
+
+function formatLamportsAsSol(raw: bigint | number | string): string {
+  const bi = typeof raw === 'bigint' ? raw : BigInt(raw)
+  const neg = bi < 0n ? '-' : ''
+  const abs = bi < 0n ? -bi : bi
+  const whole = abs / 1_000_000_000n
+  const frac4 = ((abs % 1_000_000_000n) * 10_000n + 500_000_000n) / 1_000_000_000n
+  if (frac4 >= 10_000n) {
+    return `${neg}${(whole + 1n).toString()}.0000`
+  }
+  return `${neg}${whole.toString()}.${frac4.toString().padStart(4, '0')}`
+}
+
 /**
  * Canonical cross-language Mode 1 Selective Disclosure Proof (matches Rust
  * `SelectiveDisclosureProof`, Swift `FfiSelectiveDisclosureProof`, and Kotlin).
+ *
+ * `page_id` and `amount` are emitted as exact JSON `number` when `<= Number.MAX_SAFE_INTEGER`
+ * and as lossless base-10 `string` when `> Number.MAX_SAFE_INTEGER` (e.g. parallel append
+ * lanes `1..=15` where `page_id = (lane_id << 56) | seq`).
  */
 export interface SelectiveDisclosureProof {
   version: number
-  page_id: number
+  page_id: number | bigint | string
   slot_index: number
   stealth_pk_b58: string
   asset_tag_b58: string
   commitment_b58: string
   mint_b58: string
-  amount: number
+  amount: number | bigint | string
   asset_blinding_b58: string
   value_blinding_b58: string
 }
 
 export function createSelectiveDisclosureProof(note: {
-  pageId: bigint | number
+  pageId: bigint | number | string
   slotIndex: number
   stealthPk: Uint8Array
   assetTag: Uint8Array
   commitment: Uint8Array
   mint: Uint8Array
-  amount?: bigint | number
-  amountLamports?: bigint | number
+  amount?: bigint | number | string
+  amountLamports?: bigint | number | string
   assetBlinding?: bigint
   valueBlinding?: bigint
 }): SelectiveDisclosureProof {
@@ -636,13 +659,13 @@ export function createSelectiveDisclosureProof(note: {
     : new Uint8Array(32)
   return {
     version: 1,
-    page_id: Number(note.pageId),
+    page_id: encodeSafeU64Json(note.pageId),
     slot_index: note.slotIndex,
     stealth_pk_b58: base58Encode(note.stealthPk),
     asset_tag_b58: base58Encode(note.assetTag),
     commitment_b58: base58Encode(note.commitment),
     mint_b58: base58Encode(note.mint),
-    amount: Number(amt),
+    amount: encodeSafeU64Json(amt),
     asset_blinding_b58: base58Encode(aBlind),
     value_blinding_b58: base58Encode(vBlind),
   }
@@ -656,7 +679,7 @@ function normalizeDisclosureInput(
       version: 1,
       cluster: 'mainnet',
       programId: AUDREN_PROGRAM_ID_STR,
-      pageId: String(input.page_id),
+      pageId: BigInt(input.page_id).toString(),
       slotIndex: input.slot_index,
       signature: '',
       stealthPk: input.stealth_pk_b58,
@@ -664,8 +687,8 @@ function normalizeDisclosureInput(
       commitment: input.commitment_b58,
       mint: input.mint_b58,
       assetSymbol: input.mint_b58 === SYSTEM_PROGRAM_ID_STR ? 'SOL' : 'SPL',
-      amountLamports: String(input.amount),
-      amountSol: (input.amount / 1e9).toFixed(4),
+      amountLamports: BigInt(input.amount).toString(),
+      amountSol: formatLamportsAsSol(input.amount),
       assetBlinding: input.asset_blinding_b58,
       valueBlinding: input.value_blinding_b58,
     }
@@ -1004,6 +1027,25 @@ export function exportFullViewingKey(keys: AudrenKeypair): FullViewingKeyExport 
     viewSkB58: base58Encode(scalarToBytes32LE(keys.viewSk)),
     viewPkB58: base58Encode(keys.viewPk),
   }
+}
+
+export interface ParsedFullViewingKey {
+  spendPk: Uint8Array
+  viewSk: bigint
+  viewPk: Uint8Array
+}
+
+export function parseFullViewingKey(fvk: FullViewingKeyExport): ParsedFullViewingKey {
+  const spendPk = base58Decode(fvk.spendPkB58)
+  if (spendPk.length !== 32) {
+    throw new Error('FullViewingKey spendPkB58 must decode to 32 bytes')
+  }
+  const viewSk = decodeCanonicalScalar32(fvk.viewSkB58, 'viewSkB58')
+  const viewPk = base58Decode(fvk.viewPkB58)
+  if (viewPk.length !== 32) {
+    throw new Error('FullViewingKey viewPkB58 must decode to 32 bytes')
+  }
+  return { spendPk, viewSk, viewPk }
 }
 
 export interface AuditorKeypair {

@@ -15,10 +15,10 @@ Every constant, PDA, account decoder, key derivation, scanner, local zero-knowle
 
 1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
 2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveSwapEscrowPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `decodePoolState`, `decodePageHeader`, `decodeAppendLaneState`
-3. **Scanner** — `PAGE_SCAN_OFFSET` (`64`), `PAGE_SCAN_LEN` (`1056`), `scanPageScanSlice`, `scanEpochPageSpendable`, `buildPageSubscribeWsPayload`, `checkNullifiersSpent`
-4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildSwapViaRouterInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`
+3. **Scanner** — `PAGE_SCAN_OFFSET` (`64`), `PAGE_SCAN_LEN` (`1056`), `PAGE_SCAN_DATA_SLICE`, `scanPageScanSlice`, `scanEpochPage` (read-only FVK or spendable), `scanEpochPageSpendable`, `buildPageSubscribeWsPayload`, `checkNullifiersSpent`
+4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildSwapViaRouterInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`
 5. **Disclosure & Audit** — `createSelectiveDisclosureProof`, `verifySelectiveDisclosureReceipt`, `verifySelectiveDisclosureOnPage`, `deriveAuditorKeypair`, `auditorDecryptNote`
-6. **Relayer & IDLs** — `AudrenRelayClient`, `JUPITER_CPI_EXCLUDED_DEXES`, `prepareRouterAccountsForAudren`, `compileV1Message`, `serializeV1Transaction`, `AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`
+6. **Relayer & IDLs** — `AudrenRelayClient`, `AUDREN_DEFAULT_RELAY_URL`, `JUPITER_CPI_EXCLUDED_DEXES`, `prepareRouterAccounts`, `prepareRouterAccountsForAudren`, `compileV1Message`, `serializeV1Transaction`, `AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`
 
 ## Build, Test & Consume from Source
 
@@ -39,19 +39,15 @@ pnpm add /tmp/audren-sdk.tgz
 ## Quick Example
 
 ```ts
-import { AUDREN_PROGRAM_ID, derivePoolPda, decodePageHeader } from '@audren/sdk';
-import {
-  deriveKeysFromSeed,
-  deriveSubaccountKeys,
-  scanEpochPageSpendable,
-  buildTransferInstruction,
-  createSelectiveDisclosureProof,
-} from '@audren/sdk/prover';
+import { AUDREN_PROGRAM_ID, PAGE_SCAN_DATA_SLICE, derivePoolPda } from '@audren/sdk';
+import { deriveKeysFromSeed, deriveSubaccountKeys, exportFullViewingKey } from '@audren/sdk/prover';
 
 const seed = crypto.getRandomValues(new Uint8Array(32));
 const alice = await deriveKeysFromSeed(seed);
 const tradingSubaccount = await deriveSubaccountKeys(seed, 1);
-const { address: poolPda } = await derivePoolPda(0);
+const fvk = exportFullViewingKey(tradingSubaccount);
+const { address: poolPda } = await derivePoolPda(0, AUDREN_PROGRAM_ID);
+console.log({ address: alice.address, poolPda, fvk: fvk.spendPkB58, slice: PAGE_SCAN_DATA_SLICE });
 ```
 
 ## Privacy Responsibilities

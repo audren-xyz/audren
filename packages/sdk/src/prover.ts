@@ -37,6 +37,7 @@ import {
   hkdfExpandBytes,
   isNonZeroPoint,
   mulRistretto,
+  parseFullViewingKey,
   readU64le,
   scalarFromWideLE,
   scalarToBytes32LE,
@@ -45,6 +46,7 @@ import {
   u64le,
   utf8,
   type AudrenKeypair,
+  type FullViewingKeyExport,
   type SolanaAccountMeta,
   type SolanaInstruction,
 } from './crypto.ts'
@@ -144,7 +146,7 @@ export const PAGE_SCAN_LEN = PAGE_CAPACITY + PAGE_CAPACITY * 32 // 1,056 B
  * using Token-2022's exact ceiling division (`feeBps / 10_000`, capped at `maxFee`).
  */
 export function calculateTransferFee(amount: bigint, feeBps: number, maxFee: bigint): bigint {
-  if (feeBps <= 0 || amount <= 0n) return 0n
+  if (feeBps <= 0 || amount <= 0n || maxFee <= 0n) return 0n
   const bps = BigInt(Math.min(Math.floor(feeBps), 10_000))
   const raw = bps === 10_000n ? amount : (amount * bps + 9_999n) / 10_000n
   const capped = raw < maxFee ? raw : maxFee
@@ -305,11 +307,14 @@ export async function deriveAta(
 // ============================================================================
 
 export interface AudrenAddress {
+  encoded?: string
   spendPk: Uint8Array
   viewPk: Uint8Array
 }
 
-export function parseAudrenAddress(encoded: string): AudrenAddress {
+export type AudrenRecipient = AudrenAddress | string
+
+export function parseAudrenAddress(encoded: string): AudrenAddress & { encoded: string } {
   const clean = encoded.trim()
   const body = clean.startsWith('aud1') ? clean.slice(4) : clean
   const raw = base58Decode(body)
@@ -321,7 +326,11 @@ export function parseAudrenAddress(encoded: string): AudrenAddress {
   if (!isNonZeroPoint(spendPk) || !isNonZeroPoint(viewPk)) {
     throw new Error('Invalid Ristretto255 points in Audren address')
   }
-  return { spendPk, viewPk }
+  return { encoded: `aud1${body}`, spendPk, viewPk }
+}
+
+function resolveAudrenAddress(recipient: AudrenRecipient): AudrenAddress {
+  return typeof recipient === 'string' ? parseAudrenAddress(recipient) : recipient
 }
 
 /**
@@ -1265,17 +1274,18 @@ export interface PreparedFullNote {
 }
 
 export async function prepareShieldedNote(params: {
-  recipient: AudrenAddress
+  recipient: AudrenRecipient
   mint: Uint8Array
   amount: bigint
   blindAsset: boolean
   blindValue: boolean
   memoText?: string
 }): Promise<PreparedFullNote> {
+  const recipient = resolveAudrenAddress(params.recipient)
   const rEph = randomScalar()
   const ephemeralPk = compressPoint(mulRistretto(G_PT, rEph))
-  const sharedBytes = compressPoint(mulRistretto(decompressPoint(params.recipient.viewPk), rEph))
-  const mat = await deriveFullStealthFromShared(params.recipient.spendPk, ephemeralPk, sharedBytes)
+  const sharedBytes = compressPoint(mulRistretto(decompressPoint(recipient.viewPk), rEph))
+  const mat = await deriveFullStealthFromShared(recipient.spendPk, ephemeralPk, sharedBytes)
 
   const gMint = decompressPoint(await assetGenerator(params.mint))
   const assetBlinding = params.blindAsset ? mat.derivedAssetBlinding : 0n
@@ -1322,15 +1332,16 @@ export interface PreparedDynamicOutput {
 }
 
 export async function prepareDynamicSwapOutput(params: {
-  recipient: AudrenAddress
+  recipient: AudrenRecipient
   mintOut: Uint8Array
   minAmountOut: bigint
   memoText?: string
 }): Promise<PreparedDynamicOutput> {
+  const recipient = resolveAudrenAddress(params.recipient)
   const rEph = randomScalar()
   const ephemeralPk = compressPoint(mulRistretto(G_PT, rEph))
-  const sharedBytes = compressPoint(mulRistretto(decompressPoint(params.recipient.viewPk), rEph))
-  const mat = await deriveFullStealthFromShared(params.recipient.spendPk, ephemeralPk, sharedBytes)
+  const sharedBytes = compressPoint(mulRistretto(decompressPoint(recipient.viewPk), rEph))
+  const mat = await deriveFullStealthFromShared(recipient.spendPk, ephemeralPk, sharedBytes)
 
   const ciphertext = await encryptNoteMemo(
     mat,
@@ -1400,15 +1411,49 @@ export interface SpendableAudrenNote {
   nullifierPdaB58: string
 }
 
+export type AudrenScanKeys =
+  | (Pick<AudrenKeypair, 'spendPk' | 'viewSk'> & Partial<Pick<AudrenKeypair, 'spendSk'>>)
+  | FullViewingKeyExport
+
+function resolveViewSk(keys: Pick<AudrenKeypair, 'viewSk'> | FullViewingKeyExport): bigint {
+  if ('viewSkB58' in keys) {
+    return parseFullViewingKey(keys).viewSk
+  }
+  if (typeof keys.viewSk !== 'bigint') {
+    throw new Error('scanPageScanSlice requires a valid viewSk bigint or FullViewingKeyExport')
+  }
+  return keys.viewSk
+}
+
+function resolveScanKeys(keys: AudrenScanKeys): {
+  spendPk: Uint8Array
+  viewSk: bigint
+  spendSk?: bigint
+} {
+  if ('viewSkB58' in keys) {
+    const parsed = parseFullViewingKey(keys)
+    return { spendPk: parsed.spendPk, viewSk: parsed.viewSk }
+  }
+  if (!(keys.spendPk instanceof Uint8Array) || keys.spendPk.length !== 32) {
+    throw new Error('scanEpochPage requires a 32-byte spendPk or FullViewingKeyExport')
+  }
+  if (typeof keys.viewSk !== 'bigint') {
+    throw new Error('scanEpochPage requires a valid viewSk bigint or FullViewingKeyExport')
+  }
+  return { spendPk: keys.spendPk, viewSk: keys.viewSk, spendSk: keys.spendSk }
+}
+
 /**
  * Stage 1 (Fast Compact Filter): Scan a `1,056 B` `EpochPage` `dataSlice[64..1120]`
  * (`view_tags[32] || ephemeral_pks[32]`) and return matched candidate slot indices.
+ * Accepts either an `AudrenKeypair` / `{ viewSk }` or an exported `FullViewingKeyExport`.
  * Never aborts on zero or malformed slots (`continue` per slot).
  */
 export async function scanPageScanSlice(
-  keys: Pick<AudrenKeypair, 'viewSk'>,
+  keys: Pick<AudrenKeypair, 'viewSk'> | FullViewingKeyExport,
   sliceBytes: Uint8Array,
 ): Promise<number[]> {
+  const viewSk = resolveViewSk(keys)
   if (sliceBytes.length < PAGE_SCAN_LEN) return []
   const hits: number[] = []
   for (let slot = 0; slot < PAGE_CAPACITY; slot++) {
@@ -1416,7 +1461,7 @@ export async function scanPageScanSlice(
     if (!isNonZeroPoint(eph)) continue
     try {
       const ephPt = decompressPoint(eph)
-      const sharedBytes = compressPoint(mulRistretto(ephPt, keys.viewSk))
+      const sharedBytes = compressPoint(mulRistretto(ephPt, viewSk))
       const expectedTag = (await sha256(utf8('audren/v1/view_tag'), sharedBytes))[0]
       if (expectedTag === sliceBytes[slot]) {
         hits.push(slot)
@@ -1446,29 +1491,55 @@ export function verifyDynamicAmountForNote(
   }
 }
 
+export interface OwnedAudrenNote {
+  pageId: bigint
+  slotIndex: number
+  mint: Uint8Array
+  mintB58: string
+  isNativeSol: boolean
+  amount: bigint
+  isDynamicOutput: boolean
+  amountResolved: boolean
+  memoText: string
+  stealthPk: Uint8Array
+  assetTag: Uint8Array
+  commitment: Uint8Array
+  assetBlinding: bigint
+  valueBlinding: bigint
+  stealthScalar: bigint
+  spendX?: bigint
+  nullifier?: Uint8Array
+  nullifierPdaB58?: string
+}
+
 /**
- * Scan a full `EpochPage` for all notes owned by `keys` (including blinded Transfer notes
- * and dynamic Swap outputs whose exact `actual_out` may be provided in `knownDynamicAmounts`).
+ * Scan a full `EpochPage` for all notes owned by a `FullViewingKey` (`spendPk + viewSk`)
+ * or full keypair (`spendPk + viewSk + spendSk`), including blinded `Transfer`/`Merge`
+ * notes and dynamic `SwapViaRouter` outputs.
+ *
+ * When `spendSk` is omitted (read-only viewing key / watch-only wallet / compliance auditor),
+ * `spendX`, `nullifier`, and `nullifierPdaB58` are `undefined`.
  */
-export async function scanEpochPageSpendable(
-  keys: Pick<AudrenKeypair, 'spendSk' | 'spendPk' | 'viewSk'>,
+export async function scanEpochPage(
+  keys: AudrenScanKeys,
   pageBytes: Uint8Array,
   poolId = 0,
   knownDynamicAmounts?: Record<string, bigint>,
-): Promise<SpendableAudrenNote[]> {
+): Promise<OwnedAudrenNote[]> {
+  const resolved = resolveScanKeys(keys)
   const hdr = decodeEpochPageHeader(pageBytes)
   const notes = extractEpochPageNotes(pageBytes)
-  const owned: SpendableAudrenNote[] = []
+  const owned: OwnedAudrenNote[] = []
 
   for (const n of notes) {
     if (!isNonZeroPoint(n.ephemeralPk)) continue
     try {
       const ephPt = decompressPoint(n.ephemeralPk)
-      const sharedBytes = compressPoint(mulRistretto(ephPt, keys.viewSk))
+      const sharedBytes = compressPoint(mulRistretto(ephPt, resolved.viewSk))
       const expectedTag = (await sha256(utf8('audren/v1/view_tag'), sharedBytes))[0]
       if (expectedTag !== n.viewTag) continue
 
-      const mat = await deriveFullStealthFromShared(keys.spendPk, n.ephemeralPk, sharedBytes)
+      const mat = await deriveFullStealthFromShared(resolved.spendPk, n.ephemeralPk, sharedBytes)
       if (!bytesEqual(mat.stealthPk, n.stealthPk)) continue
 
       const aesKey = await crypto.subtle.importKey('raw', toArrayBuffer(mat.aesKey), 'AES-GCM', false, [
@@ -1508,7 +1579,6 @@ export async function scanEpochPageSpendable(
             amountResolved = true
           }
         }
-        // Check if actual_out == min_amount_out directly
         if (!amountResolved) {
           const minV = mulRistretto(expectedA, memoAmount)
           if (bytesEqual(compressPoint(minV), n.commitment)) {
@@ -1521,9 +1591,16 @@ export async function scanEpochPageSpendable(
         if (!bytesEqual(compressPoint(expectedV), n.commitment)) continue
       }
 
-      const { spendX, nullifier } = await computeNoteNullifier(keys.spendSk, mat.stealthScalar)
-      const nullifierPda = (await deriveNullifierPda(poolId, nullifier)).address
       const isNativeSol = bytesEqual(mint, NATIVE_SOL_MINT)
+      let spendX: bigint | undefined
+      let nullifier: Uint8Array | undefined
+      let nullifierPdaB58: string | undefined
+      if (resolved.spendSk !== undefined) {
+        const spend = await computeNoteNullifier(resolved.spendSk, mat.stealthScalar)
+        spendX = spend.spendX
+        nullifier = spend.nullifier
+        nullifierPdaB58 = base58Encode((await deriveNullifierPda(poolId, spend.nullifier)).address)
+      }
 
       owned.push({
         pageId: hdr.pageId,
@@ -1543,7 +1620,7 @@ export async function scanEpochPageSpendable(
         stealthScalar: mat.stealthScalar,
         spendX,
         nullifier,
-        nullifierPdaB58: base58Encode(nullifierPda),
+        nullifierPdaB58,
       })
     } catch {
       // 1/256 view_tag collision or malformed slot; continue cleanly
@@ -1551,6 +1628,19 @@ export async function scanEpochPageSpendable(
   }
 
   return owned
+}
+
+/**
+ * Scan a full `EpochPage` for all spendable notes owned by `keys` (requires `spendSk`
+ * and always populates `spendX`, `nullifier`, and `nullifierPdaB58`).
+ */
+export async function scanEpochPageSpendable(
+  keys: Pick<AudrenKeypair, 'spendSk' | 'spendPk' | 'viewSk'>,
+  pageBytes: Uint8Array,
+  poolId = 0,
+  knownDynamicAmounts?: Record<string, bigint>,
+): Promise<SpendableAudrenNote[]> {
+  return (await scanEpochPage(keys, pageBytes, poolId, knownDynamicAmounts)) as SpendableAudrenNote[]
 }
 
 // ============================================================================
@@ -1724,7 +1814,7 @@ export async function buildDepositInstruction(params: {
   depositor: Uint8Array
   poolId: number
   activePageId: bigint
-  recipient: AudrenAddress
+  recipient: AudrenRecipient
   mint: Uint8Array
   amount: bigint
   netAmount?: bigint
@@ -1824,8 +1914,8 @@ export async function buildTransferInstruction(params: {
   ring: RingSlotWitness[]
   inputNote: SpendableAudrenNote
   secretIndex: number
-  recipient: AudrenAddress
-  changeAddr: AudrenAddress
+  recipient: AudrenRecipient
+  changeAddr: AudrenRecipient
   payAmount: bigint
   memoText?: string
 }): Promise<{
@@ -1971,7 +2061,7 @@ export async function buildMergeInstruction(params: {
   ring2: RingSlotWitness[]
   note2: SpendableAudrenNote
   secretIndex2: number
-  ownerAddr: AudrenAddress
+  ownerAddr: AudrenRecipient
   memoText?: string
 }): Promise<{
   instruction: SolanaInstruction
@@ -2133,8 +2223,8 @@ export async function buildSwapViaRouterInstruction(params: {
   tokenProgramOut: Uint8Array
   amountIn: bigint
   minAmountOut: bigint
-  recipient: AudrenAddress
-  changeAddr: AudrenAddress
+  recipient: AudrenRecipient
+  changeAddr: AudrenRecipient
   routerProgramId: Uint8Array
   routerIxData: Uint8Array
   routerAccounts: SolanaAccountMeta[]
@@ -2318,7 +2408,7 @@ export async function buildWithdrawInstruction(params: {
   inputNote: SpendableAudrenNote
   secretIndex: number
   recipientAccount: Uint8Array // wallet pubkey for SOL, or recipient ATA for SPL/Token-2022
-  changeAddr: AudrenAddress
+  changeAddr: AudrenRecipient
   amount: bigint
   splTokenProgram?: Uint8Array
 }): Promise<{

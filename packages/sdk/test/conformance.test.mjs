@@ -153,6 +153,18 @@ test('3. scanner: dataSlice view-tag filter & note decryption match Rust byte-fo
   const hits = await prover.scanPageScanSlice(alice, sliceBytes);
   assert.deepEqual(hits, vectors.epoch_page.matched_slots);
 
+  // Read-only FullViewingKeyExport works directly in BOTH scanPageScanSlice AND scanEpochPage,
+  // AND corrupted decoy slots never blind subsequent slots!
+  const fvk = prover.exportFullViewingKey(alice);
+  assert.deepEqual(await prover.scanPageScanSlice(fvk, sliceBytes), vectors.epoch_page.matched_slots);
+  const poisonedPage = new Uint8Array(pageBytes);
+  poisonedPage.fill(0xff, 96, 128);
+  const fvkOwned = await prover.scanEpochPage(fvk, poisonedPage, vectors.epoch_page.pool_id);
+  assert.equal(fvkOwned.length, 1);
+  assert.equal(fvkOwned[0].slotIndex, vectors.epoch_page.alice_note.slot_index);
+  assert.equal(fvkOwned[0].amount, BigInt(vectors.epoch_page.alice_note.amount));
+  assert.equal(fvkOwned[0].nullifier, undefined);
+
   const owned = await prover.scanEpochPageSpendable(alice, pageBytes, vectors.epoch_page.pool_id);
   assert.equal(owned.length, 1);
   const note = owned[0];
@@ -171,23 +183,28 @@ test('3. scanner: dataSlice view-tag filter & note decryption match Rust byte-fo
   assert.equal(note.nullifierPdaB58, exp.nullifier_pda);
 });
 
-test('4. prover: pure-TS Deposit, Transfer (m=5 Triptych + Bulletproofs U128), ProofBuffer & Withdraw', async () => {
+test('4. prover: exact wire lengths & accounts for Deposit, Transfer, Merge, ProofBuffer, Close & Withdraw', async () => {
   const alice = await prover.deriveKeysFromSeed(hexToBytes(vectors.alice.seed_hex));
-  const bobAddr = prover.parseAudrenAddress(vectors.bob.address);
-  const aliceAddr = prover.parseAudrenAddress(vectors.alice.address);
   const payer = core.base58Decode(vectors.pdas.proof_buffer_authority);
   const pageBytes = hexToBytes(vectors.epoch_page.page_hex);
 
+  // Token-2022 ceiling fee parity (including maxFee=0 guard)
+  assert.equal(prover.netDepositAmount(1_000_000n, 250, 10_000n), 990_000n);
+  assert.equal(prover.netDepositAmount(1_000_000n, 250, 0n), 1_000_000n);
+
+  // Builders accept aud1... strings directly without separate parseAudrenAddress aliasing!
   const { instructions: depIxs, note: depNote } = await prover.buildDepositInstruction({
     depositor: payer,
     poolId: 0,
     activePageId: 1n,
-    recipient: bobAddr,
+    recipient: vectors.bob.address,
     mint: prover.NATIVE_SOL_MINT,
     amount: 500_000n,
   });
   assert.equal(depIxs.length, 1);
   assert.equal(depIxs[0].data[0], core.TAG_DEPOSIT);
+  assert.equal(depIxs[0].data.length, 139);
+  assert.equal(depIxs[0].accounts.length, 6);
   assert.equal(depNote.amount, 500_000n);
 
   const [ownedNote] = await prover.scanEpochPageSpendable(alice, pageBytes, 0);
@@ -203,19 +220,68 @@ test('4. prover: pure-TS Deposit, Transfer (m=5 Triptych + Bulletproofs U128), P
       ring,
       inputNote: ownedNote,
       secretIndex: vectors.epoch_page.alice_note.slot_index,
-      recipient: bobAddr,
-      changeAddr: aliceAddr,
+      recipient: vectors.bob.address,
+      changeAddr: vectors.alice.address,
       payAmount: 900_000n,
     });
   assert.equal(xferIx.data[0], core.TAG_TRANSFER);
-  assert.ok(xferIx.data.length > 2_000);
+  assert.equal(xferIx.data.length, 2_373);
+  assert.equal(xferIx.accounts.length, 8);
   assert.equal(payNote.amount, 900_000n);
   assert.equal(changeNote.amount, 600_000n);
   assert.equal(bytesToHex(nullifier), vectors.epoch_page.alice_note.nullifier_hex);
 
+  // Merge two distinct Bob SOL notes + assert self-merge rejection!
+  const bob = await prover.deriveKeysFromSeed(hexToBytes(vectors.bob.seed_hex));
+  const bobSolNotes = (await prover.scanEpochPageSpendable(bob, pageBytes, 0)).filter(
+    (n) => n.isNativeSol,
+  );
+  assert.ok(bobSolNotes.length >= 2);
+  await assert.rejects(
+    prover.buildMergeInstruction({
+      payer,
+      poolId: 0,
+      outPageId: 1n,
+      input1PageIds: [0n],
+      ring1: ring,
+      note1: ownedNote,
+      secretIndex1: vectors.epoch_page.alice_note.slot_index,
+      input2PageIds: [0n],
+      ring2: ring,
+      note2: ownedNote,
+      secretIndex2: vectors.epoch_page.alice_note.slot_index,
+      ownerAddr: vectors.alice.address,
+    }),
+  );
+  const { instruction: mergeIx } = await prover.buildMergeInstruction({
+    payer,
+    poolId: 0,
+    outPageId: 1n,
+    input1PageIds: [0n],
+    ring1: ring,
+    note1: bobSolNotes[0],
+    secretIndex1: bobSolNotes[0].slotIndex,
+    input2PageIds: [0n],
+    ring2: ring,
+    note2: bobSolNotes[1],
+    secretIndex2: bobSolNotes[1].slotIndex,
+    ownerAddr: vectors.bob.address,
+  });
+  assert.equal(mergeIx.data[0], core.TAG_MERGE);
+  assert.equal(mergeIx.data.length, 2_950);
+  assert.equal(mergeIx.accounts.length, 10);
+
   const bufPlan = await prover.buildBufferedExecutionPlan(xferIx, 42n);
-  assert.ok(bufPlan.uploadChunks.length >= 3);
-  assert.equal(bufPlan.executeIx.data[0], core.TAG_EXEC_BUFFERED);
+  assert.equal(bufPlan.uploadChunks.length, 4);
+  assert.deepEqual(Array.from(bufPlan.executeIx.data), [core.TAG_EXEC_BUFFERED, core.TAG_TRANSFER]);
+  assert.equal(core.base58Encode(bufPlan.proofBufferPda), vectors.pdas.proof_buffer.address);
+
+  const closeIx = prover.buildCloseProofBufferInstruction({
+    payer,
+    proofBufferPda: bufPlan.proofBufferPda,
+  });
+  assert.deepEqual(Array.from(closeIx.data), [core.TAG_CLOSE_PROOF_BUFFER]);
+  assert.equal(closeIx.accounts.length, 2);
 
   const { instruction: wdIx, changeNote: wdChg } = await prover.buildWithdrawInstruction({
     payer,
@@ -226,15 +292,32 @@ test('4. prover: pure-TS Deposit, Transfer (m=5 Triptych + Bulletproofs U128), P
     inputNote: ownedNote,
     secretIndex: vectors.epoch_page.alice_note.slot_index,
     recipientAccount: payer,
-    changeAddr: aliceAddr,
+    changeAddr: vectors.alice.address,
     amount: 1_000_000n,
   });
   assert.equal(wdIx.data[0], core.TAG_WITHDRAW);
-  assert.ok(wdIx.data.length > 1_800);
+  assert.equal(wdIx.data.length, 1_966);
+  assert.equal(wdIx.accounts.length, 10);
   assert.equal(wdChg.amount, 500_000n);
+
+  const { instruction: wdFullIx } = await prover.buildWithdrawInstruction({
+    payer,
+    poolId: 0,
+    outPageId: 1n,
+    inputPageIds: [0n],
+    ring,
+    inputNote: ownedNote,
+    secretIndex: vectors.epoch_page.alice_note.slot_index,
+    recipientAccount: payer,
+    changeAddr: vectors.alice.address,
+    amount: ownedNote.amount,
+  });
+  assert.equal(wdFullIx.data[0], core.TAG_WITHDRAW);
+  assert.equal(wdFullIx.data.length, 941);
+  assert.equal(wdFullIx.accounts[1].isWritable, false);
 });
 
-test('5. disclosure & auditor: Rust-generated SelectiveDisclosure & Auditor ElGamal verify in TS', async () => {
+test('5. disclosure & auditor: Rust-generated SelectiveDisclosure, odd Lane 1 page_id & Auditor ElGamal verify in TS', async () => {
   const alice = await prover.deriveKeysFromSeed(hexToBytes(vectors.alice.seed_hex));
   const pageBytes = hexToBytes(vectors.epoch_page.page_hex);
   const receipt = JSON.parse(vectors.selective_disclosure_json);
@@ -243,6 +326,12 @@ test('5. disclosure & auditor: Rust-generated SelectiveDisclosure & Auditor ElGa
   const [note] = await prover.scanEpochPageSpendable(alice, pageBytes, vectors.epoch_page.pool_id);
   const tsProof = prover.createSelectiveDisclosureProof(note);
   assert.deepEqual(tsProof, receipt);
+
+  // Parallel append lane 1 odd page_id (> Number.MAX_SAFE_INTEGER) stays lossless!
+  const oddLane1PageId = core.pageIdForLane(1, 1n); // 72057594037927937n
+  const oddProof = prover.createSelectiveDisclosureProof({ ...note, pageId: oddLane1PageId });
+  assert.equal(oddProof.page_id, oddLane1PageId.toString());
+  assert.equal((await prover.verifySelectiveDisclosureReceipt(oddProof)).valid, true);
 
   // Rust-generated SelectiveDisclosureProof verifies standalone AND on-page in pure TS!
   assert.equal((await prover.verifySelectiveDisclosureReceipt(receipt)).valid, true);
@@ -269,11 +358,33 @@ test('5. disclosure & auditor: Rust-generated SelectiveDisclosure & Auditor ElGa
   assert.equal(bytesToHex(decrypted.assetGenerator), vectors.auditor.expected_asset_gen_hex);
 });
 
-test('6. router & relayer: Jupiter CPI excluded DEXes, default relay URL & dataSlice match canonical constants', () => {
+test('6. router & relayer: Jupiter CPI excluded DEXes, default relay URL, dataSlice & prepareRouterAccounts', async () => {
   assert.equal(core.JUPITER_CPI_EXCLUDED_DEXES.join(','), vectors.jupiter_cpi_excluded_dexes);
   assert.equal(core.AUDREN_DEFAULT_RELAY_URL, 'https://relay.audren.xyz');
   assert.deepEqual(core.PAGE_SCAN_DATA_SLICE, {
     offset: vectors.epoch_page.scan_offset,
     length: vectors.epoch_page.scan_length,
   });
+
+  const escrow0 = vectors.pdas.swap_escrow_0.address;
+  const wsol = vectors.asset_generators.wsol_mint_b58;
+  const usdc = vectors.asset_generators.usdc_mint_b58;
+  const { address: escrowInAta } = await core.deriveAssociatedTokenAddress(escrow0, wsol);
+  const { address: escrowOutAta } = await core.deriveAssociatedTokenAddress(escrow0, usdc);
+  const prep = await core.prepareRouterAccounts({
+    poolId: 0,
+    shardId: 0,
+    inputMint: wsol,
+    outputMint: usdc,
+    routerAccounts: [
+      { pubkey: escrowInAta, isSigner: false, isWritable: true },
+      { pubkey: escrow0, isSigner: true, isWritable: true },
+      { pubkey: escrowOutAta, isSigner: false, isWritable: true },
+    ],
+  });
+  assert.equal(prep.escrowPda, escrow0);
+  assert.equal(prep.escrowInAta, escrowInAta);
+  assert.equal(prep.escrowOutAta, escrowOutAta);
+  assert.deepEqual([prep.escrowIdx, prep.escrowInIdx, prep.escrowOutIdx], [1, 0, 2]);
+  assert.equal(prep.accounts[1].isSigner, false);
 });

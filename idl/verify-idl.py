@@ -420,10 +420,44 @@ def main() -> None:
         assert "@audren/sdk/prover" in shim_txt, f"{shim_rel} must re-export from @audren/sdk/prover"
         assert len(shim_txt) < 1500, f"{shim_rel} looks duplicated ({len(shim_txt)} B); keep prover solely in packages/sdk"
 
+    # 18. Cross-SDK DEFAULT_RELAY_URL, UniFFI -> Swift/Kotlin binding parity & zero dead doc APIs
+    rust_relay_m = re.search(r'pub const DEFAULT_RELAY_URL:\s*&str\s*=\s*"([^"]+)"', rust_router)
+    assert rust_relay_m, "Missing DEFAULT_RELAY_URL in crates/client/src/router.rs"
+    ts_relayer = (ROOT / "packages" / "sdk" / "src" / "relayer.ts").read_text(encoding="utf-8")
+    ts_relay_m = re.search(r"export const AUDREN_DEFAULT_RELAY_URL = '([^']+)'", ts_relayer)
+    assert ts_relay_m, "Missing AUDREN_DEFAULT_RELAY_URL in packages/sdk/src/relayer.ts"
+    assert rust_relay_m.group(1) == ts_relay_m.group(1) == "https://relay.audren.xyz", (
+        f"Default relay URL drifted: rust={rust_relay_m.group(1)} ts={ts_relay_m.group(1)}"
+    )
+
+    ffi_src = (ROOT / "crates" / "audren-ffi" / "src" / "lib.rs").read_text(encoding="utf-8")
+    ffi_exports = re.findall(r"#\[uniffi::export\]\s*pub fn (\w+)\s*\(", ffi_src)
+    assert len(ffi_exports) >= 35, f"Expected >= 35 UniFFI exports, found {len(ffi_exports)}"
+    swift_gen = (ROOT / "packages" / "swift" / "Sources" / "AudrenSDK" / "AudrenSDK.swift").read_text(encoding="utf-8")
+    kotlin_gen = (ROOT / "packages" / "kotlin" / "src" / "main" / "kotlin" / "xyz" / "audren" / "sdk" / "audren_ffi.kt").read_text(encoding="utf-8")
+    for fn_snake in ffi_exports:
+        parts = fn_snake.split("_")
+        fn_camel = parts[0] + "".join(p.capitalize() for p in parts[1:])
+        assert f"public func {fn_camel}(" in swift_gen, (
+            f"Swift binding missing UniFFI export `{fn_snake}` -> `{fn_camel}` (run ./scripts/build-mobile-sdks.sh bindings)"
+        )
+        assert f"fun `{fn_camel}`(" in kotlin_gen or f"fun {fn_camel}(" in kotlin_gen, (
+            f"Kotlin binding missing UniFFI export `{fn_snake}` -> `{fn_camel}` (run ./scripts/build-mobile-sdks.sh bindings)"
+        )
+
+    dead_api_re = re.compile(r"\b(fetchRelayerInfo|submitToRelayer)\b")
+    for md in md_files:
+        m_dead = dead_api_re.search(md.read_text(encoding="utf-8"))
+        assert not m_dead, f"Stale/non-existent SDK symbol `{m_dead.group(0)}` in {md.relative_to(ROOT)}"
+
+    dev_tsx = (ROOT / "apps" / "web" / "components" / "DevelopersExperience.tsx").read_text(encoding="utf-8")
+    for tab_id in ("ts:", "rust:", "swift:", "kotlin:"):
+        assert tab_id in dev_tsx, f"apps/web/components/DevelopersExperience.tsx missing SDK tab {tab_id}"
+
     print(
         f"verify-idl: ok (v{prog_version}, {len(ix_tags)} instructions, {len(expected_sizes)} fixed accounts + ProofBuffer, "
         f"{len(pda_prefixes)} PDAs ({len(seen_pda_to_acc)} linked in ixs), {len(core_errs)} errors, "
-        f"10 version manifests, 4 SDKs (Rust/TS/Swift/Kotlin) + spec/test-vectors.json, "
+        f"10 version manifests, 4 SDKs (Rust/TS/Swift/Kotlin, {len(ffi_exports)} synced UniFFI exports) + spec/test-vectors.json, "
         f"{len(rust_dexes)} CPI-excluded DEXes, {len(md_files)} docs, "
         f"Apache-2.0, brand/OG parity, security.json, .security.txt, protocol.ts, and Agave {builder_ver}/{tools_ver}/sBPF{sbf_arch} pins matched)"
     )

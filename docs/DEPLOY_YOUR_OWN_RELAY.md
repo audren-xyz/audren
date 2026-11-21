@@ -144,10 +144,11 @@ Confirm that `/v1/info?cluster=mainnet` shows:
 
 ### B. In `@audren/sdk`
 ```ts
-import { fetchRelayerInfo, submitToRelayer } from '@audren/sdk';
+import { AudrenRelayClient } from '@audren/sdk';
 
 const RELAY_URL = 'https://audren-relay.<your-subdomain>.workers.dev';
-const info = await fetchRelayerInfo(RELAY_URL, 'mainnet');
+const relay = new AudrenRelayClient(RELAY_URL);
+const info = await relay.getInfo('mainnet');
 console.log('Relayer fee payer:', info.relayerPubkey);
 ```
 

@@ -481,6 +481,22 @@ fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -654,6 +670,80 @@ public func FfiConverterTypeFfiAccountMeta_lift(_ buf: RustBuffer) throws -> Ffi
 #endif
 public func FfiConverterTypeFfiAccountMeta_lower(_ value: FfiAccountMeta) -> RustBuffer {
     return FfiConverterTypeFfiAccountMeta.lower(value)
+}
+
+
+public struct FfiAppendLaneState: Equatable, Hashable {
+    public var version: UInt8
+    public var laneId: UInt8
+    public var bump: UInt8
+    public var rentVaultBump: UInt8
+    public var poolId: UInt32
+    public var currentPageId: UInt64
+    public var createdSlot: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(version: UInt8, laneId: UInt8, bump: UInt8, rentVaultBump: UInt8, poolId: UInt32, currentPageId: UInt64, createdSlot: UInt64) {
+        self.version = version
+        self.laneId = laneId
+        self.bump = bump
+        self.rentVaultBump = rentVaultBump
+        self.poolId = poolId
+        self.currentPageId = currentPageId
+        self.createdSlot = createdSlot
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiAppendLaneState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAppendLaneState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAppendLaneState {
+        return
+            try FfiAppendLaneState(
+                version: FfiConverterUInt8.read(from: &buf), 
+                laneId: FfiConverterUInt8.read(from: &buf), 
+                bump: FfiConverterUInt8.read(from: &buf), 
+                rentVaultBump: FfiConverterUInt8.read(from: &buf), 
+                poolId: FfiConverterUInt32.read(from: &buf), 
+                currentPageId: FfiConverterUInt64.read(from: &buf), 
+                createdSlot: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiAppendLaneState, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.version, into: &buf)
+        FfiConverterUInt8.write(value.laneId, into: &buf)
+        FfiConverterUInt8.write(value.bump, into: &buf)
+        FfiConverterUInt8.write(value.rentVaultBump, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt64.write(value.currentPageId, into: &buf)
+        FfiConverterUInt64.write(value.createdSlot, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAppendLaneState_lift(_ buf: RustBuffer) throws -> FfiAppendLaneState {
+    return try FfiConverterTypeFfiAppendLaneState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAppendLaneState_lower(_ value: FfiAppendLaneState) -> RustBuffer {
+    return FfiConverterTypeFfiAppendLaneState.lower(value)
 }
 
 
@@ -2465,6 +2555,16 @@ public func buildBufferedExecutionPlan(nonce: UInt64, inner: FfiBuiltInstruction
     )
 })
 }
+public func buildCloseProofBufferInstruction(programId: String, payer: String, nonce: UInt64)throws  -> FfiBuiltInstruction  {
+    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(
+        FfiConverterString.lower(programId),
+        FfiConverterString.lower(payer),
+        FfiConverterUInt64.lower(nonce),uniffiCallStatus
+    )
+})
+}
 public func buildDepositInstruction(params: FfiDepositParams)throws  -> FfiBuiltInstruction  {
     return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
@@ -2478,6 +2578,28 @@ public func buildMergeInstruction(params: FfiMergeParams)throws  -> FfiBuiltInst
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_build_merge_instruction(
         FfiConverterTypeFfiMergeParams_lower(params),uniffiCallStatus
+    )
+})
+}
+public func buildOpenLanePageInstruction(programId: String, payer: String, poolId: UInt32, currentPageId: UInt64)throws  -> FfiBuiltInstruction  {
+    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(
+        FfiConverterString.lower(programId),
+        FfiConverterString.lower(payer),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt64.lower(currentPageId),uniffiCallStatus
+    )
+})
+}
+public func buildOpenPageInstruction(programId: String, payer: String, poolId: UInt32, currentPageId: UInt64)throws  -> FfiBuiltInstruction  {
+    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_build_open_page_instruction(
+        FfiConverterString.lower(programId),
+        FfiConverterString.lower(payer),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt64.lower(currentPageId),uniffiCallStatus
     )
 })
 }
@@ -2513,6 +2635,14 @@ public func createSelectiveDisclosureProof(note: FfiOwnedNote) -> FfiSelectiveDi
     )
 })
 }
+public func decodeAppendLaneState(data: Data)throws  -> FfiAppendLaneState  {
+    return try  FfiConverterTypeFfiAppendLaneState_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_decode_append_lane_state(
+        FfiConverterData.lower(data),uniffiCallStatus
+    )
+})
+}
 public func decodeEpochPageHeader(data: Data)throws  -> FfiEpochPageHeader  {
     return try  FfiConverterTypeFfiEpochPageHeader_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
@@ -2533,6 +2663,16 @@ public func defaultRelayUrl() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_default_relay_url(uniffiCallStatus
+    )
+})
+}
+public func deriveAssociatedTokenAddress(ownerB58: String, mintB58: String, tokenProgramB58: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_associated_token_address(
+        FfiConverterString.lower(ownerB58),
+        FfiConverterString.lower(mintB58),
+        FfiConverterString.lower(tokenProgramB58),uniffiCallStatus
     )
 })
 }
@@ -2682,6 +2822,33 @@ public func jupiterCpiExcludedDexes() -> [String]  {
     )
 })
 }
+public func laneOfPageId(pageId: UInt64) -> UInt8  {
+    return try!  FfiConverterUInt8.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_lane_of_page_id(
+        FfiConverterUInt64.lower(pageId),uniffiCallStatus
+    )
+})
+}
+public func netDepositAmount(grossAmount: UInt64, feeBps: UInt16, maxFee: UInt64) -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_net_deposit_amount(
+        FfiConverterUInt64.lower(grossAmount),
+        FfiConverterUInt16.lower(feeBps),
+        FfiConverterUInt64.lower(maxFee),uniffiCallStatus
+    )
+})
+}
+public func pageIdForLane(laneId: UInt8, seq: UInt64)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_page_id_for_lane(
+        FfiConverterUInt8.lower(laneId),
+        FfiConverterUInt64.lower(seq),uniffiCallStatus
+    )
+})
+}
 public func pageScanDataSlice() -> FfiDataSlice  {
     return try!  FfiConverterTypeFfiDataSlice_lift(try! rustCall() {
         uniffiCallStatus in
@@ -2743,6 +2910,14 @@ public func scanPageDataslice(pageId: UInt64, slice1056: Data, spendPk32: Data, 
     )
 })
 }
+public func seqOfPageId(pageId: UInt64) -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_seq_of_page_id(
+        FfiConverterUInt64.lower(pageId),uniffiCallStatus
+    )
+})
+}
 public func verifySelectiveDisclosureOnPage(proof: FfiSelectiveDisclosureProof, pageBytes: Data)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
@@ -2785,10 +2960,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_build_buffered_execution_plan() != 8649) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_audren_ffi_checksum_func_build_close_proof_buffer_instruction() != 39797) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_audren_ffi_checksum_func_build_deposit_instruction() != 14202) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_build_merge_instruction() != 53530) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction() != 8415) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_build_open_page_instruction() != 36337) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_build_swap_via_router_instruction() != 55178) {
@@ -2803,6 +2987,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_create_selective_disclosure_proof() != 10976) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_audren_ffi_checksum_func_decode_append_lane_state() != 27838) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_audren_ffi_checksum_func_decode_epoch_page_header() != 29208) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2810,6 +2997,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_default_relay_url() != 15592) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_derive_associated_token_address() != 29979) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_derive_auditor_keypair() != 4233) {
@@ -2860,6 +3050,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes() != 47827) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_audren_ffi_checksum_func_lane_of_page_id() != 3031) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_net_deposit_amount() != 42006) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_page_id_for_lane() != 27348) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_audren_ffi_checksum_func_page_scan_data_slice() != 2480) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2876,6 +3075,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_scan_page_dataslice() != 54765) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_seq_of_page_id() != 51006) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_verify_selective_disclosure_on_page() != 38521) {

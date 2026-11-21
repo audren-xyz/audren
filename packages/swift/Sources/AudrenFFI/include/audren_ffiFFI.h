@@ -258,6 +258,11 @@ RustBuffer uniffi_audren_ffi_fn_func_auditor_decrypt_note(RustBuffer auditor_sk_
 RustBuffer uniffi_audren_ffi_fn_func_build_buffered_execution_plan(uint64_t nonce, RustBuffer inner, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_CLOSE_PROOF_BUFFER_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_CLOSE_PROOF_BUFFER_INSTRUCTION
+RustBuffer uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(RustBuffer program_id, RustBuffer payer, uint64_t nonce, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_INSTRUCTION
 RustBuffer uniffi_audren_ffi_fn_func_build_deposit_instruction(RustBuffer params, RustCallStatus *_Nonnull out_status
@@ -266,6 +271,16 @@ RustBuffer uniffi_audren_ffi_fn_func_build_deposit_instruction(RustBuffer params
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_MERGE_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_MERGE_INSTRUCTION
 RustBuffer uniffi_audren_ffi_fn_func_build_merge_instruction(RustBuffer params, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_LANE_PAGE_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_LANE_PAGE_INSTRUCTION
+RustBuffer uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(RustBuffer program_id, RustBuffer payer, uint32_t pool_id, uint64_t current_page_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
+RustBuffer uniffi_audren_ffi_fn_func_build_open_page_instruction(RustBuffer program_id, RustBuffer payer, uint32_t pool_id, uint64_t current_page_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_SWAP_VIA_ROUTER_INSTRUCTION
@@ -288,6 +303,11 @@ RustBuffer uniffi_audren_ffi_fn_func_build_withdraw_instruction(RustBuffer param
 RustBuffer uniffi_audren_ffi_fn_func_create_selective_disclosure_proof(RustBuffer note, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_APPEND_LANE_STATE
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_APPEND_LANE_STATE
+RustBuffer uniffi_audren_ffi_fn_func_decode_append_lane_state(RustBuffer data, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_EPOCH_PAGE_HEADER
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_EPOCH_PAGE_HEADER
 RustBuffer uniffi_audren_ffi_fn_func_decode_epoch_page_header(RustBuffer data, RustCallStatus *_Nonnull out_status
@@ -302,6 +322,11 @@ RustBuffer uniffi_audren_ffi_fn_func_decode_pool_state(RustBuffer data, RustCall
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DEFAULT_RELAY_URL
 RustBuffer uniffi_audren_ffi_fn_func_default_relay_url(RustCallStatus *_Nonnull out_status
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ASSOCIATED_TOKEN_ADDRESS
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ASSOCIATED_TOKEN_ADDRESS
+RustBuffer uniffi_audren_ffi_fn_func_derive_associated_token_address(RustBuffer owner_b58, RustBuffer mint_b58, RustBuffer token_program_b58, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_AUDITOR_KEYPAIR
@@ -385,6 +410,21 @@ RustBuffer uniffi_audren_ffi_fn_func_jupiter_cpi_excluded_dexes(RustCallStatus *
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_LANE_OF_PAGE_ID
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_LANE_OF_PAGE_ID
+uint8_t uniffi_audren_ffi_fn_func_lane_of_page_id(uint64_t page_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_NET_DEPOSIT_AMOUNT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_NET_DEPOSIT_AMOUNT
+uint64_t uniffi_audren_ffi_fn_func_net_deposit_amount(uint64_t gross_amount, uint16_t fee_bps, uint64_t max_fee, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PAGE_ID_FOR_LANE
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PAGE_ID_FOR_LANE
+uint64_t uniffi_audren_ffi_fn_func_page_id_for_lane(uint8_t lane_id, uint64_t seq, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PAGE_SCAN_DATA_SLICE
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PAGE_SCAN_DATA_SLICE
 RustBuffer uniffi_audren_ffi_fn_func_page_scan_data_slice(RustCallStatus *_Nonnull out_status
@@ -415,6 +455,11 @@ RustBuffer uniffi_audren_ffi_fn_func_scan_epoch_page(uint32_t pool_id, RustBuffe
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_SCAN_PAGE_DATASLICE
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_SCAN_PAGE_DATASLICE
 RustBuffer uniffi_audren_ffi_fn_func_scan_page_dataslice(uint64_t page_id, RustBuffer slice_1056, RustBuffer spend_pk_32, RustBuffer view_sk_32, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_SEQ_OF_PAGE_ID
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_SEQ_OF_PAGE_ID
+uint64_t uniffi_audren_ffi_fn_func_seq_of_page_id(uint64_t page_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_VERIFY_SELECTIVE_DISCLOSURE_ON_PAGE
@@ -705,6 +750,12 @@ uint16_t uniffi_audren_ffi_checksum_func_build_buffered_execution_plan(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_CLOSE_PROOF_BUFFER_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_CLOSE_PROOF_BUFFER_INSTRUCTION
+uint16_t uniffi_audren_ffi_checksum_func_build_close_proof_buffer_instruction(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_INSTRUCTION
 uint16_t uniffi_audren_ffi_checksum_func_build_deposit_instruction(void
@@ -714,6 +765,18 @@ uint16_t uniffi_audren_ffi_checksum_func_build_deposit_instruction(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_MERGE_INSTRUCTION
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_MERGE_INSTRUCTION
 uint16_t uniffi_audren_ffi_checksum_func_build_merge_instruction(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_LANE_PAGE_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_LANE_PAGE_INSTRUCTION
+uint16_t uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_INSTRUCTION
+uint16_t uniffi_audren_ffi_checksum_func_build_open_page_instruction(void
     
 );
 #endif
@@ -741,6 +804,12 @@ uint16_t uniffi_audren_ffi_checksum_func_create_selective_disclosure_proof(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_APPEND_LANE_STATE
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_APPEND_LANE_STATE
+uint16_t uniffi_audren_ffi_checksum_func_decode_append_lane_state(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_EPOCH_PAGE_HEADER
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_EPOCH_PAGE_HEADER
 uint16_t uniffi_audren_ffi_checksum_func_decode_epoch_page_header(void
@@ -756,6 +825,12 @@ uint16_t uniffi_audren_ffi_checksum_func_decode_pool_state(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DEFAULT_RELAY_URL
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DEFAULT_RELAY_URL
 uint16_t uniffi_audren_ffi_checksum_func_default_relay_url(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ASSOCIATED_TOKEN_ADDRESS
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ASSOCIATED_TOKEN_ADDRESS
+uint16_t uniffi_audren_ffi_checksum_func_derive_associated_token_address(void
     
 );
 #endif
@@ -855,6 +930,24 @@ uint16_t uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_LANE_OF_PAGE_ID
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_LANE_OF_PAGE_ID
+uint16_t uniffi_audren_ffi_checksum_func_lane_of_page_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_NET_DEPOSIT_AMOUNT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_NET_DEPOSIT_AMOUNT
+uint16_t uniffi_audren_ffi_checksum_func_net_deposit_amount(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PAGE_ID_FOR_LANE
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PAGE_ID_FOR_LANE
+uint16_t uniffi_audren_ffi_checksum_func_page_id_for_lane(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PAGE_SCAN_DATA_SLICE
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PAGE_SCAN_DATA_SLICE
 uint16_t uniffi_audren_ffi_checksum_func_page_scan_data_slice(void
@@ -888,6 +981,12 @@ uint16_t uniffi_audren_ffi_checksum_func_scan_epoch_page(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_SCAN_PAGE_DATASLICE
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_SCAN_PAGE_DATASLICE
 uint16_t uniffi_audren_ffi_checksum_func_scan_page_dataslice(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_SEQ_OF_PAGE_ID
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_SEQ_OF_PAGE_ID
+uint16_t uniffi_audren_ffi_checksum_func_seq_of_page_id(void
     
 );
 #endif

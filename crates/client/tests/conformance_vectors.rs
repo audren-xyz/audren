@@ -672,9 +672,50 @@ fn canonical_conformance_vectors_match_and_prove_end_to_end() {
     )
     .unwrap();
     assert_eq!(xfer_ix.data[0], 3); // Tag 3 = Transfer
-    assert!(xfer_ix.data.len() > 2_000);
+    assert_eq!(xfer_ix.data.len(), 2_373);
+    assert_eq!(xfer_ix.accounts.len(), 8);
     assert_eq!(pay_note.amount, 900_000);
     assert_eq!(chg_note.amount, 600_000);
+
+    // Audited Transfer + extract_transfer_auditor_ciphertexts round-trip
+    let aud_seed = from_hex(&expected.auditor.auditor_seed_hex);
+    let mut aud_seed32 = [0u8; 32];
+    aud_seed32.copy_from_slice(&aud_seed);
+    let aud_kp = AuditorKeypair::from_seed(&aud_seed32);
+    let (aud_xfer_ix, _, _) = build_transfer(
+        program_id,
+        payer,
+        0,
+        1,
+        &[0],
+        &ring,
+        &full_note,
+        expected.epoch_page.alice_note.slot_index as usize,
+        &bob_addr,
+        &alice.address(),
+        900_000,
+        Some(aud_kp.auditor_pk),
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    let (s1, s2, m1, m2) =
+        audren_client::instructions::extract_transfer_auditor_ciphertexts(&aud_xfer_ix.data)
+            .expect("extract audited ciphertexts");
+    assert_eq!(
+        aud_kp.decrypt_spent_pubkey(&s1, &s2).unwrap(),
+        full_note.stealth_pk
+    );
+    assert_eq!(
+        aud_kp.decrypt_asset_generator(&m1, &m2).unwrap(),
+        asset_generator(&full_note.mint)
+    );
+
+    // SelectiveDisclosureProof::from_owned_note matches canonical vector JSON
+    let sd_from_helper = SelectiveDisclosureProof::from_owned_note(&full_note);
+    let sd_expected: SelectiveDisclosureProof =
+        serde_json::from_str(&expected.selective_disclosure_json).unwrap();
+    assert_eq!(sd_from_helper, sd_expected);
 
     let (wd_ix, wd_chg) = build_withdraw(
         program_id,
@@ -694,6 +735,36 @@ fn canonical_conformance_vectors_match_and_prove_end_to_end() {
     )
     .unwrap();
     assert_eq!(wd_ix.data[0], 6); // Tag 6 = Withdraw
-    assert!(wd_ix.data.len() > 1_800);
+    assert_eq!(wd_ix.data.len(), 1_966);
+    assert_eq!(wd_ix.accounts.len(), 10);
     assert_eq!(wd_chg.unwrap().amount, 500_000);
+
+    // Router & Relayer helpers
+    assert_eq!(
+        audren_client::router::DEFAULT_RELAY_URL,
+        "https://relay.audren.xyz"
+    );
+    let classic_tp = Address::new_from_array(audren_core::CLASSIC_TOKEN_PROGRAM_ID);
+    let wsol_mint: Address = expected.asset_generators.wsol_mint_b58.parse().unwrap();
+    let usdc_mint: Address = expected.asset_generators.usdc_mint_b58.parse().unwrap();
+    let (escrow0, _) = derive_swap_escrow_pda(&program_id, 0, 0);
+    let escrow_in = audren_client::pda::derive_ata(&escrow0, &classic_tp, &wsol_mint);
+    let escrow_out = audren_client::pda::derive_ata(&escrow0, &classic_tp, &usdc_mint);
+    let prep = audren_client::router::prepare_router_accounts(
+        &program_id,
+        0,
+        0,
+        &wsol_mint,
+        &usdc_mint,
+        &classic_tp,
+        &classic_tp,
+        &[
+            audren_client::instructions::AudrenAccountMeta::writable(escrow_in),
+            audren_client::instructions::AudrenAccountMeta::writable_signer(escrow0),
+            audren_client::instructions::AudrenAccountMeta::writable(escrow_out),
+        ],
+    )
+    .unwrap();
+    assert_eq!((prep.escrow_idx, prep.escrow_in_idx, prep.escrow_out_idx), (1, 0, 2));
+    assert!(!prep.accounts[1].is_signer);
 }

@@ -13,7 +13,7 @@ The service sees connection metadata and public instruction/quote parameters. `s
 ## How it fits together
 
 ```text
-  Client (Web UI, @audren/sdk, Rust client, custom wallet)
+  Client (Web UI, @audren/sdk, Rust / Swift / Kotlin SDKs, custom wallet)
     │  1. Proves Triptych + Bulletproof locally (spending and viewing keys never leave client)
     │  2. POST /v1/swap/quote & /v1/swap/instructions (for Tag 5 swaps)
     │  3. POST /v1/relay/submit (unsigned Audren instruction bytes + account metas)

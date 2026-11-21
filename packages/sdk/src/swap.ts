@@ -1,3 +1,6 @@
+import { AUDREN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID } from './constants.ts';
+import { deriveAssociatedTokenAddress, deriveSwapEscrowPda } from './pda.ts';
+
 /**
  * Router-Agnostic Private Swap Client & Stateless Relayer Helper.
  *
@@ -140,4 +143,62 @@ export function prepareRouterAccountsForAudren(
     isSigner: meta.pubkey === swapEscrowAddress ? false : meta.isSigner,
     isWritable: meta.isWritable,
   }));
+}
+
+export interface PreparedRouterAccounts {
+  escrowPda: string;
+  escrowInAta: string;
+  escrowOutAta: string;
+  escrowIdx: number;
+  escrowInIdx: number;
+  escrowOutIdx: number;
+  accounts: RouterAccountMeta[];
+}
+
+/**
+ * High-level cross-SDK helper (mirrors Rust `prepare_router_accounts`, Swift `prepareRouterAccounts`,
+ * and Kotlin `prepareRouterAccounts`): derives the sharded `swap_escrow` PDA and its input/output
+ * ATAs, locates `(escrowIdx, escrowInIdx, escrowOutIdx)`, and strips the external signer bit on
+ * `swap_escrow` so Audren can sign via `invoke_signed`.
+ */
+export async function prepareRouterAccounts(params: {
+  poolId: number;
+  shardId: number;
+  inputMint: string;
+  outputMint: string;
+  inputTokenProgram?: string;
+  outputTokenProgram?: string;
+  routerAccounts: readonly RouterAccountMeta[];
+  programId?: string;
+}): Promise<PreparedRouterAccounts> {
+  const programId = params.programId ?? AUDREN_PROGRAM_ID;
+  const inputTp = params.inputTokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID;
+  const outputTp = params.outputTokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID;
+  const { address: escrowPda } = await deriveSwapEscrowPda(params.poolId, params.shardId, programId);
+  const { address: escrowInAta } = await deriveAssociatedTokenAddress(
+    escrowPda,
+    params.inputMint,
+    inputTp,
+  );
+  const { address: escrowOutAta } = await deriveAssociatedTokenAddress(
+    escrowPda,
+    params.outputMint,
+    outputTp,
+  );
+  const { escrowIdx, escrowInIdx, escrowOutIdx } = resolveRouterEscrowIndices(
+    params.routerAccounts,
+    escrowPda,
+    escrowInAta,
+    escrowOutAta,
+  );
+  const accounts = prepareRouterAccountsForAudren(params.routerAccounts, escrowPda);
+  return {
+    escrowPda,
+    escrowInAta,
+    escrowOutAta,
+    escrowIdx,
+    escrowInIdx,
+    escrowOutIdx,
+    accounts,
+  };
 }

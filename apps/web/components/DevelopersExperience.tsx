@@ -26,29 +26,32 @@ import {
   deriveKeysFromSeed,
   deriveSubaccountKeys,
   scanEpochPageSpendable,
-  buildTransferInstruction,
   createSelectiveDisclosureProof,
+  verifySelectiveDisclosureOnPage,
 } from '@audren/sdk/prover';
 
 // 1. Keys & isolated sub-accounts (matching Rust, Swift & Kotlin byte-for-byte)
 const alice   = await deriveKeysFromSeed(seed32);
 const trading = await deriveSubaccountKeys(seed32, 1);
 
-// 2. Canonical PDAs & standard RPC dataSlice scan (offset: 64, length: 1056)
+// 2. Canonical PDAs & standard RPC dataSlice filter (offset: 64, length: 1056)
 const { address: poolPda } = await derivePoolPda(0, AUDREN_PROGRAM_ID);
 const { address: page0 }   = await deriveEpochPagePda(0, 0n, AUDREN_PROGRAM_ID);
+const { offset, length }   = PAGE_SCAN_DATA_SLICE;
 
-// 3. Decrypt notes, prove locally & submit via optional relayer (or direct v1 tx)
+// 3. Decrypt notes, verify Mode 1 receipt, and connect to any Audren relay
 const notes = await scanEpochPageSpendable(alice, pageBytes, 0);
 const proof = createSelectiveDisclosureProof(notes[0]);
+const check = await verifySelectiveDisclosureOnPage(proof, pageBytes);
 const relay = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);`,
   },
   rust: {
     tab: 'Rust (Cargo)',
     file: 'crates/client · native ~50 ms local proving & RPC/WS scanner',
     code: `use audren_client::{
-    keys::AudrenKeys,
+    keys::{AudrenKeys, SelectiveDisclosureProof},
     pda::{derive_epoch_page_pda, derive_pool_pda},
+    router::DEFAULT_RELAY_URL,
     scanner::{decrypt_owned_note, scan_page_dataslice},
 };
 use audren_core::AUDREN_PROGRAM_ID;
@@ -65,8 +68,11 @@ let (pool_pda, _) = derive_pool_pda(&pid, 0);
 let (page0, _)    = derive_epoch_page_pda(&pid, 0, 0);
 let hits = scan_page_dataslice(&fvk, 0, &slice_1056)?;
 
-// 3. Build Multi-Base Triptych + Batched Bulletproofs locally (~50 ms)
-// build_transfer / build_merge / build_swap_via_router / build_withdraw`,
+// 3. Decrypt owned notes, verify Mode 1 receipt & submit via optional relay
+let note    = decrypt_owned_note(&fvk, Some(&trading), &pid, 0, &page_bytes, hits[0].slot_index, None)?.unwrap();
+let receipt = SelectiveDisclosureProof::from_owned_note(&note);
+assert!(receipt.verify_against_page(&page_bytes)?);
+println!("Relayer: {DEFAULT_RELAY_URL}");`,
   },
   swift: {
     tab: 'Swift (iOS / macOS)',
@@ -87,12 +93,13 @@ let hits  = try scanPageDataslice(
     pageId: 0, slice1056: sliceBytes, spendPk32: alice.spendPk, viewSk32: alice.viewSk
 )
 
-// 3. Decrypt notes, generate Mode 1 receipt, or prove Transfer locally
+// 3. Decrypt notes, verify Mode 1 receipt, or prove Transfer locally
 let notes = try scanEpochPage(
     poolId: 0, pageBytes: pageBytes,
     spendSk32: alice.spendSk, spendPk32: alice.spendPk, viewSk32: alice.viewSk, programId: pid
 )
-let receipt = createSelectiveDisclosureProof(note: notes[0])`,
+let receipt = createSelectiveDisclosureProof(note: notes[0])
+let valid   = try verifySelectiveDisclosureOnPage(proof: receipt, pageBytes: pageBytes)`,
   },
   kotlin: {
     tab: 'Kotlin (Android / JVM)',
@@ -110,7 +117,7 @@ val pool  = derivePoolPda(0u, pid)
 val slice = pageScanDataSlice() // offset: 64, length: 1056
 val hits  = scanPageDataslice(0uL, sliceBytes, alice.spendPk, alice.viewSk)
 
-// 3. Decrypt notes, generate Mode 1 receipt, or prove Transfer locally
+// 3. Decrypt notes, verify Mode 1 receipt, or prove Transfer locally
 val notes = scanEpochPage(0u, pageBytes, alice.spendSk, alice.spendPk, alice.viewSk, pid)
 val receipt = createSelectiveDisclosureProof(notes[0])
 val valid   = verifySelectiveDisclosureOnPage(receipt, pageBytes)`,

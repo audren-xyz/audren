@@ -26,6 +26,13 @@ cargo check --workspace --tests
 pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
 pnpm --dir apps/relay typecheck
 pnpm --dir apps/web typecheck
+
+# 4. Cross-language conformance suites (Rust, FFI, Swift & Kotlin)
+cargo test -p audren-client --test conformance_vectors
+cargo test -p audren-ffi --test conformance_ffi
+./scripts/build-mobile-sdks.sh bindings
+swift test --package-path packages/swift          # macOS
+gradle -p packages/kotlin test --rerun-tasks      # JVM 21+ / Android
 ```
 
 If your change modifies any instruction, account layout, PDA seed, error code, or `security.json`, regenerate the IDLs and SDK mirrors first:
