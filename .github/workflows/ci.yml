@@ -53,7 +53,24 @@ jobs:
       - name: Run Rust & FFI canonical conformance tests (spec/test-vectors.json)
         run: |
           cargo test -p audren-client --test conformance_vectors
-          cargo test -p audren-ffi
+          cargo test -p audren-ffi --test conformance_ffi
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Run Cross-SDK Real sBPFv3 LiteSVM Suite (TypeScript + UniFFI -> verified Mainnet audren.so)
+        env:
+          AUDREN_REQUIRE_SBF: '1'
+        run: |
+          pnpm --dir packages/sdk install --frozen-lockfile
+          pnpm --dir packages/sdk build
+          mkdir -p target/deploy
+          curl -fsSL https://github.com/audren-xyz/audren/releases/download/v0.2.0/audren.so -o target/deploy/audren.so
+          curl -fsSL https://github.com/audren-xyz/audren/releases/download/v0.2.0/audren.so.sha256 -o target/deploy/audren.so.sha256
+          (cd target/deploy && head -n 1 audren.so.sha256 | sha256sum -c -)
+          cargo test -p audren-ffi --test cross_sdk_litesvm -- --nocapture
       - name: Build native libaudren_ffi.so (release)
         run: cargo build -p audren-ffi --release
       - uses: actions/setup-java@v6

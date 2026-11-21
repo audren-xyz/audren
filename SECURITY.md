@@ -19,8 +19,11 @@ Do not open public GitHub issues or disclose active vulnerabilities publicly bef
 In-scope components:
 - `program/` — Audren on-chain Solana program (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`)
 - `crates/audren-core/` — shared wire layouts, PDA derivations, and error codes
-- `crates/client/` — Rust prover, scanner, and router swap builder
-- `packages/sdk/` — `@audren/sdk` TypeScript SDK and published IDLs
+- `crates/client/` — Rust SDK (prover, scanner, selective disclosure, router swap builder)
+- `crates/audren-ffi/` — UniFFI native mobile bridge backing Swift & Kotlin (`45` synced exports)
+- `packages/sdk/` — `@audren/sdk` + `@audren/sdk/prover` TypeScript SDK and published IDLs
+- `packages/swift/` — `AudrenSDK` Swift (iOS 15+ / macOS 13+) SDK
+- `packages/kotlin/` — `xyz.audren.sdk` Kotlin (Android API 24+ / JVM 21+) SDK
 - `apps/relay/` — standalone Privacy Relayer firewall, accounting, and guard logic
 - `apps/web/` — client-side browser prover, wallet integration, and Worker proxy
 

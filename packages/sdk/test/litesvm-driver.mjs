@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * JSON stdin -> stdout driver for `crates/client/tests/cross_sdk_litesvm.rs`.
+ * JSON stdin -> stdout driver for `crates/audren-ffi/tests/cross_sdk_litesvm.rs`.
  *
  * Calls the REAL compiled `@audren/sdk` and `@audren/sdk/prover` bundles to build
  * production Solana instructions (Deposit, Transfer, Merge, SwapViaRouter, Withdraw,

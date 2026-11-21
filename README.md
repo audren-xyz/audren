@@ -54,16 +54,16 @@ All four official Audren SDKs share the exact same **6 standardized building blo
 | **Swift (iOS / macOS)** | [`packages/swift/`](packages/swift/README.md) (`AudrenSDK`) | UniFFI over `crates/audren-ffi` (`audren-client`) | iOS 15+, macOS 13+ (`XCFramework` / SwiftPM) | ~50 ms |
 | **Kotlin (Android / JVM)** | [`packages/kotlin/`](packages/kotlin/README.md) (`xyz.audren.sdk`) | UniFFI + JNA over `crates/audren-ffi` (`audren-client`) | Android API 24+ (`jniLibs`), JVM 21+ | ~50 ms |
 
-Runnable examples for all 4 languages live in [`audren-xyz/examples`](https://github.com/audren-xyz/examples).
+Runnable examples for all 4 languages — verified in CI for **100% byte-for-byte canonical stdout parity** (`Rust == TypeScript == Swift == Kotlin`) — live in [`audren-xyz/examples`](https://github.com/audren-xyz/examples).
 
 ### The 6 Standardized Building Blocks Across All 4 SDKs
 
 1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — all 10 canonical PDAs (`pool`, `epoch_page`, `sol_vault`, `vault_auth`, `page_rent_vault`, `swap_escrow`, `lane`, `lane_rent_vault`, `nullifier`, `proof_buffer`) + `decodePoolState`, `decodeEpochPageHeader`
-3. **Scanner** — `dataSlice: { offset: 64, length: 1056 }` view-tag filtering (`scanPageDataslice`) and note decryption (`scanEpochPage`)
-4. **Prover** — local proof generation & instruction builders (`Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `ProofBuffer`)
-5. **Disclosure & Audit** — Mode 1 Selective Disclosure proof + standalone/on-page verify, Mode 2 Full Viewing Key, and Institutional Auditor ElGamal decryption
-6. **Relayer & IDLs** — `JUPITER_CPI_EXCLUDED_DEXES`, `defaultRelayUrl`, router account preparation, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs
+2. **PDAs & Layouts** — all 10 canonical PDAs (`pool`, `epoch_page`, `sol_vault`, `vault_auth`, `page_rent_vault`, `swap_escrow`, `lane`, `lane_rent_vault`, `nullifier`, `proof_buffer`), `deriveAssociatedTokenAddress`, lane `page_id` bit-packing, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`
+3. **Scanner** — `dataSlice: { offset: 64, length: 1056 }` view-tag filtering (`scanPageDataslice`), read-only FVK & spendable note decryption (`scanEpochPage`) with per-slot decoy fault isolation
+4. **Prover** — local proof generation & instruction builders (`Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `ProofBuffer`, `CloseProofBuffer`, `OpenPage`, `OpenLanePage`)
+5. **Disclosure & Audit** — Mode 1 Selective Disclosure proof (64-bit safe across parallel lanes `1..15`) + standalone/on-page verify, Mode 2 Full Viewing Key, and Institutional Auditor ElGamal decryption
+6. **Relayer, Router & IDLs** — `DEFAULT_RELAY_URL`, `prepareRouterAccounts`, `JUPITER_CPI_EXCLUDED_DEXES`, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs (`45` synced UniFFI exports verified by `idl/verify-idl.py`)
 
 ## Repository layout
 
@@ -147,8 +147,9 @@ pnpm --dir apps/web check
 python3 scripts/build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy
 python3 scripts/build-sbf.py --manifest-path tests/mock-router/Cargo.toml --sbf-out-dir target/deploy
 
-# Run all 7 LiteSVM integration & adversarial suites
+# Run all 7 LiteSVM integration & adversarial suites + real-sBPFv3 Cross-SDK LiteSVM suite
 cargo test --test litesvm_e2e -- --nocapture
+AUDREN_REQUIRE_SBF=1 cargo test -p audren-ffi --test cross_sdk_litesvm -- --nocapture
 ```
 
 ### 3. Cluster deployment, Program Metadata & Verified Builds

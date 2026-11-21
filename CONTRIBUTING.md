@@ -47,6 +47,7 @@ If your change modifies `program/` or `tests/mock-router/`, build the determinis
 python3 scripts/build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy
 python3 scripts/build-sbf.py --manifest-path tests/mock-router/Cargo.toml --sbf-out-dir target/deploy
 cargo test --test litesvm_e2e -- --nocapture
+AUDREN_REQUIRE_SBF=1 cargo test -p audren-ffi --test cross_sdk_litesvm -- --nocapture
 ```
 
 ## Pull Request Guidelines
