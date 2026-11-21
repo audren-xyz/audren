@@ -1,10 +1,25 @@
 /**
  * Router-Agnostic Private Swap Client & Stateless Relayer Helper.
  *
- * Works with any Solana DEX aggregator or AMM router (Jupiter v6, Orca, Raydium,
- * Meteora, Phoenix, Titan, DFlow, or custom routers) that emits a swap instruction
- * signed by Audren's isolated `swap_escrow` PDA.
+ * Works with compatible PDA-signing Solana routers that satisfy Audren custody
+ * checks and transaction limits. Hosted route availability is provider-specific.
  */
+
+/**
+ * Jupiter DEX labels that reject PDA CPI callers (e.g. `InvalidRealUser` / top-level
+ * instruction sysvar introspection) and are excluded by default when routing through
+ * Audren's isolated `swap_escrow` PDA.
+ */
+export const JUPITER_CPI_EXCLUDED_DEXES: readonly string[] = [
+  'Kipseli',
+  'Quantum',
+  'BisonFi',
+  'BisonFi Predict',
+  'BinaryFi',
+  'Obsidian',
+  'VaultLiquidUnstake',
+  'Sanctum Prop S',
+];
 
 export interface RouterQuoteParams {
   inputMint: string;
@@ -12,6 +27,8 @@ export interface RouterQuoteParams {
   amount: string;
   slippageBps: number;
   onlyDirectRoutes?: boolean;
+  /** Override DEX exclusions (defaults to `JUPITER_CPI_EXCLUDED_DEXES`; pass `[]` to disable). */
+  excludeDexes?: readonly string[];
 }
 
 export interface RouterAccountMeta {
@@ -52,12 +69,14 @@ export async function fetchAggregatorPrivateSwapRoute(
   swap: RouterSwapInstructionsResponse;
 }> {
   const base = aggregatorBaseUrl.replace(/\/$/, '');
+  const excluded = quoteParams.excludeDexes ?? JUPITER_CPI_EXCLUDED_DEXES;
   const qs = new URLSearchParams({
     inputMint: quoteParams.inputMint,
     outputMint: quoteParams.outputMint,
     amount: quoteParams.amount,
     slippageBps: String(quoteParams.slippageBps),
     ...(quoteParams.onlyDirectRoutes ? { onlyDirectRoutes: 'true' } : {}),
+    ...(excluded.length > 0 ? { excludeDexes: excluded.join(',') } : {}),
   });
   const quoteRes = await fetch(`${base}/quote?${qs.toString()}`);
   if (!quoteRes.ok) {
@@ -84,7 +103,7 @@ export async function fetchAggregatorPrivateSwapRoute(
 
 /**
  * Locate `(escrowIdx, escrowInIdx, escrowOutIdx)` inside an arbitrary external router
- * account list so any DEX or aggregator plugs into Audren's `SwapViaRouter` instruction.
+ * account list for compatible PDA-signing routes accepted by Audren's `SwapViaRouter` instruction.
  */
 export function resolveRouterEscrowIndices(
   routerAccounts: readonly RouterAccountMeta[],

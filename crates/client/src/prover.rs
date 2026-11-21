@@ -1,8 +1,8 @@
-//! Pure Ristretto255 Provers matching `programs/audren/program/src/crypto.rs` byte-for-byte:
+//! Pure Ristretto255 Provers matching `program/src/crypto.rs` byte-for-byte:
 //! - Multi-Base Binary Triptych (`m = 5` -> 32 notes / 1 page, `m = 6` -> 64 notes / 2 pages,
 //!   `m = 7` -> 128 notes / 4 pages), optional audited mode
 //! - Verifiable Auditor Asset Encryption (`192 B`)
-//! - Cross-Base Bridge 1 (`128 B`) & 2 (`224 B`)
+//! - Cross-Base Bridge 1 (`128 B`) & 2 (`256 B`)
 //! - Native Agave Batched Bulletproofs (`672 B` / `736 B`) via `solana-zk-sdk`
 
 use crate::ClientError;
@@ -126,8 +126,10 @@ impl RingSlotWitness {
 
 /// Witness secrets for the real spent note at index `secret_index` in the ring.
 pub struct TriptychWitness<'a> {
-    /// Ring size exponent (`6` -> 64 slots / 1 page, `7` -> 128 slots / 2 pages).
+    /// Ring size exponent (`5` -> 32 slots / 1 page, `6` -> 64 slots / 2 pages, `7` -> 128 slots / 4 pages).
     pub m: u8,
+    /// Ordered on-chain `EpochPage` IDs corresponding to each `32`-slot page chunk in `ring`.
+    pub input_page_ids: &'a [u64],
     /// Index `l ∈ 0..2^m` of the real spent note in `ring`.
     pub secret_index: usize,
     /// Full ring slice (`len == 2^m`; unpopulated tail slots are `RingSlotWitness::EMPTY`).
@@ -197,12 +199,18 @@ pub fn prove_triptych<R: RngCore + CryptoRng>(
     w: &TriptychWitness<'_>,
     rng: &mut R,
 ) -> Result<TriptychProofOutput, ClientError> {
-    input_pages_for_m(w.m).map_err(|_| ClientError::InvalidProofInput("m must be 5, 6, or 7"))?;
+    let n_pages = input_pages_for_m(w.m)
+        .map_err(|_| ClientError::InvalidProofInput("m must be 5, 6, or 7"))?;
     let mu = w.m as usize;
     let n = 1usize << mu;
     if w.ring.len() != n || w.secret_index >= n {
         return Err(ClientError::InvalidProofInput(
             "ring length must equal 2^m and secret_index < 2^m",
+        ));
+    }
+    if w.input_page_ids.len() != n_pages {
+        return Err(ClientError::InvalidProofInput(
+            "input_page_ids length must match m (1, 2, or 4 pages)",
         ));
     }
     if w.spend_x == Scalar::ZERO {
@@ -212,6 +220,69 @@ pub fn prove_triptych<R: RngCore + CryptoRng>(
     let audited = w.auditor_pk.is_some();
     let expected_len = triptych_proof_len(w.m, audited)
         .map_err(|_| ClientError::InvalidProofInput("invalid triptych dimensions"))?;
+
+    // Compute per-page immutable prefix counts and strong Fiat-Shamir `ring_root`
+    // matching `program/src/crypto.rs::verify_triptych` byte-for-byte.
+    let mut prefix_counts = [0u8; 4];
+    let mut page_hashes = [[0u8; 32]; 4];
+    for p_idx in 0..n_pages {
+        let base_k = p_idx * PAGE_CAPACITY;
+        let mut prefix = 0usize;
+        while prefix < PAGE_CAPACITY && w.ring[base_k + prefix].stealth_pk != IDENTITY {
+            prefix += 1;
+        }
+        if prefix == 0 {
+            return Err(ClientError::InvalidProofInput(
+                "input page must have at least 1 populated slot",
+            ));
+        }
+        for slot in prefix..PAGE_CAPACITY {
+            let s = &w.ring[base_k + slot];
+            if s.stealth_pk != IDENTITY || s.asset_tag != IDENTITY || s.commitment != IDENTITY {
+                return Err(ClientError::InvalidProofInput(
+                    "ring slots within a page must be densely populated from 0..prefix",
+                ));
+            }
+        }
+        prefix_counts[p_idx] = prefix as u8;
+        let mut stealth_buf = Vec::with_capacity(prefix * 32);
+        let mut asset_buf = Vec::with_capacity(prefix * 32);
+        let mut commit_buf = Vec::with_capacity(prefix * 32);
+        for slot in 0..prefix {
+            let entry = &w.ring[base_k + slot];
+            stealth_buf.extend_from_slice(&entry.stealth_pk);
+            asset_buf.extend_from_slice(&entry.asset_tag);
+            commit_buf.extend_from_slice(&entry.commitment);
+        }
+        page_hashes[p_idx] = hashv(&[
+            b"audren/v1/ring/page",
+            &w.input_page_ids[p_idx].to_le_bytes(),
+            &[prefix as u8],
+            &stealth_buf,
+            &asset_buf,
+            &commit_buf,
+        ])
+        .to_bytes();
+    }
+    if (w.secret_index % PAGE_CAPACITY) >= prefix_counts[w.secret_index / PAGE_CAPACITY] as usize {
+        return Err(ClientError::InvalidProofInput(
+            "secret_index points outside page prefix_count",
+        ));
+    }
+    let aud_bytes = w.auditor_pk.unwrap_or(IDENTITY);
+    let mut ring_parts: [&[u8]; 7] = [
+        b"audren/v1/triptych/ring",
+        &[w.m, u8::from(audited)],
+        &aud_bytes,
+        &[],
+        &[],
+        &[],
+        &[],
+    ];
+    for p_idx in 0..n_pages {
+        ring_parts[3 + p_idx] = &page_hashes[p_idx];
+    }
+    let ring_root = hashv(&ring_parts[..3 + n_pages]).to_bytes();
 
     let g = g_point();
     let h = h_point();
@@ -234,8 +305,14 @@ pub fn prove_triptych<R: RngCore + CryptoRng>(
         ring_v.push(decompress(&slot.commitment)?);
     }
 
-    // Challenge 1: `alpha` binds `A_spend` and `V_spend` before `W[..]`.
-    let alpha = hash_to_scalar(&[b"triptych/alpha", &w.ctx_hash, &w.a_spend, &w.v_spend]);
+    // Challenge 1: `alpha` binds `ctx_hash`, `ring_root`, `A_spend`, and `V_spend` before `W[..]`.
+    let alpha = hash_to_scalar(&[
+        b"triptych/alpha",
+        &w.ctx_hash,
+        &ring_root,
+        &w.a_spend,
+        &w.v_spend,
+    ]);
     let alpha_bytes = alpha.to_bytes();
 
     // Effective difference scalar `delta` such that:
@@ -342,9 +419,10 @@ pub fn prove_triptych<R: RngCore + CryptoRng>(
     let c_bytes = compress(&pt_c);
     let d_bytes = compress(&pt_d);
 
-    // Challenge 2: `xi` binds all prover commitments identically to `program/src/crypto.rs`.
-    let mut xi_slices: Vec<&[u8]> = Vec::with_capacity(8 + 5 * mu);
+    // Challenge 2: `xi` binds `ring_root` and all prover commitments identically to `program/src/crypto.rs`.
+    let mut xi_slices: Vec<&[u8]> = Vec::with_capacity(9 + 5 * mu);
     xi_slices.push(b"triptych/xi");
+    xi_slices.push(&ring_root);
     xi_slices.push(&alpha_bytes);
     xi_slices.push(&j_bytes);
     xi_slices.push(&a_bytes);
@@ -400,6 +478,7 @@ pub fn prove_triptych<R: RngCore + CryptoRng>(
 
     // Serialize in exact wire order matching `verify_triptych`.
     let mut out = Vec::with_capacity(expected_len);
+    out.extend_from_slice(&prefix_counts[..n_pages]);
     out.extend_from_slice(&j_bytes);
     out.extend_from_slice(&a_bytes);
     out.extend_from_slice(&b_bytes);

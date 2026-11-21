@@ -1,6 +1,6 @@
 //! Audren Core — shared `#![no_std]` layouts, PDA seeds, proof framing, and error codes.
 //!
-//! Consumed verbatim by both the sBPFv3 on-chain program (`programs/audren/program`)
+//! Consumed verbatim by both the sBPFv3 on-chain program (`program`)
 //! and off-chain clients (`crates/client`, TypeScript SDK, relayers) so account layouts,
 //! proof byte counts, and domain separators can never drift.
 
@@ -24,6 +24,37 @@ pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Maximum number of sharded `swap_escrow` PDAs per pool (prevents write-lock contention).
 pub const MAX_ESCROW_SHARDS: u8 = 16;
+
+/// Maximum number of independent concurrent append lanes per logical pool (`0..16`).
+/// Lane `0` uses page IDs `0, 1, 2, ...` (`(0 << 56) | seq`, 100% compatible with legacy Pool 0).
+/// Lanes `1..15` use page IDs `(lane_id << 56) | seq`, allowing lock-free parallel appends with
+/// read-only `PoolState`, per-lane `LaneRentVault`, and ONE unified pool + canonical `NullifierPDA`!
+pub const MAX_APPEND_LANES: u8 = 16;
+
+/// Mask for the 56-bit per-lane page sequence number inside a `page_id: u64`.
+pub const PAGE_SEQ_MASK: u64 = 0x00FF_FFFF_FFFF_FFFF;
+
+/// Extract the append lane (`0..16`) from a `page_id`.
+#[inline]
+pub const fn lane_of_page_id(page_id: u64) -> u8 {
+    (page_id >> 56) as u8
+}
+
+/// Extract the 56-bit sequence number within its lane from a `page_id`.
+#[inline]
+pub const fn seq_of_page_id(page_id: u64) -> u64 {
+    page_id & PAGE_SEQ_MASK
+}
+
+/// Construct a globally unique `page_id` for `(lane_id, seq)`.
+#[inline]
+pub const fn page_id_for_lane(lane_id: u8, seq: u64) -> Option<u64> {
+    if lane_id >= MAX_APPEND_LANES || seq > PAGE_SEQ_MASK {
+        None
+    } else {
+        Some(((lane_id as u64) << 56) | seq)
+    }
+}
 
 /// Classic SPL Token program ID.
 pub const CLASSIC_TOKEN_PROGRAM_ID: Bytes32 =
@@ -59,6 +90,8 @@ pub const SOL_VAULT_SEED: &[u8] = b"audren_sol";
 pub const PAGE_RENT_SEED: &[u8] = b"audren_rent";
 pub const ESCROW_SEED: &[u8] = b"audren_escrow";
 pub const PROOF_BUFFER_SEED: &[u8] = b"audren_buf";
+pub const LANE_SEED: &[u8] = b"audren_lane";
+pub const LANE_RENT_SEED: &[u8] = b"audren_lrent";
 
 /// Protocol operating mode for a pool.
 #[repr(u8)]
@@ -121,6 +154,7 @@ pub enum AudrenError {
     ArithmeticOverflow = 30,
     InsufficientPageRent = 31,
     InvalidProofBuffer = 32,
+    InvalidLane = 33,
 }
 
 impl From<AudrenError> for u32 {

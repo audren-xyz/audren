@@ -153,7 +153,9 @@ impl FullViewingKey {
         let view_sk = Option::from(Scalar::from_canonical_bytes(view_sk_bytes))
             .ok_or(ClientError::InvalidEncoding("non-canonical view_sk"))?;
         if compress(&(view_sk * g_point())) != view_pk {
-            return Err(ClientError::InvalidEncoding("view_sk does not match view_pk"));
+            return Err(ClientError::InvalidEncoding(
+                "view_sk does not match view_pk",
+            ));
         }
         Ok(Self {
             spend_pk,
@@ -268,7 +270,11 @@ pub fn derive_stealth_for_recipient<R: RngCore + CryptoRng>(
 
 /// Fast 1-byte `view_tag` check for `dataSlice` note discovery (`255/256` rejection rate).
 #[inline]
-pub fn quick_view_tag_match(fvk: &FullViewingKey, ephemeral_pk: &Point, view_tag: u8) -> Option<RistrettoPoint> {
+pub fn quick_view_tag_match(
+    fvk: &FullViewingKey,
+    ephemeral_pk: &Point,
+    view_tag: u8,
+) -> Option<RistrettoPoint> {
     let r_pt = decompress(ephemeral_pk).ok()?;
     let shared = fvk.view_sk * r_pt;
     let shared_bytes = compress(&shared);
@@ -461,7 +467,10 @@ pub fn prepare_dynamic_swap_output<R: RngCore + CryptoRng>(
 }
 
 /// Compute a note's unique deterministic spend nullifier `J = x^{-1} * U`.
-pub fn compute_note_nullifier(spend_sk: &Scalar, stealth_scalar: &Scalar) -> Result<(Scalar, Point), ClientError> {
+pub fn compute_note_nullifier(
+    spend_sk: &Scalar,
+    stealth_scalar: &Scalar,
+) -> Result<(Scalar, Point), ClientError> {
     let x = spend_sk + stealth_scalar;
     if x == Scalar::ZERO {
         return Err(ClientError::Crypto("degenerate zero stealth spend key"));
@@ -507,6 +516,26 @@ impl SelectiveDisclosureProof {
         let expected_a = g_mint + a_blind * h_point();
         let expected_v = Scalar::from(self.amount) * expected_a + v_blind * h_point();
         Ok(expected_a == a_pt && expected_v == v_pt)
+    }
+
+    /// Verify BOTH the cryptographic Pedersen opening AND exact inclusion inside an authentic
+    /// on-chain `EpochPage` account (`page_id`, `slot_index`, `stealth_pk`, `asset_tag`, `commitment`).
+    pub fn verify_against_page(&self, page_bytes: &[u8]) -> Result<bool, ClientError> {
+        if !self.verify()? {
+            return Ok(false);
+        }
+        let header = audren_core::layout::PageHeader::decode(page_bytes)
+            .map_err(|_| ClientError::InvalidEncoding("invalid EpochPage header"))?;
+        if header.page_id != self.page_id || self.slot_index >= header.count {
+            return Ok(false);
+        }
+        let (on_p, on_a, on_v) =
+            audren_core::layout::read_page_witness(page_bytes, self.slot_index as usize)
+                .map_err(|_| ClientError::InvalidEncoding("invalid EpochPage witness"))?;
+        let claim_p = decode_b58_32(&self.stealth_pk_b58)?;
+        let claim_a = decode_b58_32(&self.asset_tag_b58)?;
+        let claim_v = decode_b58_32(&self.commitment_b58)?;
+        Ok(on_p == claim_p && on_a == claim_a && on_v == claim_v)
     }
 }
 

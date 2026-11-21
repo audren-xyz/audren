@@ -6,7 +6,7 @@
 //!   and `AuditorKeypair` (`PoolMode::InstitutionalAudited`)
 //! - Multi-Base Binary Triptych (`N = 32 / 64 / 128`), Auditor Asset Encryption, Cross-Base 1/2,
 //!   and native Agave Batched Bulletproof provers
-//! - Router-agnostic 1-tx private swap builder (Jupiter, Orca, Raydium, Meteora, Phoenix, or any DEX router)
+//! - Router-agnostic 1-tx private swap builder for compatible PDA-signing routers
 //! - Standard Solana RPC `getMultipleAccounts` (`dataSlice`) and WS `programSubscribe` scanner
 
 pub mod instructions;

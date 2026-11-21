@@ -1,13 +1,33 @@
 /**
- * Canonical Audren protocol constants matching `programs/audren/crates/audren-core/src/lib.rs`
+ * Canonical Audren protocol constants matching `crates/audren-core/src/lib.rs`
  * and `layout.rs` byte-for-byte.
  */
 
-/** Canonical Audren Program ID deployed identically on Solana Mainnet-Beta and Devnet. */
+/** Canonical Audren Program ID deployed identically on Solana Mainnet and Devnet. */
 export const AUDREN_PROGRAM_ID = 'AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3';
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_ESCROW_SHARDS = 16;
+export const MAX_APPEND_LANES = 16;
+export const PAGE_SEQ_MASK = 0x00ff_ffff_ffff_ffffn;
+
+export function laneOfPageId(pageId: bigint): number {
+  return Number((pageId >> 56n) & 0xffn);
+}
+
+export function seqOfPageId(pageId: bigint): bigint {
+  return pageId & PAGE_SEQ_MASK;
+}
+
+export function pageIdForLane(laneId: number, seq: bigint): bigint {
+  if (!Number.isInteger(laneId) || laneId < 0 || laneId >= MAX_APPEND_LANES) {
+    throw new Error(`Invalid laneId: ${laneId}`);
+  }
+  if (seq < 0n || seq > PAGE_SEQ_MASK) {
+    throw new Error(`Invalid lane sequence: ${seq.toString()}`);
+  }
+  return (BigInt(laneId) << 56n) | seq;
+}
 
 export const CLASSIC_TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 export const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
@@ -15,6 +35,8 @@ export const ASSOCIATED_TOKEN_PROGRAM_ID = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTN
 export const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 export const ZK_ELGAMAL_PROOF_PROGRAM_ID = 'ZkE1Gama1Proof11111111111111111111111111111';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+/** Canonical Native SOL mint identifier (`[0u8; 32]`, base58 `"11111111111111111111111111111111"`). */
+export const NATIVE_SOL_MINT = SYSTEM_PROGRAM_ID;
 
 export const POOL_SEED = 'audren_pool';
 export const PAGE_SEED = 'audren_page';
@@ -24,10 +46,17 @@ export const SOL_VAULT_SEED = 'audren_sol';
 export const PAGE_RENT_SEED = 'audren_rent';
 export const ESCROW_SEED = 'audren_escrow';
 export const PROOF_BUFFER_SEED = 'audren_buf';
+export const LANE_SEED = 'audren_lane';
+export const LANE_RENT_SEED = 'audren_lrent';
 
 export const POOL_MAGIC = 'AUDRNPL1';
 export const PAGE_MAGIC = 'AUDRNPG1';
+export const SOL_VAULT_MAGIC = 'AUDRNSL1';
+export const PAGE_RENT_MAGIC = 'AUDRNRN1';
 export const PROOF_BUFFER_MAGIC = 'AUDRNBF1';
+export const LANE_MAGIC = 'AUDRNLN1';
+export const LANE_STATE_LEN = 64;
+export const SENTINEL_ACCOUNT_LEN = 16;
 export const PROOF_BUFFER_HEADER_LEN = 48;
 export const PROOF_BUFFER_CHUNK_SIZE = 768;
 export const PROOF_BUFFER_MAX_CHUNKS = 13;
@@ -66,6 +95,8 @@ export const TAG_SET_PAUSED = 7;
 export const TAG_WRITE_PROOF_BUFFER = 8;
 export const TAG_EXEC_BUFFERED = 9;
 export const TAG_CLOSE_PROOF_BUFFER = 10;
+export const TAG_INIT_LANE = 11;
+export const TAG_OPEN_LANE_PAGE = 12;
 
 export const TRIPTYCH_M_ONE_PAGE = 5;
 export const TRIPTYCH_M_TWO_PAGES = 6;
@@ -82,8 +113,51 @@ export enum PoolMode {
   InstitutionalAudited = 1,
 }
 
+/**
+ * Audren on-chain error codes returned as `ProgramError::Custom(code)`.
+ * Matches `audren_core::AudrenError` (`1..=33`) byte-for-byte.
+ */
+export enum AudrenError {
+  InvalidInstruction = 1,
+  InvalidAccount = 2,
+  InvalidPda = 3,
+  InvalidMagic = 4,
+  UnsupportedVersion = 5,
+  PoolPaused = 6,
+  Unauthorized = 7,
+  UnsupportedTokenProgram = 8,
+  UnsafeMintExtension = 9,
+  ZeroAmount = 10,
+  PageFull = 11,
+  PageNotReady = 12,
+  PageEmpty = 13,
+  DuplicateOrUnorderedPages = 14,
+  WrongPool = 15,
+  NullifierAlreadySpent = 16,
+  InvalidPoint = 17,
+  InvalidScalar = 18,
+  InvalidTriptychProof = 19,
+  InvalidCrossBaseProof = 20,
+  InvalidRangeProof = 21,
+  InvalidAuditorProof = 22,
+  MissingAuditorKey = 23,
+  InvalidEscrowShard = 24,
+  InvalidRouterProgram = 25,
+  EscrowAuthorityAltered = 26,
+  EscrowAccountAltered = 27,
+  SlippageExceeded = 28,
+  UnexpectedPartialFill = 29,
+  ArithmeticOverflow = 30,
+  InsufficientPageRent = 31,
+  InvalidProofBuffer = 32,
+  InvalidLane = 33,
+}
+
+export const MAX_MERGE_RING_SLOTS = 128;
+
 export function triptychProofLen(m: 5 | 6 | 7, audited: boolean): number {
-  const base = (9 + 4 * m) * 32;
+  const nPages = inputPagesForM(m);
+  const base = nPages + (9 + 4 * m) * 32;
   const aud = audited ? (3 + 2 * m) * 32 : 0;
   return base + aud;
 }
@@ -92,4 +166,10 @@ export function inputPagesForM(m: 5 | 6 | 7): 1 | 2 | 4 {
   if (m === 5) return 1;
   if (m === 6) return 2;
   return 4;
+}
+
+export function mForInputPages(pages: 1 | 2 | 4): 5 | 6 | 7 {
+  if (pages === 1) return TRIPTYCH_M_ONE_PAGE;
+  if (pages === 2) return TRIPTYCH_M_TWO_PAGES;
+  return TRIPTYCH_M_FOUR_PAGES;
 }

@@ -3,11 +3,31 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Zero-dependency TypeScript SDK for Audren — instruction codecs, EpochPage decoders, standard RPC/WS dataSlice scanner, and router-agnostic private swap helpers",
+  "description": "Zero-dependency TypeScript SDK for Audren \u2014 instruction codecs, EpochPage decoders, standard RPC/WS dataSlice scanner, and router-agnostic private swap helpers",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm build && node --test test/*.test.mjs",
+    "prepack": "pnpm build"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }

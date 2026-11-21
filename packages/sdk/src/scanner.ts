@@ -5,6 +5,7 @@
  */
 
 import {
+  AUDREN_PROGRAM_ID,
   PAGE_LEN,
   PAGE_MAGIC,
   PAGE_OFF_POOL_ID,
@@ -197,27 +198,42 @@ export async function fetchPageScanSlices(
 }
 
 /**
- * Check up to 100 deterministic `NullifierPDA`s in one pure Solana RPC call (`true` == spent).
+ * Check arbitrary numbers of deterministic `NullifierPDA`s (automatically chunked in batches of 100)
+ * in pure Solana RPC calls (`true` == owned by `programId` == spent).
  */
 export async function checkNullifiersSpent(
   rpcUrl: string,
   nullifierAddresses: readonly string[],
   commitment: 'confirmed' | 'finalized' = 'confirmed',
+  programId: string = AUDREN_PROGRAM_ID,
 ): Promise<boolean[]> {
-  const res = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(buildNullifierCheckRpcPayload(nullifierAddresses, 2, commitment)),
-  });
-  if (!res.ok) {
-    throw new Error(`Solana RPC error: HTTP ${res.status}`);
+  if (nullifierAddresses.length === 0) return [];
+  const results: boolean[] = [];
+  for (let i = 0; i < nullifierAddresses.length; i += MAX_RPC_MULTI_ACCOUNTS) {
+    const chunk = nullifierAddresses.slice(i, i + MAX_RPC_MULTI_ACCOUNTS);
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(buildNullifierCheckRpcPayload(chunk, 2, commitment)),
+    });
+    if (!res.ok) {
+      throw new Error(`Solana RPC error: HTTP ${res.status}`);
+    }
+    const json = (await res.json()) as {
+      result?: { value: (RpcAccountEntry | null)[] };
+      error?: { message: string };
+    };
+    if (json.error || !json.result) {
+      throw new Error(json.error?.message ?? 'Missing getMultipleAccounts result');
+    }
+    if (!Array.isArray(json.result.value) || json.result.value.length !== chunk.length) {
+      throw new Error(
+        `Unexpected nullifier status count: expected ${chunk.length}, got ${json.result.value?.length ?? 0}`,
+      );
+    }
+    for (const acc of json.result.value) {
+      results.push(acc !== null && acc.owner === programId);
+    }
   }
-  const json = (await res.json()) as {
-    result?: { value: (RpcAccountEntry | null)[] };
-    error?: { message: string };
-  };
-  if (json.error || !json.result) {
-    throw new Error(json.error?.message ?? 'Missing getMultipleAccounts result');
-  }
-  return json.result.value.map((acc) => acc !== null);
+  return results;
 }

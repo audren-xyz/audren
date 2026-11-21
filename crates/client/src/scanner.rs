@@ -45,7 +45,7 @@ pub struct OwnedNote {
     pub page_id: u64,
     pub slot_index: usize,
     pub mint: [u8; 32],
-    /// Confirmed amount (`Some(amount)`) or `None` if `FLAG_DYNAMIC_ONCHAIN_VALUE` needs tx resolution.
+    /// Confirmed note amount (`0` when `is_dynamic_output == true` before on-chain tx resolution).
     pub amount: u64,
     pub is_dynamic_output: bool,
     pub stealth_pk: Point,
@@ -94,7 +94,11 @@ pub fn build_page_scan_rpc_request(
     let keys: Vec<String> = page_ids
         .iter()
         .take(RPC_MULTI_ACCOUNT_BATCH)
-        .map(|&pid| derive_epoch_page_pda(program_id, pool_id, pid).0.to_string())
+        .map(|&pid| {
+            derive_epoch_page_pda(program_id, pool_id, pid)
+                .0
+                .to_string()
+        })
         .collect();
     json!({
         "jsonrpc": "2.0",
@@ -117,11 +121,7 @@ pub fn build_page_scan_rpc_request(
 /// Build an Agave 4.4+ WebSocket `programSubscribe` request that streams real-time
 /// `1,056 B` `EpochPage` scan slices (`dataSlice`) for a specific `pool_id`, saving ~83%
 /// WebSocket bandwidth with zero custom indexing infrastructure.
-pub fn build_page_subscribe_ws_request(
-    rpc_id: u64,
-    program_id: &Address,
-    pool_id: u32,
-) -> Value {
+pub fn build_page_subscribe_ws_request(rpc_id: u64, program_id: &Address, pool_id: u32) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": rpc_id,
@@ -207,8 +207,8 @@ pub fn scan_page_dataslice(
         let mut eph = [0u8; 32];
         eph.copy_from_slice(&slice[eph_base + slot * 32..eph_base + (slot + 1) * 32]);
         if eph == [0u8; 32] {
-            // Unpopulated tail slot — pages fill densely from 0..count.
-            break;
+            // Skip any unpopulated or malformed zero slot without aborting later positions on this page.
+            continue;
         }
         if quick_view_tag_match(fvk, &eph, view_tags[slot]).is_some() {
             hits.push(ScanCandidate {

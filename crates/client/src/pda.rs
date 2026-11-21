@@ -1,8 +1,8 @@
-//! Deterministic PDA derivation helpers matching `programs/audren/program/src/state.rs` byte-for-byte.
+//! Deterministic PDA derivation helpers matching `program/src/state.rs` byte-for-byte.
 
 use audren_core::{
-    ASSOCIATED_TOKEN_PROGRAM_ID, ESCROW_SEED, NULLIFIER_SEED, PAGE_RENT_SEED, PAGE_SEED, POOL_SEED,
-    PROOF_BUFFER_SEED, SOL_VAULT_SEED, VAULT_AUTH_SEED,
+    ASSOCIATED_TOKEN_PROGRAM_ID, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, NULLIFIER_SEED,
+    PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, SOL_VAULT_SEED, VAULT_AUTH_SEED,
 };
 use solana_address::Address;
 
@@ -28,6 +28,22 @@ pub fn derive_sol_vault_pda(program_id: &Address, pool_id: u32) -> (Address, u8)
 pub fn derive_page_rent_vault_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
     let id_le = pool_id.to_le_bytes();
     Address::find_program_address(&[PAGE_RENT_SEED, &id_le], program_id)
+}
+
+#[inline]
+pub fn derive_lane_pda(program_id: &Address, pool_id: u32, lane_id: u8) -> (Address, u8) {
+    let id_le = pool_id.to_le_bytes();
+    Address::find_program_address(&[LANE_SEED, &id_le, &[lane_id]], program_id)
+}
+
+#[inline]
+pub fn derive_lane_rent_vault_pda(
+    program_id: &Address,
+    pool_id: u32,
+    lane_id: u8,
+) -> (Address, u8) {
+    let id_le = pool_id.to_le_bytes();
+    Address::find_program_address(&[LANE_RENT_SEED, &id_le, &[lane_id]], program_id)
 }
 
 #[inline]

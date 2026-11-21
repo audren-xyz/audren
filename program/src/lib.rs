@@ -5,8 +5,7 @@
 //! `EpochPage` pool (`32` notes / `6,240 B` per page):
 //! - Private multi-asset transfers hiding sender, recipient, token mint, and amount
 //! - Single-transaction private DEX swaps (`SwapViaRouter`) through 16 isolated `swap_escrow`
-//!   shards into any Solana DEX aggregator or AMM router (Jupiter, Orca, Raydium, Meteora,
-//!   Phoenix, Titan, DFlow, or custom routers), settling output into a fresh stealth note
+//!   shards into compatible PDA-signing routers, settling output into a fresh stealth note
 //! - Opt-in institutional auditability (`PoolMode::InstitutionalAudited`), enforcing verifiable
 //!   ElGamal encryption of spent stealth pubkeys and hidden mints under `K_aud` on-chain
 //! - Pure Ristretto255 Multi-Base Binary Triptych (`32 / 64 / 128`-note rings) verified via
@@ -26,21 +25,25 @@ mod state;
 use audren_core::{
     instruction::{
         input_pages_for_m, triptych_proof_len, AUDITOR_ASSET_PROOF_LEN, CROSS_BASE_1_LEN,
-        CROSS_BASE_2_LEN, DYNAMIC_OUTPUT_WIRE_LEN, NOTE_WIRE_LEN, RANGE_U128_PROOF_LEN,
-        RANGE_U64_PROOF_LEN, TAG_CLOSE_PROOF_BUFFER, TAG_DEPOSIT, TAG_EXEC_BUFFERED, TAG_INIT_POOL,
-        TAG_MERGE, TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_SWAP_VIA_ROUTER, TAG_TRANSFER, TAG_WITHDRAW,
+        CROSS_BASE_2_LEN, DYNAMIC_OUTPUT_WIRE_LEN, MAX_MERGE_RING_SLOTS, NOTE_WIRE_LEN,
+        RANGE_U128_PROOF_LEN, RANGE_U64_PROOF_LEN, TAG_CLOSE_PROOF_BUFFER, TAG_DEPOSIT,
+        TAG_EXEC_BUFFERED, TAG_INIT_LANE, TAG_INIT_POOL, TAG_MERGE, TAG_OPEN_LANE_PAGE,
+        TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_SWAP_VIA_ROUTER, TAG_TRANSFER, TAG_WITHDRAW,
         TAG_WRITE_PROOF_BUFFER,
     },
+    lane_of_page_id,
     layout::{
-        read_32, read_u16, read_u32, read_u64, NoteEntry, PageHeader, PoolState, BUF_OFF_AUTHORITY,
-        BUF_OFF_EXPECTED_LEN, BUF_OFF_MAGIC, BUF_OFF_WRITTEN_MASK, MAX_CPI_ACCOUNT_ALLOC,
-        NOTE_CT_LEN, PAGE_CAPACITY, PAGE_LEN, PAGE_RENT_MAGIC, PAGE_ROLLOVER_HEADROOM,
-        POOL_STATE_LEN, PROOF_BUFFER_CHUNK_SIZE, PROOF_BUFFER_HEADER_LEN, PROOF_BUFFER_MAGIC,
-        PROOF_BUFFER_MAX_PAYLOAD, SENTINEL_ACCOUNT_LEN, SOL_VAULT_MAGIC,
+        read_32, read_u16, read_u32, read_u64, AppendLaneState, NoteEntry, PageHeader, PoolState,
+        BUF_OFF_AUTHORITY, BUF_OFF_EXPECTED_LEN, BUF_OFF_MAGIC, BUF_OFF_WRITTEN_MASK,
+        LANE_STATE_LEN, MAX_CPI_ACCOUNT_ALLOC, NOTE_CT_LEN, PAGE_CAPACITY, PAGE_LEN,
+        PAGE_RENT_MAGIC, PAGE_ROLLOVER_HEADROOM, POOL_STATE_LEN, PROOF_BUFFER_CHUNK_SIZE,
+        PROOF_BUFFER_HEADER_LEN, PROOF_BUFFER_MAGIC, PROOF_BUFFER_MAX_PAYLOAD,
+        SENTINEL_ACCOUNT_LEN, SOL_VAULT_MAGIC,
     },
-    AudrenError, PoolMode, CLASSIC_TOKEN_PROGRAM_ID, ESCROW_SEED, NATIVE_SOL_MINT,
-    NULLIFIER_SEED, PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, PROTOCOL_VERSION,
-    SOL_VAULT_SEED, TOKEN_2022_PROGRAM_ID, VAULT_AUTH_SEED, WSOL_MINT,
+    page_id_for_lane, seq_of_page_id, AudrenError, PoolMode, CLASSIC_TOKEN_PROGRAM_ID,
+    ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MAX_APPEND_LANES, NATIVE_SOL_MINT, NULLIFIER_SEED,
+    PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, PROTOCOL_VERSION, SOL_VAULT_SEED,
+    TOKEN_2022_PROGRAM_ID, VAULT_AUTH_SEED, WSOL_MINT,
 };
 use crypto::{
     address_bytes, asset_generator, is_zero_point, pt_add, pt_mul_u64, transcript_root,
@@ -50,6 +53,7 @@ use crypto::{
 };
 use solana_account_info::AccountInfo;
 use solana_address::Address;
+use solana_clock::Clock;
 use solana_cpi::{invoke, invoke_signed};
 use solana_msg::msg;
 use solana_program_error::{ProgramError, ProgramResult};
@@ -61,9 +65,10 @@ use spl_token_2022_interface::{
     state::{Account as TokenAccount, Mint},
 };
 use state::{
-    append_note_to_page, check_page_rent_vault, check_sol_vault, check_supported_token_program,
-    ensure, err, escrow_pda, expected_ata, init_sentinel_bytes, load_page_header, load_pool,
-    nullifier_pda, page_pda, page_rent_pda, pool_pda, proof_buffer_pda, save_pool, sol_vault_pda,
+    append_note_to_page, check_lane_rent_vault, check_page_rent_vault, check_sol_vault,
+    check_supported_token_program, ensure, err, escrow_pda, expected_ata, init_sentinel_bytes,
+    lane_pda, lane_rent_pda, load_lane, load_page_header, load_pool, nullifier_pda, page_pda,
+    page_rent_pda, pool_pda, proof_buffer_pda, save_lane, save_pool, sol_vault_pda,
     vault_auth_pda,
 };
 
@@ -285,6 +290,7 @@ fn decode_note_wire(data: &[u8]) -> Result<NoteEntry, ProgramError> {
     let commitment = read_32(data, 97).map_err(err)?;
     let mut ciphertext = [0u8; NOTE_CT_LEN];
     ciphertext.copy_from_slice(&data[129..129 + NOTE_CT_LEN]);
+    validate_nonzero_point(&ephemeral_pk)?;
     validate_nonzero_point(&stealth_pk)?;
     validate_nonzero_point(&asset_tag)?;
     validate_point(&commitment)?;
@@ -371,19 +377,75 @@ fn load_input_pages<'a, 'b>(
     Ok((headers, borrows))
 }
 
-/// Append a note to `out_page` and bump `pool.total_notes`.
+/// Validate the output `EpochPage` and matching rent vault for either Lane 0 (legacy Pool 0)
+/// or parallel append lanes `1..15` (where `pool_acc` stays READ-ONLY for zero write contention!).
+fn resolve_output_target(
+    pool_acc: &AccountInfo,
+    out_page_acc: &AccountInfo,
+    rent_vault_acc: &AccountInfo,
+    program_id: &Address,
+    pool: &PoolState,
+) -> Result<(u8, u64), ProgramError> {
+    let hdr = load_page_header(out_page_acc, program_id, pool.pool_id)?;
+    let out_lane = lane_of_page_id(hdr.page_id);
+    ensure(
+        out_lane < pool.effective_lane_count(),
+        AudrenError::InvalidLane,
+    )?;
+    if out_lane == 0 {
+        ensure(pool_acc.is_writable, AudrenError::InvalidAccount)?;
+        ensure(hdr.page_id == pool.current_page_id, AudrenError::WrongPool)?;
+        check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+    } else {
+        ensure(!hdr.closed, AudrenError::PageFull)?;
+        check_lane_rent_vault(rent_vault_acc, program_id, pool.pool_id, out_lane)?;
+    }
+    Ok((out_lane, hdr.page_id))
+}
+
+/// Append a note to `out_page` (Lane 0 or parallel Lane `1..15`) and bump `pool.total_notes` on Lane 0.
 fn write_output_note(
     out_page: &AccountInfo,
     program_id: &Address,
     pool: &mut PoolState,
+    out_lane: u8,
     note: &NoteEntry,
-) -> Result<u8, ProgramError> {
-    let idx = append_note_to_page(out_page, program_id, pool.pool_id, pool.current_page_id, note)?;
-    pool.total_notes = pool
-        .total_notes
-        .checked_add(1)
-        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
-    Ok(idx)
+    slot: u64,
+) -> Result<(u64, u8), ProgramError> {
+    let expected = if out_lane == 0 {
+        Some(pool.current_page_id)
+    } else {
+        None
+    };
+    let (page_id, idx) = append_note_to_page(out_page, program_id, pool.pool_id, expected, note, slot)?;
+    if out_lane == 0 {
+        pool.total_notes = pool
+            .total_notes
+            .checked_add(1)
+            .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    }
+    Ok((page_id, idx))
+}
+
+/// Persist `PoolState` counters only when writing to Lane 0 (or when caller explicitly passed
+/// `pool_acc` writable on a full withdrawal). Parallel Lanes `1..15` keep `PoolState` read-only!
+fn finalize_pool_spend(
+    pool_acc: &AccountInfo,
+    program_id: &Address,
+    pool: &mut PoolState,
+    out_lane: u8,
+    spend_delta: u64,
+) -> ProgramResult {
+    if out_lane == 0 && pool_acc.is_writable {
+        if spend_delta > 0 {
+            pool.total_spends = pool
+                .total_spends
+                .checked_add(spend_delta)
+                .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+        }
+        save_pool(pool_acc, program_id, pool)?;
+    }
+    Ok(())
 }
 
 fn process(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -402,6 +464,8 @@ fn process(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Progr
         TAG_WRITE_PROOF_BUFFER => ix_write_proof_buffer(program_id, accounts, rest),
         TAG_EXEC_BUFFERED => ix_exec_buffered(program_id, accounts, rest),
         TAG_CLOSE_PROOF_BUFFER => ix_close_proof_buffer(program_id, accounts, rest),
+        TAG_INIT_LANE => ix_init_lane(program_id, accounts, rest),
+        TAG_OPEN_LANE_PAGE => ix_open_lane_page(program_id, accounts, rest),
         _ => Err(err(AudrenError::InvalidInstruction)),
     }
 }
@@ -490,6 +554,7 @@ fn ix_init_pool(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> 
     init_sentinel_bytes(sol_vault_acc, program_id, SOL_VAULT_MAGIC, sv_bump)?;
     init_sentinel_bytes(rent_vault_acc, program_id, PAGE_RENT_MAGIC, rv_bump)?;
 
+    let slot = Clock::get()?.slot;
     let pool_state = PoolState {
         version: PROTOCOL_VERSION,
         bump: p_bump,
@@ -506,6 +571,7 @@ fn ix_init_pool(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> 
         vault_auth_bump,
         sol_vault_bump: sv_bump,
         page_rent_bump: rv_bump,
+        active_lanes: 1,
     };
     save_pool(pool_acc, program_id, &pool_state)?;
 
@@ -517,7 +583,7 @@ fn ix_init_pool(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> 
         count: 0,
         pool_id,
         page_id: 0,
-        created_slot: 0,
+        created_slot: slot,
         closed_slot: 0,
     }
     .encode(&mut page_data)
@@ -570,16 +636,23 @@ fn ix_open_page(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> 
         AudrenError::PageNotReady,
     )?;
 
-    let next_id = pool
-        .current_page_id
-        .checked_add(1)
-        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    let next_id = page_id_for_lane(
+        0,
+        seq_of_page_id(pool.current_page_id)
+            .checked_add(1)
+            .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?,
+    )
+    .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
     let (next_addr, next_bump) = page_pda(program_id, pool.pool_id, next_id);
     ensure(*next_page_acc.key == next_addr, AudrenError::InvalidPda)?;
 
+    let slot = Clock::get()?.slot;
     // Permanently seal the outgoing page so its witness set becomes immutable.
     {
         cur_hdr.closed = true;
+        if cur_hdr.closed_slot == 0 {
+            cur_hdr.closed_slot = slot;
+        }
         let mut cd = cur_page_acc.try_borrow_mut_data()?;
         cur_hdr.encode(&mut cd).map_err(err)?;
     }
@@ -637,7 +710,7 @@ fn ix_open_page(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> 
             count: 0,
             pool_id: pool.pool_id,
             page_id: next_id,
-            created_slot: 0,
+            created_slot: slot,
             closed_slot: 0,
         }
         .encode(&mut nd)
@@ -679,6 +752,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     let view_tag = data[9];
     let ephemeral_pk = read_32(data, 10).map_err(err)?;
+    validate_nonzero_point(&ephemeral_pk)?;
     let stealth_pk = read_32(data, 42).map_err(err)?;
     validate_nonzero_point(&stealth_pk)?;
     let mut ciphertext = [0u8; NOTE_CT_LEN];
@@ -689,7 +763,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let out_page_acc = &accounts[2];
     ensure(depositor.is_signer, AudrenError::Unauthorized)?;
     ensure(
-        depositor.is_writable && pool_acc.is_writable && out_page_acc.is_writable,
+        depositor.is_writable && out_page_acc.is_writable,
         AudrenError::InvalidAccount,
     )?;
 
@@ -700,6 +774,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let committed_amount: u64;
     let rent_vault_acc: &AccountInfo;
     let sys_prog: &AccountInfo;
+    let out_lane: u8;
 
     if is_native {
         ensure(accounts.len() >= 6, AudrenError::InvalidAccount)?;
@@ -707,7 +782,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
         rent_vault_acc = &accounts[4];
         sys_prog = &accounts[5];
         check_sol_vault(sol_vault, program_id, pool.pool_id)?;
-        check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+        out_lane = resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?.0;
         ensure(
             sol_vault.is_writable && rent_vault_acc.is_writable,
             AudrenError::InvalidAccount,
@@ -728,7 +803,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
         sys_prog = &accounts[8];
         let hook_accounts = &accounts[9..];
         check_supported_token_program(token_prog.key)?;
-        check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+        out_lane = resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?.0;
         ensure(
             depositor_ata.is_writable && vault_ata.is_writable && rent_vault_acc.is_writable,
             AudrenError::InvalidAccount,
@@ -772,6 +847,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     collect_page_rent_fee(depositor, rent_vault_acc, sys_prog, &pool, 1)?;
 
+    let slot = Clock::get()?.slot;
     let g_mint = asset_generator(&mint_bytes);
     let commitment = pt_mul_u64(committed_amount, g_mint)?;
     let note = NoteEntry {
@@ -782,11 +858,12 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Pr
         commitment,
         ciphertext,
     };
-    let idx = write_output_note(out_page_acc, program_id, &mut pool, &note)?;
-    save_pool(pool_acc, program_id, &pool)?;
+    let (out_page_id, idx) =
+        write_output_note(out_page_acc, program_id, &mut pool, out_lane, &note, slot)?;
+    finalize_pool_spend(pool_acc, program_id, &mut pool, out_lane, 0)?;
     msg!(
         "audren:deposit page={} idx={} amount={}",
-        pool.current_page_id,
+        out_page_id,
         idx,
         committed_amount
     );
@@ -818,7 +895,6 @@ fn ix_transfer(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
     ensure(payer.is_signer, AudrenError::Unauthorized)?;
     ensure(
         payer.is_writable
-            && pool_acc.is_writable
             && out_page_acc.is_writable
             && nullifier_acc.is_writable
             && rent_vault_acc.is_writable,
@@ -827,7 +903,8 @@ fn ix_transfer(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
 
     let mut pool = load_pool(pool_acc, program_id)?;
     ensure(!pool.paused, AudrenError::PoolPaused)?;
-    check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+    let (out_lane, _) =
+        resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?;
 
     let m = data[0];
     let note_pay = decode_note_wire(&data[1..1 + NOTE_WIRE_LEN])?;
@@ -916,16 +993,15 @@ fn ix_transfer(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
     )?;
     collect_page_rent_fee(payer, rent_vault_acc, sys_prog, &pool, 2)?;
 
-    let idx1 = write_output_note(out_page_acc, program_id, &mut pool, &note_pay)?;
-    let idx2 = write_output_note(out_page_acc, program_id, &mut pool, &note_chg)?;
-    pool.total_spends = pool
-        .total_spends
-        .checked_add(1)
-        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
-    save_pool(pool_acc, program_id, &pool)?;
+    let slot = Clock::get()?.slot;
+    let (out_page_id, idx1) =
+        write_output_note(out_page_acc, program_id, &mut pool, out_lane, &note_pay, slot)?;
+    let (_, idx2) =
+        write_output_note(out_page_acc, program_id, &mut pool, out_lane, &note_chg, slot)?;
+    finalize_pool_spend(pool_acc, program_id, &mut pool, out_lane, 1)?;
     msg!(
         "audren:transfer page={} idx1={} idx2={}",
-        pool.current_page_id,
+        out_page_id,
         idx1,
         idx2
     );
@@ -963,7 +1039,6 @@ fn ix_merge(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Prog
     ensure(payer.is_signer, AudrenError::Unauthorized)?;
     ensure(
         payer.is_writable
-            && pool_acc.is_writable
             && out_page_acc.is_writable
             && null1_acc.is_writable
             && null2_acc.is_writable
@@ -973,7 +1048,8 @@ fn ix_merge(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Prog
 
     let mut pool = load_pool(pool_acc, program_id)?;
     ensure(!pool.paused, AudrenError::PoolPaused)?;
-    check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+    let (out_lane, _) =
+        resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?;
 
     let m1 = data[0];
     let m2 = data[1];
@@ -1010,6 +1086,10 @@ fn ix_merge(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Prog
 
     let n_pages1 = input_pages_for_m(m1).map_err(err)?;
     let n_pages2 = input_pages_for_m(m2).map_err(err)?;
+    ensure(
+        (n_pages1 + n_pages2) * PAGE_CAPACITY <= MAX_MERGE_RING_SLOTS,
+        AudrenError::InvalidInstruction,
+    )?;
     ensure(
         accounts.len() >= 8 + n_pages1 + n_pages2,
         AudrenError::InvalidAccount,
@@ -1098,13 +1178,11 @@ fn ix_merge(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> Prog
     )?;
     collect_page_rent_fee(payer, rent_vault_acc, sys_prog, &pool, 1)?;
 
-    let idx = write_output_note(out_page_acc, program_id, &mut pool, &note_out)?;
-    pool.total_spends = pool
-        .total_spends
-        .checked_add(2)
-        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
-    save_pool(pool_acc, program_id, &pool)?;
-    msg!("audren:merge page={} idx={}", pool.current_page_id, idx);
+    let slot = Clock::get()?.slot;
+    let (out_page_id, idx) =
+        write_output_note(out_page_acc, program_id, &mut pool, out_lane, &note_out, slot)?;
+    finalize_pool_spend(pool_acc, program_id, &mut pool, out_lane, 2)?;
+    msg!("audren:merge page={} idx={}", out_page_id, idx);
     Ok(())
 }
 
@@ -1178,7 +1256,6 @@ fn ix_swap_via_router(
     ensure(payer.is_signer, AudrenError::Unauthorized)?;
     ensure(
         payer.is_writable
-            && pool_acc.is_writable
             && out_page_acc.is_writable
             && nullifier_acc.is_writable
             && rent_vault_acc.is_writable
@@ -1199,7 +1276,8 @@ fn ix_swap_via_router(
 
     let mut pool = load_pool(pool_acc, program_id)?;
     ensure(!pool.paused, AudrenError::PoolPaused)?;
-    check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+    let (out_lane, _) =
+        resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?;
     check_supported_token_program(token_prog_in.key)?;
     check_supported_token_program(token_prog_out.key)?;
     let mint_info_in = load_mint_info(mint_in, token_prog_in.key)?;
@@ -1235,17 +1313,22 @@ fn ix_swap_via_router(
     off += DYNAMIC_OUTPUT_WIRE_LEN;
     let out_view_tag = out_desc[0];
     let out_eph_pk = read_32(out_desc, 1).map_err(err)?;
+    validate_nonzero_point(&out_eph_pk)?;
     let out_stealth_pk = read_32(out_desc, 33).map_err(err)?;
     validate_nonzero_point(&out_stealth_pk)?;
     let mut out_ct = [0u8; NOTE_CT_LEN];
     out_ct.copy_from_slice(&out_desc[65..65 + NOTE_CT_LEN]);
 
     let mut change_bundle: Option<(NoteEntry, [u8; 32], &[u8], &[u8])> = None;
+    let mut chg_wire_slice: &[u8] = &[];
+    let mut c_chg_slice: &[u8] = &[];
     if has_change {
         let chg_need = NOTE_WIRE_LEN + 32 + CROSS_BASE_1_LEN + RANGE_U64_PROOF_LEN;
         ensure(data.len() >= off + chg_need, AudrenError::InvalidInstruction)?;
-        let note_chg = decode_note_wire(&data[off..off + NOTE_WIRE_LEN])?;
+        chg_wire_slice = &data[off..off + NOTE_WIRE_LEN];
+        let note_chg = decode_note_wire(chg_wire_slice)?;
         off += NOTE_WIRE_LEN;
+        c_chg_slice = &data[off..off + 32];
         let c_chg = read_32(data, off).map_err(err)?;
         off += 32;
         let xbase1 = &data[off..off + CROSS_BASE_1_LEN];
@@ -1265,11 +1348,13 @@ fn ix_swap_via_router(
         let rd = &data[off..off + DYNAMIC_OUTPUT_WIRE_LEN];
         refund_raw = rd;
         off += DYNAMIC_OUTPUT_WIRE_LEN;
+        let r_eph = read_32(rd, 1).map_err(err)?;
+        validate_nonzero_point(&r_eph)?;
         let r_stealth = read_32(rd, 33).map_err(err)?;
         validate_nonzero_point(&r_stealth)?;
         let mut r_ct = [0u8; NOTE_CT_LEN];
         r_ct.copy_from_slice(&rd[65..65 + NOTE_CT_LEN]);
-        refund_desc = Some((rd[0], read_32(rd, 1).map_err(err)?, r_stealth, r_ct));
+        refund_desc = Some((rd[0], r_eph, r_stealth, r_ct));
     }
 
     let audited = pool.has_auditor();
@@ -1330,12 +1415,9 @@ fn ix_swap_via_router(
     // Ensure input and output mints differ so escrow_in != escrow_out.
     ensure(mint_in.key != mint_out.key, AudrenError::InvalidInstruction)?;
 
-    // Build Fiat-Shamir context binding EVERY swap term (including `router_prog.key`) so neither
-    // a relayer nor searcher can substitute the router, mints, `min_amount_out`, or stealth outputs.
-    let chg_commit = change_bundle
-        .as_ref()
-        .map(|(n, _, _, _)| n.commitment)
-        .unwrap_or(IDENTITY);
+    // Build Fiat-Shamir context binding EVERY swap term (including `router_prog.key` and full
+    // change note wire bytes + `c_chg`) so no relayer or searcher can substitute the router,
+    // mints, `min_amount_out`, or any stealth output / change note field.
     let ctx_hash = transcript_root(&[
         b"audren/v1/swap_router",
         &address_bytes(program_id),
@@ -1347,7 +1429,8 @@ fn ix_swap_via_router(
         &amount_in.to_le_bytes(),
         &min_amount_out.to_le_bytes(),
         out_desc,
-        &chg_commit,
+        chg_wire_slice,
+        c_chg_slice,
         refund_raw,
     ]);
 
@@ -1562,6 +1645,7 @@ fn ix_swap_via_router(
     let out_notes_count = 1u64 + u64::from(has_change) + u64::from(net_refund > 0);
     collect_page_rent_fee(payer, rent_vault_acc, sys_prog, &pool, out_notes_count)?;
 
+    let slot = Clock::get()?.slot;
     let g_out = asset_generator(&mint_out.key.to_bytes());
     let v_out = pt_mul_u64(net_out, g_out)?;
     let swap_note = NoteEntry {
@@ -1572,10 +1656,11 @@ fn ix_swap_via_router(
         commitment: v_out,
         ciphertext: out_ct,
     };
-    let idx_out = write_output_note(out_page_acc, program_id, &mut pool, &swap_note)?;
+    let (out_page_id, idx_out) =
+        write_output_note(out_page_acc, program_id, &mut pool, out_lane, &swap_note, slot)?;
 
     if let Some((note_chg, _, _, _)) = change_bundle {
-        write_output_note(out_page_acc, program_id, &mut pool, &note_chg)?;
+        write_output_note(out_page_acc, program_id, &mut pool, out_lane, &note_chg, slot)?;
     }
     if net_refund > 0 {
         if let Some((r_tag, r_eph, r_stealth, r_ct)) = refund_desc {
@@ -1588,18 +1673,14 @@ fn ix_swap_via_router(
                 commitment: v_ref,
                 ciphertext: r_ct,
             };
-            write_output_note(out_page_acc, program_id, &mut pool, &refund_note)?;
+            write_output_note(out_page_acc, program_id, &mut pool, out_lane, &refund_note, slot)?;
         }
     }
 
-    pool.total_spends = pool
-        .total_spends
-        .checked_add(1)
-        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
-    save_pool(pool_acc, program_id, &pool)?;
+    finalize_pool_spend(pool_acc, program_id, &mut pool, out_lane, 1)?;
     msg!(
         "audren:swap_router page={} idx={} net_out={} net_refund={}",
-        pool.current_page_id,
+        out_page_id,
         idx_out,
         net_out,
         net_refund
@@ -1642,27 +1723,36 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
     let sys_prog = &accounts[6];
     ensure(payer.is_signer, AudrenError::Unauthorized)?;
     ensure(
-        payer.is_writable && pool_acc.is_writable && nullifier_acc.is_writable,
+        payer.is_writable && nullifier_acc.is_writable,
         AudrenError::InvalidAccount,
     )?;
-    if has_change {
+
+    let mut pool = load_pool(pool_acc, program_id)?;
+    // Non-custodial escape hatch: full withdrawals (`!has_change`, writing zero new notes) ALWAYS
+    // succeed even when `pool.paused == true` AND keep `PoolState` read-only (zero write-lock!).
+    let out_lane = if has_change {
+        ensure(!pool.paused, AudrenError::PoolPaused)?;
         ensure(
             out_page_acc.is_writable && rent_vault_acc.is_writable,
             AudrenError::InvalidAccount,
         )?;
-    }
-
-    let mut pool = load_pool(pool_acc, program_id)?;
-    ensure(!pool.paused, AudrenError::PoolPaused)?;
-    check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+        resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?.0
+    } else {
+        check_page_rent_vault(rent_vault_acc, program_id, pool.pool_id)?;
+        0
+    };
 
     let mut off = 11usize;
     let mut change_bundle: Option<(NoteEntry, [u8; 32], &[u8], &[u8])> = None;
+    let mut chg_wire_slice: &[u8] = &[];
+    let mut c_chg_slice: &[u8] = &[];
     if has_change {
         let chg_need = NOTE_WIRE_LEN + 32 + CROSS_BASE_1_LEN + RANGE_U64_PROOF_LEN;
         ensure(data.len() >= off + chg_need, AudrenError::InvalidInstruction)?;
-        let note_chg = decode_note_wire(&data[off..off + NOTE_WIRE_LEN])?;
+        chg_wire_slice = &data[off..off + NOTE_WIRE_LEN];
+        let note_chg = decode_note_wire(chg_wire_slice)?;
         off += NOTE_WIRE_LEN;
+        c_chg_slice = &data[off..off + 32];
         let c_chg = read_32(data, off).map_err(err)?;
         off += 32;
         let xbase1 = &data[off..off + CROSS_BASE_1_LEN];
@@ -1702,10 +1792,6 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
         v_out
     };
 
-    let chg_commit = change_bundle
-        .as_ref()
-        .map(|(n, _, _, _)| n.commitment)
-        .unwrap_or(IDENTITY);
     let ctx_hash = transcript_root(&[
         b"audren/v1/withdraw",
         &address_bytes(program_id),
@@ -1714,7 +1800,8 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
         &mint_bytes,
         &recipient_key,
         &amount_out.to_le_bytes(),
-        &chg_commit,
+        chg_wire_slice,
+        c_chg_slice,
     ]);
 
     let (page_headers, page_borrows) =
@@ -1753,8 +1840,9 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
     )?;
 
     if let Some((note_chg, _, _, _)) = change_bundle {
+        let slot = Clock::get()?.slot;
         collect_page_rent_fee(payer, rent_vault_acc, sys_prog, &pool, 1)?;
-        write_output_note(out_page_acc, program_id, &mut pool, &note_chg)?;
+        write_output_note(out_page_acc, program_id, &mut pool, out_lane, &note_chg, slot)?;
     }
 
     if is_native {
@@ -1826,11 +1914,7 @@ fn ix_withdraw(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> P
     // Touch `WSOL_MINT` so the constant stays linked and audited for WSOL swap routes.
     let _ = WSOL_MINT;
 
-    pool.total_spends = pool
-        .total_spends
-        .checked_add(1)
-        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
-    save_pool(pool_acc, program_id, &pool)?;
+    finalize_pool_spend(pool_acc, program_id, &mut pool, out_lane, 1)?;
     msg!("audren:withdraw amount={}", amount_out);
     Ok(())
 }
@@ -2052,5 +2136,268 @@ fn ix_close_proof_buffer(
         )?;
     }
     close_proof_buffer_account(buf_acc, payer)?;
+    Ok(())
+}
+
+// ============================================================================
+// Tag 11: InitLane (enable parallel append lane 1..15 inside an existing pool)
+// Data: lane_id (1)
+// Accounts: [0] authority/payer (signer, wr), [1] pool (wr), [2] lane_state (wr),
+//           [3] lane_page_0 (wr), [4] lane_rent_vault (wr), [5] system_program
+// ============================================================================
+fn ix_init_lane(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    ensure(data.len() == 1, AudrenError::InvalidInstruction)?;
+    ensure(accounts.len() >= 6, AudrenError::InvalidAccount)?;
+
+    let authority = &accounts[0];
+    let pool_acc = &accounts[1];
+    let lane_acc = &accounts[2];
+    let page0_acc = &accounts[3];
+    let rent_vault_acc = &accounts[4];
+    let sys_prog = &accounts[5];
+    ensure(authority.is_signer, AudrenError::Unauthorized)?;
+    ensure(
+        authority.is_writable
+            && pool_acc.is_writable
+            && lane_acc.is_writable
+            && page0_acc.is_writable
+            && rent_vault_acc.is_writable
+            && *sys_prog.key == system::id(),
+        AudrenError::InvalidAccount,
+    )?;
+
+    let lane_id = data[0];
+    ensure(
+        lane_id >= 1 && lane_id < MAX_APPEND_LANES,
+        AudrenError::InvalidLane,
+    )?;
+
+    let mut pool = load_pool(pool_acc, program_id)?;
+    ensure(
+        authority.key.to_bytes() == pool.authority,
+        AudrenError::Unauthorized,
+    )?;
+    // Lanes are activated sequentially (1, 2, ..., 15) so scanners know exact active range 0..active_lanes.
+    let current_lanes = pool.effective_lane_count();
+    ensure(lane_id == current_lanes, AudrenError::InvalidLane)?;
+
+    let pool_le = pool.pool_id.to_le_bytes();
+    let (l_addr, l_bump) = lane_pda(program_id, pool.pool_id, lane_id)?;
+    ensure(*lane_acc.key == l_addr, AudrenError::InvalidPda)?;
+    let (lr_addr, lr_bump) = lane_rent_pda(program_id, pool.pool_id, lane_id)?;
+    ensure(*rent_vault_acc.key == lr_addr, AudrenError::InvalidPda)?;
+    let first_page_id =
+        page_id_for_lane(lane_id, 0).ok_or_else(|| err(AudrenError::InvalidLane))?;
+    let (pg_addr, pg_bump) = page_pda(program_id, pool.pool_id, first_page_id);
+    ensure(*page0_acc.key == pg_addr, AudrenError::InvalidPda)?;
+
+    create_pda(
+        authority,
+        lane_acc,
+        sys_prog,
+        &[LANE_SEED, &pool_le, &[lane_id], &[l_bump]],
+        LANE_STATE_LEN,
+        program_id,
+    )?;
+    create_pda(
+        authority,
+        rent_vault_acc,
+        sys_prog,
+        &[LANE_RENT_SEED, &pool_le, &[lane_id], &[lr_bump]],
+        SENTINEL_ACCOUNT_LEN,
+        program_id,
+    )?;
+    create_pda(
+        authority,
+        page0_acc,
+        sys_prog,
+        &[PAGE_SEED, &pool_le, &first_page_id.to_le_bytes(), &[pg_bump]],
+        PAGE_LEN,
+        program_id,
+    )?;
+
+    let slot = Clock::get()?.slot;
+    init_sentinel_bytes(rent_vault_acc, program_id, PAGE_RENT_MAGIC, lr_bump)?;
+    save_lane(
+        lane_acc,
+        program_id,
+        &AppendLaneState {
+            version: PROTOCOL_VERSION,
+            lane_id,
+            bump: l_bump,
+            rent_vault_bump: lr_bump,
+            pool_id: pool.pool_id,
+            current_page_id: first_page_id,
+            created_slot: slot,
+        },
+    )?;
+
+    {
+        let mut pd = page0_acc.try_borrow_mut_data()?;
+        PageHeader {
+            version: PROTOCOL_VERSION,
+            bump: pg_bump,
+            closed: false,
+            count: 0,
+            pool_id: pool.pool_id,
+            page_id: first_page_id,
+            created_slot: slot,
+            closed_slot: 0,
+        }
+        .encode(&mut pd)
+        .map_err(err)?;
+    }
+
+    pool.active_lanes = current_lanes
+        .checked_add(1)
+        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    save_pool(pool_acc, program_id, &pool)?;
+    msg!(
+        "audren:init_lane pool={} lane={} page={}",
+        pool.pool_id,
+        lane_id,
+        first_page_id
+    );
+    Ok(())
+}
+
+// ============================================================================
+// Tag 12: OpenLanePage (permissionless self-funding rollover for parallel lanes 1..15)
+// Data: lane_id (1)
+// Accounts: [0] payer (signer, wr), [1] pool (ro!), [2] lane_state (wr),
+//           [3] current_page (wr), [4] next_page (wr), [5] lane_rent_vault (wr), [6] system_program
+// ============================================================================
+fn ix_open_lane_page(program_id: &Address, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    ensure(data.len() == 1, AudrenError::InvalidInstruction)?;
+    ensure(accounts.len() >= 7, AudrenError::InvalidAccount)?;
+
+    let payer = &accounts[0];
+    let pool_acc = &accounts[1];
+    let lane_acc = &accounts[2];
+    let cur_page_acc = &accounts[3];
+    let next_page_acc = &accounts[4];
+    let rent_vault_acc = &accounts[5];
+    let sys_prog = &accounts[6];
+    ensure(payer.is_signer, AudrenError::Unauthorized)?;
+    ensure(
+        payer.is_writable
+            && lane_acc.is_writable
+            && cur_page_acc.is_writable
+            && next_page_acc.is_writable
+            && rent_vault_acc.is_writable
+            && *sys_prog.key == system::id()
+            && next_page_acc.owner == sys_prog.key
+            && next_page_acc.data_is_empty(),
+        AudrenError::InvalidAccount,
+    )?;
+
+    let lane_id = data[0];
+    ensure(
+        lane_id >= 1 && lane_id < MAX_APPEND_LANES,
+        AudrenError::InvalidLane,
+    )?;
+
+    let pool = load_pool(pool_acc, program_id)?;
+    ensure(!pool.paused, AudrenError::PoolPaused)?;
+    ensure(
+        lane_id < pool.effective_lane_count(),
+        AudrenError::InvalidLane,
+    )?;
+    check_lane_rent_vault(rent_vault_acc, program_id, pool.pool_id, lane_id)?;
+
+    let mut lane = load_lane(lane_acc, program_id, pool.pool_id, lane_id)?;
+    let mut cur_hdr = load_page_header(cur_page_acc, program_id, pool.pool_id)?;
+    ensure(
+        cur_hdr.page_id == lane.current_page_id,
+        AudrenError::WrongPool,
+    )?;
+    let remaining = PAGE_CAPACITY.saturating_sub(cur_hdr.count as usize);
+    ensure(
+        cur_hdr.closed || remaining <= PAGE_ROLLOVER_HEADROOM,
+        AudrenError::PageNotReady,
+    )?;
+
+    let next_seq = seq_of_page_id(lane.current_page_id)
+        .checked_add(1)
+        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    let next_id = page_id_for_lane(lane_id, next_seq)
+        .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    let (next_addr, next_bump) = page_pda(program_id, pool.pool_id, next_id);
+    ensure(*next_page_acc.key == next_addr, AudrenError::InvalidPda)?;
+
+    let slot = Clock::get()?.slot;
+    {
+        cur_hdr.closed = true;
+        if cur_hdr.closed_slot == 0 {
+            cur_hdr.closed_slot = slot;
+        }
+        let mut cd = cur_page_acc.try_borrow_mut_data()?;
+        cur_hdr.encode(&mut cd).map_err(err)?;
+    }
+
+    let rent = Rent::get()?;
+    let min_vault = rent.minimum_balance(SENTINEL_ACCOUNT_LEN);
+    let page_rent = rent.minimum_balance(PAGE_LEN);
+    let available = rent_vault_acc.lamports().saturating_sub(min_vault);
+    let needed = page_rent.saturating_sub(next_page_acc.lamports());
+    let subsidy = available.min(needed);
+    let payer_deficit = needed.saturating_sub(subsidy);
+
+    let pool_le = pool.pool_id.to_le_bytes();
+    let next_le = next_id.to_le_bytes();
+    let page_seeds: &[&[u8]] = &[PAGE_SEED, &pool_le, &next_le, &[next_bump]];
+
+    if payer_deficit > 0 {
+        invoke(
+            &sys::transfer(payer.key, next_page_acc.key, payer_deficit),
+            &[payer.clone(), next_page_acc.clone(), sys_prog.clone()],
+        )?;
+    }
+    invoke_signed(
+        &sys::allocate(next_page_acc.key, PAGE_LEN as u64),
+        &[next_page_acc.clone(), sys_prog.clone()],
+        &[page_seeds],
+    )?;
+    invoke_signed(
+        &sys::assign(next_page_acc.key, program_id),
+        &[next_page_acc.clone(), sys_prog.clone()],
+        &[page_seeds],
+    )?;
+
+    if subsidy > 0 {
+        **rent_vault_acc.try_borrow_mut_lamports()? = rent_vault_acc
+            .lamports()
+            .checked_sub(subsidy)
+            .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+        **next_page_acc.try_borrow_mut_lamports()? = next_page_acc
+            .lamports()
+            .checked_add(subsidy)
+            .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
+    }
+
+    {
+        let mut nd = next_page_acc.try_borrow_mut_data()?;
+        PageHeader {
+            version: PROTOCOL_VERSION,
+            bump: next_bump,
+            closed: false,
+            count: 0,
+            pool_id: pool.pool_id,
+            page_id: next_id,
+            created_slot: slot,
+            closed_slot: 0,
+        }
+        .encode(&mut nd)
+        .map_err(err)?;
+    }
+
+    lane.current_page_id = next_id;
+    save_lane(lane_acc, program_id, &lane)?;
+    msg!(
+        "audren:open_lane_page pool={} lane={} page={}",
+        pool.pool_id,
+        lane_id,
+        next_id
+    );
     Ok(())
 }

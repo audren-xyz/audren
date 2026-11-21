@@ -9,14 +9,15 @@ use agave_feature_set::FeatureSet;
 use audren_client::{
     instructions::{
         build_buffered_execution, build_close_proof_buffer, build_deposit,
-        build_deposit_with_options, build_init_pool, build_merge, build_open_page,
-        build_set_paused, build_swap_via_router, build_transfer, build_withdraw,
-        net_deposit_amount, AudrenAccountMeta, AudrenInstruction, SwapViaRouterParams,
+        build_deposit_with_options, build_init_lane, build_init_pool, build_merge,
+        build_open_lane_page, build_open_page, build_set_paused, build_swap_via_router,
+        build_transfer, build_withdraw, net_deposit_amount, AudrenAccountMeta, AudrenInstruction,
+        SwapViaRouterParams,
     },
-    keys::{AudrenKeys, AuditorKeypair, SelectiveDisclosureProof},
+    keys::{AuditorKeypair, AudrenKeys, SelectiveDisclosureProof},
     pda::{
-        derive_ata, derive_epoch_page_pda, derive_page_rent_vault_pda, derive_pool_pda,
-        derive_sol_vault_pda, derive_swap_escrow_pda, derive_vault_auth_pda,
+        derive_ata, derive_epoch_page_pda, derive_lane_pda, derive_page_rent_vault_pda,
+        derive_pool_pda, derive_sol_vault_pda, derive_swap_escrow_pda, derive_vault_auth_pda,
     },
     prover::{asset_generator, extract_ring_from_page, RingSlotWitness},
     router::locate_escrow_indices,
@@ -28,7 +29,7 @@ use audren_core::{
         PageHeader, PoolState, PAGE_CAPACITY, PAGE_LEN, PAGE_ROLLOVER_HEADROOM, PAGE_SCAN_LEN,
         PAGE_SCAN_OFFSET,
     },
-    AudrenError, CLASSIC_TOKEN_PROGRAM_ID, NATIVE_SOL_MINT, PoolMode, SYSTEM_PROGRAM_ID,
+    AudrenError, PoolMode, CLASSIC_TOKEN_PROGRAM_ID, NATIVE_SOL_MINT, SYSTEM_PROGRAM_ID,
     TOKEN_2022_PROGRAM_ID,
 };
 use litesvm::{types::TransactionResult, LiteSVM};
@@ -49,8 +50,7 @@ use solana_transaction::versioned::VersionedTransaction;
 use spl_token_2022_interface::{
     extension::{
         transfer_fee::instruction as transfer_fee_ix,
-        transfer_hook::instruction as transfer_hook_ix,
-        ExtensionType,
+        transfer_hook::instruction as transfer_hook_ix, ExtensionType,
     },
     instruction as token_ix,
     state::{Account as TokenAccount, Mint},
@@ -135,7 +135,13 @@ fn send_ixs(
     ixs: &[Instruction],
     cu_limit: u32,
 ) -> TransactionResult {
-    let (tx, wire) = build_v1_tx(payer, extra_signers, ixs, svm.latest_blockhash().to_bytes(), cu_limit);
+    let (tx, wire) = build_v1_tx(
+        payer,
+        extra_signers,
+        ixs,
+        svm.latest_blockhash().to_bytes(),
+        cu_limit,
+    );
     assert!(
         wire.len() <= MAX_TRANSACTION_SIZE,
         "Solana v1 wire tx {} B exceeds {MAX_TRANSACTION_SIZE} B limit",
@@ -325,7 +331,8 @@ fn create_t22_ata_with_balance(
     account_extensions: &[ExtensionType],
 ) -> Address {
     let ata = derive_ata(owner, t22_prog, mint);
-    let space = ExtensionType::try_calculate_account_len::<TokenAccount>(account_extensions).unwrap();
+    let space =
+        ExtensionType::try_calculate_account_len::<TokenAccount>(account_extensions).unwrap();
     let rent = svm.minimum_balance_for_rent_exemption(space);
     svm.set_account(
         ata,
@@ -413,7 +420,8 @@ fn test_full_permissionless_lifecycle_and_security() {
     );
 
     let sol_vault = derive_sol_vault_pda(&audren_id, pool_id).0;
-    let sol_vault_rent = svm.minimum_balance_for_rent_exemption(audren_core::layout::SENTINEL_ACCOUNT_LEN);
+    let sol_vault_rent =
+        svm.minimum_balance_for_rent_exemption(audren_core::layout::SENTINEL_ACCOUNT_LEN);
     assert_eq!(
         svm.get_account(&sol_vault).unwrap().lamports,
         sol_vault_rent + sol_amount
@@ -431,8 +439,15 @@ fn test_full_permissionless_lifecycle_and_security() {
     let (vault_auth, _) = derive_vault_auth_pda(&audren_id, pool_id);
 
     let usdc_mint = create_mint(&mut svm, &payer, &classic_prog, 6);
-    let payer_usdc = create_ata_with_balance(&mut svm, &classic_prog, &usdc_mint.pubkey(), &payer.pubkey(), 10_000_000);
-    let vault_usdc = create_ata_with_balance(&mut svm, &classic_prog, &usdc_mint.pubkey(), &vault_auth, 0);
+    let payer_usdc = create_ata_with_balance(
+        &mut svm,
+        &classic_prog,
+        &usdc_mint.pubkey(),
+        &payer.pubkey(),
+        10_000_000,
+    );
+    let vault_usdc =
+        create_ata_with_balance(&mut svm, &classic_prog, &usdc_mint.pubkey(), &vault_auth, 0);
 
     let (dep_spl_ix, _) = build_deposit(
         audren_id,
@@ -454,8 +469,15 @@ fn test_full_permissionless_lifecycle_and_security() {
 
     // Plain Token-2022 mint (no extensions)
     let safe_t22_mint = create_mint(&mut svm, &payer, &t22_prog, 6);
-    let payer_t22 = create_ata_with_balance(&mut svm, &t22_prog, &safe_t22_mint.pubkey(), &payer.pubkey(), 2_000_000);
-    let vault_t22 = create_ata_with_balance(&mut svm, &t22_prog, &safe_t22_mint.pubkey(), &vault_auth, 0);
+    let payer_t22 = create_ata_with_balance(
+        &mut svm,
+        &t22_prog,
+        &safe_t22_mint.pubkey(),
+        &payer.pubkey(),
+        2_000_000,
+    );
+    let vault_t22 =
+        create_ata_with_balance(&mut svm, &t22_prog, &safe_t22_mint.pubkey(), &vault_auth, 0);
     let (dep_t22_ix, _) = build_deposit(
         audren_id,
         payer.pubkey(),
@@ -509,11 +531,16 @@ fn test_full_permissionless_lifecycle_and_security() {
         None,
     )
     .unwrap();
-    let m_ix =
-        token_ix::initialize_mint2(&t22_prog, &reg_mint.pubkey(), &payer.pubkey(), None, 6)
-            .unwrap();
+    let m_ix = token_ix::initialize_mint2(&t22_prog, &reg_mint.pubkey(), &payer.pubkey(), None, 6)
+        .unwrap();
     expect_ok(
-        send_ixs(&mut svm, &payer, &[&reg_mint], &[c_ix, pd_ix, tf_ix, th_ix, m_ix], 300_000),
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[&reg_mint],
+            &[c_ix, pd_ix, tf_ix, th_ix, m_ix],
+            300_000,
+        ),
         "create regulated T22 mint (PYUSD/USDG profile)",
     );
     let payer_reg = create_t22_ata_with_balance(
@@ -523,7 +550,10 @@ fn test_full_permissionless_lifecycle_and_security() {
         &reg_mint.pubkey(),
         &payer.pubkey(),
         500_000,
-        &[ExtensionType::TransferFeeAmount],
+        &[
+            ExtensionType::TransferFeeAmount,
+            ExtensionType::TransferHookAccount,
+        ],
     );
     let vault_reg = create_t22_ata_with_balance(
         &mut svm,
@@ -532,7 +562,10 @@ fn test_full_permissionless_lifecycle_and_security() {
         &reg_mint.pubkey(),
         &vault_auth,
         0,
-        &[ExtensionType::TransferFeeAmount],
+        &[
+            ExtensionType::TransferFeeAmount,
+            ExtensionType::TransferHookAccount,
+        ],
     );
     let (dep_reg_ix, _) = build_deposit(
         audren_id,
@@ -555,10 +588,9 @@ fn test_full_permissionless_lifecycle_and_security() {
     // 4b. Active TransferFee Token-2022 Mint (100 bps = 1%, max_fee = 50_000):
     //     Gross deposit 1_000_000 credits exact net 990_000 to vault & commits V = 990_000 * G_mint.
     let fee_mint = Keypair::new();
-    let fee_space = ExtensionType::try_calculate_account_len::<Mint>(&[
-        ExtensionType::TransferFeeConfig,
-    ])
-    .unwrap();
+    let fee_space =
+        ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::TransferFeeConfig])
+            .unwrap();
     let fee_rent = svm.minimum_balance_for_rent_exemption(fee_space);
     let c_fee = sys_ix::create_account(
         &payer.pubkey(),
@@ -576,11 +608,16 @@ fn test_full_permissionless_lifecycle_and_security() {
         50_000, // max fee cap
     )
     .unwrap();
-    let m_fee =
-        token_ix::initialize_mint2(&t22_prog, &fee_mint.pubkey(), &payer.pubkey(), None, 6)
-            .unwrap();
+    let m_fee = token_ix::initialize_mint2(&t22_prog, &fee_mint.pubkey(), &payer.pubkey(), None, 6)
+        .unwrap();
     expect_ok(
-        send_ixs(&mut svm, &payer, &[&fee_mint], &[c_fee, tf_active, m_fee], 300_000),
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[&fee_mint],
+            &[c_fee, tf_active, m_fee],
+            300_000,
+        ),
         "create active TransferFee T22 mint (100 bps)",
     );
     let payer_fee = create_t22_ata_with_balance(
@@ -631,10 +668,9 @@ fn test_full_permissionless_lifecycle_and_security() {
 
     // 4c. Soulbound NonTransferable Token-2022 Mint -> rejected natively by Token-2022!
     let soul_mint = Keypair::new();
-    let soul_space = ExtensionType::try_calculate_account_len::<Mint>(&[
-        ExtensionType::NonTransferable,
-    ])
-    .unwrap();
+    let soul_space =
+        ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::NonTransferable])
+            .unwrap();
     let soul_rent = svm.minimum_balance_for_rent_exemption(soul_space);
     let c_soul = sys_ix::create_account(
         &payer.pubkey(),
@@ -648,7 +684,13 @@ fn test_full_permissionless_lifecycle_and_security() {
         token_ix::initialize_mint2(&t22_prog, &soul_mint.pubkey(), &payer.pubkey(), None, 6)
             .unwrap();
     expect_ok(
-        send_ixs(&mut svm, &payer, &[&soul_mint], &[c_soul, nt_ix, m_soul], 300_000),
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[&soul_mint],
+            &[c_soul, nt_ix, m_soul],
+            300_000,
+        ),
         "create soulbound NonTransferable T22 mint",
     );
     let payer_soul = create_t22_ata_with_balance(
@@ -658,7 +700,10 @@ fn test_full_permissionless_lifecycle_and_security() {
         &soul_mint.pubkey(),
         &payer.pubkey(),
         100_000,
-        &[ExtensionType::NonTransferableAccount],
+        &[
+            ExtensionType::ImmutableOwner,
+            ExtensionType::NonTransferableAccount,
+        ],
     );
     let vault_soul = create_t22_ata_with_balance(
         &mut svm,
@@ -667,7 +712,10 @@ fn test_full_permissionless_lifecycle_and_security() {
         &soul_mint.pubkey(),
         &vault_auth,
         0,
-        &[ExtensionType::NonTransferableAccount],
+        &[
+            ExtensionType::ImmutableOwner,
+            ExtensionType::NonTransferableAccount,
+        ],
     );
     let (dep_soul_ix, _) = build_deposit(
         audren_id,
@@ -748,7 +796,13 @@ fn test_full_permissionless_lifecycle_and_security() {
     )
     .unwrap();
     expect_custom_err(
-        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&double_spend_ix)], 1_400_000),
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&double_spend_ix)],
+            1_400_000,
+        ),
         AudrenError::NullifierAlreadySpent,
         "Reject double-spend nullifier",
     );
@@ -778,7 +832,10 @@ fn test_full_permissionless_lifecycle_and_security() {
         asset_blinding_b58: bs58::encode(bob_notes[0].asset_blinding.to_bytes()).into_string(),
         value_blinding_b58: bs58::encode(bob_notes[0].value_blinding.to_bytes()).into_string(),
     };
-    assert!(disclosure.verify().unwrap(), "Mode 1 SelectiveDisclosureProof verified!");
+    assert!(
+        disclosure.verify().unwrap(),
+        "Mode 1 SelectiveDisclosureProof verified!"
+    );
 
     // 6. Fill Page 0..3 via Deposits & OpenPage rollovers to test m=6 (2-page / 64) & m=7 (4-page / 128)!
     //    Also tests PageNotReady rejection before headroom (count < 28)!
@@ -958,20 +1015,35 @@ fn test_full_permissionless_lifecycle_and_security() {
         &mut rng,
     )
     .unwrap();
-    assert!(!wd_full.accounts[2].is_writable, "out_page MUST be readonly when !has_change");
-    assert!(!wd_full.accounts[4].is_writable, "rent_vault MUST be readonly when !has_change");
+    assert!(
+        !wd_full.accounts[2].is_writable,
+        "out_page MUST be readonly when !has_change"
+    );
+    assert!(
+        !wd_full.accounts[4].is_writable,
+        "rent_vault MUST be readonly when !has_change"
+    );
     expect_ok(
         send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&wd_full)], 600_000),
         "Withdraw Native SOL (0.25 SOL full, ro page)",
     );
-    assert_eq!(svm.get_account(&bob_wallet.pubkey()).unwrap().lamports, 250_000_000);
+    assert_eq!(
+        svm.get_account(&bob_wallet.pubkey()).unwrap().lamports,
+        250_000_000
+    );
 
     // 11. Withdraw Classic SPL (Alice withdraws 3 USDC of her 5 USDC with 2 USDC change)
     let alice_usdc = alice_notes_after
         .iter()
         .find(|n| n.mint == usdc_mint.pubkey().to_bytes())
         .expect("Alice USDC note");
-    let bob_usdc_ata = create_ata_with_balance(&mut svm, &classic_prog, &usdc_mint.pubkey(), &bob_wallet.pubkey(), 0);
+    let bob_usdc_ata = create_ata_with_balance(
+        &mut svm,
+        &classic_prog,
+        &usdc_mint.pubkey(),
+        &bob_wallet.pubkey(),
+        0,
+    );
     let ring_p0_now = read_ring(&svm, &audren_id, pool_id, &[0]);
     let (wd_spl, _) = build_withdraw(
         audren_id,
@@ -1034,7 +1106,9 @@ fn test_full_permissionless_lifecycle_and_security() {
 // ----------------------------------------------------------------------------
 #[test]
 fn test_institutional_audited_mode_and_decryption() {
-    println!("\n=== TEST 2: InstitutionalAudited Mode (S1/S2 + M1/M2 Verifiable Auditor Decryption) ===");
+    println!(
+        "\n=== TEST 2: InstitutionalAudited Mode (S1/S2 + M1/M2 Verifiable Auditor Decryption) ==="
+    );
     let mut rng = StdRng::seed_from_u64(0xA0D8_E202);
     let audren_id = Keypair::new().pubkey();
     let mut svm = new_svm(audren_id, None);
@@ -1106,7 +1180,13 @@ fn test_institutional_audited_mode_and_decryption() {
     )
     .unwrap();
     expect_custom_err(
-        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&unaudited_xfer)], 700_000),
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&unaudited_xfer)],
+            700_000,
+        ),
         AudrenError::InvalidInstruction,
         "Reject unaudited tx in audited pool",
     );
@@ -1130,7 +1210,13 @@ fn test_institutional_audited_mode_and_decryption() {
     )
     .unwrap();
     expect_ok(
-        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&audited_xfer)], 1_400_000),
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&audited_xfer)],
+            1_400_000,
+        ),
         "Transfer (InstitutionalAudited, m=5)",
     );
 
@@ -1143,7 +1229,8 @@ fn test_institutional_audited_mode_and_decryption() {
     let s1: [u8; 32] = audited_xfer.data[trip_off + base_trip_len..trip_off + base_trip_len + 32]
         .try_into()
         .unwrap();
-    let s2: [u8; 32] = audited_xfer.data[trip_off + base_trip_len + 32..trip_off + base_trip_len + 64]
+    let s2: [u8; 32] = audited_xfer.data
+        [trip_off + base_trip_len + 32..trip_off + base_trip_len + 64]
         .try_into()
         .unwrap();
     let recovered_p_l = auditor.decrypt_spent_pubkey(&s1, &s2).unwrap();
@@ -1153,15 +1240,21 @@ fn test_institutional_audited_mode_and_decryption() {
     );
 
     let aud_asset_off = audited_xfer.data.len() - AUDITOR_ASSET_PROOF_LEN;
-    let m1: [u8; 32] = audited_xfer.data[aud_asset_off..aud_asset_off + 32].try_into().unwrap();
-    let m2: [u8; 32] = audited_xfer.data[aud_asset_off + 32..aud_asset_off + 64].try_into().unwrap();
+    let m1: [u8; 32] = audited_xfer.data[aud_asset_off..aud_asset_off + 32]
+        .try_into()
+        .unwrap();
+    let m2: [u8; 32] = audited_xfer.data[aud_asset_off + 32..aud_asset_off + 64]
+        .try_into()
+        .unwrap();
     let recovered_g_mint = auditor.decrypt_asset_generator(&m1, &m2).unwrap();
     assert_eq!(
         recovered_g_mint,
         asset_generator(&NATIVE_SOL_MINT),
         "Auditor MUST recover exact hidden mint generator G_mint from (M_1, M_2)!"
     );
-    println!("  [AUDITOR VERIFIED] Decrypted exact P_l and exact G_mint with zero false positives!");
+    println!(
+        "  [AUDITOR VERIFIED] Decrypted exact P_l and exact G_mint with zero false positives!"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -1211,16 +1304,38 @@ fn test_swap_via_router_and_adversarial_defenses() {
     // Give swap_escrow 1_000_000 lamports so we can verify malicious router cannot drain lamports!
     svm.airdrop(&swap_escrow, 1_000_000).unwrap();
 
-    let payer_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &payer.pubkey(), 100_000_000);
-    let vault_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &vault_auth, 0);
-    let vault_wsol = create_ata_with_balance(&mut svm, &token_prog, &mint_wsol.pubkey(), &vault_auth, 0);
-    let escrow_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &swap_escrow, 0);
-    let escrow_wsol = create_ata_with_balance(&mut svm, &token_prog, &mint_wsol.pubkey(), &swap_escrow, 0);
+    let payer_usdc = create_ata_with_balance(
+        &mut svm,
+        &token_prog,
+        &mint_usdc.pubkey(),
+        &payer.pubkey(),
+        100_000_000,
+    );
+    let vault_usdc =
+        create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &vault_auth, 0);
+    let vault_wsol =
+        create_ata_with_balance(&mut svm, &token_prog, &mint_wsol.pubkey(), &vault_auth, 0);
+    let escrow_usdc =
+        create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &swap_escrow, 0);
+    let escrow_wsol =
+        create_ata_with_balance(&mut svm, &token_prog, &mint_wsol.pubkey(), &swap_escrow, 0);
 
     // Mock DEX liquidity pool accounts
     let (mock_pool_auth, _) = Address::find_program_address(&[b"mock_pool"], &router_id);
-    let mock_pool_usdc = create_ata_with_balance(&mut svm, &token_prog, &mint_usdc.pubkey(), &mock_pool_auth, 500_000_000);
-    let mock_pool_wsol = create_ata_with_balance(&mut svm, &token_prog, &mint_wsol.pubkey(), &mock_pool_auth, 500_000_000_000);
+    let mock_pool_usdc = create_ata_with_balance(
+        &mut svm,
+        &token_prog,
+        &mint_usdc.pubkey(),
+        &mock_pool_auth,
+        500_000_000,
+    );
+    let mock_pool_wsol = create_ata_with_balance(
+        &mut svm,
+        &token_prog,
+        &mint_wsol.pubkey(),
+        &mock_pool_auth,
+        500_000_000_000,
+    );
 
     // Deposit 50 USDC (50_000_000) into Audren for Alice
     let (dep_ix, _) = build_deposit(
@@ -1545,7 +1660,13 @@ fn test_swap_via_router_and_adversarial_defenses() {
     )
     .unwrap();
     expect_custom_err(
-        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&unexp_partial_ix)], 700_000),
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&unexp_partial_ix)],
+            700_000,
+        ),
         AudrenError::UnexpectedPartialFill,
         "Reject unexpected partial fill",
     );
@@ -1596,14 +1717,21 @@ fn test_swap_via_router_and_adversarial_defenses() {
     assert_eq!(token_balance_of(&svm, &vault_wsol), 250_000_000); // 0.25 WSOL!
 
     // Verify Bob decrypts his dynamic 250_000_000 WSOL note and can immediately spend/withdraw it!
-    let bob_wsol_notes = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &bob, Some(250_000_000));
+    let bob_wsol_notes =
+        scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &bob, Some(250_000_000));
     assert_eq!(bob_wsol_notes.len(), 1);
     assert_eq!(bob_wsol_notes[0].amount, 250_000_000);
     assert_eq!(bob_wsol_notes[0].mint, mint_wsol.pubkey().to_bytes());
     assert!(bob_wsol_notes[0].is_dynamic_output);
 
     // Prove Bob can spend his dynamic swap output note on-chain via Withdraw!
-    let bob_wsol_ata = create_ata_with_balance(&mut svm, &token_prog, &mint_wsol.pubkey(), &authority.pubkey(), 0);
+    let bob_wsol_ata = create_ata_with_balance(
+        &mut svm,
+        &token_prog,
+        &mint_wsol.pubkey(),
+        &authority.pubkey(),
+        0,
+    );
     let ring_after_swap = read_ring(&svm, &audren_id, pool_id, &[0]);
     let (wd_swap_out, _) = build_withdraw(
         audren_id,
@@ -1820,7 +1948,13 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
                             cu_limit: u32,
                             label: &str|
      -> TransactionResult {
-        let (tx, wire) = build_v1_tx(signer, &[], ixs, svm.latest_blockhash().to_bytes(), cu_limit);
+        let (tx, wire) = build_v1_tx(
+            signer,
+            &[],
+            ixs,
+            svm.latest_blockhash().to_bytes(),
+            cu_limit,
+        );
         let wire_len = wire.len();
         assert!(
             wire_len <= MAX_TRANSACTION_SIZE,
@@ -1907,7 +2041,10 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
     // ProofBuffer MUST be closed (either None or 0 lamports & 0 bytes owned by System)
     let buf_after = svm.get_account(&plan.proof_buffer);
     assert!(
-        buf_after.as_ref().map(|a| a.lamports == 0 && a.data.is_empty()).unwrap_or(true),
+        buf_after
+            .as_ref()
+            .map(|a| a.lamports == 0 && a.data.is_empty())
+            .unwrap_or(true),
         "ProofBuffer MUST be fully closed and refunded after ExecBuffered!"
     );
 
@@ -1943,7 +2080,10 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
     );
     let buf_closed = svm.get_account(&plan.proof_buffer);
     assert!(
-        buf_closed.as_ref().map(|a| a.lamports == 0 && a.data.is_empty()).unwrap_or(true),
+        buf_closed
+            .as_ref()
+            .map(|a| a.lamports == 0 && a.data.is_empty())
+            .unwrap_or(true),
         "CloseProofBuffer MUST refund 100% rent!"
     );
 
@@ -1993,4 +2133,774 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
         "  [BUFFERED WITHDRAW OK] CU={} | ALL TXS SOLANA V1 (0x81) <= {MAX_TRANSACTION_SIZE} B!",
         wd_cu
     );
+}
+
+// ----------------------------------------------------------------------------
+// TEST 6: Cryptographic & Protocol Security Regressions
+//   6a. Frozen Heart single-tx `[Deposit(solved P_s), Withdraw(forged)]` MUST fail
+//   6b. Open-page concurrent append immunity (immutable per-page prefix_count)
+//   6c. Relayer change-note stealth_pk hijacking on Withdraw & SwapViaRouter MUST fail
+//   6d. Zero ephemeral_pk deposit rejected + scanner continues past zero slot + 128+128 merge cap
+// ----------------------------------------------------------------------------
+#[test]
+fn test_security_frozen_heart_prefix_immunity_and_change_binding() {
+    use audren_client::pda::derive_nullifier_pda;
+    use audren_client::prover::{
+        bit_generator, compress, decompress, g_point, h_point, hash_to_scalar, nullifier_generator,
+        transcript_root,
+    };
+    use audren_core::{
+        instruction::{TAG_DEPOSIT, TAG_WITHDRAW},
+        ZK_ELGAMAL_PROOF_PROGRAM_ID,
+    };
+    use curve25519_dalek::{scalar::Scalar, traits::Identity};
+
+    println!("\n=== TEST 6: Frozen Heart, Open-Page Prefix Immunity, Change Theft & Scanner Hardening ===");
+    let mut rng = StdRng::seed_from_u64(0xF802_E477);
+    let audren_id = Keypair::new().pubkey();
+    let mock_router_id = Keypair::new().pubkey();
+    let mut svm = new_svm(audren_id, Some(mock_router_id));
+
+    let authority = Keypair::new();
+    let payer = Keypair::new();
+    let attacker = Keypair::new();
+    svm.airdrop(&authority.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&attacker.pubkey(), 100_000_000_000).unwrap();
+
+    let alice = AudrenKeys::random(&mut rng);
+    let bob = AudrenKeys::random(&mut rng);
+    let pool_id = 0u32;
+
+    let init_ix = build_init_pool(
+        audren_id,
+        authority.pubkey(),
+        pool_id,
+        PoolMode::Permissionless,
+        true,
+        [0u8; 32],
+        2_000_000,
+    );
+    expect_ok(
+        send_ixs(&mut svm, &authority, &[], &[to_svm_ix(&init_ix)], 300_000),
+        "InitPool (Security Regression)",
+    );
+
+    // 6a. Alice deposits 2 SOL at slot 0; attacker tries the Frozen Heart forge using slot 1 (1 lamport).
+    let victim_amount = 2_000_000_000u64;
+    let (dep_alice, _) = build_deposit(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        NATIVE_SOL_MINT,
+        victim_amount,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_alice)], 300_000),
+        "Alice deposits 2 SOL (slot 0)",
+    );
+
+    let ring_before = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let p0 = decompress(&ring_before[0].stealth_pk).unwrap();
+    let g_sol_bytes = asset_generator(&NATIVE_SOL_MINT);
+    let g_sol = decompress(&g_sol_bytes).unwrap();
+    let v0_pt = Scalar::from(victim_amount) * g_sol;
+    let v1_pt = Scalar::from(1u64) * g_sol;
+    let v_spend_bytes = compress(&v0_pt);
+
+    // Build an algebraically consistent Frozen Heart forgery (omitting ring_root from xi, as in the old weak FS).
+    let m = 5usize;
+    let ctx_hash = transcript_root(&[
+        b"audren/v1/withdraw",
+        audren_id.as_ref(),
+        &pool_id.to_le_bytes(),
+        &[m as u8, 1u8, 0u8],
+        &NATIVE_SOL_MINT,
+        attacker.pubkey().as_ref(),
+        &victim_amount.to_le_bytes(),
+        &[],
+        &[],
+    ]);
+    let fake_ring_root = [0xAAu8; 32]; // cannot know true ring_root before solving for P_1!
+    let alpha = hash_to_scalar(&[
+        b"triptych/alpha",
+        &ctx_hash,
+        &fake_ring_root,
+        &g_sol_bytes,
+        &v_spend_bytes,
+    ]);
+    let alpha_bytes = alpha.to_bytes();
+
+    let g = g_point();
+    let h = h_point();
+    let u = decompress(&nullifier_generator()).unwrap();
+    let x_fake = Scalar::random(&mut rng);
+    let j_pt = x_fake.invert() * u;
+    let j_bytes = compress(&j_pt);
+
+    let r_a = Scalar::random(&mut rng);
+    let r_b = Scalar::random(&mut rng);
+    let r_c = Scalar::random(&mut rng);
+    let r_d = Scalar::random(&mut rng);
+    let a_bits: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut rng)).collect();
+    let mut pt_a = r_a * h;
+    let pt_b = r_b * h;
+    let mut pt_c = r_c * h;
+    let mut pt_d = r_d * h;
+    for j in 0..m {
+        let hj = decompress(&bit_generator(j)).unwrap();
+        let aj = a_bits[j];
+        pt_a += aj * hj;
+        pt_c += aj * hj;
+        pt_d += -(aj * aj) * hj;
+    }
+
+    // Polynomial coefficients for l = 0: slot 0 has leading xi^m, slot 1 has degree <= m-1.
+    let mut poly = vec![vec![Scalar::ZERO; m + 1]; 1 << m];
+    for (k, p) in poly.iter_mut().enumerate() {
+        p[0] = Scalar::ONE;
+        let mut deg = 0usize;
+        for j in 0..m {
+            let k_bit = (k >> j) & 1;
+            let c1 = if k_bit == 0 {
+                Scalar::ONE
+            } else {
+                Scalar::ZERO
+            };
+            let c0 = if k_bit == 1 { a_bits[j] } else { -a_bits[j] };
+            for d in (0..=deg).rev() {
+                let prev = p[d];
+                p[d + 1] += prev * c1;
+                p[d] = prev * c0;
+            }
+            deg += 1;
+        }
+    }
+
+    let mut rhos = Vec::with_capacity(m);
+    let mut taus = Vec::with_capacity(m);
+    let mut xs = Vec::with_capacity(m);
+    let mut ys = Vec::with_capacity(m);
+    let mut ws = Vec::with_capacity(m);
+    for j in 0..m {
+        let rho = Scalar::random(&mut rng);
+        let tau = Scalar::random(&mut rng);
+        rhos.push(rho);
+        taus.push(tau);
+        xs.push(compress(&(rho * g)));
+        ys.push(compress(&(rho * j_pt)));
+        let w_acc =
+            tau * h + poly[0][j] * (g_sol + alpha * v0_pt) + poly[1][j] * (g_sol + alpha * v1_pt);
+        ws.push(compress(&w_acc));
+    }
+    let a_bytes = compress(&pt_a);
+    let b_bytes = compress(&pt_b);
+    let c_bytes = compress(&pt_c);
+    let d_bytes = compress(&pt_d);
+    let mut xi_slices: Vec<&[u8]> = vec![
+        b"triptych/xi",
+        &fake_ring_root,
+        &alpha_bytes,
+        &j_bytes,
+        &a_bytes,
+        &b_bytes,
+        &c_bytes,
+        &d_bytes,
+    ];
+    for x in &xs {
+        xi_slices.push(x);
+    }
+    for y in &ys {
+        xi_slices.push(y);
+    }
+    for w in &ws {
+        xi_slices.push(w);
+    }
+    let xi = hash_to_scalar(&xi_slices);
+
+    let mut xi_pow = Scalar::ONE;
+    let mut rho_sum = Scalar::ZERO;
+    let mut tau_sum = Scalar::ZERO;
+    let mut x_eval = curve25519_dalek::ristretto::RistrettoPoint::identity();
+    for j in 0..m {
+        rho_sum += rhos[j] * xi_pow;
+        tau_sum += taus[j] * xi_pow;
+        x_eval += xi_pow * decompress(&xs[j]).unwrap();
+        xi_pow *= xi;
+    }
+    let z_a = r_b * xi + r_a;
+    let z_c = r_c * xi + r_d;
+    let z_x = x_fake * xi_pow - rho_sum;
+    let z_q = -tau_sum;
+
+    // Evaluate p_0(xi) and p_1(xi) and solve Eq 3 for P_1!
+    let mut p0_xi = Scalar::ONE;
+    let mut p1_xi = Scalar::ONE;
+    for j in 0..m {
+        p0_xi *= xi - a_bits[j];
+        p1_xi *= if j == 0 { a_bits[j] } else { xi - a_bits[j] };
+    }
+    let solved_p1 = compress(&(p1_xi.invert() * (z_x * g + x_eval - p0_xi * p0)));
+
+    // Build atomic [Deposit(1 lamport, solved_p1), Withdraw(2 SOL -> attacker, forged_proof)].
+    let (pool_pda, _) = derive_pool_pda(&audren_id, pool_id);
+    let (page0_pda, _) = derive_epoch_page_pda(&audren_id, pool_id, 0);
+    let (sol_vault, _) = derive_sol_vault_pda(&audren_id, pool_id);
+    let (rent_vault, _) = derive_page_rent_vault_pda(&audren_id, pool_id);
+    let (null_pda, _) = derive_nullifier_pda(&audren_id, pool_id, &j_bytes);
+    let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
+    let zk_prog = Address::new_from_array(ZK_ELGAMAL_PROOF_PROGRAM_ID);
+
+    let mut dep_forge_data = Vec::with_capacity(139);
+    dep_forge_data.push(TAG_DEPOSIT);
+    dep_forge_data.push(1);
+    dep_forge_data.extend_from_slice(&1u64.to_le_bytes());
+    dep_forge_data.push(0x42);
+    dep_forge_data.extend_from_slice(&compress(&(Scalar::from(7u64) * g)));
+    dep_forge_data.extend_from_slice(&solved_p1);
+    dep_forge_data.extend_from_slice(&[0u8; 64]);
+    let dep_forge_ix = Instruction {
+        program_id: audren_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new(page0_pda, false),
+            AccountMeta::new(sol_vault, false),
+            AccountMeta::new(rent_vault, false),
+            AccountMeta::new_readonly(sys_prog, false),
+        ],
+        data: dep_forge_data,
+    };
+
+    let mut wd_forge_data = Vec::new();
+    wd_forge_data.push(TAG_WITHDRAW);
+    wd_forge_data.push(m as u8);
+    wd_forge_data.push(1); // is_native
+    wd_forge_data.push(0); // has_change
+    wd_forge_data.extend_from_slice(&victim_amount.to_le_bytes());
+    wd_forge_data.push(2); // prefix_count = 2 (includes slot 0 + freshly deposited slot 1!)
+    wd_forge_data.extend_from_slice(&j_bytes);
+    wd_forge_data.extend_from_slice(&a_bytes);
+    wd_forge_data.extend_from_slice(&b_bytes);
+    wd_forge_data.extend_from_slice(&c_bytes);
+    wd_forge_data.extend_from_slice(&d_bytes);
+    for x in &xs {
+        wd_forge_data.extend_from_slice(x);
+    }
+    for y in &ys {
+        wd_forge_data.extend_from_slice(y);
+    }
+    for w in &ws {
+        wd_forge_data.extend_from_slice(w);
+    }
+    for aj in &a_bits {
+        wd_forge_data.extend_from_slice(&aj.to_bytes());
+    }
+    wd_forge_data.extend_from_slice(&z_a.to_bytes());
+    wd_forge_data.extend_from_slice(&z_c.to_bytes());
+    wd_forge_data.extend_from_slice(&z_x.to_bytes());
+    wd_forge_data.extend_from_slice(&z_q.to_bytes());
+    let wd_forge_ix = Instruction {
+        program_id: audren_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(pool_pda, false),
+            AccountMeta::new_readonly(page0_pda, false),
+            AccountMeta::new(null_pda, false),
+            AccountMeta::new_readonly(rent_vault, false),
+            AccountMeta::new_readonly(zk_prog, false),
+            AccountMeta::new_readonly(sys_prog, false),
+            AccountMeta::new(sol_vault, false),
+            AccountMeta::new(attacker.pubkey(), false),
+            AccountMeta::new_readonly(page0_pda, false),
+        ],
+        data: wd_forge_data,
+    };
+    expect_custom_err(
+        send_ixs(
+            &mut svm,
+            &attacker,
+            &[],
+            &[dep_forge_ix, wd_forge_ix],
+            1_000_000,
+        ),
+        AudrenError::InvalidTriptychProof,
+        "Frozen Heart atomic deposit+withdraw forge",
+    );
+
+    // 6b. Open-page concurrent append immunity: Bob deposits at slot 1, then Alice and Bob BOTH
+    //     build transfers from the exact same open-page snapshot (count=2). Alice lands first
+    //     (appending slots 2 and 3). Bob's UNCHANGED pre-built tx MUST still succeed!
+    let (dep_bob, _) = build_deposit(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &bob.address(),
+        NATIVE_SOL_MINT,
+        1_000_000_000,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_bob)], 300_000),
+        "Bob deposits 1 SOL (slot 1)",
+    );
+    let shared_open_ring = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let alice_note = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, None)
+        .pop()
+        .unwrap();
+    let bob_note = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &bob, None)
+        .pop()
+        .unwrap();
+
+    let (alice_tx, _, _) = build_transfer(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &[0],
+        &shared_open_ring,
+        &alice_note,
+        alice_note.slot_index,
+        &bob.address(),
+        &alice.address(),
+        500_000_000,
+        None,
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    let (bob_tx, _, _) = build_transfer(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &[0],
+        &shared_open_ring,
+        &bob_note,
+        bob_note.slot_index,
+        &alice.address(),
+        &bob.address(),
+        400_000_000,
+        None,
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&alice_tx)], 900_000),
+        "Open-page concurrent transfer #1 (Alice)",
+    );
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&bob_tx)], 900_000),
+        "Open-page concurrent transfer #2 (Bob, same snapshot!)",
+    );
+
+    // 6c. Relayer change-note theft defense: tamper ONLY with change note stealth_pk on partial Withdraw!
+    let ring_after = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let bob_new_notes = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &bob, None);
+    let bob_spendable = bob_new_notes
+        .iter()
+        .find(|n| n.slot_index >= 2 && n.amount >= 500_000_000)
+        .expect("Bob received transfer note");
+    let (mut partial_wd, _) = build_withdraw(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &[0],
+        &ring_after,
+        bob_spendable,
+        bob_spendable.slot_index,
+        payer.pubkey(),
+        &bob.address(),
+        100_000_000,
+        None,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    // Change note wire starts at data[12..]; stealth_pk is at offset +33..+65 inside NOTE_WIRE_LEN.
+    let attacker_stealth = compress(&(Scalar::from(999u64) * g));
+    partial_wd.data[12 + 33..12 + 65].copy_from_slice(&attacker_stealth);
+    expect_custom_err(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&partial_wd)], 900_000),
+        AudrenError::InvalidTriptychProof,
+        "Relayer change stealth_pk hijack on Withdraw",
+    );
+
+    // 6d. Zero ephemeral_pk deposit rejected + scanner survives synthetic zero slot + 128+128 merge rejected.
+    let (mut bad_eph_dep, _) = build_deposit(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        NATIVE_SOL_MINT,
+        10_000,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    bad_eph_dep.data[11..43].fill(0); // ephemeral_pk = [0u8; 32]
+    expect_custom_err(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&bad_eph_dep)], 300_000),
+        AudrenError::InvalidPoint,
+        "Deposit with zero ephemeral_pk",
+    );
+
+    // Rust dataSlice scanner must NOT abort at a zero ephemeral_pk in slot 0 when slot 1 is owned!
+    let mut crafted_slice = [0u8; PAGE_SCAN_LEN];
+    let page0_bytes = read_page_bytes(&svm, &audren_id, pool_id, 0);
+    // Copy slot 0 (Alice's deposit) into slot 1, leaving slot 0 all zeros.
+    crafted_slice[1] = page0_bytes[PAGE_SCAN_OFFSET];
+    crafted_slice[PAGE_CAPACITY + 32..PAGE_CAPACITY + 64].copy_from_slice(
+        &page0_bytes[PAGE_SCAN_OFFSET + PAGE_CAPACITY..PAGE_SCAN_OFFSET + PAGE_CAPACITY + 32],
+    );
+    let hits = scan_page_dataslice(&alice.full_viewing_key(), 0, &crafted_slice).unwrap();
+    assert!(
+        hits.iter().any(|h| h.slot_index == 1),
+        "scan_page_dataslice MUST continue past a zero slot and find slot 1"
+    );
+
+    // Client build_merge MUST reject combined ring > 128 (e.g. 4 pages + 4 pages = 128+128).
+    let fake_4pages = vec![RingSlotWitness::EMPTY; 4 * PAGE_CAPACITY];
+    assert!(
+        build_merge(
+            audren_id,
+            payer.pubkey(),
+            pool_id,
+            0,
+            &[0, 1, 2, 3],
+            &fake_4pages,
+            bob_spendable,
+            0,
+            &[0, 1, 2, 3],
+            &fake_4pages,
+            bob_spendable,
+            0,
+            &bob.address(),
+            None,
+            &mut rng,
+        )
+        .is_err(),
+        "build_merge MUST reject 128+128 rings (> 128 combined cap)"
+    );
+    println!("  [ALL SECURITY REGRESSIONS PASSED]");
+}
+
+// ----------------------------------------------------------------------------
+// TEST 7: Multi-Lane Lock-Free Appends (Read-Only PoolState), Non-Custodial
+//         Pause Escape Hatch (Full Withdraw While Paused), Real Page Slots,
+//         and On-Chain Selective Disclosure Inclusion Verification!
+// ----------------------------------------------------------------------------
+#[test]
+fn test_multilane_parallel_appends_pause_escape_and_slots() {
+    println!("\n=== TEST 7: Multi-Lane Appends + Pause Escape Hatch + Real Slots ===");
+    let audren_id = Keypair::new().pubkey();
+    let mut svm = new_svm(audren_id, None);
+    svm.warp_to_slot(42_000);
+    let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_7777);
+
+    let authority = Keypair::new();
+    let payer = Keypair::new();
+    svm.airdrop(&authority.pubkey(), 100_000_000_000).unwrap();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+
+    let alice = AudrenKeys::random(&mut rng);
+    let bob = AudrenKeys::random(&mut rng);
+    let pool_id = 0u32;
+
+    let init_ix = build_init_pool(
+        audren_id,
+        authority.pubkey(),
+        pool_id,
+        PoolMode::Permissionless,
+        true,
+        [0u8; 32],
+        2_000_000,
+    );
+    expect_ok(
+        send_ixs(&mut svm, &authority, &[], &[to_svm_ix(&init_ix)], 300_000),
+        "InitPool (Multi-Lane)",
+    );
+
+    // 7a. Page 0 records real non-zero `created_slot`!
+    let p0_hdr = PageHeader::decode(&read_page_bytes(&svm, &audren_id, pool_id, 0)).unwrap();
+    assert_eq!(
+        p0_hdr.created_slot, 42_000,
+        "Page 0 MUST record real created_slot"
+    );
+
+    // 7b. Authority activates parallel Lane 1 (`Tag 11`), initializing `(1 << 56) | 0`.
+    svm.warp_to_slot(42_100);
+    let init_lane1 = build_init_lane(audren_id, authority.pubkey(), pool_id, 1).unwrap();
+    expect_ok(
+        send_ixs(
+            &mut svm,
+            &authority,
+            &[],
+            &[to_svm_ix(&init_lane1)],
+            300_000,
+        ),
+        "InitLane (Lane 1)",
+    );
+    let (pool_pda, _) = derive_pool_pda(&audren_id, pool_id);
+    let pool_state = PoolState::decode(&svm.get_account(&pool_pda).unwrap().data).unwrap();
+    assert_eq!(
+        pool_state.effective_lane_count(),
+        2,
+        "Pool MUST report 2 active lanes"
+    );
+
+    let lane1_page0 = audren_core::page_id_for_lane(1, 0).unwrap();
+    let (lane1_pda, _) = derive_lane_pda(&audren_id, pool_id, 1);
+    let lane1_state =
+        audren_core::layout::AppendLaneState::decode(&svm.get_account(&lane1_pda).unwrap().data)
+            .unwrap();
+    assert_eq!(lane1_state.current_page_id, lane1_page0);
+    assert_eq!(lane1_state.created_slot, 42_100);
+
+    // 7c. Deposit into Lane 1 with `PoolState` READ-ONLY!
+    let (dep_lane1, _) = build_deposit(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        lane1_page0,
+        &alice.address(),
+        NATIVE_SOL_MINT,
+        2_000_000_000,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    assert!(
+        !dep_lane1.accounts[1].is_writable,
+        "Lane 1 Deposit MUST keep PoolState READ-ONLY (zero write-lock!)"
+    );
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_lane1)], 300_000),
+        "Deposit onto Lane 1 (PoolState read-only)",
+    );
+
+    // 7d. Verify SelectiveDisclosureProof directly against authentic on-chain EpochPage bytes!
+    let lane1_bytes = read_page_bytes(&svm, &audren_id, pool_id, lane1_page0);
+    let alice_lane1_note =
+        scan_and_decrypt_page(&svm, &audren_id, pool_id, lane1_page0, &alice, None)
+            .pop()
+            .unwrap();
+    let disclosure = SelectiveDisclosureProof {
+        version: 1,
+        page_id: alice_lane1_note.page_id,
+        slot_index: alice_lane1_note.slot_index as u8,
+        stealth_pk_b58: bs58::encode(alice_lane1_note.stealth_pk).into_string(),
+        asset_tag_b58: bs58::encode(alice_lane1_note.asset_tag).into_string(),
+        commitment_b58: bs58::encode(alice_lane1_note.commitment).into_string(),
+        mint_b58: bs58::encode(alice_lane1_note.mint).into_string(),
+        amount: alice_lane1_note.amount,
+        asset_blinding_b58: bs58::encode(alice_lane1_note.asset_blinding.to_bytes()).into_string(),
+        value_blinding_b58: bs58::encode(alice_lane1_note.value_blinding.to_bytes()).into_string(),
+    };
+    assert!(
+        disclosure.verify_against_page(&lane1_bytes).unwrap(),
+        "Selective disclosure MUST verify against authentic on-chain EpochPage!"
+    );
+    let p0_bytes = read_page_bytes(&svm, &audren_id, pool_id, 0);
+    assert!(
+        !disclosure.verify_against_page(&p0_bytes).unwrap(),
+        "Selective disclosure MUST reject wrong EpochPage!"
+    );
+
+    // 7e. Transfer from Lane 1 -> Lane 1 with `PoolState` READ-ONLY, then verify cross-lane
+    //     double-spend (spending the same Lane 1 note into Lane 0) fails with NullifierAlreadySpent!
+    let ring_lane1 = read_ring(&svm, &audren_id, pool_id, &[lane1_page0]);
+    let (xfer_lane1, _, _) = build_transfer(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        lane1_page0,
+        &[lane1_page0],
+        &ring_lane1,
+        &alice_lane1_note,
+        alice_lane1_note.slot_index,
+        &bob.address(),
+        &alice.address(),
+        1_200_000_000,
+        None,
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    assert!(
+        !xfer_lane1.accounts[1].is_writable,
+        "Lane 1 Transfer MUST keep PoolState READ-ONLY!"
+    );
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&xfer_lane1)], 900_000),
+        "Transfer on Lane 1 (PoolState read-only)",
+    );
+    let (double_spend_lane0, _, _) = build_transfer(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &[lane1_page0],
+        &ring_lane1,
+        &alice_lane1_note,
+        alice_lane1_note.slot_index,
+        &bob.address(),
+        &alice.address(),
+        100_000_000,
+        None,
+        &[],
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&double_spend_lane0)],
+            900_000,
+        ),
+        AudrenError::NullifierAlreadySpent,
+        "Cross-lane double spend rejected by unified NullifierPDA",
+    );
+
+    // 7f. Fill Lane 1 page 0 to 28 entries and execute permissionless `OpenLanePage` (Tag 12)
+    //     with `PoolState` READ-ONLY, verifying real `closed_slot` & `created_slot`!
+    for _ in 0..25 {
+        let (d, _) = build_deposit(
+            audren_id,
+            payer.pubkey(),
+            pool_id,
+            lane1_page0,
+            &bob.address(),
+            NATIVE_SOL_MINT,
+            10_000,
+            None,
+            &mut rng,
+        )
+        .unwrap();
+        expect_ok(
+            send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&d)], 300_000),
+            "Fill Lane 1 page 0 to rollover threshold",
+        );
+    }
+    svm.warp_to_slot(42_500);
+    let roll_lane1 = build_open_lane_page(audren_id, payer.pubkey(), pool_id, lane1_page0).unwrap();
+    assert!(
+        !roll_lane1.accounts[1].is_writable,
+        "OpenLanePage MUST keep PoolState READ-ONLY!"
+    );
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&roll_lane1)], 300_000),
+        "Permissionless OpenLanePage (Lane 1 -> page 1)",
+    );
+    let sealed_hdr =
+        PageHeader::decode(&read_page_bytes(&svm, &audren_id, pool_id, lane1_page0)).unwrap();
+    assert!(sealed_hdr.closed && sealed_hdr.closed_slot == 42_500);
+    let lane1_page1 = audren_core::page_id_for_lane(1, 1).unwrap();
+    let new_hdr =
+        PageHeader::decode(&read_page_bytes(&svm, &audren_id, pool_id, lane1_page1)).unwrap();
+    assert!(!new_hdr.closed && new_hdr.created_slot == 42_500);
+
+    // 7g. Emergency pause blocks deposits AND partial withdrawals, while FULL withdrawal
+    //     (`has_change = false`, read-only PoolState) ALWAYS succeeds as a non-custodial escape hatch!
+    let pause_ix = build_set_paused(audren_id, authority.pubkey(), pool_id, true);
+    expect_ok(
+        send_ixs(&mut svm, &authority, &[], &[to_svm_ix(&pause_ix)], 100_000),
+        "SetPaused(true)",
+    );
+    let (blocked_dep, _) = build_deposit(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        NATIVE_SOL_MINT,
+        50_000,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&blocked_dep)], 300_000),
+        AudrenError::PoolPaused,
+        "Deposit blocked while paused",
+    );
+    let ring_sealed = read_ring(&svm, &audren_id, pool_id, &[lane1_page0]);
+    let bob_notes = scan_and_decrypt_page(&svm, &audren_id, pool_id, lane1_page0, &bob, None);
+    let bob_big = bob_notes
+        .iter()
+        .find(|n| n.amount == 1_200_000_000)
+        .expect("Bob received 1.2 SOL note on Lane 1");
+    let (blocked_partial_wd, _) = build_withdraw(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        lane1_page1,
+        &[lane1_page0],
+        &ring_sealed,
+        bob_big,
+        bob_big.slot_index,
+        payer.pubkey(),
+        &bob.address(),
+        500_000_000,
+        None,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&blocked_partial_wd)],
+            900_000,
+        ),
+        AudrenError::PoolPaused,
+        "Partial withdraw blocked while paused",
+    );
+    let (escape_full_wd, _) = build_withdraw(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &[lane1_page0],
+        &ring_sealed,
+        bob_big,
+        bob_big.slot_index,
+        payer.pubkey(),
+        &bob.address(),
+        bob_big.amount,
+        None,
+        None,
+        &mut rng,
+    )
+    .unwrap();
+    assert!(
+        !escape_full_wd.accounts[1].is_writable,
+        "Full withdraw MUST keep PoolState READ-ONLY!"
+    );
+    expect_ok(
+        send_ixs(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&escape_full_wd)],
+            700_000,
+        ),
+        "Full Withdraw SUCCEEDS while Pool is Paused (non-custodial escape hatch!)",
+    );
+    println!("  [MULTI-LANE + PAUSE ESCAPE + REAL SLOTS PASSED]");
 }

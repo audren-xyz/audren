@@ -28,7 +28,7 @@ use audren_client::{
 };
 use audren_core::{
     layout::{PoolState, PAGE_SCAN_LEN, PAGE_SCAN_OFFSET},
-    AUDREN_PROGRAM_ID, NATIVE_SOL_MINT, PoolMode,
+    PoolMode, AUDREN_PROGRAM_ID, NATIVE_SOL_MINT,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand::{rngs::StdRng, SeedableRng};
@@ -100,7 +100,11 @@ fn rpc_call(url: &str, method: &str, params: Value) -> Value {
 }
 
 fn get_blockhash(url: &str) -> [u8; 32] {
-    let res = rpc_call(url, "getLatestBlockhash", json!([{"commitment": "confirmed"}]));
+    let res = rpc_call(
+        url,
+        "getLatestBlockhash",
+        json!([{"commitment": "confirmed"}]),
+    );
     let s = res["value"]["blockhash"].as_str().unwrap();
     let bytes = bs58::decode(s).into_vec().unwrap();
     bytes.try_into().unwrap()
@@ -210,7 +214,13 @@ fn send_audren_v1(
     label: &str,
 ) -> String {
     let ix = to_ix(audren_ix);
-    let probe = build_v1_wire(payer, std::slice::from_ref(&ix), [0u8; 32], cu_limit, 10_000);
+    let probe = build_v1_wire(
+        payer,
+        std::slice::from_ref(&ix),
+        [0u8; 32],
+        cu_limit,
+        10_000,
+    );
     if probe.len() <= MAX_TRANSACTION_SIZE {
         return send_v1_and_confirm(url, payer, &[ix], cu_limit, label);
     }
@@ -290,7 +300,13 @@ fn test_live_devnet_full_shielded_lifecycle() {
             [0u8; 32],
             2_000_000,
         );
-        send_v1_and_confirm(&rpc_url, &payer, &[to_ix(&init_ix)], 120_000, "InitPool(#0)");
+        send_v1_and_confirm(
+            &rpc_url,
+            &payer,
+            &[to_ix(&init_ix)],
+            120_000,
+            "InitPool(#0)",
+        );
         0
     };
 
@@ -307,29 +323,48 @@ fn test_live_devnet_full_shielded_lifecycle() {
         &mut rng,
     )
     .unwrap();
-    send_audren_v1(&rpc_url, &payer, &dep_ix, 120_000, seed_now, "Deposit(0.05 SOL -> Alice)");
+    send_audren_v1(
+        &rpc_url,
+        &payer,
+        &dep_ix,
+        120_000,
+        seed_now,
+        "Deposit(0.05 SOL -> Alice)",
+    );
 
     // 2. Scan EpochPage via standard RPC dataSlice[64..1120]
     let (page_pda, _) = derive_epoch_page_pda(&program_id, pool_id, active_page_id);
-    let scan_slice =
-        get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
-            .expect("EpochPage dataSlice");
+    let scan_slice = get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
+        .expect("EpochPage dataSlice");
     let alice_fvk = alice.full_viewing_key();
     let alice_hits = scan_page_dataslice(&alice_fvk, active_page_id, &scan_slice).unwrap();
-    assert_eq!(alice_hits.len(), 1, "Alice must find exactly 1 shielded note via dataSlice");
+    assert!(
+        !alice_hits.is_empty(),
+        "Alice must find her shielded note via dataSlice"
+    );
 
     let page_full = get_account_data(&rpc_url, &page_pda, None).expect("EpochPage full");
-    let alice_note = decrypt_owned_note(
-        &alice_fvk,
-        Some(&alice),
-        &program_id,
-        pool_id,
-        &page_full,
-        alice_hits[0].slot_index,
-        None,
-    )
-    .unwrap()
-    .expect("decrypt Alice note");
+    let alice_notes: Vec<_> = alice_hits
+        .iter()
+        .filter_map(|h| {
+            decrypt_owned_note(
+                &alice_fvk,
+                Some(&alice),
+                &program_id,
+                pool_id,
+                &page_full,
+                h.slot_index,
+                None,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        alice_notes.len(),
+        1,
+        "Alice must decrypt exactly 1 shielded note"
+    );
+    let alice_note = alice_notes.into_iter().next().unwrap();
     assert_eq!(alice_note.amount, 50_000_000);
     println!(
         "  [PURE-RPC SCAN OK] Found Alice note at page={} slot={} amount=0.05 SOL",
@@ -370,20 +405,33 @@ fn test_live_devnet_full_shielded_lifecycle() {
             .expect("EpochPage dataSlice 2");
     let bob_fvk = bob.full_viewing_key();
     let bob_hits = scan_page_dataslice(&bob_fvk, active_page_id, &scan_slice_2).unwrap();
-    assert_eq!(bob_hits.len(), 1, "Bob must find his 0.03 SOL shielded note");
+    assert!(
+        !bob_hits.is_empty(),
+        "Bob must find his 0.03 SOL shielded note"
+    );
 
     let page_full_2 = get_account_data(&rpc_url, &page_pda, None).expect("EpochPage full 2");
-    let bob_note = decrypt_owned_note(
-        &bob_fvk,
-        Some(&bob),
-        &program_id,
-        pool_id,
-        &page_full_2,
-        bob_hits[0].slot_index,
-        None,
-    )
-    .unwrap()
-    .expect("decrypt Bob note");
+    let bob_notes: Vec<_> = bob_hits
+        .iter()
+        .filter_map(|h| {
+            decrypt_owned_note(
+                &bob_fvk,
+                Some(&bob),
+                &program_id,
+                pool_id,
+                &page_full_2,
+                h.slot_index,
+                None,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        bob_notes.len(),
+        1,
+        "Bob must decrypt exactly 1 shielded note"
+    );
+    let bob_note = bob_notes.into_iter().next().unwrap();
     assert_eq!(bob_note.amount, 30_000_000);
 
     let ring2 = extract_ring_from_page(&page_full_2).unwrap();
@@ -446,7 +494,9 @@ fn test_live_mainnet_smoke_full_recovery() {
     let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
 
     let active_page_id = if let Some(pool_bytes) = get_account_data(&rpc_url, &pool_pda, None) {
-        PoolState::decode(&pool_bytes).expect("decode PoolState").current_page_id
+        PoolState::decode(&pool_bytes)
+            .expect("decode PoolState")
+            .current_page_id
     } else {
         let init_ix = build_init_pool(
             program_id,
@@ -457,7 +507,13 @@ fn test_live_mainnet_smoke_full_recovery() {
             [0u8; 32],
             2_000_000,
         );
-        send_v1_and_confirm(&rpc_url, &payer, &[to_ix(&init_ix)], 120_000, "Mainnet InitPool(#0)");
+        send_v1_and_confirm(
+            &rpc_url,
+            &payer,
+            &[to_ix(&init_ix)],
+            120_000,
+            "Mainnet InitPool(#0)",
+        );
         0
     };
 
@@ -474,26 +530,39 @@ fn test_live_mainnet_smoke_full_recovery() {
         &mut rng,
     )
     .unwrap();
-    send_audren_v1(&rpc_url, &payer, &dep_ix, 120_000, seed_now, "Mainnet Deposit(0.001 SOL)");
+    send_audren_v1(
+        &rpc_url,
+        &payer,
+        &dep_ix,
+        120_000,
+        seed_now,
+        "Mainnet Deposit(0.001 SOL)",
+    );
 
     let (page_pda, _) = derive_epoch_page_pda(&program_id, pool_id, active_page_id);
     let scan_slice = get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
         .expect("EpochPage dataSlice");
     let alice_fvk = alice.full_viewing_key();
     let alice_hits = scan_page_dataslice(&alice_fvk, active_page_id, &scan_slice).unwrap();
-    assert_eq!(alice_hits.len(), 1);
+    assert!(!alice_hits.is_empty());
     let page_full = get_account_data(&rpc_url, &page_pda, None).expect("EpochPage full");
-    let alice_note = decrypt_owned_note(
-        &alice_fvk,
-        Some(&alice),
-        &program_id,
-        pool_id,
-        &page_full,
-        alice_hits[0].slot_index,
-        None,
-    )
-    .unwrap()
-    .expect("decrypt Alice note");
+    let alice_notes: Vec<_> = alice_hits
+        .iter()
+        .filter_map(|h| {
+            decrypt_owned_note(
+                &alice_fvk,
+                Some(&alice),
+                &program_id,
+                pool_id,
+                &page_full,
+                h.slot_index,
+                None,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(alice_notes.len(), 1);
+    let alice_note = alice_notes.into_iter().next().unwrap();
 
     let ring = extract_ring_from_page(&page_full).unwrap();
     let (xfer_ix, _, _) = build_transfer(
@@ -522,23 +591,30 @@ fn test_live_mainnet_smoke_full_recovery() {
         "Mainnet Transfer(0.001 SOL -> Bob)",
     );
 
-    let scan_slice_2 = get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
-        .expect("EpochPage dataSlice 2");
+    let scan_slice_2 =
+        get_account_data(&rpc_url, &page_pda, Some((PAGE_SCAN_OFFSET, PAGE_SCAN_LEN)))
+            .expect("EpochPage dataSlice 2");
     let bob_fvk = bob.full_viewing_key();
     let bob_hits = scan_page_dataslice(&bob_fvk, active_page_id, &scan_slice_2).unwrap();
-    assert_eq!(bob_hits.len(), 1);
+    assert!(!bob_hits.is_empty());
     let page_full_2 = get_account_data(&rpc_url, &page_pda, None).expect("EpochPage full 2");
-    let bob_note = decrypt_owned_note(
-        &bob_fvk,
-        Some(&bob),
-        &program_id,
-        pool_id,
-        &page_full_2,
-        bob_hits[0].slot_index,
-        None,
-    )
-    .unwrap()
-    .expect("decrypt Bob note");
+    let bob_notes: Vec<_> = bob_hits
+        .iter()
+        .filter_map(|h| {
+            decrypt_owned_note(
+                &bob_fvk,
+                Some(&bob),
+                &program_id,
+                pool_id,
+                &page_full_2,
+                h.slot_index,
+                None,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(bob_notes.len(), 1);
+    let bob_note = bob_notes.into_iter().next().unwrap();
     assert_eq!(bob_note.amount, 1_000_000);
 
     let ring2 = extract_ring_from_page(&page_full_2).unwrap();

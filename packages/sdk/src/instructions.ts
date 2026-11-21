@@ -1,13 +1,16 @@
 /**
- * Wire encoders for Audren's non-ZK instructions (`InitPool`, `OpenPage`, `Deposit`, `SetPaused`)
- * including third-party confidential deposits (`encodeDepositData`).
+ * Wire encoders for Audren's non-ZK, buffer, and append-lane instructions:
+ * `InitPool` (0), `OpenPage` (1), `Deposit` (2), `SetPaused` (7),
+ * `WriteProofBuffer` (8), `ExecBuffered` (9), `CloseProofBuffer` (10),
+ * `InitLane` (11), and `OpenLanePage` (12).
  *
  * Zero-knowledge proving instructions (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`)
- * invoke the compiled Rust/WASM prover in `programs/audren/crates/client`.
+ * invoke the Rust prover (`crates/client`).
  */
 
 import {
   DYNAMIC_OUTPUT_WIRE_LEN,
+  MAX_APPEND_LANES,
   NOTE_CT_LEN,
   PROOF_BUFFER_CHUNK_SIZE,
   PROOF_BUFFER_MAX_PAYLOAD,
@@ -15,7 +18,9 @@ import {
   TAG_CLOSE_PROOF_BUFFER,
   TAG_DEPOSIT,
   TAG_EXEC_BUFFERED,
+  TAG_INIT_LANE,
   TAG_INIT_POOL,
+  TAG_OPEN_LANE_PAGE,
   TAG_OPEN_PAGE,
   TAG_SET_PAUSED,
   TAG_WRITE_PROOF_BUFFER,
@@ -147,4 +152,22 @@ export function netDepositAmount(amount: bigint, feeBps: number, maxFee: bigint)
 /** Encode Tag 10 (`CloseProofBuffer`, 1 byte) — reclaims 100% rent from an abandoned buffer. */
 export function encodeCloseProofBufferData(): Uint8Array {
   return new Uint8Array([TAG_CLOSE_PROOF_BUFFER]);
+}
+
+function assertParallelLaneId(laneId: number): void {
+  if (!Number.isInteger(laneId) || laneId < 1 || laneId >= MAX_APPEND_LANES) {
+    throw new RangeError(`Parallel laneId must be an integer in 1..${MAX_APPEND_LANES - 1}, got ${laneId}`);
+  }
+}
+
+/** Encode Tag 11 (`InitLane`, 2 bytes) — initializes parallel append lane `laneId` (`1..=15`). */
+export function encodeInitLaneData(laneId: number): Uint8Array {
+  assertParallelLaneId(laneId);
+  return new Uint8Array([TAG_INIT_LANE, laneId]);
+}
+
+/** Encode Tag 12 (`OpenLanePage`, 2 bytes) — pre-opens the next `EpochPage` on lane `laneId` (`1..=15`). */
+export function encodeOpenLanePageData(laneId: number): Uint8Array {
+  assertParallelLaneId(laneId);
+  return new Uint8Array([TAG_OPEN_LANE_PAGE, laneId]);
 }

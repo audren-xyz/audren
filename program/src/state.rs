@@ -1,13 +1,16 @@
 //! On-chain account PDA derivation, validation, and zero-copy state accessors.
 
 use audren_core::{
+    lane_of_page_id,
     layout::{
-        read_page_witness, write_page_note, NoteEntry, PageHeader, PoolState, PAGE_LEN,
-        PAGE_RENT_MAGIC, POOL_STATE_LEN, SENTINEL_ACCOUNT_LEN, SOL_VAULT_MAGIC,
+        read_page_witness, write_page_note, AppendLaneState, NoteEntry, PageHeader, PoolState,
+        LANE_STATE_LEN, PAGE_LEN, PAGE_RENT_MAGIC, POOL_STATE_LEN, SENTINEL_ACCOUNT_LEN,
+        SOL_VAULT_MAGIC,
     },
     AudrenError, Bytes32, ASSOCIATED_TOKEN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID, ESCROW_SEED,
-    MAX_ESCROW_SHARDS, NULLIFIER_SEED, PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED,
-    PROTOCOL_VERSION, SOL_VAULT_SEED, TOKEN_2022_PROGRAM_ID, VAULT_AUTH_SEED,
+    LANE_RENT_SEED, LANE_SEED, MAX_APPEND_LANES, MAX_ESCROW_SHARDS, NULLIFIER_SEED,
+    PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, PROTOCOL_VERSION, SOL_VAULT_SEED,
+    TOKEN_2022_PROGRAM_ID, VAULT_AUTH_SEED,
 };
 use solana_account_info::AccountInfo;
 use solana_address::Address;
@@ -57,6 +60,36 @@ pub fn sol_vault_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
 
 pub fn page_rent_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
     Address::find_program_address(&[PAGE_RENT_SEED, &pool_id.to_le_bytes()], program_id)
+}
+
+pub fn lane_pda(
+    program_id: &Address,
+    pool_id: u32,
+    lane_id: u8,
+) -> Result<(Address, u8), ProgramError> {
+    ensure(
+        lane_id >= 1 && lane_id < MAX_APPEND_LANES,
+        AudrenError::InvalidLane,
+    )?;
+    Ok(Address::find_program_address(
+        &[LANE_SEED, &pool_id.to_le_bytes(), &[lane_id]],
+        program_id,
+    ))
+}
+
+pub fn lane_rent_pda(
+    program_id: &Address,
+    pool_id: u32,
+    lane_id: u8,
+) -> Result<(Address, u8), ProgramError> {
+    ensure(
+        lane_id >= 1 && lane_id < MAX_APPEND_LANES,
+        AudrenError::InvalidLane,
+    )?;
+    Ok(Address::find_program_address(
+        &[LANE_RENT_SEED, &pool_id.to_le_bytes(), &[lane_id]],
+        program_id,
+    ))
 }
 
 pub fn escrow_pda(program_id: &Address, pool_id: u32, shard_id: u8) -> Result<(Address, u8), ProgramError> {
@@ -142,9 +175,10 @@ pub fn append_note_to_page(
     account: &AccountInfo,
     program_id: &Address,
     pool_id: u32,
-    expected_page_id: u64,
+    expected_page_id: Option<u64>,
     note: &NoteEntry,
-) -> Result<u8, ProgramError> {
+    slot: u64,
+) -> Result<(u64, u8), ProgramError> {
     ensure(
         account.is_writable && account.owner == program_id,
         AudrenError::InvalidAccount,
@@ -152,11 +186,16 @@ pub fn append_note_to_page(
     let mut data = account.try_borrow_mut_data()?;
     ensure(data.len() == PAGE_LEN, AudrenError::InvalidAccount)?;
     let mut header = PageHeader::decode(&data).map_err(err)?;
-    ensure(
-        header.pool_id == pool_id && header.page_id == expected_page_id,
-        AudrenError::WrongPool,
-    )?;
-    let (expected, _) = page_pda(program_id, pool_id, expected_page_id);
+    ensure(header.pool_id == pool_id, AudrenError::WrongPool)?;
+    if let Some(expected_id) = expected_page_id {
+        ensure(header.page_id == expected_id, AudrenError::WrongPool)?;
+    } else {
+        ensure(
+            lane_of_page_id(header.page_id) >= 1,
+            AudrenError::InvalidLane,
+        )?;
+    }
+    let (expected, _) = page_pda(program_id, pool_id, header.page_id);
     ensure(*account.key == expected, AudrenError::InvalidPda)?;
     let idx = header.count as usize;
     ensure(
@@ -170,9 +209,54 @@ pub fn append_note_to_page(
         .ok_or_else(|| err(AudrenError::ArithmeticOverflow))?;
     if (header.count as usize) == audren_core::layout::PAGE_CAPACITY {
         header.closed = true;
+        header.closed_slot = slot;
     }
     header.encode(&mut data).map_err(err)?;
-    Ok(idx as u8)
+    Ok((header.page_id, idx as u8))
+}
+
+pub fn load_lane(
+    account: &AccountInfo,
+    program_id: &Address,
+    pool_id: u32,
+    lane_id: u8,
+) -> Result<AppendLaneState, ProgramError> {
+    ensure(account.owner == program_id, AudrenError::InvalidAccount)?;
+    let data = account.try_borrow_data()?;
+    ensure(data.len() == LANE_STATE_LEN, AudrenError::InvalidAccount)?;
+    let state = AppendLaneState::decode(&data).map_err(err)?;
+    ensure(
+        state.version == PROTOCOL_VERSION
+            && state.pool_id == pool_id
+            && state.lane_id == lane_id,
+        AudrenError::InvalidLane,
+    )?;
+    let (expected, _) = lane_pda(program_id, pool_id, lane_id)?;
+    ensure(*account.key == expected, AudrenError::InvalidPda)?;
+    Ok(state)
+}
+
+pub fn save_lane(
+    account: &AccountInfo,
+    program_id: &Address,
+    state: &AppendLaneState,
+) -> Result<(), ProgramError> {
+    ensure(
+        account.is_writable && account.owner == program_id,
+        AudrenError::InvalidAccount,
+    )?;
+    let mut data = account.try_borrow_mut_data()?;
+    state.encode(&mut data).map_err(err)
+}
+
+pub fn check_lane_rent_vault(
+    account: &AccountInfo,
+    program_id: &Address,
+    pool_id: u32,
+    lane_id: u8,
+) -> Result<(), ProgramError> {
+    let (expected, _) = lane_rent_pda(program_id, pool_id, lane_id)?;
+    check_sentinel(account, program_id, &expected, PAGE_RENT_MAGIC)
 }
 
 pub fn check_sentinel(

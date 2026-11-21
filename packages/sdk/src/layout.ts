@@ -1,8 +1,11 @@
 /**
- * Zero-copy binary decoders for Audren `PoolState` (192 B) and SoA `EpochPage` (6,240 B).
+ * Zero-copy binary decoders for Audren `PoolState` (192 B), `AppendLaneState` (64 B),
+ * and SoA `EpochPage` (6,240 B).
  */
 
 import {
+  LANE_MAGIC,
+  LANE_STATE_LEN,
   NOTE_CT_LEN,
   PAGE_CAPACITY,
   PAGE_LEN,
@@ -35,6 +38,7 @@ export interface PoolState {
   vaultAuthBump: number;
   solVaultBump: number;
   pageRentBump: number;
+  activeLanes: number;
 }
 
 export interface PageHeader {
@@ -46,6 +50,16 @@ export interface PageHeader {
   pageId: bigint;
   createdSlot: bigint;
   closedSlot: bigint;
+}
+
+export interface AppendLaneState {
+  version: number;
+  laneId: number;
+  bump: number;
+  rentVaultBump: number;
+  poolId: number;
+  currentPageId: bigint;
+  createdSlot: bigint;
 }
 
 export interface NoteEntry {
@@ -97,6 +111,27 @@ export function decodePoolState(data: Uint8Array): PoolState {
     vaultAuthBump: data[113],
     solVaultBump: data[114],
     pageRentBump: data[115],
+    activeLanes: Math.max(1, data[116]),
+  };
+}
+
+export function decodeAppendLaneState(data: Uint8Array): AppendLaneState {
+  if (data.byteLength !== LANE_STATE_LEN) {
+    throw new Error(`AppendLaneState must be ${LANE_STATE_LEN} bytes, got ${data.byteLength}`);
+  }
+  const magic = readAscii(data, 0, 8);
+  if (magic !== LANE_MAGIC) {
+    throw new Error(`Invalid AppendLaneState magic: ${magic}`);
+  }
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  return {
+    version: data[8],
+    laneId: data[9],
+    bump: data[10],
+    rentVaultBump: data[11],
+    poolId: view.getUint32(12, true),
+    currentPageId: view.getBigUint64(16, true),
+    createdSlot: view.getBigUint64(24, true),
   };
 }
 

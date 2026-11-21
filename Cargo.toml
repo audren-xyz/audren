@@ -1,6 +1,6 @@
 # Host workspace: shared core library and client SDK (prover, pure-RPC/WS scanner, router-agnostic swap builder).
 # The deployed on-chain program builds in its own isolated workspace (`program/`) with its own Cargo.lock,
-# following `programs/README.md` ("One layout per program").
+# keeping on-chain build dependencies separate from the host client.
 [workspace]
 resolver = "2"
 members = ["crates/audren-core", "crates/client"]

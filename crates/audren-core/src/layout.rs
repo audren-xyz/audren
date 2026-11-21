@@ -15,6 +15,7 @@ pub const PAGE_MAGIC: [u8; 8] = *b"AUDRNPG1";
 pub const SOL_VAULT_MAGIC: [u8; 8] = *b"AUDRNSL1";
 pub const PAGE_RENT_MAGIC: [u8; 8] = *b"AUDRNRN1";
 pub const PROOF_BUFFER_MAGIC: [u8; 8] = *b"AUDRNBF1";
+pub const LANE_MAGIC: [u8; 8] = *b"AUDRNLN1";
 
 // ---------------------------------------------------------------------------
 // Ephemeral ProofBuffer PDA (48 B header + up to 9,984 B payload <= 10 KiB CPI cap)
@@ -31,7 +32,7 @@ pub const BUF_OFF_MAGIC: usize = 0; // [u8; 8]
 pub const BUF_OFF_AUTHORITY: usize = 8; // [u8; 32]
 pub const BUF_OFF_EXPECTED_LEN: usize = 40; // u32 LE
 pub const BUF_OFF_WRITTEN_MASK: usize = 44; // u16 LE
-// [46..48]: reserved zero bytes
+                                            // [46..48]: reserved zero bytes
 
 // ---------------------------------------------------------------------------
 // PoolState (192 bytes)
@@ -55,7 +56,8 @@ pub const POOL_OFF_AUDITOR_LOCKED: usize = 112; // u8 (1 = auditor_pk permanentl
 pub const POOL_OFF_VAULT_AUTH_BUMP: usize = 113; // u8
 pub const POOL_OFF_SOL_VAULT_BUMP: usize = 114; // u8
 pub const POOL_OFF_PAGE_RENT_BUMP: usize = 115; // u8
-// [116..192]: 76 bytes reserved zero padding for forward-compatible PQ metadata
+pub const POOL_OFF_ACTIVE_LANES: usize = 116; // u8 (0 or 1 = Lane 0 only; 2..=16 = Lanes 0..N-1 active)
+                                              // [117..192]: 75 bytes reserved zero padding for forward-compatible PQ metadata
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolState {
@@ -74,6 +76,7 @@ pub struct PoolState {
     pub vault_auth_bump: u8,
     pub sol_vault_bump: u8,
     pub page_rent_bump: u8,
+    pub active_lanes: u8,
 }
 
 impl PoolState {
@@ -101,6 +104,7 @@ impl PoolState {
             vault_auth_bump: data[POOL_OFF_VAULT_AUTH_BUMP],
             sol_vault_bump: data[POOL_OFF_SOL_VAULT_BUMP],
             page_rent_bump: data[POOL_OFF_PAGE_RENT_BUMP],
+            active_lanes: data[POOL_OFF_ACTIVE_LANES],
         })
     }
 
@@ -129,12 +133,88 @@ impl PoolState {
         out[POOL_OFF_VAULT_AUTH_BUMP] = self.vault_auth_bump;
         out[POOL_OFF_SOL_VAULT_BUMP] = self.sol_vault_bump;
         out[POOL_OFF_PAGE_RENT_BUMP] = self.page_rent_bump;
+        out[POOL_OFF_ACTIVE_LANES] = self.active_lanes;
         Ok(())
     }
 
     #[inline]
     pub fn has_auditor(&self) -> bool {
         self.mode == PoolMode::InstitutionalAudited && self.auditor_pk != [0u8; 32]
+    }
+
+    /// Effective number of active append lanes (`>= 1`; legacy `0` means Lane 0 only).
+    #[inline]
+    pub fn effective_lane_count(&self) -> u8 {
+        if self.active_lanes == 0 {
+            1
+        } else {
+            self.active_lanes
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AppendLaneState (64 bytes, one PDA per parallel append lane 1..15)
+// ---------------------------------------------------------------------------
+
+pub const LANE_STATE_LEN: usize = 64;
+
+pub const LANE_OFF_MAGIC: usize = 0; // [u8; 8]
+pub const LANE_OFF_VERSION: usize = 8; // u8
+pub const LANE_OFF_LANE_ID: usize = 9; // u8 (1..16)
+pub const LANE_OFF_BUMP: usize = 10; // u8
+pub const LANE_OFF_RENT_BUMP: usize = 11; // u8
+pub const LANE_OFF_POOL_ID: usize = 12; // u32 LE
+pub const LANE_OFF_CURRENT_PAGE: usize = 16; // u64 LE ((lane_id << 56) | seq)
+pub const LANE_OFF_CREATED_SLOT: usize = 24; // u64 LE
+                                             // [32..64]: 32 bytes reserved
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppendLaneState {
+    pub version: u8,
+    pub lane_id: u8,
+    pub bump: u8,
+    pub rent_vault_bump: u8,
+    pub pool_id: u32,
+    pub current_page_id: u64,
+    pub created_slot: u64,
+}
+
+impl AppendLaneState {
+    pub fn decode(data: &[u8]) -> Result<Self, AudrenError> {
+        if data.len() != LANE_STATE_LEN {
+            return Err(AudrenError::InvalidAccount);
+        }
+        if data[LANE_OFF_MAGIC..LANE_OFF_MAGIC + 8] != LANE_MAGIC {
+            return Err(AudrenError::InvalidMagic);
+        }
+        Ok(Self {
+            version: data[LANE_OFF_VERSION],
+            lane_id: data[LANE_OFF_LANE_ID],
+            bump: data[LANE_OFF_BUMP],
+            rent_vault_bump: data[LANE_OFF_RENT_BUMP],
+            pool_id: read_u32(data, LANE_OFF_POOL_ID)?,
+            current_page_id: read_u64(data, LANE_OFF_CURRENT_PAGE)?,
+            created_slot: read_u64(data, LANE_OFF_CREATED_SLOT)?,
+        })
+    }
+
+    pub fn encode(&self, out: &mut [u8]) -> Result<(), AudrenError> {
+        if out.len() != LANE_STATE_LEN {
+            return Err(AudrenError::InvalidAccount);
+        }
+        out.fill(0);
+        out[LANE_OFF_MAGIC..LANE_OFF_MAGIC + 8].copy_from_slice(&LANE_MAGIC);
+        out[LANE_OFF_VERSION] = self.version;
+        out[LANE_OFF_LANE_ID] = self.lane_id;
+        out[LANE_OFF_BUMP] = self.bump;
+        out[LANE_OFF_RENT_BUMP] = self.rent_vault_bump;
+        out[LANE_OFF_POOL_ID..LANE_OFF_POOL_ID + 4].copy_from_slice(&self.pool_id.to_le_bytes());
+        out[LANE_OFF_CURRENT_PAGE..LANE_OFF_CURRENT_PAGE + 8]
+            .copy_from_slice(&self.current_page_id.to_le_bytes());
+        out[LANE_OFF_CREATED_SLOT..LANE_OFF_CREATED_SLOT + 8]
+            .copy_from_slice(&self.created_slot.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -166,7 +246,7 @@ pub const PAGE_OFF_POOL_ID: usize = 12; // u32 LE
 pub const PAGE_OFF_PAGE_ID: usize = 16; // u64 LE
 pub const PAGE_OFF_CREATED_SLOT: usize = 24; // u64 LE
 pub const PAGE_OFF_CLOSED_SLOT: usize = 32; // u64 LE
-// [40..64]: 24 bytes reserved
+                                            // [40..64]: 24 bytes reserved
 
 /// Contiguous pure-RPC scan slice: `view_tags[32]` + `ephemeral_pks[32]`.
 pub const PAGE_OFF_VIEW_TAGS: usize = PAGE_HEADER_LEN; // 64..96 (32 B)
@@ -260,7 +340,10 @@ impl PageHeader {
 
 /// Zero-copy read of `(stealth_pk, asset_tag, commitment)` at slot `idx` in a validated `EpochPage`.
 #[inline]
-pub fn read_page_witness(data: &[u8], idx: usize) -> Result<(Bytes32, Bytes32, Bytes32), AudrenError> {
+pub fn read_page_witness(
+    data: &[u8],
+    idx: usize,
+) -> Result<(Bytes32, Bytes32, Bytes32), AudrenError> {
     if data.len() != PAGE_LEN || idx >= PAGE_CAPACITY {
         return Err(AudrenError::InvalidAccount);
     }
@@ -302,7 +385,9 @@ pub fn read_page_note(data: &[u8], idx: usize) -> Result<NoteEntry, AudrenError>
     let off32 = idx * 32;
     let off_ct = idx * NOTE_CT_LEN;
     let mut ciphertext = [0u8; NOTE_CT_LEN];
-    ciphertext.copy_from_slice(&data[PAGE_OFF_CIPHERTEXTS + off_ct..PAGE_OFF_CIPHERTEXTS + off_ct + NOTE_CT_LEN]);
+    ciphertext.copy_from_slice(
+        &data[PAGE_OFF_CIPHERTEXTS + off_ct..PAGE_OFF_CIPHERTEXTS + off_ct + NOTE_CT_LEN],
+    );
     Ok(NoteEntry {
         view_tag: data[PAGE_OFF_VIEW_TAGS + idx],
         ephemeral_pk: read_32(data, PAGE_OFF_EPHEMERAL_PKS + off32)?,
@@ -315,19 +400,25 @@ pub fn read_page_note(data: &[u8], idx: usize) -> Result<NoteEntry, AudrenError>
 
 #[inline]
 pub fn read_u16(data: &[u8], off: usize) -> Result<u16, AudrenError> {
-    let slice = data.get(off..off + 2).ok_or(AudrenError::InvalidInstruction)?;
+    let slice = data
+        .get(off..off + 2)
+        .ok_or(AudrenError::InvalidInstruction)?;
     Ok(u16::from_le_bytes([slice[0], slice[1]]))
 }
 
 #[inline]
 pub fn read_u32(data: &[u8], off: usize) -> Result<u32, AudrenError> {
-    let slice = data.get(off..off + 4).ok_or(AudrenError::InvalidInstruction)?;
+    let slice = data
+        .get(off..off + 4)
+        .ok_or(AudrenError::InvalidInstruction)?;
     Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 #[inline]
 pub fn read_u64(data: &[u8], off: usize) -> Result<u64, AudrenError> {
-    let slice = data.get(off..off + 8).ok_or(AudrenError::InvalidInstruction)?;
+    let slice = data
+        .get(off..off + 8)
+        .ok_or(AudrenError::InvalidInstruction)?;
     Ok(u64::from_le_bytes([
         slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
     ]))
@@ -335,7 +426,9 @@ pub fn read_u64(data: &[u8], off: usize) -> Result<u64, AudrenError> {
 
 #[inline]
 pub fn read_32(data: &[u8], off: usize) -> Result<Bytes32, AudrenError> {
-    let slice = data.get(off..off + 32).ok_or(AudrenError::InvalidInstruction)?;
+    let slice = data
+        .get(off..off + 32)
+        .ok_or(AudrenError::InvalidInstruction)?;
     let mut out = [0u8; 32];
     out.copy_from_slice(slice);
     Ok(out)

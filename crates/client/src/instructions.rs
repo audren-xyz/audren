@@ -9,25 +9,28 @@ use crate::keys::{
     PreparedNote,
 };
 use crate::pda::{
-    derive_ata, derive_epoch_page_pda, derive_nullifier_pda, derive_page_rent_vault_pda,
-    derive_pool_pda, derive_proof_buffer_pda, derive_sol_vault_pda, derive_swap_escrow_pda,
-    derive_vault_auth_pda,
+    derive_ata, derive_epoch_page_pda, derive_lane_pda, derive_lane_rent_vault_pda,
+    derive_nullifier_pda, derive_page_rent_vault_pda, derive_pool_pda, derive_proof_buffer_pda,
+    derive_sol_vault_pda, derive_swap_escrow_pda, derive_vault_auth_pda,
 };
 use crate::prover::{
     asset_generator, compress, decompress, h_point, prove_auditor_asset, prove_cross_base_1,
-    prove_cross_base_2, prove_range_u128, prove_range_u64, prove_triptych, transcript_root,
-    IDENTITY, Point, RingSlotWitness, TriptychWitness,
+    prove_cross_base_2, prove_range_u128, prove_range_u64, prove_triptych, transcript_root, Point,
+    RingSlotWitness, TriptychWitness,
 };
 use crate::scanner::OwnedNote;
 use crate::ClientError;
 use audren_core::{
     instruction::{
-        m_for_input_pages, DYNAMIC_OUTPUT_WIRE_LEN, NOTE_WIRE_LEN, TAG_CLOSE_PROOF_BUFFER,
-        TAG_DEPOSIT, TAG_EXEC_BUFFERED, TAG_INIT_POOL, TAG_MERGE, TAG_OPEN_PAGE, TAG_SET_PAUSED,
-        TAG_SWAP_VIA_ROUTER, TAG_TRANSFER, TAG_WITHDRAW, TAG_WRITE_PROOF_BUFFER,
+        m_for_input_pages, DYNAMIC_OUTPUT_WIRE_LEN, MAX_MERGE_RING_SLOTS, NOTE_WIRE_LEN,
+        TAG_CLOSE_PROOF_BUFFER, TAG_DEPOSIT, TAG_EXEC_BUFFERED, TAG_INIT_LANE, TAG_INIT_POOL,
+        TAG_MERGE, TAG_OPEN_LANE_PAGE, TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_SWAP_VIA_ROUTER,
+        TAG_TRANSFER, TAG_WITHDRAW, TAG_WRITE_PROOF_BUFFER,
     },
+    lane_of_page_id,
     layout::{NoteEntry, PROOF_BUFFER_CHUNK_SIZE, PROOF_BUFFER_MAX_PAYLOAD},
-    NATIVE_SOL_MINT, PoolMode, SYSTEM_PROGRAM_ID, ZK_ELGAMAL_PROOF_PROGRAM_ID,
+    page_id_for_lane, seq_of_page_id, PoolMode, NATIVE_SOL_MINT, SYSTEM_PROGRAM_ID,
+    ZK_ELGAMAL_PROOF_PROGRAM_ID,
 };
 use curve25519_dalek::scalar::Scalar;
 use rand::{CryptoRng, RngCore};
@@ -252,19 +255,22 @@ pub fn build_deposit_with_options<R: RngCore + CryptoRng>(
 ) -> Result<(AudrenInstruction, PreparedNote), ClientError> {
     let is_native = mint == NATIVE_SOL_MINT;
     let prepared = prepare_shielded_note(
-        recipient,
-        mint,
-        net_amount,
-        false,
-        None,
-        false,
-        [0u8; 7],
-        rng,
+        recipient, mint, net_amount, false, None, false, [0u8; 7], rng,
     )?;
 
     let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
     let (out_page, _) = derive_epoch_page_pda(&program_id, pool_id, active_page_id);
-    let (rent_vault, _) = derive_page_rent_vault_pda(&program_id, pool_id);
+    let out_lane = lane_of_page_id(active_page_id);
+    let pool_meta = if out_lane == 0 {
+        AudrenAccountMeta::writable(pool_pda)
+    } else {
+        AudrenAccountMeta::readonly(pool_pda)
+    };
+    let rent_vault = if out_lane == 0 {
+        derive_page_rent_vault_pda(&program_id, pool_id).0
+    } else {
+        derive_lane_rent_vault_pda(&program_id, pool_id, out_lane).0
+    };
     let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
     let mut data = Vec::with_capacity(1 + 9 + DYNAMIC_OUTPUT_WIRE_LEN);
@@ -280,21 +286,20 @@ pub fn build_deposit_with_options<R: RngCore + CryptoRng>(
         let (sol_vault, _) = derive_sol_vault_pda(&program_id, pool_id);
         vec![
             AudrenAccountMeta::writable_signer(depositor),
-            AudrenAccountMeta::writable(pool_pda),
+            pool_meta,
             AudrenAccountMeta::writable(out_page),
             AudrenAccountMeta::writable(sol_vault),
             AudrenAccountMeta::writable(rent_vault),
             AudrenAccountMeta::readonly(sys_prog),
         ]
     } else {
-        let (token_program, depositor_ata, vault_ata) = spl_accounts.ok_or(
-            ClientError::InvalidProofInput(
+        let (token_program, depositor_ata, vault_ata) =
+            spl_accounts.ok_or(ClientError::InvalidProofInput(
                 "SPL deposit requires (token_program, depositor_ata, vault_ata)",
-            ),
-        )?;
+            ))?;
         vec![
             AudrenAccountMeta::writable_signer(depositor),
-            AudrenAccountMeta::writable(pool_pda),
+            pool_meta,
             AudrenAccountMeta::writable(out_page),
             AudrenAccountMeta::readonly(Address::new_from_array(mint)),
             AudrenAccountMeta::writable(depositor_ata),
@@ -340,12 +345,11 @@ pub fn build_transfer<R: RngCore + CryptoRng>(
         return Err(ClientError::InvalidProofInput("insufficient note balance"));
     }
     let chg_amount = input_note.amount - pay_amount;
-    let m = m_for_input_pages(input_page_ids.len()).map_err(|_| {
-        ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages")
-    })?;
-    let spend_x = input_note
-        .spend_x
-        .ok_or(ClientError::InvalidProofInput("spend_x required to spend note"))?;
+    let m = m_for_input_pages(input_page_ids.len())
+        .map_err(|_| ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages"))?;
+    let spend_x = input_note.spend_x.ok_or(ClientError::InvalidProofInput(
+        "spend_x required to spend note",
+    ))?;
 
     // Both outputs derive their own independent, unlinkable ECDH `asset_blinding` so recipient
     // and sender recover both notes purely from `EpochPage` without any local state.
@@ -372,8 +376,9 @@ pub fn build_transfer<R: RngCore + CryptoRng>(
 
     let a_spend = note_pay.entry.asset_tag;
     let a_spend_blinding = note_pay.asset_blinding;
-    let v_spend =
-        compress(&(decompress(&note_pay.entry.commitment)? + decompress(&note_chg.entry.commitment)?));
+    let v_spend = compress(
+        &(decompress(&note_pay.entry.commitment)? + decompress(&note_chg.entry.commitment)?),
+    );
     // V_pay + V_chg = (pay + chg) * G_mint + (pay * a_pay + r_pay + chg * a_chg + r_chg) * H
     let v_spend_eff_blinding = Scalar::from(pay_amount) * note_pay.asset_blinding
         + note_pay.value_blinding
@@ -404,6 +409,7 @@ pub fn build_transfer<R: RngCore + CryptoRng>(
     let triptych = prove_triptych(
         &TriptychWitness {
             m,
+            input_page_ids,
             secret_index,
             ring,
             spend_x,
@@ -476,13 +482,23 @@ pub fn build_transfer<R: RngCore + CryptoRng>(
     let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
     let (out_page, _) = derive_epoch_page_pda(&program_id, pool_id, out_page_id);
     let (nullifier_pda, _) = derive_nullifier_pda(&program_id, pool_id, &triptych.nullifier);
-    let (rent_vault, _) = derive_page_rent_vault_pda(&program_id, pool_id);
+    let out_lane = lane_of_page_id(out_page_id);
+    let pool_meta = if out_lane == 0 {
+        AudrenAccountMeta::writable(pool_pda)
+    } else {
+        AudrenAccountMeta::readonly(pool_pda)
+    };
+    let rent_vault = if out_lane == 0 {
+        derive_page_rent_vault_pda(&program_id, pool_id).0
+    } else {
+        derive_lane_rent_vault_pda(&program_id, pool_id, out_lane).0
+    };
     let zk_prog = Address::new_from_array(ZK_ELGAMAL_PROOF_PROGRAM_ID);
     let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
     let mut accounts = vec![
         AudrenAccountMeta::writable_signer(payer),
-        AudrenAccountMeta::writable(pool_pda),
+        pool_meta,
         AudrenAccountMeta::writable(out_page),
         AudrenAccountMeta::writable(nullifier_pda),
         AudrenAccountMeta::writable(rent_vault),
@@ -540,6 +556,11 @@ pub fn build_merge<R: RngCore + CryptoRng>(
     let m2 = m_for_input_pages(input2_page_ids.len()).map_err(|_| {
         ClientError::InvalidProofInput("input2_page_ids must have 1, 2, or 4 pages")
     })?;
+    if ((1usize << m1) + (1usize << m2)) > MAX_MERGE_RING_SLOTS {
+        return Err(ClientError::InvalidProofInput(
+            "combined merge ring width exceeds 128 slots (max 64+64)",
+        ));
+    }
     let spend_x1 = note1
         .spend_x
         .ok_or(ClientError::InvalidProofInput("spend_x1 required"))?;
@@ -587,6 +608,7 @@ pub fn build_merge<R: RngCore + CryptoRng>(
     let t1 = prove_triptych(
         &TriptychWitness {
             m: m1,
+            input_page_ids: input1_page_ids,
             secret_index: secret_index1,
             ring: ring1,
             spend_x: spend_x1,
@@ -605,6 +627,7 @@ pub fn build_merge<R: RngCore + CryptoRng>(
     let t2 = prove_triptych(
         &TriptychWitness {
             m: m2,
+            input_page_ids: input2_page_ids,
             secret_index: secret_index2,
             ring: ring2,
             spend_x: spend_x2,
@@ -673,13 +696,23 @@ pub fn build_merge<R: RngCore + CryptoRng>(
     let (out_page, _) = derive_epoch_page_pda(&program_id, pool_id, out_page_id);
     let (n1_pda, _) = derive_nullifier_pda(&program_id, pool_id, &t1.nullifier);
     let (n2_pda, _) = derive_nullifier_pda(&program_id, pool_id, &t2.nullifier);
-    let (rent_vault, _) = derive_page_rent_vault_pda(&program_id, pool_id);
+    let out_lane = lane_of_page_id(out_page_id);
+    let pool_meta = if out_lane == 0 {
+        AudrenAccountMeta::writable(pool_pda)
+    } else {
+        AudrenAccountMeta::readonly(pool_pda)
+    };
+    let rent_vault = if out_lane == 0 {
+        derive_page_rent_vault_pda(&program_id, pool_id).0
+    } else {
+        derive_lane_rent_vault_pda(&program_id, pool_id, out_lane).0
+    };
     let zk_prog = Address::new_from_array(ZK_ELGAMAL_PROOF_PROGRAM_ID);
     let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
     let mut accounts = vec![
         AudrenAccountMeta::writable_signer(payer),
-        AudrenAccountMeta::writable(pool_pda),
+        pool_meta,
         AudrenAccountMeta::writable(out_page),
         AudrenAccountMeta::writable(n1_pda),
         AudrenAccountMeta::writable(n2_pda),
@@ -761,9 +794,8 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     if params.min_amount_out == 0 {
         return Err(ClientError::InvalidProofInput("min_amount_out must be > 0"));
     }
-    let m = m_for_input_pages(params.input_page_ids.len()).map_err(|_| {
-        ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages")
-    })?;
+    let m = m_for_input_pages(params.input_page_ids.len())
+        .map_err(|_| ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages"))?;
     let spend_x = params
         .input_note
         .spend_x
@@ -831,11 +863,15 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
         )
     };
 
-    let chg_commit = change_note_opt
+    let chg_wire_opt = change_note_opt
         .as_ref()
-        .map(|(n, _)| n.entry.commitment)
-        .unwrap_or(IDENTITY);
-    let refund_slice: &[u8] = refund_wire_opt.as_ref().map(|b| b.as_slice()).unwrap_or(&[]);
+        .map(|(n, _)| encode_note_wire(&n.entry));
+    let chg_wire_slice: &[u8] = chg_wire_opt.as_ref().map(|b| b.as_slice()).unwrap_or(&[]);
+    let c_chg_slice: &[u8] = c_chg_opt.as_ref().map(|b| b.as_slice()).unwrap_or(&[]);
+    let refund_slice: &[u8] = refund_wire_opt
+        .as_ref()
+        .map(|b| b.as_slice())
+        .unwrap_or(&[]);
 
     let ctx_hash = transcript_root(&[
         b"audren/v1/swap_router",
@@ -848,13 +884,15 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
         &params.amount_in.to_le_bytes(),
         &params.min_amount_out.to_le_bytes(),
         &out_desc_wire,
-        &chg_commit,
+        chg_wire_slice,
+        c_chg_slice,
         refund_slice,
     ]);
 
     let triptych = prove_triptych(
         &TriptychWitness {
             m,
+            input_page_ids: params.input_page_ids,
             secret_index: params.secret_index,
             ring: params.ring,
             spend_x,
@@ -872,10 +910,7 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     )?;
 
     let mut data = Vec::with_capacity(
-        25 + DYNAMIC_OUTPUT_WIRE_LEN
-            + 1200
-            + triptych.proof.len()
-            + params.router_ix_data.len(),
+        25 + DYNAMIC_OUTPUT_WIRE_LEN + 1200 + triptych.proof.len() + params.router_ix_data.len(),
     );
     data.push(TAG_SWAP_VIA_ROUTER);
     data.push(m);
@@ -921,10 +956,21 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
     let (vault_auth, _) = derive_vault_auth_pda(&params.program_id, params.pool_id);
     let (swap_escrow, _) =
         derive_swap_escrow_pda(&params.program_id, params.pool_id, params.shard_id);
-    let (out_page, _) = derive_epoch_page_pda(&params.program_id, params.pool_id, params.out_page_id);
+    let (out_page, _) =
+        derive_epoch_page_pda(&params.program_id, params.pool_id, params.out_page_id);
     let (nullifier_pda, _) =
         derive_nullifier_pda(&params.program_id, params.pool_id, &triptych.nullifier);
-    let (rent_vault, _) = derive_page_rent_vault_pda(&params.program_id, params.pool_id);
+    let out_lane = lane_of_page_id(params.out_page_id);
+    let pool_meta = if out_lane == 0 {
+        AudrenAccountMeta::writable(pool_pda)
+    } else {
+        AudrenAccountMeta::readonly(pool_pda)
+    };
+    let rent_vault = if out_lane == 0 {
+        derive_page_rent_vault_pda(&params.program_id, params.pool_id).0
+    } else {
+        derive_lane_rent_vault_pda(&params.program_id, params.pool_id, out_lane).0
+    };
 
     let mint_in_addr = Address::new_from_array(params.input_note.mint);
     let mint_out_addr = Address::new_from_array(params.mint_out);
@@ -936,7 +982,7 @@ pub fn build_swap_via_router<R: RngCore + CryptoRng>(
 
     let mut accounts = vec![
         AudrenAccountMeta::writable_signer(params.payer),
-        AudrenAccountMeta::writable(pool_pda),
+        pool_meta,
         AudrenAccountMeta::writable(out_page),
         AudrenAccountMeta::writable(nullifier_pda),
         AudrenAccountMeta::writable(rent_vault),
@@ -1002,9 +1048,8 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
     if amount == 0 || amount > input_note.amount {
         return Err(ClientError::InvalidProofInput("invalid withdraw amount"));
     }
-    let m = m_for_input_pages(input_page_ids.len()).map_err(|_| {
-        ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages")
-    })?;
+    let m = m_for_input_pages(input_page_ids.len())
+        .map_err(|_| ClientError::InvalidProofInput("input_page_ids must have 1, 2, or 4 pages"))?;
     let spend_x = input_note
         .spend_x
         .ok_or(ClientError::InvalidProofInput("spend_x required"))?;
@@ -1047,10 +1092,9 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
         )
     };
 
-    let chg_commit = change_opt
-        .as_ref()
-        .map(|(n, _)| n.entry.commitment)
-        .unwrap_or(IDENTITY);
+    let chg_wire_opt = change_opt.as_ref().map(|(n, _)| encode_note_wire(&n.entry));
+    let chg_wire_slice: &[u8] = chg_wire_opt.as_ref().map(|b| b.as_slice()).unwrap_or(&[]);
+    let c_chg_slice: &[u8] = c_chg_opt.as_ref().map(|b| b.as_slice()).unwrap_or(&[]);
 
     let ctx_hash = transcript_root(&[
         b"audren/v1/withdraw",
@@ -1060,12 +1104,14 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
         &input_note.mint,
         recipient_account.as_ref(),
         &amount.to_le_bytes(),
-        &chg_commit,
+        chg_wire_slice,
+        c_chg_slice,
     ]);
 
     let triptych = prove_triptych(
         &TriptychWitness {
             m,
+            input_page_ids,
             secret_index,
             ring,
             spend_x,
@@ -1116,13 +1162,23 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
     let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
     let (out_page, _) = derive_epoch_page_pda(&program_id, pool_id, out_page_id);
     let (nullifier_pda, _) = derive_nullifier_pda(&program_id, pool_id, &triptych.nullifier);
-    let (rent_vault, _) = derive_page_rent_vault_pda(&program_id, pool_id);
+    let out_lane = lane_of_page_id(out_page_id);
+    let pool_meta = if has_change && out_lane == 0 {
+        AudrenAccountMeta::writable(pool_pda)
+    } else {
+        AudrenAccountMeta::readonly(pool_pda)
+    };
+    let rent_vault = if has_change && out_lane >= 1 {
+        derive_lane_rent_vault_pda(&program_id, pool_id, out_lane).0
+    } else {
+        derive_page_rent_vault_pda(&program_id, pool_id).0
+    };
     let zk_prog = Address::new_from_array(ZK_ELGAMAL_PROOF_PROGRAM_ID);
     let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
 
     let mut accounts = vec![
         AudrenAccountMeta::writable_signer(payer),
-        AudrenAccountMeta::writable(pool_pda),
+        pool_meta,
         if has_change {
             AudrenAccountMeta::writable(out_page)
         } else {
@@ -1143,8 +1199,9 @@ pub fn build_withdraw<R: RngCore + CryptoRng>(
         accounts.push(AudrenAccountMeta::writable(sol_vault));
         accounts.push(AudrenAccountMeta::writable(recipient_account));
     } else {
-        let token_program = spl_token_program
-            .ok_or(ClientError::InvalidProofInput("SPL withdraw requires token_program"))?;
+        let token_program = spl_token_program.ok_or(ClientError::InvalidProofInput(
+            "SPL withdraw requires token_program",
+        ))?;
         let (vault_auth, _) = derive_vault_auth_pda(&program_id, pool_id);
         let mint_addr = Address::new_from_array(input_note.mint);
         let vault_ata = derive_ata(&vault_auth, &token_program, &mint_addr);
@@ -1279,4 +1336,74 @@ pub fn build_close_proof_buffer(
         ],
         data: vec![TAG_CLOSE_PROOF_BUFFER],
     }
+}
+
+/// Tag 11: `InitLane` — enable parallel append lane `lane_id` (`1..15`) inside an existing pool.
+pub fn build_init_lane(
+    program_id: Address,
+    authority: Address,
+    pool_id: u32,
+    lane_id: u8,
+) -> Result<AudrenInstruction, ClientError> {
+    let first_page_id =
+        page_id_for_lane(lane_id, 0).ok_or(ClientError::InvalidProofInput("invalid lane_id"))?;
+    if lane_id == 0 {
+        return Err(ClientError::InvalidProofInput("lane_id must be 1..15"));
+    }
+    let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
+    let (lane_pda, _) = derive_lane_pda(&program_id, pool_id, lane_id);
+    let (page0_pda, _) = derive_epoch_page_pda(&program_id, pool_id, first_page_id);
+    let (rent_vault, _) = derive_lane_rent_vault_pda(&program_id, pool_id, lane_id);
+    let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
+    Ok(AudrenInstruction {
+        program_id,
+        accounts: vec![
+            AudrenAccountMeta::writable_signer(authority),
+            AudrenAccountMeta::writable(pool_pda),
+            AudrenAccountMeta::writable(lane_pda),
+            AudrenAccountMeta::writable(page0_pda),
+            AudrenAccountMeta::writable(rent_vault),
+            AudrenAccountMeta::readonly(sys_prog),
+        ],
+        data: vec![TAG_INIT_LANE, lane_id],
+    })
+}
+
+/// Tag 12: `OpenLanePage` — permissionless rollover for parallel lane `1..15` with read-only `PoolState`.
+pub fn build_open_lane_page(
+    program_id: Address,
+    payer: Address,
+    pool_id: u32,
+    current_page_id: u64,
+) -> Result<AudrenInstruction, ClientError> {
+    let lane_id = lane_of_page_id(current_page_id);
+    if lane_id == 0 {
+        return Err(ClientError::InvalidProofInput(
+            "use build_open_page for lane 0",
+        ));
+    }
+    let next_seq = seq_of_page_id(current_page_id)
+        .checked_add(1)
+        .ok_or(ClientError::InvalidProofInput("lane sequence overflow"))?;
+    let next_page_id = page_id_for_lane(lane_id, next_seq)
+        .ok_or(ClientError::InvalidProofInput("invalid lane page_id"))?;
+    let (pool_pda, _) = derive_pool_pda(&program_id, pool_id);
+    let (lane_pda, _) = derive_lane_pda(&program_id, pool_id, lane_id);
+    let (cur_page, _) = derive_epoch_page_pda(&program_id, pool_id, current_page_id);
+    let (next_page, _) = derive_epoch_page_pda(&program_id, pool_id, next_page_id);
+    let (rent_vault, _) = derive_lane_rent_vault_pda(&program_id, pool_id, lane_id);
+    let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
+    Ok(AudrenInstruction {
+        program_id,
+        accounts: vec![
+            AudrenAccountMeta::writable_signer(payer),
+            AudrenAccountMeta::readonly(pool_pda),
+            AudrenAccountMeta::writable(lane_pda),
+            AudrenAccountMeta::writable(cur_page),
+            AudrenAccountMeta::writable(next_page),
+            AudrenAccountMeta::writable(rent_vault),
+            AudrenAccountMeta::readonly(sys_prog),
+        ],
+        data: vec![TAG_OPEN_LANE_PAGE, lane_id],
+    })
 }

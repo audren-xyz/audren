@@ -1,15 +1,19 @@
 //! Router-Agnostic Private Swap & Stateless Relayer Wire Codecs.
 //!
-//! Works with any Solana DEX aggregator or AMM router (Jupiter, Orca, Raydium, Meteora,
-//! Phoenix, Titan, DFlow, or custom routers) that emits a swap instruction signed by
-//! Audren's isolated `swap_escrow` PDA.
+//! Works with compatible PDA-signing Solana routers that satisfy Audren custody
+//! checks and transaction limits. Hosted route availability is provider-specific.
 
 use serde::{Deserialize, Serialize};
 use solana_address::Address;
 
 use crate::instructions::AudrenAccountMeta;
 
-/// Standard aggregator `/quote` request payload (compatible with Jupiter v6 and similar APIs).
+/// Jupiter DEX labels that reject PDA CPI callers (e.g. `InvalidRealUser` / sysvar top-level
+/// instruction introspection) and must be excluded when routing through `SwapViaRouter`.
+pub const JUPITER_CPI_EXCLUDED_DEXES: &str =
+    "Kipseli,Quantum,BisonFi,BisonFi Predict,BinaryFi,Obsidian,VaultLiquidUnstake,Sanctum Prop S";
+
+/// Standard aggregator `/quote` request payload (compatible with Jupiter v1/v6 and similar APIs).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterQuoteRequest {
@@ -19,6 +23,8 @@ pub struct RouterQuoteRequest {
     pub slippage_bps: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub only_direct_routes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_dexes: Option<String>,
 }
 
 /// Standard aggregator `/swap-instructions` request configured for Audren's sharded `swap_escrow` PDA.

@@ -22,7 +22,10 @@ use audren_core::{
         input_pages_for_m, triptych_proof_len, AUDITOR_ASSET_PROOF_LEN, CROSS_BASE_1_LEN,
         CROSS_BASE_2_LEN, RANGE_U128_PROOF_LEN, RANGE_U64_PROOF_LEN,
     },
-    layout::{read_32, PageHeader, PAGE_CAPACITY},
+    layout::{
+        read_32, PageHeader, PAGE_CAPACITY, PAGE_OFF_ASSET_TAGS, PAGE_OFF_COMMITMENTS,
+        PAGE_OFF_STEALTH_PKS,
+    },
     AudrenError,
 };
 use bytemuck::Zeroable;
@@ -189,6 +192,64 @@ impl VerifiedTriptych {
     }
 }
 
+#[inline(never)]
+fn compute_triptych_ring_root(
+    m: u8,
+    expected_pages: usize,
+    page_headers: &[PageHeader],
+    pages: &[&[u8]],
+    auditor_pk: Option<&Point>,
+    proof_prefix: &[u8],
+) -> Result<([usize; 4], [u8; 32]), ProgramError> {
+    let audited = auditor_pk.is_some();
+    let mut prefix_counts = [0usize; 4];
+    let mut page_hashes = [[0u8; 32]; 4];
+    for p_idx in 0..expected_pages {
+        let prefix = proof_prefix[p_idx] as usize;
+        ensure(
+            prefix >= 1
+                && prefix <= page_headers[p_idx].count as usize
+                && prefix <= PAGE_CAPACITY,
+            AudrenError::InvalidTriptychProof,
+        )?;
+        prefix_counts[p_idx] = prefix;
+        let len32 = prefix * 32;
+        let page_bytes = pages[p_idx];
+        page_hashes[p_idx] = hashv(&[
+            b"audren/v1/ring/page",
+            &page_headers[p_idx].page_id.to_le_bytes(),
+            &[prefix as u8],
+            &page_bytes[PAGE_OFF_STEALTH_PKS..PAGE_OFF_STEALTH_PKS + len32],
+            &page_bytes[PAGE_OFF_ASSET_TAGS..PAGE_OFF_ASSET_TAGS + len32],
+            &page_bytes[PAGE_OFF_COMMITMENTS..PAGE_OFF_COMMITMENTS + len32],
+        ])
+        .to_bytes();
+    }
+    let aud_bytes = auditor_pk.copied().unwrap_or(IDENTITY);
+    let mut ring_parts: [&[u8]; 7] = [
+        b"audren/v1/triptych/ring",
+        &[m, u8::from(audited)],
+        &aud_bytes,
+        &[],
+        &[],
+        &[],
+        &[],
+    ];
+    for p_idx in 0..expected_pages {
+        ring_parts[3 + p_idx] = &page_hashes[p_idx];
+    }
+    let ring_root = hashv(&ring_parts[..3 + expected_pages]).to_bytes();
+    Ok((prefix_counts, ring_root))
+}
+
+struct TriptychCommitments {
+    xs: [Point; 7],
+    ys: [Point; 7],
+    ws: [Point; 7],
+    ts: [Point; 7],
+    es: [Point; 7],
+}
+
 /// Verify a Multi-Base Binary Triptych proof (`m = 5` -> 32 notes, `m = 6` -> 64 notes,
 /// or `m = 7` -> 128 notes) via batched Agave `sol_curve_multiscalar_mul` syscalls.
 #[allow(clippy::too_many_arguments)]
@@ -220,8 +281,20 @@ pub fn verify_triptych(
         validate_nonzero_point(k_aud)?;
     }
 
-    // Parse proof elements sequentially.
-    let mut off = 0usize;
+    // Parse per-page immutable prefix counts (`1..=page.count`) and compute strong Fiat-Shamir
+    // `ring_root` in an out-of-line helper so `verify_triptych` stays comfortably under Solana's
+    // 4,096-byte SBF stack frame limit.
+    let (prefix_counts, ring_root) = compute_triptych_ring_root(
+        m,
+        expected_pages,
+        page_headers,
+        pages,
+        auditor_pk,
+        &proof[..expected_pages],
+    )?;
+
+    // Parse proof elements sequentially after `prefix_counts`.
+    let mut off = expected_pages;
     let read_pt = |off: &mut usize, nonzero: bool| -> Result<Point, ProgramError> {
         let p = read_32(proof, *off).map_err(err)?;
         *off += 32;
@@ -244,16 +317,20 @@ pub fn verify_triptych(
     let pt_c = read_pt(&mut off, false)?;
     let pt_d = read_pt(&mut off, false)?;
 
-    let mut xs = [IDENTITY; 7];
-    let mut ys = [IDENTITY; 7];
-    let mut ws = [IDENTITY; 7];
-    for item in xs.iter_mut().take(mu) {
+    let mut com = Box::new(TriptychCommitments {
+        xs: [IDENTITY; 7],
+        ys: [IDENTITY; 7],
+        ws: [IDENTITY; 7],
+        ts: [IDENTITY; 7],
+        es: [IDENTITY; 7],
+    });
+    for item in com.xs.iter_mut().take(mu) {
         *item = read_pt(&mut off, false)?;
     }
-    for item in ys.iter_mut().take(mu) {
+    for item in com.ys.iter_mut().take(mu) {
         *item = read_pt(&mut off, false)?;
     }
-    for item in ws.iter_mut().take(mu) {
+    for item in com.ws.iter_mut().take(mu) {
         *item = read_pt(&mut off, false)?;
     }
 
@@ -268,52 +345,51 @@ pub fn verify_triptych(
 
     let mut s1_opt: Option<Point> = None;
     let mut s2_opt: Option<Point> = None;
-    let mut ts = [IDENTITY; 7];
-    let mut es = [IDENTITY; 7];
     let mut z_aud = Scalar::ZERO;
 
     if audited {
         s1_opt = Some(read_pt(&mut off, false)?);
         s2_opt = Some(read_pt(&mut off, false)?);
-        for item in ts.iter_mut().take(mu) {
+        for item in com.ts.iter_mut().take(mu) {
             *item = read_pt(&mut off, false)?;
         }
-        for item in es.iter_mut().take(mu) {
+        for item in com.es.iter_mut().take(mu) {
             *item = read_pt(&mut off, false)?;
         }
         z_aud = read_sc(&mut off)?;
     }
     ensure(off == proof.len(), AudrenError::InvalidTriptychProof)?;
 
-    // Challenge 1: `alpha` binds `A_spend` and `V_spend` before `W[..]`.
-    let alpha = hash_to_scalar(&[b"triptych/alpha", ctx_hash, a_spend, v_spend]);
+    // Challenge 1: `alpha` binds `ctx_hash`, full `ring_root`, `A_spend`, and `V_spend` before `W[..]`.
+    let alpha = hash_to_scalar(&[b"triptych/alpha", ctx_hash, &ring_root, a_spend, v_spend]);
     let alpha_bytes = alpha.to_bytes();
 
-    // Challenge 2: `xi` binds all prover commitments.
-    let mut xi_slices: Vec<&[u8]> = Vec::with_capacity(8 + 5 * mu);
+    // Challenge 2: `xi` binds `ring_root` and all prover commitments.
+    let mut xi_slices: Vec<&[u8]> = Vec::with_capacity(9 + 5 * mu);
     xi_slices.push(b"triptych/xi");
+    xi_slices.push(&ring_root);
     xi_slices.push(&alpha_bytes);
     xi_slices.push(&j_nullifier);
     xi_slices.push(&pt_a);
     xi_slices.push(&pt_b);
     xi_slices.push(&pt_c);
     xi_slices.push(&pt_d);
-    for item in xs.iter().take(mu) {
+    for item in com.xs.iter().take(mu) {
         xi_slices.push(item);
     }
-    for item in ys.iter().take(mu) {
+    for item in com.ys.iter().take(mu) {
         xi_slices.push(item);
     }
-    for item in ws.iter().take(mu) {
+    for item in com.ws.iter().take(mu) {
         xi_slices.push(item);
     }
     if let (Some(ref s1), Some(ref s2)) = (&s1_opt, &s2_opt) {
         xi_slices.push(s1);
         xi_slices.push(s2);
-        for item in ts.iter().take(mu) {
+        for item in com.ts.iter().take(mu) {
             xi_slices.push(item);
         }
-        for item in es.iter().take(mu) {
+        for item in com.es.iter().take(mu) {
             xi_slices.push(item);
         }
     }
@@ -381,13 +457,13 @@ pub fn verify_triptych(
         Ok(())
     };
 
-    // Ring witnesses across 1, 2, or 4 `EpochPage`s (skipping unpopulated IDENTITY slots).
+    // Ring witnesses across 1, 2, or 4 `EpochPage`s over each page's immutable `prefix_counts[p_idx]`.
     let p_weight_n = (if audited { mu3 - mu7 } else { mu3 }).to_normal();
     let mu5_n = mu5.to_normal();
     let v_weight = mu5 * alpha;
     let v_weight_n = v_weight.to_normal();
     for (p_idx, page_bytes) in pages.iter().enumerate() {
-        let count = page_headers[p_idx].count as usize;
+        let count = prefix_counts[p_idx];
         let base_k = p_idx * PAGE_CAPACITY;
         for slot in 0..count {
             let pk_coeff = p_k[base_k + slot];
@@ -441,9 +517,9 @@ pub fn verify_triptych(
     // Eq 3, 4, 5: masked polynomial terms `X_j, Y_j, W_j`.
     for j in 0..mu {
         let xj = xi_pows[j];
-        push(-(mu3 * xj), xs[j]);
-        push(-(mu4 * xj), ys[j]);
-        push(-(mu5 * xj), ws[j]);
+        push(-(mu3 * xj), com.xs[j]);
+        push(-(mu4 * xj), com.ys[j]);
+        push(-(mu5 * xj), com.ws[j]);
     }
 
     // Fixed generators `G`, `H`, `U`, `J`, `A_spend`, `V_spend`.
@@ -466,8 +542,8 @@ pub fn verify_triptych(
         push(-(mu7 * z_aud), *k_aud);
         for j in 0..mu {
             let xj = xi_pows[j];
-            push(-(mu6 * xj), ts[j]);
-            push(-(mu7 * xj), es[j]);
+            push(-(mu6 * xj), com.ts[j]);
+            push(-(mu7 * xj), com.es[j]);
         }
     }
 

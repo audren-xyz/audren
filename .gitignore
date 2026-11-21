@@ -6,3 +6,7 @@ node_modules
 *.keypair.json
 .env
 .env.*
+
+.scratch/
+**/dist/
+*.tgz

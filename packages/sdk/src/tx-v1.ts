@@ -160,6 +160,9 @@ export function compileV1Message(params: {
   let configMask = 0;
   const configValues: Uint8Array[] = [];
   if (config.priorityFeeLamports !== undefined) {
+    if (config.priorityFeeLamports < 0n) {
+      throw new Error(`Invalid negative priorityFeeLamports: ${config.priorityFeeLamports}`);
+    }
     configMask |= CONFIG_MASK_PRIORITY_FEE;
     configValues.push(u64le(config.priorityFeeLamports));
   }
