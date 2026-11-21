@@ -4,7 +4,7 @@ import { DevelopersExperience } from '@/components/DevelopersExperience'
 export const metadata: Metadata = {
   title: 'Build with Audren',
   description:
-    'Start with the Rust proving client or zero-runtime-dependency TypeScript transaction helpers. Read the protocol and integrate independently.',
+    'Four standardized Apache-2.0 SDKs — Rust, TypeScript, Swift (iOS), and Kotlin (Android) — sharing six identical building blocks and one cross-language conformance spec.',
   alternates: { canonical: 'https://audren.xyz/developers/' },
 }
 

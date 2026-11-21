@@ -29,7 +29,7 @@ Ring capacity is not a count of equally plausible notes or independent users. Em
 ## How Audren fits together
 
 ```text
-  Browser / SDK / Rust Client
+  Rust / TypeScript / Swift (iOS) / Kotlin (Android) SDK
     │  1. Scans EpochPage dataSlices via standard Solana RPC
     │  2. Builds Ristretto255 Multi-Base Triptych + Agave Bulletproof locally
     ▼
@@ -43,18 +43,44 @@ Ring capacity is not a count of equally plausible notes or independent users. Em
        • Enforces NullifierPDA uniqueness & SwapViaRouter escrow isolation
 ```
 
+## Official SDKs (4 Languages, 1 Shared Conformance Spec)
+
+All four official Audren SDKs share the exact same **6 standardized building blocks** (`keys`, `pda & layout`, `scanner`, `prover`, `disclosure & audit`, `relayer & idl`), consumed directly from source (zero package-registry lock-in) and proven byte-for-byte in CI against one shared canonical vector suite ([`spec/test-vectors.json`](spec/test-vectors.json)):
+
+| Language | Package Path | Engine | Target Runtime | Local Proof Speed (`m=5`) |
+|---|---|---|---|---|
+| **Rust** | [`crates/client/`](crates/client/Cargo.toml) | Native `audren-client` | Services, CLIs, bots, validators | ~50 ms |
+| **TypeScript** | [`packages/sdk/`](packages/sdk/README.md) (`@audren/sdk` + `@audren/sdk/prover`) | Zero-dep core + pure-TS `@noble/curves` prover | Browsers, Node 22+, Cloudflare Workers | ~0.8–1.5 s |
+| **Swift (iOS / macOS)** | [`packages/swift/`](packages/swift/README.md) (`AudrenSDK`) | UniFFI over `crates/audren-ffi` (`audren-client`) | iOS 15+, macOS 13+ (`XCFramework` / SwiftPM) | ~50 ms |
+| **Kotlin (Android / JVM)** | [`packages/kotlin/`](packages/kotlin/README.md) (`xyz.audren.sdk`) | UniFFI + JNA over `crates/audren-ffi` (`audren-client`) | Android API 24+ (`jniLibs`), JVM 21+ | ~50 ms |
+
+Runnable examples for all 4 languages live in [`audren-xyz/examples`](https://github.com/audren-xyz/examples).
+
+### The 6 Standardized Building Blocks Across All 4 SDKs
+
+1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
+2. **PDAs & Layouts** — all 10 canonical PDAs (`pool`, `epoch_page`, `sol_vault`, `vault_auth`, `page_rent_vault`, `swap_escrow`, `lane`, `lane_rent_vault`, `nullifier`, `proof_buffer`) + `decodePoolState`, `decodeEpochPageHeader`
+3. **Scanner** — `dataSlice: { offset: 64, length: 1056 }` view-tag filtering (`scanPageDataslice`) and note decryption (`scanEpochPage`)
+4. **Prover** — local proof generation & instruction builders (`Deposit`, `Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`, `ProofBuffer`)
+5. **Disclosure & Audit** — Mode 1 Selective Disclosure proof + standalone/on-page verify, Mode 2 Full Viewing Key, and Institutional Auditor ElGamal decryption
+6. **Relayer & IDLs** — `JUPITER_CPI_EXCLUDED_DEXES`, `defaultRelayUrl`, router account preparation, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs
+
 ## Repository layout
 
 ```text
 program/              On-chain sBPFv3 Solana program (#![no_std], pinocchio 0.11.1, lto = "fat")
 crates/audren-core/   #![no_std] account layouts, PDA seeds, wire sizes, and AudrenError codes
 crates/client/        Rust SDK (provers, RPC/WS scanner, router swap builder, LiteSVM & live tests)
+crates/audren-ffi/    UniFFI native FFI layer backing the Swift (iOS/macOS) & Kotlin (Android/JVM) SDKs
+packages/sdk/         TypeScript SDK (@audren/sdk zero-dep core + @audren/sdk/prover pure-TS prover)
+packages/swift/       Swift SDK (AudrenSDK SwiftPM package + iOS XCFramework build script)
+packages/kotlin/      Kotlin SDK (xyz.audren.sdk Gradle/JVM + Android jniLibs build script)
+spec/                 Canonical cross-language conformance vectors (spec/test-vectors.json)
 idl/                  Published Codama v1.8.0 & Anchor v0.30+ IDLs, security.json, and verifier
-packages/sdk/         Zero-dependency TypeScript ESM SDK (@audren/sdk) + bundled IDLs
 apps/relay/           Open-source, self-hostable Cloudflare Worker Privacy Relayer
 apps/web/             Next.js 16 + Cloudflare Worker web app, Wallet Vault & Devnet sandbox
 tests/mock-router/    Isolated Pinocchio sBPFv3 mock router for adversarial SwapViaRouter tests
-scripts/              Deterministic sBPFv3 build helper (`build-sbf.py`) & upgrade/metadata script
+scripts/              Deterministic sBPFv3 build helper (`build-sbf.py`), upgrade script & mobile SDK builder
 assets/brand/         Canonical Audren SVG/PNG logos, README wordmarks, and social preview cards
 docs/                 Self-host relayer guide and canonical deployment addresses
 ARCHITECTURE.md       Account byte layouts, cryptographic soundness proofs, and runtime specification
@@ -91,21 +117,28 @@ CONTRIBUTING.md       Contributor workflow and zero-drift verification checklist
 
 ## Quickstart: Verification, Build & Testing
 
-### 1. Fast host checks (Rust + IDLs + TypeScript)
+### 1. Fast host checks (Rust, IDLs, TypeScript, Swift & Kotlin)
 ```bash
-# Rust typechecks (isolated sBPFv3 manifests + host workspace)
+# Rust typechecks & canonical conformance tests
 cargo check --manifest-path program/Cargo.toml
 cargo check --manifest-path program/Cargo.toml --features no-entrypoint
 cargo check --manifest-path tests/mock-router/Cargo.toml
 cargo check --workspace --tests
+cargo test -p audren-client --test conformance_vectors
+cargo test -p audren-ffi
 
-# Verify IDLs match crates/audren-core byte-for-byte
+# Verify IDLs, 4-language SDKs, docs & zero-drift invariants
 python3 idl/verify-idl.py
 
-# TypeScript SDK, Relayer, and Web UI checks
+# TypeScript SDK (core + pure-TS prover conformance), Relayer & Web UI
 pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
 pnpm --dir apps/relay typecheck
-pnpm --dir apps/web typecheck
+pnpm --dir apps/web check
+
+# Mobile SDKs (Swift iOS/macOS & Kotlin Android/JVM conformance + native provers)
+./scripts/build-mobile-sdks.sh bindings
+(cd packages/swift && swift test)
+(cd packages/kotlin && gradle test)
 ```
 
 ### 2. Compile sBPFv3 `.so` artifacts & run LiteSVM E2E tests

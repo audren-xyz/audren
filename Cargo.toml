@@ -3,7 +3,7 @@
 # with its own pinned `Cargo.lock` for deterministic sBPFv3 builds.
 [workspace]
 resolver = "2"
-members = ["crates/audren-core", "crates/client"]
+members = ["crates/audren-core", "crates/client", "crates/audren-ffi"]
 exclude = ["program", "tests/mock-router"]
 
 [workspace.package]

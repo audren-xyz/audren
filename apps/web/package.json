@@ -18,6 +18,7 @@
     "e2e:audit": "npx tsx scripts/e2e-full-audit.ts"
   },
   "dependencies": {
+    "@audren/sdk": "file:../../packages/sdk",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "@solana/kit": "^8.6.0",

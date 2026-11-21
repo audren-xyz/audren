@@ -7,9 +7,13 @@ Standalone open-source repository for the **Audren** Solana shielded protocol, p
 - **`crates/audren-core/`** is `#![no_std]` and is the single source of truth for PDA seeds, account layouts, instruction tags (`0x00..=0x0C`), proof wire lengths, and `AudrenError` codes.
 - **`program/`** is an isolated `#![no_std]` `pinocchio 0.11.1` sBPFv3 program manifest excluded from the root Cargo workspace so sBPFv3 dependencies never collide with host crates (`solana-zk-sdk`, `litesvm`). Always check both manifests independently.
 - **`tests/mock-router/`** is an isolated `#![no_std]` `pinocchio 0.11.1` sBPFv3 test router used by `litesvm_e2e` to exercise adversarial router behavior against `SwapViaRouter`.
-- **`crates/client/`** provides the Rust prover, RPC/WebSocket scanner, `SwapViaRouter` builder, and LiteSVM / live Solana integration suites.
+- **`crates/client/`** provides the Rust SDK (provers, RPC/WebSocket scanner, `SwapViaRouter` builder, selective disclosure, auditor decryptor, and LiteSVM / live Solana integration suites).
+- **`crates/audren-ffi/`** is the UniFFI native FFI facade over `crates/client` generating the Swift (`packages/swift/`) and Kotlin (`packages/kotlin/`) mobile SDKs with zero cryptographic re-implementation drift.
+- **`spec/test-vectors.json`** is the single canonical cross-language conformance suite verified byte-for-byte by Rust (`audren-client` & `audren-ffi`), TypeScript (`@audren/sdk` & `@audren/sdk/prover`), Swift (`AudrenSDK`), and Kotlin (`xyz.audren.sdk`) on every CI run.
 - **`idl/`** owns deterministic Codama v1.8.0 and Anchor v0.30+ IDL generation (`idl/generate-idl.py`) and drift verification (`idl/verify-idl.py`), mirrored into `packages/sdk/`.
-- **`packages/sdk/`** is a zero-dependency TypeScript ESM SDK (`@audren/sdk`) targeting Node 22+ and browser runtimes. Do not add runtime npm dependencies.
+- **`packages/sdk/`** is the unified TypeScript ESM SDK: `@audren/sdk` (zero runtime dependencies for PDAs, layouts, scanner payloads, relayer, v1 tx, and IDLs) and `@audren/sdk/prover` (pure-TS Ristretto255 + Multi-Base Triptych + Batched Bulletproofs prover using `@noble/curves` & `@noble/hashes`, shared directly by `apps/web` with zero duplication).
+- **`packages/swift/`** is the SwiftPM SDK (`AudrenSDK`) for iOS 15+ and macOS 13+ backed by `crates/audren-ffi`.
+- **`packages/kotlin/`** is the Gradle/JNA Kotlin SDK (`xyz.audren.sdk`) for Android API 24+ and JVM 21+ backed by `crates/audren-ffi`.
 - **`apps/relay/`** is the standalone, open-source, self-hostable Cloudflare Worker Privacy Relayer. See [`apps/relay/AGENTS.md`](apps/relay/AGENTS.md).
 - **`apps/web/`** is the Next.js 16 + Cloudflare Worker web app, live Wallet Vault, and Devnet sandbox. See [`apps/web/AGENTS.md`](apps/web/AGENTS.md).
 

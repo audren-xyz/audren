@@ -20,13 +20,15 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - name: Verify IDL, SDK, Relayer, Web protocol.ts, docs & toolchain parity
+      - name: Verify IDL, 4-language SDKs, Relayer, Web protocol.ts, docs & toolchain parity
         run: python3 idl/verify-idl.py
-      - name: Syntax-check release operator script
-        run: bash -n scripts/upgrade-program.sh
+      - name: Syntax-check operator & mobile SDK scripts
+        run: |
+          bash -n scripts/upgrade-program.sh
+          bash -n scripts/build-mobile-sdks.sh
 
-  rust-check:
-    name: Rust Check (Program, Mock Router & Workspace)
+  rust-and-kotlin:
+    name: Rust SDK, FFI & Kotlin (Android/JVM) Conformance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -48,9 +50,40 @@ jobs:
         run: cargo check --manifest-path tests/mock-router/Cargo.toml
       - name: Check host workspace & tests
         run: cargo check --workspace --tests
+      - name: Run Rust & FFI canonical conformance tests (spec/test-vectors.json)
+        run: |
+          cargo test -p audren-client --test conformance_vectors
+          cargo test -p audren-ffi
+      - name: Build native libaudren_ffi.so (release)
+        run: cargo build -p audren-ffi --release
+      - uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.7.1'
+      - name: Run Kotlin (Android/JVM) SDK conformance tests
+        working-directory: packages/kotlin
+        run: gradle test --no-daemon
+
+  swift-sdk:
+    name: Swift (iOS/macOS) SDK Conformance
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.1'
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native libaudren_ffi.dylib (release)
+        run: cargo build -p audren-ffi --release
+      - name: Run Swift SDK conformance tests (spec/test-vectors.json)
+        working-directory: packages/swift
+        run: swift test
 
   typescript-and-web:
-    name: SDK, Relayer & Web App Build
+    name: TypeScript SDK, Relayer & Web App Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -60,7 +93,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - name: Typecheck & test @audren/sdk
+      - name: Typecheck & run @audren/sdk + @audren/sdk/prover conformance tests
         run: |
           pnpm --dir packages/sdk install --frozen-lockfile
           pnpm --dir packages/sdk typecheck

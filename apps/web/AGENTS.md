@@ -18,7 +18,7 @@ Read the root [`AGENTS.md`](../../AGENTS.md) first. On-chain wire layouts are ow
 - **Security headers, copy & lint hygiene:**
   - Preserve `public/_headers` (`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Content-Security-Policy` allowing `connect-src 'self' https: http://localhost:* http://127.0.0.1:*` for pluggable user relayers).
   - Never use `eslint-disable`, `TODO`, or `FIXME` in source files; never default to public Solana RPC; never write "Mainnet-Beta" anywhere.
-  - Every code example on `/developers` and `/architecture` must match real SDK signatures in `packages/sdk` and `crates/client`.
+  - Every code example on `/developers` and `/architecture` must match real SDK signatures across `crates/client`, `packages/sdk`, `packages/swift`, and `packages/kotlin`.
   - Maintain clean desktop and mobile (`390px`) layouts with zero horizontal overflow (`docScrollWidth === innerWidth`).
 
 ## Verification

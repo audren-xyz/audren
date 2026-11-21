@@ -1,0 +1,8 @@
+[bindings.swift]
+ffi_module_name = "AudrenFFI"
+ffi_module_filename = "audren_ffiFFI"
+module_name = "AudrenSDK"
+
+[bindings.kotlin]
+package_name = "xyz.audren.sdk"
+cdylib_name = "audren_ffi"

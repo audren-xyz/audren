@@ -3,8 +3,18 @@ target/
 **/target/
 .scratch/
 **/*.so
+**/*.dylib
+**/*.a
 **/*.build.json
 !**/tsconfig.build.json
+
+# Swift & Kotlin/Gradle build artifacts
+packages/swift/.build/
+packages/swift/.swiftpm/
+packages/swift/*.xcframework/
+packages/kotlin/.gradle/
+packages/kotlin/build/
+packages/kotlin/src/main/jniLibs/
 
 # Node / Next.js / Wrangler artifacts
 node_modules/

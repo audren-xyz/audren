@@ -558,9 +558,9 @@ async function main() {
     await screenshot(cdp, 'part1-soundness.png')
 
     await cdp.send('Page.navigate', { url: `${BASE_URL}/developers/` })
-    await waitFor(() => cdp!.eval<boolean>(`document.body.innerText.includes('TypeScript') && document.body.innerText.includes('Rust')`), 'Developer scope')
+    await waitFor(() => cdp!.eval<boolean>(`document.body.innerText.includes('TypeScript') && document.body.innerText.includes('Rust') && document.body.innerText.includes('Swift') && document.body.innerText.includes('Kotlin')`), '4-language Developer SDK scope')
     const developerText = await cdp.eval<string>(`document.body.innerText`)
-    assert.ok(developerText.includes('Full Ristretto255 keypairs and zero-knowledge proving live in crates/client'), 'SDK scope must distinguish TypeScript helpers from the Rust proving client')
+    assert.ok(developerText.includes('spec/test-vectors.json'), 'Developers page must reference canonical conformance vectors')
     assert.ok(!developerText.includes('npm install @audren/sdk'), 'Unpublished registry package advertised')
     await screenshot(cdp, 'part1-developers.png')
 

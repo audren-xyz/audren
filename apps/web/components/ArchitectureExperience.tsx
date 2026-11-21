@@ -352,8 +352,8 @@ export function ArchitectureExperience() {
             <div>
               <h2>Ready to integrate?</h2>
               <p>
-                Grab <code>crates/client</code> or zero-dependency <code>@audren/sdk</code> and
-                test every instruction on Devnet or LiteSVM.
+                Start with our Rust, TypeScript, Swift (iOS), or Kotlin (Android) SDK — all four
+                verified byte-for-byte against <code>spec/test-vectors.json</code>.
               </p>
             </div>
             <div className={styles.closingActions}>

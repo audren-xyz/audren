@@ -1234,7 +1234,7 @@ export function LandingExperience() {
               <h2>Use it directly. Integrate without permission.</h2>
               <p>
                 Run private transfers and compatible DEX swaps in your browser, or integrate the
-                Rust prover and zero-dependency TypeScript SDK into your own wallet or app.
+                Rust, TypeScript, Swift (iOS), and Kotlin (Android) SDKs into your own wallet or app.
               </p>
             </div>
             <div className={styles.actions}>

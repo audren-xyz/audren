@@ -8,80 +8,117 @@ import { SiteFooter } from '@/components/SiteFooter'
 import { AUDREN, explorerAddress } from '@/lib/protocol'
 import styles from '@/components/SubpageShell.module.css'
 
-type SnippetId = 'pda' | 'scan' | 'relay' | 'rust'
+type SnippetId = 'ts' | 'rust' | 'swift' | 'kotlin'
 
 const SNIPPETS: Record<SnippetId, { tab: string; file: string; code: string }> = {
-  pda: {
-    tab: 'PDAs & aud1… (TS)',
-    file: 'packages/sdk · zero runtime dependencies',
+  ts: {
+    tab: 'TypeScript (Web / Node)',
+    file: 'packages/sdk · @audren/sdk (zero deps) + @audren/sdk/prover (pure TS)',
     code: `import {
   AUDREN_PROGRAM_ID,
+  PAGE_SCAN_DATA_SLICE,
   derivePoolPda,
   deriveEpochPagePda,
-  deriveSwapEscrowPda,
-  parseAudrenAddress,
+  AudrenRelayClient,
+  AUDREN_DEFAULT_RELAY_URL,
 } from '@audren/sdk';
+import {
+  deriveKeysFromSeed,
+  deriveSubaccountKeys,
+  scanEpochPageSpendable,
+  buildTransferInstruction,
+  createSelectiveDisclosureProof,
+} from '@audren/sdk/prover';
 
-// Validate RFC 9496 Ristretto255 points inside an aud1… address
-const { spendPk, viewPk } = parseAudrenAddress('aud1...');
+// 1. Keys & isolated sub-accounts (matching Rust, Swift & Kotlin byte-for-byte)
+const alice   = await deriveKeysFromSeed(seed32);
+const trading = await deriveSubaccountKeys(seed32, 1);
 
-// Canonical Solana PDAs (Web Crypto SHA-256 + pure-BigInt Ed25519 check)
-const [poolPda] = await derivePoolPda(0, AUDREN_PROGRAM_ID);
-const [page0]   = await deriveEpochPagePda(0, 0n, AUDREN_PROGRAM_ID);
-const [escrow]  = await deriveSwapEscrowPda(0, 0, AUDREN_PROGRAM_ID);`,
-  },
-  scan: {
-    tab: 'Scan EpochPages (TS)',
-    file: 'Standard Solana RPC · 1,056 B per 32-note page',
-    code: `import { fetchPageScanSlices, PAGE_SCAN_DATA_SLICE } from '@audren/sdk';
+// 2. Canonical PDAs & standard RPC dataSlice scan (offset: 64, length: 1056)
+const { address: poolPda } = await derivePoolPda(0, AUDREN_PROGRAM_ID);
+const { address: page0 }   = await deriveEpochPagePda(0, 0n, AUDREN_PROGRAM_ID);
 
-// Fetch view_tags[32] + ephemeral_pks[32] across up to 100 pages per RPC batch
-// PAGE_SCAN_DATA_SLICE = { offset: 64, length: 1056 } (~106 KB for 3,200 notes)
-const slices = await fetchPageScanSlices(
-  process.env.SOLANA_RPC_URL!,
-  pageAddresses,
-);
-
-for (const slice of slices) {
-  // Check 1-byte view tags locally with your viewing key (rejects 255/256 non-owned notes)
-  console.log(slice.address, slice.viewTags.length);
-}`,
-  },
-  relay: {
-    tab: 'Relayer Client (TS)',
-    file: 'Pluggable HTTP contract · relay.audren.xyz or self-hosted',
-    code: `import { AudrenRelayClient, AUDREN_DEFAULT_RELAY_URL } from '@audren/sdk';
-
-const relay = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);
-const info  = await relay.info('mainnet');
-
-// Submit a locally proved Audren instruction — zero spend/view keys sent
-const settled = await relay.submit({
-  cluster: 'mainnet',
-  instructionDataB64,
-  accounts,
-  computeUnitLimit: 600_000,
-  priorityFeeLamports: '10000',
-});
-console.log('Settled signature:', settled.signature);`,
+// 3. Decrypt notes, prove locally & submit via optional relayer (or direct v1 tx)
+const notes = await scanEpochPageSpendable(alice, pageBytes, 0);
+const proof = createSelectiveDisclosureProof(notes[0]);
+const relay = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);`,
   },
   rust: {
-    tab: 'Rust Prover (Cargo)',
-    file: 'crates/client · complete Ristretto255 proving & scanning',
-    code: `use audren_client::keys::AudrenKeys;
+    tab: 'Rust (Cargo)',
+    file: 'crates/client · native ~50 ms local proving & RPC/WS scanner',
+    code: `use audren_client::{
+    keys::AudrenKeys,
+    pda::{derive_epoch_page_pda, derive_pool_pda},
+    scanner::{decrypt_owned_note, scan_page_dataslice},
+};
+use audren_core::AUDREN_PROGRAM_ID;
+use solana_address::Address;
 
-// Derive master spend/view keypair + isolated stream-scoped sub-accounts
-let master  = AudrenKeys::from_seed(&seed_32);
-let payroll = AudrenKeys::from_seed_subaccount(&seed_32, 1);
+// 1. Master spend/view keys + stream-scoped sub-accounts
+let alice   = AudrenKeys::from_seed(&seed_32);
+let trading = AudrenKeys::from_seed_subaccount(&seed_32, 1);
+let fvk     = trading.full_viewing_key();
 
-// Export read-only viewing key strictly for sub-account #1
-let payroll_fvk = payroll.full_viewing_key();
-println!("Payable aud1 address: {}", payroll.address().to_string());`,
+// 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scanning
+let pid = Address::new_from_array(AUDREN_PROGRAM_ID);
+let (pool_pda, _) = derive_pool_pda(&pid, 0);
+let (page0, _)    = derive_epoch_page_pda(&pid, 0, 0);
+let hits = scan_page_dataslice(&fvk, 0, &slice_1056)?;
+
+// 3. Build Multi-Base Triptych + Batched Bulletproofs locally (~50 ms)
+// build_transfer / build_merge / build_swap_via_router / build_withdraw`,
+  },
+  swift: {
+    tab: 'Swift (iOS / macOS)',
+    file: 'packages/swift · AudrenSDK via UniFFI over audren-client (~50 ms native)',
+    code: `import AudrenSDK
+import Foundation
+
+// 1. Master keys, sub-accounts & read-only Full Viewing Key
+let alice   = try deriveKeysFromSeed(seed32: seed32)
+let trading = try deriveSubaccountKeys(masterSeed32: seed32, accountIndex: 1)
+let fvk     = try exportFullViewingKey(seed32: seed32, accountIndex: 1)
+
+// 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scan
+let pid   = programId()
+let pool  = try derivePoolPda(poolId: 0, programId: pid)
+let slice = pageScanDataSlice() // offset: 64, length: 1056
+let hits  = try scanPageDataslice(
+    pageId: 0, slice1056: sliceBytes, spendPk32: alice.spendPk, viewSk32: alice.viewSk
+)
+
+// 3. Decrypt notes, generate Mode 1 receipt, or prove Transfer locally
+let notes = try scanEpochPage(
+    poolId: 0, pageBytes: pageBytes,
+    spendSk32: alice.spendSk, spendPk32: alice.spendPk, viewSk32: alice.viewSk, programId: pid
+)
+let receipt = createSelectiveDisclosureProof(note: notes[0])`,
+  },
+  kotlin: {
+    tab: 'Kotlin (Android / JVM)',
+    file: 'packages/kotlin · xyz.audren.sdk via UniFFI + JNA (~50 ms native)',
+    code: `import xyz.audren.sdk.*
+
+// 1. Master keys, sub-accounts & read-only Full Viewing Key
+val alice   = deriveKeysFromSeed(seed32)
+val trading = deriveSubaccountKeys(seed32, 1u)
+val fvk     = exportFullViewingKey(seed32, 1u)
+
+// 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scan
+val pid   = programId()
+val pool  = derivePoolPda(0u, pid)
+val slice = pageScanDataSlice() // offset: 64, length: 1056
+val hits  = scanPageDataslice(0uL, sliceBytes, alice.spendPk, alice.viewSk)
+
+// 3. Decrypt notes, generate Mode 1 receipt, or prove Transfer locally
+val notes = scanEpochPage(0u, pageBytes, alice.spendSk, alice.spendPk, alice.viewSk, pid)
+val receipt = createSelectiveDisclosureProof(notes[0])
+val valid   = verifySelectiveDisclosureOnPage(receipt, pageBytes)`,
   },
 }
 
 export function DevelopersExperience() {
-  const [tab, setTab] = useState<SnippetId>('pda')
+  const [tab, setTab] = useState<SnippetId>('ts')
   const [copied, setCopied] = useState(false)
   const snippet = SNIPPETS[tab]
 
@@ -104,9 +141,9 @@ export function DevelopersExperience() {
           <div className={styles.heroSingle}>
             <h1>Build your own way in.</h1>
             <p className={styles.heroLead}>
-              No Audren account, API gate, or integration approval. Read the Apache-2.0 source,
-              choose any Solana RPC provider, and plug in your own wallet or relayer. Hosted
-              relayers and DEX providers carry separate availability, credentials, and policies.
+              No Audren account, API gate, or integration approval. Four standardized SDKs —
+              Rust, TypeScript, Swift (iOS), and Kotlin (Android) — sharing six identical
+              building blocks and one cross-language conformance test suite.
             </p>
           </div>
 
@@ -128,12 +165,21 @@ export function DevelopersExperience() {
               </strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>TypeScript &amp; Rust SDKs</span>
-              <strong><code>@audren/sdk</code> · <code>crates/client</code></strong>
+              <span>4 Standardized SDKs</span>
+              <strong>Rust · TypeScript · Swift · Kotlin</strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>License &amp; Status</span>
-              <strong>Apache-2.0 · Verified · Pre-audit</strong>
+              <span>Conformance &amp; License</span>
+              <strong>
+                <a
+                  href={`${AUDREN.githubCore}/blob/main/spec/test-vectors.json`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  spec/test-vectors.json <ArrowUpRight size={11} />
+                </a>{' '}
+                · Apache-2.0
+              </strong>
             </div>
           </div>
         </section>
@@ -172,7 +218,6 @@ export function DevelopersExperience() {
                 </filter>
               </defs>
 
-              {/* Connecting tracks + sequential signal pulses */}
               {[
                 { x1: 205, x2: 245, begin: '0s' },
                 { x1: 440, x2: 480, begin: '0.85s' },
@@ -272,32 +317,35 @@ export function DevelopersExperience() {
           </div>
         </section>
 
-        {/* CHOOSE YOUR STARTING POINT */}
+        {/* FOUR STANDARDIZED SDKS */}
         <section className={styles.sectionAlt}>
           <div className="container">
             <div className={styles.sectionIntro}>
               <div>
-                <h2>Choose the right starting point.</h2>
+                <h2>Four languages. Six identical building blocks.</h2>
               </div>
               <p>
-                Full cryptographic proving and Ristretto255 key management live in Rust; wire
-                codecs, PDA derivation, RPC scanning, and relayer submission live in zero-dependency
-                TypeScript.
+                Every Audren SDK exposes the same primitives — <strong>keys</strong>,{' '}
+                <strong>PDAs &amp; layouts</strong>, <strong>dataSlice scanner</strong>,{' '}
+                <strong>local ZK prover</strong>, <strong>disclosure &amp; audit</strong>, and{' '}
+                <strong>relayer &amp; router helpers</strong> — consumed directly from Apache-2.0
+                source and verified byte-for-byte in CI against{' '}
+                <code>spec/test-vectors.json</code>.
               </p>
             </div>
 
             <div className={styles.ledger2}>
               <article className={`${styles.ledgerCell} ${styles.ledgerCellHighlight}`}>
-                <span className={styles.cellIndex}>RUST</span>
-                <h3>Complete proving client</h3>
+                <span className={styles.cellIndex}>RUST · SERVICES &amp; CLIs</span>
+                <h3><code>crates/client</code></h3>
                 <p className={styles.cellLead}>
-                  Start in <code>crates/client</code> for an independent private wallet or backend
-                  integration. Pin a git revision and verify the full deposit-to-withdrawal flow.
+                  Canonical native proving client and cryptographic source of truth. Pin a git
+                  revision directly in <code>Cargo.toml</code> (no crates.io lock-in).
                 </p>
                 <ul className={styles.dashList}>
-                  <li>Ristretto255 spend/view keypairs + HKDF sub-accounts (<code>from_seed_subaccount</code>)</li>
-                  <li>Local Triptych (m=5/6/7), CrossBase, and native Bulletproof generation</li>
-                  <li>RPC/WebSocket EpochPage scanner, note manager, and router swap builder</li>
+                  <li>Ristretto255 spend/view hierarchy + HKDF sub-accounts (<code>from_seed_subaccount</code>)</li>
+                  <li>~50 ms Multi-Base Triptych (m=5/6/7), CrossBase 1/2 &amp; Agave Bulletproofs</li>
+                  <li>RPC/WebSocket <code>EpochPage</code> scanner, Mode 1/2 disclosure &amp; auditor decrypt</li>
                   <li>LiteSVM &amp; Devnet integration test harness included</li>
                 </ul>
                 <div className={styles.cellFoot}>
@@ -313,17 +361,18 @@ export function DevelopersExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>TYPESCRIPT</span>
-                <h3>Zero-dependency protocol &amp; relayer SDK</h3>
+                <span className={styles.cellIndex}>TYPESCRIPT · WEB &amp; NODE 22+</span>
+                <h3><code>@audren/sdk</code> + <code>@audren/sdk/prover</code></h3>
                 <p className={styles.cellLead}>
-                  <code>@audren/sdk</code> ships built ESM and declarations from the public repo
-                  with zero runtime dependencies (not advertised as an npm registry release).
+                  Built from source via <code>packages/sdk</code>: zero-dependency core entrypoint
+                  for PDAs, layouts, scanner, relayer &amp; IDLs, plus a full pure-TS prover
+                  powering <code>audren.xyz</code> directly.
                 </p>
                 <ul className={styles.dashList}>
-                  <li>Base58 &amp; RFC 9496 <code>aud1…</code> stealth address parsing and validation</li>
-                  <li>All canonical Audren &amp; ATA PDA derivations (Web Crypto + Ed25519 check)</li>
-                  <li>HKDF sub-account seed derivation (<code>deriveSubAccountSeed</code>), account decoders, instruction codecs &amp; Solana v1 serializer</li>
-                  <li>Typed <code>AudrenRelayClient</code>, bundled <code>AUDREN_CODAMA_IDL</code> / <code>AUDREN_ANCHOR_IDL</code>, RPC/WS scan helpers &amp; DEX aggregator CPI account prep</li>
+                  <li><code>@audren/sdk</code>: zero runtime deps — PDAs, codecs, Solana v1 (<code>0x81</code>), Codama &amp; Anchor IDLs, <code>AudrenRelayClient</code></li>
+                  <li><code>@audren/sdk/prover</code>: full pure-TS Ristretto255, Triptych (m=5/6/7) &amp; Bulletproofs (<code>@noble/curves</code>)</li>
+                  <li>Matches Rust byte-for-byte on keys, sub-accounts, note decryption &amp; Mode 1 receipts</li>
+                  <li>Runs natively in browsers, Node 22+, and Cloudflare Workers</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a
@@ -336,19 +385,70 @@ export function DevelopersExperience() {
                   </a>
                 </div>
               </article>
+
+              <article className={styles.ledgerCell}>
+                <span className={styles.cellIndex}>SWIFT · iOS 15+ &amp; macOS 13+</span>
+                <h3><code>packages/swift</code> (<code>AudrenSDK</code>)</h3>
+                <p className={styles.cellLead}>
+                  Native Swift Package generated via UniFFI directly over{' '}
+                  <code>crates/audren-ffi</code> so iOS wallets inherit the exact audited Rust core
+                  with zero re-implementation drift.
+                </p>
+                <ul className={styles.dashList}>
+                  <li>~50 ms native local proving on Apple Silicon &amp; iPhone ARM64</li>
+                  <li>Complete 6-building-block API with native Swift <code>Data</code> &amp; throwing errors</li>
+                  <li>One-command iOS <code>XCFramework</code> script (<code>scripts/build-mobile-sdks.sh ios</code>)</li>
+                  <li>Proven in CI on <code>macos-latest</code> via <code>swift test</code></li>
+                </ul>
+                <div className={styles.cellFoot}>
+                  <a
+                    href={`${AUDREN.githubCore}/tree/main/packages/swift`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={styles.textLink}
+                  >
+                    Inspect packages/swift on GitHub <ArrowUpRight size={13} />
+                  </a>
+                </div>
+              </article>
+
+              <article className={styles.ledgerCell}>
+                <span className={styles.cellIndex}>KOTLIN · ANDROID API 24+ &amp; JVM</span>
+                <h3><code>packages/kotlin</code> (<code>xyz.audren.sdk</code>)</h3>
+                <p className={styles.cellLead}>
+                  Native Kotlin SDK generated via UniFFI + JNA over{' '}
+                  <code>crates/audren-ffi</code> for Android wallets and JVM services.
+                </p>
+                <ul className={styles.dashList}>
+                  <li>~50 ms native local proving on Android ARM64 / x86_64 &amp; JVM 21+</li>
+                  <li>Complete 6-building-block API identical to Rust, TypeScript &amp; Swift</li>
+                  <li>One-command Android <code>jniLibs</code> build (<code>scripts/build-mobile-sdks.sh android</code>)</li>
+                  <li>Proven in CI via <code>gradle test</code> against <code>spec/test-vectors.json</code></li>
+                </ul>
+                <div className={styles.cellFoot}>
+                  <a
+                    href={`${AUDREN.githubCore}/tree/main/packages/kotlin`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={styles.textLink}
+                  >
+                    Inspect packages/kotlin on GitHub <ArrowUpRight size={13} />
+                  </a>
+                </div>
+              </article>
             </div>
           </div>
         </section>
 
-        {/* COPYABLE CODE WORKBENCH */}
+        {/* COPYABLE CODE WORKBENCH (ALL 4 LANGUAGES) */}
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>Wire it in minutes.</h2>
+              <h2>Same primitives in every language.</h2>
             </div>
             <p>
-              Real exports straight from <code>@audren/sdk</code> and <code>crates/client</code>.
-              No custom indexer or proprietary RPC extensions required.
+              Compare the exact same keys → PDAs → <code>dataSlice</code> scan → local prover →
+              selective disclosure flow across TypeScript, Rust, Swift, and Kotlin.
             </p>
           </div>
 
@@ -392,17 +492,18 @@ export function DevelopersExperience() {
           <div className="container">
             <div className={styles.ledger2}>
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>ROUTER CPI</span>
-                <h3>Swaps use existing liquidity.</h3>
+                <span className={styles.cellIndex}>EXAMPLES &amp; ROUTER CPI</span>
+                <h3>Runnable examples across all 4 languages.</h3>
                 <p className={styles.cellLead}>
-                  <code>SwapViaRouter</code> accepts compatible PDA-signing router instructions and
-                  enforces escrow ownership, zero delegates, lamport invariants, and exact vault
-                  deltas before settling to a fresh private note.
+                  <code>audren-xyz/examples</code> mirrors the same canonical flows — keys,
+                  sub-accounts, <code>dataSlice</code> scanning, local proving, selective
+                  disclosure, and <code>SwapViaRouter</code> account planning — in Rust,
+                  TypeScript, Swift, and Kotlin.
                 </p>
                 <ul className={styles.dashList}>
-                  <li>The demo reads live routing capability from your selected relay; a router adapter in source does not guarantee a hosted service.</li>
+                  <li><code>SwapViaRouter</code> accepts compatible PDA-signing router instructions and enforces escrow ownership, zero delegates, lamport invariants, and exact vault deltas.</li>
                   <li>External DEX legs expose the token pair, trade amounts, and output record.</li>
-                  <li>The TypeScript aggregator swap example demonstrates quote &amp; account planning (not an end-to-end settled swap); inspect the Rust tests or live app for full settlement.</li>
+                  <li>All four example folders consume the official Audren SDKs directly — zero hand-rolled constants or byte offsets.</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a href={AUDREN.githubExamples} target="_blank" rel="noreferrer" className={styles.textLink}>

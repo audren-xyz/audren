@@ -2,14 +2,22 @@
   "name": "@audren/sdk",
   "version": "0.2.0",
   "type": "module",
-  "description": "Zero-dependency TypeScript SDK and published Codama/Anchor IDLs for Audren \u2014 instruction codecs, EpochPage decoders, standard RPC/WS dataSlice scanner, and router-agnostic private swap helpers",
+  "description": "TypeScript SDK for Audren — zero-dependency core (PDAs, codecs, RPC scanner, relayer, IDLs) plus pure-TS Ristretto255/Triptych/Bulletproof prover (@audren/sdk/prover)",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./prover": {
+      "types": "./dist/prover-entry.d.ts",
+      "import": "./dist/prover-entry.js"
+    },
     "./idl/codama.json": "./idl/audren.codama.json",
     "./idl/anchor.json": "./idl/audren.anchor.json"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

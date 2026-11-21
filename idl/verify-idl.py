@@ -169,17 +169,24 @@ def main() -> None:
         f"security.json source_release {sec['source_release']} != v{prog_version}; run python3 idl/generate-idl.py"
     )
 
-    # 8. Verify unified release version parity across all Rust crates & TypeScript packages
+    # 8. Verify unified release version parity across all Rust, TypeScript & Kotlin manifests
     root_ws_ver = gen.read_toml_value(ROOT / "Cargo.toml", "workspace.package", "version")
     assert root_ws_ver == prog_version, f"Cargo.toml [workspace.package].version {root_ws_ver} != program/Cargo.toml {prog_version}"
     for rel_manifest in ("crates/audren-core/Cargo.toml", "crates/client/Cargo.toml", "tests/mock-router/Cargo.toml"):
         ver = gen.read_cargo_version(ROOT / rel_manifest)
         assert ver == prog_version, f"{rel_manifest} version {ver} != program/Cargo.toml {prog_version}"
+    ffi_toml = (ROOT / "crates" / "audren-ffi" / "Cargo.toml").read_text()
+    assert "version.workspace = true" in ffi_toml, "crates/audren-ffi/Cargo.toml must inherit workspace version"
     for rel_pkg in ("packages/sdk/package.json", "apps/relay/package.json", "apps/web/package.json"):
         pkg = json.loads((ROOT / rel_pkg).read_text())
         assert pkg["version"] == prog_version, (
             f"{rel_pkg} version {pkg['version']} != program/Cargo.toml {prog_version}"
         )
+    kotlin_gradle = (ROOT / "packages" / "kotlin" / "build.gradle.kts").read_text()
+    km = re.search(r'^version\s*=\s*"([^"]+)"', kotlin_gradle, re.M)
+    assert km and km.group(1) == prog_version, (
+        f"packages/kotlin/build.gradle.kts version ({km.group(1) if km else None}) != program/Cargo.toml {prog_version}"
+    )
 
     # 9. Verify every Solana program crate embeds `.security.txt` bound to CARGO_PKG_VERSION
     for rel_src in ("program/src/lib.rs", "tests/mock-router/src/lib.rs"):
@@ -292,7 +299,19 @@ def main() -> None:
         assert must_have in deployments_md, f"docs/DEPLOYMENTS.md missing canonical identifier: {must_have}"
 
     # 14. Verify all relative markdown links, no stale monorepo paths, and clean public wrangler.jsonc
-    skip_dirs = {"node_modules", "target", ".git", ".next", "out", "dist", ".credentials"}
+    skip_dirs = {
+        "node_modules",
+        "target",
+        ".git",
+        ".next",
+        "out",
+        "dist",
+        ".credentials",
+        ".build",
+        ".swiftpm",
+        ".gradle",
+        "build",
+    }
     md_files = sorted(
         p for p in ROOT.rglob("*.md") if not any(part in skip_dirs for part in p.parts)
     )
@@ -368,10 +387,44 @@ def main() -> None:
             f".github/workflows/ci.yml uses deprecated Node 20 action: {deprecated_action}"
         )
 
+    # 17. Cross-language SDK unity (Rust, TypeScript, Swift, Kotlin), canonical test vectors & zero duplicated prover
+    vectors_path = ROOT / "spec" / "test-vectors.json"
+    assert vectors_path.is_file(), "Missing canonical cross-language test vectors at spec/test-vectors.json"
+    vectors = json.loads(vectors_path.read_text(encoding="utf-8"))
+    assert vectors["spec_version"] == prog_version, (
+        f"spec/test-vectors.json spec_version {vectors['spec_version']} != {prog_version}"
+    )
+    assert vectors["program_id"] == CANONICAL_PROGRAM_ID, "spec/test-vectors.json program_id mismatch"
+    assert vectors["jupiter_cpi_excluded_dexes"] == ",".join(rust_dexes), (
+        "spec/test-vectors.json jupiter_cpi_excluded_dexes drifted from Rust"
+    )
+
+    for sdk_artifact in (
+        "crates/client/src/lib.rs",
+        "crates/audren-ffi/src/lib.rs",
+        "packages/sdk/src/prover.ts",
+        "packages/sdk/src/prover-entry.ts",
+        "packages/sdk/test/conformance.test.mjs",
+        "packages/swift/Package.swift",
+        "packages/swift/Sources/AudrenSDK/AudrenSDK.swift",
+        "packages/swift/Tests/AudrenSDKTests/ConformanceTests.swift",
+        "packages/kotlin/build.gradle.kts",
+        "packages/kotlin/src/main/kotlin/xyz/audren/sdk/audren_ffi.kt",
+        "packages/kotlin/src/test/kotlin/xyz/audren/sdk/ConformanceTest.kt",
+        "scripts/build-mobile-sdks.sh",
+    ):
+        assert (ROOT / sdk_artifact).is_file(), f"Missing canonical 4-language SDK artifact: {sdk_artifact}"
+
+    for shim_rel in ("apps/web/lib/audren-prover.ts", "apps/web/lib/audren-crypto.ts"):
+        shim_txt = (ROOT / shim_rel).read_text(encoding="utf-8")
+        assert "@audren/sdk/prover" in shim_txt, f"{shim_rel} must re-export from @audren/sdk/prover"
+        assert len(shim_txt) < 1500, f"{shim_rel} looks duplicated ({len(shim_txt)} B); keep prover solely in packages/sdk"
+
     print(
         f"verify-idl: ok (v{prog_version}, {len(ix_tags)} instructions, {len(expected_sizes)} fixed accounts + ProofBuffer, "
         f"{len(pda_prefixes)} PDAs ({len(seen_pda_to_acc)} linked in ixs), {len(core_errs)} errors, "
-        f"8 version manifests, {len(rust_dexes)} CPI-excluded DEXes, {len(md_files)} docs, "
+        f"10 version manifests, 4 SDKs (Rust/TS/Swift/Kotlin) + spec/test-vectors.json, "
+        f"{len(rust_dexes)} CPI-excluded DEXes, {len(md_files)} docs, "
         f"Apache-2.0, brand/OG parity, security.json, .security.txt, protocol.ts, and Agave {builder_ver}/{tools_ver}/sBPF{sbf_arch} pins matched)"
     )
 
