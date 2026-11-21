@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a Security Vulnerability
+    url: https://github.com/audren-xyz/audren/blob/main/SECURITY.md
+    about: Please report security issues privately to security@audren.xyz — do not open public issues.
+  - name: Protocol Documentation & Live App
+    url: https://audren.xyz
+    about: Architecture, privacy model, deployment register, and interactive Devnet/Mainnet app.
+  - name: Runnable SDK & Rust Examples
+    url: https://github.com/audren-xyz/examples
+    about: Standalone Rust and TypeScript integrations for Solana Mainnet and Devnet.

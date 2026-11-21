@@ -1,8 +1,24 @@
-# Audren
+<p>
+  <a href="https://audren.xyz">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/brand/audren-wordmark-dark.svg" />
+      <source media="(prefers-color-scheme: light)" srcset="assets/brand/audren-wordmark-light.svg" />
+      <img alt="Audren — Private money on Solana" src="assets/brand/audren-wordmark-light.svg" height="52" />
+    </picture>
+  </a>
+</p>
 
-Zero-setup multi-asset shielded pool, router-agnostic private DEX swap engine, and verifiable compliance protocol on Solana (`sBPFv3`, `pinocchio 0.11.1`, `#![no_std]`).
+<p>
+  <a href="https://github.com/audren-xyz/audren/actions/workflows/ci.yml"><img src="https://github.com/audren-xyz/audren/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/audren-xyz/audren/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/release-v0.2.0-121210" alt="Release v0.2.0" /></a>
+  <a href="https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build"><img src="https://img.shields.io/badge/Solana%20Verified%20Build-sBPFv3-184433" alt="Solana Verified Build" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-434039" alt="Apache-2.0 License" /></a>
+  <a href="https://audren.xyz"><img src="https://img.shields.io/badge/app-audren.xyz-C83E2B" alt="audren.xyz" /></a>
+</p>
 
-Native SOL, Classic SPL tokens, and transferable Token-2022 mints share a single shielded pool (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`). Users shield assets, send private transfers across 32/64/128-slot proof rings, execute single-transaction private swaps through compatible PDA-signing Solana routers, and produce selective disclosure or institutional audit proofs — with no trusted setup and no off-chain indexer.
+**Private money on Solana. Existing tokens. One shared pool.**
+
+Audren is an open-source, self-custodial privacy protocol on Solana (`sBPFv3`, `pinocchio 0.11.1`, `#![no_std]`). Native SOL, Classic SPL tokens, and transferable Token-2022 mints share one permissionless pool (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`). Shield assets without wrapper tokens, send private transfers across 32/64/128-slot rings, swap privately through compatible DEX routers in a single transaction, and generate selective receipts — with local proofs, keys you control, no trusted setup, and no off-chain indexer.
 
 ## Privacy and accounting boundaries
 
@@ -39,9 +55,11 @@ apps/relay/           Open-source, self-hostable Cloudflare Worker Privacy Relay
 apps/web/             Next.js 16 + Cloudflare Worker web app, Wallet Vault & Devnet sandbox
 tests/mock-router/    Isolated Pinocchio sBPFv3 mock router for adversarial SwapViaRouter tests
 scripts/              Deterministic sBPFv3 build helper (`build-sbf.py`) & upgrade/metadata script
+assets/brand/         Canonical Audren SVG/PNG logos, README wordmarks, and social preview cards
 docs/                 Self-host relayer guide and canonical deployment addresses
 ARCHITECTURE.md       Account byte layouts, cryptographic soundness proofs, and runtime specification
 SECURITY.md           Responsible disclosure policy (`security@audren.xyz`)
+CONTRIBUTING.md       Contributor workflow and zero-drift verification checklist
 ```
 
 ## Published IDLs, Security & Documentation

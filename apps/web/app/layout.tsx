@@ -37,12 +37,21 @@ export const metadata: Metadata = {
     url: 'https://audren.xyz',
     siteName: 'Audren',
     type: 'website',
+    images: [
+      {
+        url: '/og-image.png',
+        width: 1280,
+        height: 640,
+        alt: 'Audren — Private money on Solana. Existing tokens. One shared pool.',
+      },
+    ],
   },
   twitter: {
     card: 'summary_large_image',
     title: 'Audren — Your tokens. Your keys. Private payments.',
     description:
       'Private payments with existing Solana assets. Your spending keys stay with you. Explore Audren on Mainnet.',
+    images: ['/og-image.png'],
   },
 }
 

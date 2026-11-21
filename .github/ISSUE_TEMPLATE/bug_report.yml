@@ -1,0 +1,34 @@
+name: Bug Report
+description: Report a reproducible bug in the Audren program, SDK, relayer, or web app.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security notice:** If this is a security vulnerability, stop and email `security@audren.xyz` per `SECURITY.md`.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - program/ (Solana sBPFv3 program)
+        - crates/client or crates/audren-core (Rust)
+        - packages/sdk (@audren/sdk TypeScript)
+        - apps/relay (Privacy Relayer)
+        - apps/web (audren.xyz Web App)
+        - idl/ or docs/
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description & Steps to Reproduce
+      description: Clear steps, cluster (Mainnet / Devnet / LiteSVM), transaction signature if applicable, and expected vs. observed behavior.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit / Release Tag
+      placeholder: "e.g. v0.2.0 or git SHA"

@@ -331,11 +331,38 @@ def main() -> None:
             f"Public {rel_wrangler} must not contain private RPC URLs"
         )
 
+    # 16. License, community health files, brand assets & README release parity
+    license_txt = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in license_txt, (
+        "LICENSE must contain the full canonical Apache-2.0 text so GitHub detects SPDX Apache-2.0"
+    )
+    for req_file in (
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        "assets/brand/audren-logo.svg",
+        "assets/brand/audren-logo.png",
+        "assets/brand/audren-social-preview.png",
+        "assets/brand/audren-wordmark-light.svg",
+        "assets/brand/audren-wordmark-dark.svg",
+        "apps/web/public/og-image.png",
+    ):
+        assert (ROOT / req_file).is_file(), f"Missing required brand/community file: {req_file}"
+    assert (ROOT / "apps/web/public/og-image.png").read_bytes() == (
+        ROOT / "assets/brand/audren-social-preview.png"
+    ).read_bytes(), "apps/web/public/og-image.png drifted from assets/brand/audren-social-preview.png"
+    readme_txt = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"releases/tag/v{prog_version}" in readme_txt, (
+        f"README.md release badge must reference releases/tag/v{prog_version}"
+    )
+
     print(
         f"verify-idl: ok (v{prog_version}, {len(ix_tags)} instructions, {len(expected_sizes)} fixed accounts + ProofBuffer, "
         f"{len(pda_prefixes)} PDAs ({len(seen_pda_to_acc)} linked in ixs), {len(core_errs)} errors, "
         f"8 version manifests, {len(rust_dexes)} CPI-excluded DEXes, {len(md_files)} docs, "
-        f"security.json, .security.txt, protocol.ts, and Agave {builder_ver}/{tools_ver}/sBPF{sbf_arch} pins matched)"
+        f"Apache-2.0, brand/OG parity, security.json, .security.txt, protocol.ts, and Agave {builder_ver}/{tools_ver}/sBPF{sbf_arch} pins matched)"
     )
 
 

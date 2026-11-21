@@ -1,0 +1,17 @@
+name: Feature / Integration Request
+description: Propose a protocol improvement, router integration, SDK capability, or docs enhancement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired Outcome
+      description: What user or developer problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Proposed Design & Tradeoffs
+      description: Relevant accounts, wire formats, privacy boundaries, or API ergonomics.

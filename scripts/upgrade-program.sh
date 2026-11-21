@@ -545,6 +545,24 @@ if missing:
     sys.exit(f"GitHub Release {tag} missing required assets: {sorted(missing)}")
 print(f"Verified GitHub Release {tag} ({rel.get('html_url')}) with all {len(required)} release assets.")
 PY
+
+    echo "5. Checking GitHub org & repository metadata (${REPO_URL})..."
+    local repo_json org_json
+    repo_json="$(curl -fsS "https://api.github.com/repos/${REPO_OWNER_NAME}")"
+    org_json="$(curl -fsS "https://api.github.com/orgs/${REPO_OWNER_NAME%%/*}")"
+    python3 - "$repo_json" "$org_json" <<'PY'
+import json, sys
+repo = json.loads(sys.argv[1])
+org = json.loads(sys.argv[2])
+assert repo.get("homepage") == "https://audren.xyz", f"Repo homepage mismatch: {repo.get('homepage')}"
+assert repo.get("description"), "Repo description is empty"
+assert (repo.get("license") or {}).get("spdx_id") == "Apache-2.0", f"Repo SPDX license mismatch: {repo.get('license')}"
+assert len(repo.get("topics") or []) >= 6, f"Repo topics too sparse: {repo.get('topics')}"
+assert org.get("name") == "Audren", f"Org display name mismatch: {org.get('name')}"
+assert org.get("blog") == "https://audren.xyz", f"Org blog mismatch: {org.get('blog')}"
+assert org.get("description"), "Org description is empty"
+print(f"Verified GitHub org '{org['name']}' & repo '{repo['full_name']}' (Apache-2.0, {len(repo['topics'])} topics, homepage https://audren.xyz).")
+PY
   fi
 }
 
