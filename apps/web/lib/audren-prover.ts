@@ -1,7 +1,7 @@
 /**
  * Pure TypeScript Audren Client Prover, Scanner & Instruction Builders.
  *
- * Implements 100% browser-native cryptography matching `programs/audren/program`
+ * Implements 100% browser-native cryptography matching `program/`
  * and `solana-zk-sdk 8.0.1` byte-for-byte — zero WASM, zero server key custody:
  * - Multi-Base Binary Triptych (`m = 5 | 6 | 7` -> 32 / 64 / 128 note anonymity set)
  * - Cross-Base Bridges (`CrossBase1` 128 B, `CrossBase2` 256 B)

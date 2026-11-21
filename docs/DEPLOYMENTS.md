@@ -33,17 +33,18 @@ Mainnet releases use deterministic Linux/Docker builds via the Solana Foundation
 | **Target Architecture** | `sBPFv3` (`--arch v3 --cargo-build-sbf-args="--tools-version v1.57"`) |
 | **Workspace / Library** | `--workspace-path program --library-name audren` |
 | **Otter Verify PDA (Mainnet)** | `FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt` |
+| **Current Verified Release** | [`v0.2.0`](https://github.com/audren-xyz/audren/releases/tag/v0.2.0) (`c288d5356f58a50fe2e7ac84dce4b84401e3bdf0`) · `228,184 B` · `0aa268a9f2bac5c0f6c08f6eecc199151235d7f056d3b4944f97bf7b1dca0159` |
 | **Source Repository** | `https://github.com/audren-xyz/audren` |
 | **Explorer / OtterSec Status** | [Mainnet Verified Build](https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build) · [`verify.osec.io`](https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3) |
 
-## Deployment, Metadata & Verified Build Workflow
+## Deployment, Metadata, Verified Build & Release Workflow
 
 Configure RPC URLs and the upgrade authority keypair in environment variables or gitignored `.credentials/operator.env` (`MAINNET_RPC_URL`, `DEVNET_RPC_URL`, `AUDREN_KEYPAIR_PATH`).
 
-Every program upgrade must run through `./scripts/upgrade-program.sh` so IDLs, Security metadata, and Mainnet Verified Build attestation stay strictly synchronized with the deployed binary:
+Every program upgrade must run through `./scripts/upgrade-program.sh` so IDLs, Security metadata, Mainnet Verified Build attestation, GitHub Releases, and the Web UI deployment register stay strictly synchronized with the deployed binary:
 
 ```bash
-# 1. Regenerate and verify local IDLs, security.json, .security.txt, and toolchain pins
+# 1. Regenerate and verify all 15 cross-repo invariants (IDLs, SDK, Relayer, Web protocol.ts, docs, security, pins)
 python3 idl/generate-idl.py && python3 idl/verify-idl.py
 
 # 2. Build deterministic Linux/Docker sBPFv3 artifact (`program/target/deploy/audren.so`)
@@ -53,10 +54,12 @@ python3 idl/generate-idl.py && python3 idl/verify-idl.py
 ./scripts/upgrade-program.sh devnet
 
 # 4. Upgrade Mainnet from a clean, pushed commit (deploys verifiable ELF + syncs `security`
-#    and `idl` metadata + updates Otter Verify PDA + submits remote verification job)
+#    and `idl` metadata + updates Otter Verify PDA + runs OtterSec remote attestation +
+#    tags & publishes GitHub Release v<version> with verified ELF, SHA-256, IDLs, security.json)
 ./scripts/upgrade-program.sh mainnet
 
-# 5. Audit live cluster compliance (local parity + on-chain `security`/`idl` + Verified Build status)
+# 5. Audit live cluster compliance (local 15-point parity + on-chain `security`/`idl` +
+#    OtterSec Verified Build & `apps/web/lib/protocol.ts` hash match + GitHub Release assets)
 ./scripts/upgrade-program.sh check mainnet
 ```
 

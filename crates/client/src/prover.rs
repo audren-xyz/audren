@@ -1,4 +1,4 @@
-//! Pure Ristretto255 Provers matching `programs/audren/program/src/crypto.rs` byte-for-byte:
+//! Pure Ristretto255 Provers matching `program/src/crypto.rs` byte-for-byte:
 //! - Multi-Base Binary Triptych (`m = 5` -> 32 notes / 1 page, `m = 6` -> 64 notes / 2 pages,
 //!   `m = 7` -> 128 notes / 4 pages), optional audited mode
 //! - Verifiable Auditor Asset Encryption (`192 B`)

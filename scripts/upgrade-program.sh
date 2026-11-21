@@ -10,8 +10,10 @@ set -euo pipefail
 #   3. Program deployment (`solana program deploy`).
 #   4. Automatic Solana Program Metadata sync (`security` + `idl`) with round-trip verification.
 #   5. On Mainnet: automatic Solana Verified Build attestation (Otter Verify PDA update +
-#      remote job submission to `verify.osec.io`), requiring a clean pushed commit and a
-#      deterministic Docker build (`build-verifiable`) unless `ALLOW_UNVERIFIED_DEPLOY=1`.
+#      remote job submission to `verify.osec.io`) AND automatic GitHub tag + Release cutting
+#      (`v<version>` with verified ELF, SHA-256, IDLs, and security.json), requiring a clean
+#      pushed commit and deterministic Docker build (`build-verifiable`) unless
+#      `ALLOW_UNVERIFIED_DEPLOY=1`.
 #
 # Configuration is read strictly from environment variables or gitignored `.credentials/operator.env`:
 #   MAINNET_RPC_URL      - Solana Mainnet RPC URL
@@ -28,6 +30,7 @@ set -euo pipefail
 #   ./scripts/upgrade-program.sh idl <devnet|mainnet>
 #   ./scripts/upgrade-program.sh security <devnet|mainnet>
 #   ./scripts/upgrade-program.sh verify <mainnet|devnet> [--commit <sha>]
+#   ./scripts/upgrade-program.sh release [--commit <sha>]
 #   ./scripts/upgrade-program.sh check <devnet|mainnet>
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,6 +72,7 @@ Usage:
   ./scripts/upgrade-program.sh idl <devnet|mainnet>
   ./scripts/upgrade-program.sh security <devnet|mainnet>
   ./scripts/upgrade-program.sh verify <mainnet|devnet> [--commit <sha>]
+  ./scripts/upgrade-program.sh release [--commit <sha>]
   ./scripts/upgrade-program.sh check <devnet|mainnet>
 EOF
   exit 1
@@ -357,10 +361,146 @@ verify_onchain_build() {
   fi
 }
 
+read_program_version() {
+  python3 - "$ROOT/program/Cargo.toml" <<'PY'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+assert m, "Could not read version from program/Cargo.toml"
+print(m.group(1))
+PY
+}
+
+publish_github_release() {
+  local commit="$1"
+  command -v gh >/dev/null 2>&1 || { echo "Error: GitHub CLI (gh) is required to cut a GitHub Release." >&2; exit 1; }
+  require_solana_verify
+  [[ -f "$VERIFIABLE_SO_PATH" ]] || { echo "Error: verifiable ELF not found at $VERIFIABLE_SO_PATH; run build-verifiable first." >&2; exit 1; }
+
+  local version tag
+  version="$(read_program_version)"
+  tag="v${version}"
+
+  # Verify OtterSec reports verified status matching commit & local ELF hash
+  local exec_hash raw_sha elf_bytes status_json
+  exec_hash="$(solana-verify get-executable-hash "$VERIFIABLE_SO_PATH" | tail -n 1 | tr -d '[:space:]')"
+  raw_sha="$(shasum -a 256 "$VERIFIABLE_SO_PATH" | awk '{print $1}')"
+  elf_bytes="$(wc -c < "$VERIFIABLE_SO_PATH" | tr -d '[:space:]')"
+  status_json="$(curl -fsS "https://verify.osec.io/status/${PROGRAM_ID}")"
+
+  python3 - "$status_json" "$commit" "$exec_hash" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+commit, exec_hash = sys.argv[2], sys.argv[3]
+if not data.get("is_verified"):
+    sys.exit("Error: Mainnet Verified Build is not yet verified on verify.osec.io")
+if data.get("commit") != commit:
+    sys.exit(f"Error: verify.osec.io commit {data.get('commit')} != release commit {commit}")
+if data.get("on_chain_hash") != exec_hash or data.get("executable_hash") != exec_hash:
+    sys.exit(f"Error: verify.osec.io hash mismatch vs local verifiable ELF {exec_hash}")
+PY
+
+  # Ensure annotated git tag points to the exact verified commit and is pushed to origin
+  local existing_tag_sha=""
+  if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+    existing_tag_sha="$(git rev-list -n 1 "$tag")"
+    if [[ "$existing_tag_sha" != "$commit" ]]; then
+      echo "Error: local tag ${tag} points to ${existing_tag_sha}, not verified commit ${commit}." >&2
+      exit 1
+    fi
+  else
+    git tag -a "$tag" "$commit" -m "Audren ${tag}"
+  fi
+  git push origin "refs/tags/${tag}"
+
+  local tmp_dir sha_file notes_file
+  tmp_dir="$(mktemp -d /tmp/audren-release-XXXXXX)"
+  trap 'rm -rf "$tmp_dir"' RETURN
+  sha_file="${tmp_dir}/audren.so.sha256"
+  notes_file="${tmp_dir}/release-notes.md"
+
+  cat >"$sha_file" <<EOF
+${raw_sha}  audren.so
+# solana-verify executable hash: ${exec_hash}
+# elf_bytes: ${elf_bytes}
+# commit: ${commit}
+# program_id: ${PROGRAM_ID}
+EOF
+
+  cat >"$notes_file" <<EOF
+# Audren ${tag}
+
+Deterministic, verifiable Solana \`sBPFv3\` release for **Audren** (\`${PROGRAM_ID}\`).
+
+## On-Chain Trust & Verification
+
+| Surface | Identifier / Link |
+| :--- | :--- |
+| **Program ID (Mainnet & Devnet)** | \`${PROGRAM_ID}\` |
+| **Verified Source Commit** | \`${commit}\` |
+| **On-Chain & Executable Hash** | \`${exec_hash}\` |
+| **Deployed ELF Size / Raw SHA-256** | \`${elf_bytes} B\` · \`${raw_sha}\` |
+| **Mainnet Verified Build** | [Solana Explorer Verified Build](https://explorer.solana.com/address/${PROGRAM_ID}/verified-build) · [OtterSec Status](https://verify.osec.io/status/${PROGRAM_ID}) |
+| **Canonical Program IDL (Codama 1.8.0)** | \`5QoLwK1C3NpUXjsHEV14RsQE65MaaiT9WxGvoTyxBPsn\` · [Solana Explorer IDL](https://explorer.solana.com/address/${PROGRAM_ID}/idl) |
+| **Canonical Security Metadata** | \`GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj\` · [Solana Explorer Security](https://explorer.solana.com/address/${PROGRAM_ID}/security) |
+| **Otter Verify PDA (Mainnet)** | \`FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt\` |
+
+## Reproduce Independently
+
+\`\`\`bash
+solana-verify verify-from-repo -um \\
+  --program-id ${PROGRAM_ID} \\
+  --commit-hash ${commit} \\
+  --workspace-path ${PROGRAM_WORKSPACE_PATH} \\
+  --library-name ${PROGRAM_LIB_NAME} \\
+  --base-image ${VERIFY_BASE_IMAGE} \\
+  --arch ${SBF_ARCH} \\
+  --cargo-build-sbf-args="--tools-version ${TOOLS_VERSION}" \\
+  ${REPO_URL}
+\`\`\`
+
+## Attached Artifacts
+
+- \`audren.so\` — deterministic \`sBPFv3\` binary (\`${elf_bytes} B\`, embedded \`.security.txt\`)
+- \`audren.so.sha256\` — raw SHA-256 and \`solana-verify\` executable hash manifest
+- \`audren.codama.json\` — canonical Codama v1.8.0 IDL
+- \`audren.anchor.json\` — Anchor v0.30+ compatible IDL
+- \`security.json\` — canonical Solana Program Metadata security manifest (\`security@audren.xyz\`)
+EOF
+
+  if gh release view "$tag" --repo "$REPO_OWNER_NAME" >/dev/null 2>&1; then
+    echo "Updating existing GitHub Release ${tag} on ${REPO_OWNER_NAME}..."
+    gh release edit "$tag" \
+      --repo "$REPO_OWNER_NAME" \
+      --title "Audren ${tag}" \
+      --notes-file "$notes_file"
+    gh release upload "$tag" \
+      --repo "$REPO_OWNER_NAME" \
+      --clobber \
+      "$VERIFIABLE_SO_PATH" \
+      "$sha_file" \
+      "$IDL_PATH" \
+      "$ROOT/idl/audren.anchor.json" \
+      "$SECURITY_PATH"
+  else
+    echo "Creating GitHub Release ${tag} on ${REPO_OWNER_NAME}..."
+    gh release create "$tag" \
+      --repo "$REPO_OWNER_NAME" \
+      --target "$commit" \
+      --title "Audren ${tag}" \
+      --notes-file "$notes_file" \
+      "$VERIFIABLE_SO_PATH" \
+      "$sha_file" \
+      "$IDL_PATH" \
+      "$ROOT/idl/audren.anchor.json" \
+      "$SECURITY_PATH"
+  fi
+}
+
 check_compliance() {
   local cluster="$1"
   local rpc_url="$2"
-  echo "1. Checking local IDL, security.json, .security.txt, and toolchain parity..."
+  echo "1. Checking local IDL, SDK, Relayer, Web protocol.ts, docs, security.json, .security.txt, and toolchain parity..."
   python3 "$ROOT/idl/verify-idl.py"
 
   echo "2. Checking on-chain Program Metadata (${cluster})..."
@@ -368,15 +508,42 @@ check_compliance() {
   verify_onchain_metadata idl "$rpc_url" "$IDL_PATH"
 
   if [[ "$cluster" == "mainnet" ]]; then
-    echo "3. Checking OtterSec Verified Build status (https://verify.osec.io/status/${PROGRAM_ID})..."
+    echo "3. Checking OtterSec Verified Build status & apps/web/lib/protocol.ts parity (https://verify.osec.io/status/${PROGRAM_ID})..."
     local status_json
     status_json="$(curl -fsS "https://verify.osec.io/status/${PROGRAM_ID}")"
-    python3 - "$status_json" <<'PY'
-import json, sys
+    python3 - "$status_json" "$ROOT/apps/web/lib/protocol.ts" <<'PY'
+import json, pathlib, re, sys
 data = json.loads(sys.argv[1])
+proto = pathlib.Path(sys.argv[2]).read_text()
 print(json.dumps(data, indent=2))
 if not data.get("is_verified"):
     sys.exit("Compliance check incomplete: Mainnet Verified Build is not yet verified (run build-verifiable + mainnet upgrade).")
+exec_hash = re.search(r"\bexecutableHash:\s*'([0-9a-f]{64})'", proto).group(1)
+verified_commit = re.search(r"\bverifiedCommit:\s*'([0-9a-f]{40})'", proto).group(1)
+if data.get("on_chain_hash") != exec_hash or data.get("executable_hash") != exec_hash:
+    sys.exit(f"Drift detected: apps/web/lib/protocol.ts executableHash ({exec_hash}) != Mainnet verified hash ({data.get('on_chain_hash')})")
+if data.get("commit") != verified_commit:
+    sys.exit(f"Drift detected: apps/web/lib/protocol.ts verifiedCommit ({verified_commit}) != Mainnet verified commit ({data.get('commit')})")
+print("Verified apps/web/lib/protocol.ts matches live Mainnet verified build hash & commit.")
+PY
+
+    local version tag
+    version="$(read_program_version)"
+    tag="v${version}"
+    echo "4. Checking GitHub Release ${tag} (${REPO_URL}/releases/tag/${tag})..."
+    local release_json
+    release_json="$(curl -fsS "https://api.github.com/repos/${REPO_OWNER_NAME}/releases/tags/${tag}")"
+    python3 - "$release_json" "$tag" <<'PY'
+import json, sys
+rel = json.loads(sys.argv[1])
+tag = sys.argv[2]
+assert rel.get("tag_name") == tag, f"Release tag mismatch: {rel.get('tag_name')} != {tag}"
+assets = {a["name"] for a in rel.get("assets", [])}
+required = {"audren.so", "audren.so.sha256", "audren.codama.json", "audren.anchor.json", "security.json"}
+missing = required - assets
+if missing:
+    sys.exit(f"GitHub Release {tag} missing required assets: {sorted(missing)}")
+print(f"Verified GitHub Release {tag} ({rel.get('html_url')}) with all {len(required)} release assets.")
 PY
   fi
 }
@@ -424,6 +591,29 @@ case "$1" in
     python3 "$ROOT/idl/verify-idl.py"
     COMMIT_SHA="$(resolve_verified_commit "$COMMIT_ARG")"
     verify_onchain_build "$CLUSTER" "$RPC_URL" "$COMMIT_SHA"
+    exit 0
+    ;;
+  release)
+    shift
+    COMMIT_ARG=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --commit)
+          [[ $# -ge 2 ]] || usage
+          COMMIT_ARG="$2"
+          shift 2
+          ;;
+        *)
+          usage
+          ;;
+      esac
+    done
+    python3 "$ROOT/idl/verify-idl.py"
+    if [[ -z "$COMMIT_ARG" ]]; then
+      COMMIT_ARG="$(curl -fsS "https://verify.osec.io/status/${PROGRAM_ID}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("commit",""))')"
+    fi
+    COMMIT_SHA="$(resolve_verified_commit "$COMMIT_ARG")"
+    publish_github_release "$COMMIT_SHA"
     exit 0
     ;;
   check)
@@ -490,24 +680,30 @@ case "$1" in
     fi
 
     SOLANA_BIN="$(resolve_solana_cli)"
-    echo "Step 1/3: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN)..."
+    TOTAL_STEPS=3
+    if [[ "$CLUSTER" == "mainnet" ]]; then
+      TOTAL_STEPS=4
+    fi
+    echo "Step 1/${TOTAL_STEPS}: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN)..."
     "$SOLANA_BIN" program deploy "$SO_PATH" \
       --program-id "$PROGRAM_ID" \
       --upgrade-authority "$KEYPAIR" \
       --keypair "$KEYPAIR" \
       --url "$RPC_URL"
 
-    echo "Step 2/3: Syncing canonical Program Metadata (security + idl) on $CLUSTER..."
+    echo "Step 2/${TOTAL_STEPS}: Syncing canonical Program Metadata (security + idl) on $CLUSTER..."
     publish_security "$CLUSTER" "$RPC_URL"
     publish_idl "$CLUSTER" "$RPC_URL"
 
     if [[ "$CLUSTER" == "mainnet" && "${ALLOW_UNVERIFIED_DEPLOY:-0}" != "1" ]]; then
-      echo "Step 3/3: Updating Verified Build PDA & triggering remote attestation on Mainnet..."
+      echo "Step 3/${TOTAL_STEPS}: Updating Verified Build PDA & triggering remote attestation on Mainnet..."
       verify_onchain_build "$CLUSTER" "$RPC_URL" "$COMMIT_SHA"
+      echo "Step 4/${TOTAL_STEPS}: Tagging & publishing GitHub Release..."
+      publish_github_release "$COMMIT_SHA"
     elif [[ "$CLUSTER" == "mainnet" ]]; then
-      echo "WARNING: ALLOW_UNVERIFIED_DEPLOY=1 skipped Verified Build attestation. Run './scripts/upgrade-program.sh verify mainnet --commit <sha>' to restore verification." >&2
+      echo "WARNING: ALLOW_UNVERIFIED_DEPLOY=1 skipped Verified Build attestation and GitHub Release. Run './scripts/upgrade-program.sh verify mainnet --commit <sha>' and './scripts/upgrade-program.sh release --commit <sha>' to restore compliance." >&2
     else
-      echo "Step 3/3: Devnet upgrade + Program Metadata sync complete."
+      echo "Step 3/${TOTAL_STEPS}: Devnet upgrade + Program Metadata sync complete."
     fi
     exit 0
     ;;

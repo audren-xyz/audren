@@ -3,7 +3,7 @@ import Link from 'next/link'
 import { ArrowLeft, ArrowRight, ArrowUpRight } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
-import { AUDREN, solscanAddress } from '@/lib/protocol'
+import { AUDREN, explorerAddress, solscanAddress } from '@/lib/protocol'
 import styles from '@/components/SubpageShell.module.css'
 
 export const metadata: Metadata = {
@@ -128,11 +128,47 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
+                    <td><strong>Verified Build Hash ({AUDREN.releaseTag})</strong></td>
+                    <td><code>{AUDREN.executableHash}</code></td>
+                    <td>
+                      <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer" className={styles.textLink}>
+                        Explorer Verified Build <ArrowUpRight size={12} />
+                      </a>
+                    </td>
+                  </tr>
+                  <tr>
                     <td><strong>Deployed ELF SHA-256 ({AUDREN.elfBytes.toLocaleString()} B)</strong></td>
                     <td><code>{AUDREN.elfSha256}</code></td>
                     <td>
-                      <a href={AUDREN.githubCore} target="_blank" rel="noreferrer" className={styles.textLink}>
-                        GitHub Source <ArrowUpRight size={12} />
+                      <a href={AUDREN.githubRelease} target="_blank" rel="noreferrer" className={styles.textLink}>
+                        GitHub Release <ArrowUpRight size={12} />
+                      </a>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><strong>Canonical Program IDL PDA</strong></td>
+                    <td><code>{AUDREN.idlPda}</code></td>
+                    <td>
+                      <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer" className={styles.textLink}>
+                        Explorer IDL <ArrowUpRight size={12} />
+                      </a>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><strong>Canonical Security Metadata PDA</strong></td>
+                    <td><code>{AUDREN.securityPda}</code></td>
+                    <td>
+                      <a href={explorerAddress(AUDREN.programId, 'security')} target="_blank" rel="noreferrer" className={styles.textLink}>
+                        Explorer Security <ArrowUpRight size={12} />
+                      </a>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><strong>Otter Verify PDA (Mainnet)</strong></td>
+                    <td><code>{AUDREN.otterVerifyPda}</code></td>
+                    <td>
+                      <a href={AUDREN.osecVerifyStatusUrl} target="_blank" rel="noreferrer" className={styles.textLink}>
+                        verify.osec.io <ArrowUpRight size={12} />
                       </a>
                     </td>
                   </tr>

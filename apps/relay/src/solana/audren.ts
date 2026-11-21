@@ -13,7 +13,7 @@ import type { AudrenOpKind, SolanaAccountMeta, SolanaInstruction } from '../type
 
 // ============================================================================
 // Audren v1 Protocol Constants & PDAs
-// Verified byte-for-byte against `programs/audren/program/src/lib.rs`
+// Verified byte-for-byte against `program/src/lib.rs`
 // ============================================================================
 
 export const AUDREN_PROGRAM_ID_STR = 'AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3'
@@ -205,7 +205,7 @@ export function extractNullifierPdas(tag: number, accounts: SolanaAccountMeta[])
 
 /**
  * Extract swap metadata from Tag 5 (`SwapViaRouter`).
- * Exact account layout (verified against `apps/audren-web/lib/audren-prover.ts:2278`):
+ * Exact account layout (verified against `apps/web/lib/audren-prover.ts`):
  *   [0] payer, [1] pool, [2] out_page, [3] nullifier, [4] rent_vault,
  *   [5] zk_program, [6] system_program, [7] vault_auth,
  *   [8] in_mint, [9] vault_in, [10] token_program_in,

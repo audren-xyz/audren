@@ -1,7 +1,7 @@
 /**
  * Zero-dependency Solana Base58 codec, `aud1…` stealth address parser (with canonical
  * Ristretto255 point validation per RFC 9496 §4.3.1), and canonical PDA derivation helpers
- * matching `programs/audren/crates/client/src/pda.rs` byte-for-byte.
+ * matching `crates/client/src/pda.rs` byte-for-byte.
  *
  * Uses native Web Crypto (`SHA-256`) and pure `BigInt` curve arithmetic
  * (`curve25519-dalek` `CompressedEdwardsY::decompress` semantics matching Solana's

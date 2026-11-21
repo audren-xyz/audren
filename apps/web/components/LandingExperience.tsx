@@ -12,7 +12,7 @@ import {
 } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
-import { AUDREN, solscanAddress, solscanTx } from '@/lib/protocol'
+import { AUDREN, explorerAddress, solscanAddress, solscanTx } from '@/lib/protocol'
 import styles from './LandingExperience.module.css'
 
 type CaseId = 'pay' | 'swap' | 'withdraw' | 'receipt'
@@ -1181,6 +1181,30 @@ export function LandingExperience() {
                   <ArrowUpRight size={14} />
                 </a>
               ))}
+              <a
+                href={explorerAddress(AUDREN.programId, 'verified-build')}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Verified build
+                <ArrowUpRight size={14} />
+              </a>
+              <a
+                href={explorerAddress(AUDREN.programId, 'idl')}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Program IDL
+                <ArrowUpRight size={14} />
+              </a>
+              <a
+                href={explorerAddress(AUDREN.programId, 'security')}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Security.txt
+                <ArrowUpRight size={14} />
+              </a>
               <a
                 href={solscanAddress(AUDREN.programId)}
                 target="_blank"

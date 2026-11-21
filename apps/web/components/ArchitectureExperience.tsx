@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { ArrowLeft, ArrowRight, ArrowUpRight } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
-import { AUDREN, MEASURED_CU_ROWS, solscanAddress } from '@/lib/protocol'
+import { AUDREN, MEASURED_CU_ROWS, explorerAddress, solscanAddress } from '@/lib/protocol'
 import styles from '@/components/SubpageShell.module.css'
 
 const INSTRUCTIONS = [
@@ -79,10 +79,18 @@ export function ArchitectureExperience() {
 
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
-              <span>Program ID</span>
+              <span>Program ID ({AUDREN.releaseTag})</span>
               <strong className="mono">
                 <a href={solscanAddress(AUDREN.programId)} target="_blank" rel="noreferrer">
                   {AUDREN.programId.slice(0, 10)}…{AUDREN.programId.slice(-6)} <ArrowUpRight size={11} />
+                </a>
+              </strong>
+            </div>
+            <div className={styles.heroMetaCell}>
+              <span>Verified Build Hash</span>
+              <strong className="mono">
+                <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer">
+                  {AUDREN.executableHash.slice(0, 16)}… <ArrowUpRight size={11} />
                 </a>
               </strong>
             </div>
@@ -91,12 +99,12 @@ export function ArchitectureExperience() {
               <strong className="mono">{AUDREN.elfBytes.toLocaleString()} B · sBPFv3</strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>ELF SHA-256</span>
-              <strong className="mono">{AUDREN.elfSha256.slice(0, 16)}…</strong>
-            </div>
-            <div className={styles.heroMetaCell}>
-              <span>EpochPage / Heap</span>
-              <strong className="mono">6,240 B / 32 KiB default</strong>
+              <span>On-Chain IDL &amp; Heap</span>
+              <strong className="mono">
+                <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer">
+                  Codama 1.8.0 · 32 KiB <ArrowUpRight size={11} />
+                </a>
+              </strong>
             </div>
           </div>
         </section>
@@ -182,7 +190,7 @@ export function ArchitectureExperience() {
             <div className={styles.diagramStagePaper}>
               <div className={styles.stageHead}>
                 <strong>CU consumption vs. 1,400,000 CU Solana transaction cap</strong>
-                <span>SwapViaRouter leaves ~987k CU for DEX CPI</span>
+                <span>SwapViaRouter leaves ~1.03M CU for DEX CPI</span>
               </div>
               <div className={styles.cuList}>
                 {MEASURED_CU_ROWS.map((row) => {

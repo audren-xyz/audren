@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { ArrowUpRight } from 'lucide-react'
-import { AUDREN, shortHash, solscanAddress } from '@/lib/protocol'
+import { AUDREN, explorerAddress, shortHash, solscanAddress } from '@/lib/protocol'
 import type { NavSection } from '@/components/SiteHeader'
 
 export function SiteFooter({ current }: { current?: NavSection }) {
@@ -64,8 +64,14 @@ export function SiteFooter({ current }: { current?: NavSection }) {
 
         <div className="footer-links-group">
           <h4>On-Chain Accounts</h4>
-          <a href={solscanAddress(AUDREN.programId, 'mainnet')} target="_blank" rel="noreferrer">
-            Mainnet Program <ArrowUpRight size={12} />
+          <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer">
+            Verified Build ({AUDREN.releaseTag}) <ArrowUpRight size={12} />
+          </a>
+          <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer">
+            On-Chain Program IDL <ArrowUpRight size={12} />
+          </a>
+          <a href={explorerAddress(AUDREN.programId, 'security')} target="_blank" rel="noreferrer">
+            Security Metadata <ArrowUpRight size={12} />
           </a>
           <a href={solscanAddress(AUDREN.pool0Pda, 'mainnet')} target="_blank" rel="noreferrer">
             Mainnet Pool #0 <ArrowUpRight size={12} />

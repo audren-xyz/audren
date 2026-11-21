@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift-and-docs:
+    name: Zero-Drift & Docs Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify IDL, SDK, Relayer, Web protocol.ts, docs & toolchain parity
+        run: python3 idl/verify-idl.py
+      - name: Syntax-check release operator script
+        run: bash -n scripts/upgrade-program.sh
+
+  rust-check:
+    name: Rust Check (Program, Mock Router & Workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            program -> program/target
+            tests/mock-router -> tests/mock-router/target
+      - name: Check isolated sBPFv3 program manifest
+        run: |
+          cargo check --manifest-path program/Cargo.toml
+          cargo check --manifest-path program/Cargo.toml --features no-entrypoint
+          cargo check --manifest-path program/Cargo.toml --tests
+      - name: Check isolated mock-router manifest
+        run: cargo check --manifest-path tests/mock-router/Cargo.toml
+      - name: Check host workspace & tests
+        run: cargo check --workspace --tests
+
+  typescript-and-web:
+    name: SDK, Relayer & Web App Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Typecheck & test @audren/sdk
+        run: |
+          pnpm --dir packages/sdk install --frozen-lockfile
+          pnpm --dir packages/sdk typecheck
+          pnpm --dir packages/sdk test
+      - name: Typecheck apps/relay
+        run: |
+          pnpm --dir apps/relay install --frozen-lockfile
+          pnpm --dir apps/relay typecheck
+      - name: Typecheck, lint & build apps/web
+        run: |
+          pnpm --dir apps/web install --frozen-lockfile
+          pnpm --dir apps/web check

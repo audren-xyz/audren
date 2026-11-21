@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, Copy } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
-import { AUDREN } from '@/lib/protocol'
+import { AUDREN, explorerAddress } from '@/lib/protocol'
 import styles from '@/components/SubpageShell.module.css'
 
 type SnippetId = 'pda' | 'scan' | 'relay' | 'rust'
@@ -112,20 +112,28 @@ export function DevelopersExperience() {
 
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
-              <span>Program ID</span>
-              <strong className="mono">{AUDREN.programId.slice(0, 12)}…{AUDREN.programId.slice(-6)}</strong>
+              <span>Program ID ({AUDREN.releaseTag})</span>
+              <strong className="mono">
+                <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer">
+                  {AUDREN.programId.slice(0, 12)}…{AUDREN.programId.slice(-6)} <ArrowUpRight size={11} />
+                </a>
+              </strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Rust Prover</span>
-              <strong><code>crates/client</code></strong>
+              <span>Published IDLs</span>
+              <strong>
+                <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer">
+                  Codama 1.8.0 &amp; Anchor <ArrowUpRight size={11} />
+                </a>
+              </strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>TypeScript SDK</span>
-              <strong><code>@audren/sdk</code> (0 runtime deps)</strong>
+              <span>TypeScript &amp; Rust SDKs</span>
+              <strong><code>@audren/sdk</code> · <code>crates/client</code></strong>
             </div>
             <div className={styles.heroMetaCell}>
               <span>License &amp; Status</span>
-              <strong>Apache-2.0 · Pre-audit</strong>
+              <strong>Apache-2.0 · Verified · Pre-audit</strong>
             </div>
           </div>
         </section>
@@ -315,7 +323,7 @@ export function DevelopersExperience() {
                   <li>Base58 &amp; RFC 9496 <code>aud1…</code> stealth address parsing and validation</li>
                   <li>All canonical Audren &amp; ATA PDA derivations (Web Crypto + Ed25519 check)</li>
                   <li>HKDF sub-account seed derivation (<code>deriveSubAccountSeed</code>), account decoders, instruction codecs &amp; Solana v1 serializer</li>
-                  <li>Typed <code>AudrenRelayClient</code>, RPC/WS scan helpers &amp; DEX aggregator CPI account prep</li>
+                  <li>Typed <code>AudrenRelayClient</code>, bundled <code>AUDREN_CODAMA_IDL</code> / <code>AUDREN_ANCHOR_IDL</code>, RPC/WS scan helpers &amp; DEX aggregator CPI account prep</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a

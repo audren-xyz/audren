@@ -10,7 +10,7 @@ Read the root [`AGENTS.md`](../../AGENTS.md) first. On-chain wire layouts are ow
   - `apps/web` holds **no** Mainnet relayer private key. Wallet-mode relaying calls the user-configured relayer URL directly from the browser (`NEXT_PUBLIC_AUDREN_RELAY_URL` or custom HTTPS/localhost URL configured via "Use Your Own Relay").
 - **Standardized Jupiter API usage:** Always use authenticated `JUPITER_API_URL` (default `https://api.jup.ag`) with `JUPITER_API_KEY` uniformly across Direct Self-Pay swaps (`/api/jupiter/*`) and token metadata fallbacks — never fall back to unauthenticated public endpoints.
 - **Single source of truth for protocol metadata & browser prover:**
-  - Keep all deployed Program IDs, PDA addresses, ELF byte length & SHA-256, deployment slots, reference transaction signatures, and measured CU benchmarks centralized in `lib/protocol.ts`.
+  - Keep all deployed Program IDs, PDA addresses (`idl`, `security`, `otterVerifyPda`), release version/commit, ELF byte length & SHA-256, verified executable hash, deployment slots, reference transaction signatures, and measured CU benchmarks centralized in `lib/protocol.ts` (cross-checked automatically by `python3 idl/verify-idl.py` and `./scripts/upgrade-program.sh check mainnet`).
   - Keep `lib/audren-crypto.ts` and `lib/audren-prover.ts` byte-for-byte compatible with `crates/audren-core` and `program/src/`.
   - Keep `JUPITER_CPI_EXCLUDED_DEXES` in `worker/index.ts` synced with `apps/relay/src/aggregators/jupiter.ts`, `packages/sdk/src/swap.ts`, and `crates/client/src/router.rs`.
   - Keep `useCallback` / `useEffect` dependency arrays for live quote fetchers (`LiveWalletVault.tsx`) strictly primitive-only to prevent infinite re-quote loops.
