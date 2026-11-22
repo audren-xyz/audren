@@ -408,7 +408,7 @@ export function DevelopersExperience() {
                 <h3><code>packages/swift</code> (<code>AudrenSDK</code>)</h3>
                 <p className={styles.cellLead}>
                   Native Swift Package generated via UniFFI directly over{' '}
-                  <code>crates/audren-ffi</code> so iOS wallets inherit the exact audited Rust core
+                  <code>crates/audren-ffi</code> so iOS wallets inherit the exact canonical Rust core
                   with zero re-implementation drift.
                 </p>
                 <ul className={styles.dashList}>

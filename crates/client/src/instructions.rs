@@ -260,6 +260,11 @@ pub fn build_deposit_with_options<R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> Result<(AudrenInstruction, PreparedNote), ClientError> {
     let is_native = mint == NATIVE_SOL_MINT;
+    if gross_amount == 0 || net_amount == 0 {
+        return Err(ClientError::InvalidProofInput(
+            "deposit amount must be greater than zero",
+        ));
+    }
     if fee_from_amount && !is_native {
         return Err(ClientError::InvalidProofInput(
             "fee_from_amount is only valid for Native SOL deposits",
@@ -853,6 +858,19 @@ pub fn build_exec_via_escrow<R: RngCore + CryptoRng>(
     if params.min_amount_out == 0 {
         return Err(ClientError::InvalidProofInput("min_amount_out must be > 0"));
     }
+    if params.input_note.mint == NATIVE_SOL_MINT {
+        return Err(ClientError::InvalidProofInput(
+            "ExecViaEscrow requires an SPL/Token-2022 input note (wrap SOL to WSOL first)",
+        ));
+    }
+    if params.input_note.mint == params.mint_out {
+        return Err(ClientError::InvalidProofInput(
+            "ExecViaEscrow input and output mints must differ",
+        ));
+    }
+    let target_data_len = u16::try_from(params.target_ix_data.len()).map_err(|_| {
+        ClientError::InvalidProofInput("target_ix_data exceeds u16 length limit (65,535 B)")
+    })?;
     if params.relayer_fee == 0 && params.fee_on_output {
         return Err(ClientError::InvalidProofInput(
             "fee_on_output requires relayer_fee > 0",
@@ -1014,7 +1032,7 @@ pub fn build_exec_via_escrow<R: RngCore + CryptoRng>(
     data.push(params.escrow_idx);
     data.push(params.escrow_in_idx);
     data.push(params.escrow_out_idx);
-    data.extend_from_slice(&(params.target_ix_data.len() as u16).to_le_bytes());
+    data.extend_from_slice(&target_data_len.to_le_bytes());
     data.extend_from_slice(&out_desc_wire);
 
     let ret_change = if let Some((note_chg, s_chg)) = change_note_opt {
@@ -1167,6 +1185,13 @@ pub fn build_withdraw_with_params<R: RngCore + CryptoRng>(
             return Err(ClientError::InvalidProofInput(
                 "unwrap_wsol requires a WSOL input note",
             ));
+        }
+        if let Some(tp) = params.spl_token_program {
+            if tp.as_ref() != CLASSIC_TOKEN_PROGRAM_ID {
+                return Err(ClientError::InvalidProofInput(
+                    "unwrap_wsol requires Classic SPL Token program",
+                ));
+            }
         }
     }
     let sys_prog = Address::new_from_array(SYSTEM_PROGRAM_ID);
@@ -1616,7 +1641,7 @@ pub fn build_open_lane_page(
 
 /// Extract the `(S_1, S_2, M_1, M_2)` ElGamal auditor ciphertexts from an audited `Transfer`
 /// (`Tag 3`) instruction payload, following the exact `audren-core` wire layout:
-/// `tag(1) | m(1) | out1(226) | out2(226) | c_pay(32) | c_chg(32) | triptych_audited | cross_base_2(256) | range_u128(736) | auditor_asset(192) | [pq_envelope]`.
+/// `tag(1) | m(1) | out1(193) | out2(193) | c_pay(32) | c_chg(32) | triptych_audited | cross_base_2(256) | range_u128(736) | auditor_asset(192) | [pq_envelope]`.
 ///
 /// Returns `Ok((s1, s2, m1, m2))` ready to pass directly to [`crate::keys::AuditorKeypair::decrypt_spent_pubkey`]
 /// and [`crate::keys::AuditorKeypair::decrypt_asset_generator`].

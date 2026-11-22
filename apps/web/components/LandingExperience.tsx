@@ -587,7 +587,7 @@ function SharedVaultRingStage({
 
             {/* Clean non-overlapping arc captions */}
             <text x="324" y="34" textAnchor="middle" fill="#3a4738" fontSize="10.2" fontWeight="600">
-              Escrow PDA → DEX
+              Escrow PDA → DeFi CPI
             </text>
             <text x="324" y="246" textAnchor="middle" fill="#184433" fontSize="10.2" fontWeight="600">
               Output + change reshielded in 1 tx

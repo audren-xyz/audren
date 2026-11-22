@@ -1,7 +1,7 @@
 {
   "name": "Audren",
   "logo": "https://audren.xyz/icon.svg",
-  "description": "Zero-setup multi-asset shielded pool, router-agnostic private DEX swap engine, and verifiable compliance protocol on Solana.",
+  "description": "Zero-setup multi-asset shielded pool, protocol-agnostic shielded DeFi execution (ExecViaEscrow), and verifiable compliance protocol on Solana.",
   "sdk": "https://github.com/audren-xyz/audren/tree/main/packages/sdk",
   "project_url": "https://audren.xyz",
   "contacts": [

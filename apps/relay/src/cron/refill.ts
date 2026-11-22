@@ -91,8 +91,11 @@ export async function runAutoRefill(env: Env, cfg: RelayPolicyConfig): Promise<R
   // Step 1: Unwrap existing WSOL balance if >= 0.005 SOL
   const wsolEntry = nonZero.find((a) => a.mint === WSOL_MINT_STR)
   if (wsolEntry && wsolEntry.amount >= 5_000_000n) {
-    const bh = await rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
-      { commitment: 'confirmed' },
+    const [bh, preLamports] = await Promise.all([
+      rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
+        { commitment: 'confirmed' },
+      ]),
+      fetchBalance(rpcUrl, relayerB58),
     ])
     const ixs: SolanaInstruction[] = [
       buildCloseTokenAccountIx({
@@ -112,13 +115,21 @@ export async function runAutoRefill(env: Env, cfg: RelayPolicyConfig): Promise<R
       computeUnitLimit: 100_000,
       priorityFeeLamports: 10_000n,
     })
-    const sig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
-      toBase64(signed.wireBytes),
-      { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
-    ])
-    await waitForConfirmation(rpcUrl, sig)
-    signatures.push(sig)
-    details.push(`Unwrapped ${(Number(wsolEntry.amount) / 1e9).toFixed(4)} WSOL → native SOL (${sig})`)
+    const unwrapSim = await simulateV1Transaction(rpcUrl, signed.wireBytes, [relayerB58])
+    const postUnwrapLamports = unwrapSim.accounts[0]?.lamports ?? 0
+    if (unwrapSim.err || postUnwrapLamports <= preLamports) {
+      details.push(
+        `Skipped WSOL unwrap: pre-flight simulation did not increase SOL (${unwrapSim.err ? JSON.stringify(unwrapSim.err) : 'no net SOL gain'})`,
+      )
+    } else {
+      const sig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
+        toBase64(signed.wireBytes),
+        { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
+      ])
+      await waitForConfirmation(rpcUrl, sig)
+      signatures.push(sig)
+      details.push(`Unwrapped ${(Number(wsolEntry.amount) / 1e9).toFixed(4)} WSOL → native SOL (${sig})`)
+    }
   }
 
   let currentSol = (await fetchBalance(rpcUrl, relayerB58)) / 1e9
@@ -175,8 +186,11 @@ export async function runAutoRefill(env: Env, cfg: RelayPolicyConfig): Promise<R
           inputMint: acc.mint,
           outputMint: WSOL_MINT_STR,
         })
-        const bh = await rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
-          { commitment: 'confirmed' },
+        const [bh, preSwapLamports] = await Promise.all([
+          rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
+            { commitment: 'confirmed' },
+          ]),
+          fetchBalance(rpcUrl, relayerB58),
         ])
         const ixs: SolanaInstruction[] = [
           buildCreateAtaIdempotentIx({
@@ -212,10 +226,11 @@ export async function runAutoRefill(env: Env, cfg: RelayPolicyConfig): Promise<R
           computeUnitLimit: 600_000,
           priorityFeeLamports: 20_000n,
         })
-        const sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, [])
-        if (sim.err) {
+        const sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, [relayerB58])
+        const postSwapLamports = sim.accounts[0]?.lamports ?? 0
+        if (sim.err || postSwapLamports <= preSwapLamports) {
           details.push(
-            `Skipped refill swap for ${acc.mint.slice(0, 6)}…: pre-flight simulation failed (${JSON.stringify(sim.err)})`,
+            `Skipped refill swap for ${acc.mint.slice(0, 6)}…: pre-flight simulation ${sim.err ? `failed (${JSON.stringify(sim.err)})` : 'did not increase SOL'}`,
           )
           continue
         }

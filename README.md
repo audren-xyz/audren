@@ -63,7 +63,7 @@ Runnable examples for all 4 languages — verified in CI for **100% byte-for-byt
 3. **Scanner** — `dataSlice: { offset: 64, length: 1056 }` view-tag filtering (`scanPageDataslice`), read-only FVK & spendable note decryption (`scanEpochPage`) with per-slot decoy fault isolation
 4. **Prover** — local proof generation & instruction builders (`Deposit` incl. `fee_from_amount`, `Transfer`, `Merge`, `ExecViaEscrow` incl. native `relayer_fee`, `Withdraw` incl. native `relayer_fee` & atomic `unwrap_wsol`, `ProofBuffer`, `CloseProofBuffer`, `OpenPage`, `OpenLanePage`)
 5. **Disclosure & Audit** — Mode 1 Selective Disclosure proof (64-bit safe across parallel lanes `1..15`) + standalone/on-page verify, Mode 2 Full Viewing Key, and Institutional Auditor ElGamal decryption
-6. **Relayer, Escrow CPI & IDLs** — `DEFAULT_RELAY_URL`, `prepareEscrowAccounts` (alias `prepareRouterAccounts`), `JUPITER_CPI_EXCLUDED_DEXES`, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs (`47` synced UniFFI exports verified by `idl/verify-idl.py`)
+6. **Relayer, Escrow CPI & IDLs** — `DEFAULT_RELAY_URL`, `prepareEscrowAccounts`, `JUPITER_CPI_EXCLUDED_DEXES`, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs (`47` synced UniFFI exports verified by `idl/verify-idl.py`)
 
 ## Repository layout
 
@@ -103,11 +103,11 @@ CONTRIBUTING.md       Contributor workflow and zero-drift verification checklist
 | --- | --- | --- |
 | `0x00` | `InitPool` | Create `PoolState` (`192 B`), `EpochPage #0` (`6,240 B`), `sol_vault`, `page_rent_vault` |
 | `0x01` | `OpenPage` | Permissionless Lane `0` rollover allocating `page_id + 1` funded by `PageRentVault` |
-| `0x02` | `Deposit` | Shield Native SOL, Classic SPL, or Token-2022 to any stealth address (`flags & 1` deducts rent fee from deposit for 0-dust sweeps; zero ZK proof) |
+| `0x02` | `Deposit` | Shield Native SOL, Classic SPL, or Token-2022 to any stealth address (`flags & 2` deducts rent fee from deposit for 0-dust sweeps; zero ZK proof) |
 | `0x03` | `Transfer` | Private 1-in → 2-out transfer (`m = 5/6/7`, Triptych + CrossBase2 + `BatchedRangeProofU128`) |
 | `0x04` | `Merge` | Consolidate 2 shielded notes of the same hidden asset into 1 note |
-| `0x05` | `ExecViaEscrow` | Protocol-agnostic 1-tx Token A → Token B CPI via isolated `swap_escrow` (DEXs, lending supply, yield vaults, LSTs, perp LP, RWAs) with native input/output `relayer_fee`, optional shielded change (`flags & 1`), and partial refund (`flags & 2`) |
-| `0x06` | `Withdraw` | Unshield exact amount to any wallet/ATA with optional native `relayer_fee` and atomic WSOL → Native SOL unwrap (`flags & 2` via `audren_unwrap` PDA); full withdrawals keep `PoolState` read-only and bypass `SetPaused` |
+| `0x05` | `ExecViaEscrow` | Protocol-agnostic 1-tx Token A → Token B CPI via isolated `swap_escrow` (DEXs, lending supply, yield vaults, LSTs, perp LP, RWAs) with native input/output `relayer_fee` (`flags & 4`), optional shielded change (`flags & 1`), and partial refund (`flags & 2`) |
+| `0x06` | `Withdraw` | Unshield exact amount to any wallet/ATA with optional native `relayer_fee`, shielded change (`flags & 2`), and atomic WSOL → Native SOL unwrap (`flags & 4` via `audren_unwrap` PDA); full withdrawals keep `PoolState` read-only and bypass `SetPaused` |
 | `0x07` | `SetPaused` | Emergency pause toggle by pool authority (zero vault custody) |
 | `0x08` | `WriteProofBuffer` | Upload `<= 768 B` payload chunk into ephemeral `ProofBuffer` PDA (`<= 10,032 B`) |
 | `0x09` | `ExecBuffered` | Execute buffered instruction zero-copy and atomically refund 100% of buffer rent |
@@ -122,6 +122,7 @@ CONTRIBUTING.md       Contributor workflow and zero-drift verification checklist
 # Rust typechecks & canonical conformance tests
 cargo check --manifest-path program/Cargo.toml
 cargo check --manifest-path program/Cargo.toml --features no-entrypoint
+cargo test --manifest-path program/Cargo.toml
 cargo check --manifest-path tests/mock-router/Cargo.toml
 cargo check --workspace --tests
 cargo test -p audren-client --test conformance_vectors

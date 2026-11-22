@@ -2151,7 +2151,7 @@ export const AUDREN_CODAMA_IDL = {
               "kind": "bytesTypeNode"
             },
             "docs": [
-              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(160) + rangeU64(672) if bit0] || [refundDesc(129) if bit1] || triptychProof || targetInstructionData(targetDataLen)."
+              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(128) + rangeU64(672) if bit0] || [refundDesc(129) if bit1] || triptychProof || targetInstructionData(targetDataLen)."
             ]
           }
         ]
@@ -2256,7 +2256,7 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "PageRentVault or LaneRentVault PDA."
+              "PageRentVault (Lane 0, read-only allowed when hasChange=false) or LaneRentVault (Lanes 1..15 when hasChange=true)."
             ]
           },
           {
@@ -2336,7 +2336,7 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": false,
             "isOptional": true,
             "docs": [
-              "SPL/Token-2022 / unwrapWsol: Classic SPL Token or Token-2022 program."
+              "SPL/Token-2022: Classic SPL Token or Token-2022 program; unwrapWsol: strictly Classic SPL Token program."
             ]
           },
           {
@@ -2346,7 +2346,7 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": false,
             "isOptional": true,
             "docs": [
-              "unwrapWsol only: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] created and closed atomically."
+              "SPL/Token-2022: inputPage0 (ro); unwrapWsol: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] (wr) created and closed atomically."
             ],
             "defaultValue": {
               "kind": "pdaValueNode",
@@ -2425,7 +2425,7 @@ export const AUDREN_CODAMA_IDL = {
               "kind": "bytesTypeNode"
             },
             "docs": [
-              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(160) + rangeU64(672) if hasChange] || triptychProof."
+              "Concatenation: [changeNote(193) + cChg(32) + crossBase1(128) + rangeU64(672) if hasChange] || triptychProof."
             ]
           }
         ]
@@ -3863,7 +3863,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "zeroAmount",
         "code": 10,
-        "message": "Deposit, swap, or withdrawal amount must be strictly greater than zero.",
+        "message": "Deposit, execution, or withdrawal amount must be strictly greater than zero.",
         "docs": [
           "AudrenError::ZeroAmount (Custom error 10)."
         ]
@@ -4846,7 +4846,7 @@ export const AUDREN_ANCHOR_IDL = {
           "writable": true,
           "signer": false,
           "docs": [
-            "PageRentVault or LaneRentVault PDA."
+            "PageRentVault (Lane 0, read-only allowed when hasChange=false) or LaneRentVault (Lanes 1..15 when hasChange=true)."
           ]
         },
         {
@@ -4912,7 +4912,7 @@ export const AUDREN_ANCHOR_IDL = {
           "signer": false,
           "optional": true,
           "docs": [
-            "SPL/Token-2022 / unwrapWsol: Classic SPL Token or Token-2022 program."
+            "SPL/Token-2022: Classic SPL Token or Token-2022 program; unwrapWsol: strictly Classic SPL Token program."
           ]
         },
         {
@@ -4921,7 +4921,7 @@ export const AUDREN_ANCHOR_IDL = {
           "signer": false,
           "optional": true,
           "docs": [
-            "unwrapWsol only: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] created and closed atomically."
+            "SPL/Token-2022: inputPage0 (ro); unwrapWsol: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] (wr) created and closed atomically."
           ]
         }
       ],
@@ -5971,7 +5971,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 10,
       "name": "ZeroAmount",
-      "msg": "Deposit, swap, or withdrawal amount must be strictly greater than zero."
+      "msg": "Deposit, execution, or withdrawal amount must be strictly greater than zero."
     },
     {
       "code": 11,

@@ -131,11 +131,11 @@ export function loadPolicyConfig(env: Env): RelayPolicyConfig {
       devnet: parseSolToLamports(env.MAX_DAILY_SPONSORED_SOL_DEVNET, 1.0),
     },
     sponsoredPerIpPerHour: {
-      mainnet: Math.trunc(parseNum(env.SPONSORED_PER_IP_PER_HOUR_MAINNET, 8, 1, 500)),
+      mainnet: Math.trunc(parseNum(env.SPONSORED_PER_IP_PER_HOUR_MAINNET, 12, 1, 500)),
       devnet: 40,
     },
     sponsoredPerIpPerDay: {
-      mainnet: Math.trunc(parseNum(env.SPONSORED_PER_IP_PER_DAY_MAINNET, 20, 1, 2000)),
+      mainnet: Math.trunc(parseNum(env.SPONSORED_PER_IP_PER_DAY_MAINNET, 25, 1, 2000)),
       devnet: 150,
     },
     sponsoredCooldownSec: {

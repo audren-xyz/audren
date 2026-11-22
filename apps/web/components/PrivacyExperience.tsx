@@ -47,7 +47,7 @@ export function PrivacyExperience() {
               className={styles.stageSvg}
               viewBox="0 0 920 208"
               role="img"
-              aria-label="Three privacy boundaries: Your Device holds spend keys, view keys, local note decryption, and proof generation; RPC, Web Host & Optional Relay sees IP/connection metadata, RPC lookups, swap quotes, and anti-abuse hashes without spend keys; Solana Public Ledger records deposits, withdrawals, DEX legs, fee payers, and blinded transfer commitments"
+              aria-label="Three privacy boundaries: Your Device holds spend keys, view keys, session keypairs, local note decryption, and proof generation; RPC, Web Host & Optional Relay sees IP/connection metadata, RPC lookups, quotes, and anti-abuse hashes without spend keys; Solana Public Ledger records deposits, withdrawals, ExecViaEscrow DeFi CPI legs, session wallet activity, fee payers, and blinded transfer commitments"
             >
               {/* Connecting dashed tracks + animated data pulses */}
               <line x1="286" y1="102" x2="322" y2="102" stroke="#d5d0c3" strokeWidth="1.5" />
@@ -106,7 +106,7 @@ export function PrivacyExperience() {
               </text>
               <text x="656" y="88" fill="#3b3f36" fontSize="11">— Transfer: blinded mint, amount &amp; key</text>
               <text x="656" y="109" fill="#3b3f36" fontSize="11">— Deposit / Withdraw: public amounts</text>
-              <text x="656" y="130" fill="#3b3f36" fontSize="11">— DEX swap: public pair &amp; amounts</text>
+              <text x="656" y="130" fill="#3b3f36" fontSize="11">— DeFi CPI &amp; Bᵢ: public protocol legs</text>
               <text x="656" y="151" fill="#3b3f36" fontSize="11">— Candidate pages, fee payer &amp; timing</text>
               <text x="656" y="174" fill="#6e4928" fontSize="9.8">Permanent public blockchain record</text>
             </svg>

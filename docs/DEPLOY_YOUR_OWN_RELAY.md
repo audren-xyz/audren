@@ -92,14 +92,19 @@ Edit the non-secret `vars` in `apps/relay/wrangler.jsonc` (or copy it to gitigno
 | `DEFAULT_AGGREGATOR` | `jupiter` | Default DEX aggregator (`jupiter`, `bedrock`, `dflow`, `titan`, `okx`) |
 | `ENABLED_AGGREGATORS` | `jupiter,bedrock,dflow,titan,okx` | Aggregators exposed by `/v1/aggregators` & `auto` race |
 | `BASE_SWAP_FEE_BPS` | `25` | Minimum swap fee (0.25%) collected to the relayer's output-mint ATA |
+| `MICRO_SWAP_FEE_BPS` | `150` | Fee bps applied to subsidized micro-swaps when `ALLOW_MICRO_SWAP_SUBSIDY=true` |
 | `MAX_SELF_PAY_BPS` | `450` | Maximum dynamic bps cap for self-paying small swaps |
 | `SELF_PAY_MARGIN_BPS` | `11000` | Rent + gas reimbursement multiplier (`11000` = 1.10× live cost) |
 | `ALLOW_MICRO_SWAP_SUBSIDY` | `true` | If `false`, rejects swaps too small to self-pay (`402 FEE_REQUIRED`) |
-| `MAX_DAILY_SPONSORED_SOL_MAINNET` | `0.05` | Global daily cap (SOL) for sponsored Transfers / Merges / Withdrawals |
+| `ALLOWED_PRE_IX_PROGRAMS` | `""` | Comma-separated allowlist of zero-signer pre-instruction programs permitted before Tag 5 (e.g., Kamino Reserve refresh) |
+| `MAX_DAILY_SPONSORED_SOL_MAINNET` | `0.05` | Global daily cap (SOL) for sponsored Transfers / Merges / Withdrawals on Mainnet |
+| `MAX_DAILY_SPONSORED_SOL_DEVNET` | `1.5` | Global daily cap (SOL) for sponsored Devnet traffic |
 | `SPONSORED_PER_IP_PER_HOUR_MAINNET` | `12` | Per-IP hourly sponsored cap |
 | `SPONSORED_PER_IP_PER_DAY_MAINNET` | `25` | Per-IP daily sponsored cap |
 | `SPONSORED_COOLDOWN_SEC_MAINNET` | `12` | Minimum cooldown between sponsored requests from the same IP |
+| `SELF_PAY_PER_IP_PER_10M` | `30` | Per-IP 10-minute anti-abuse ceiling for self-paying transactions |
 | `REFILL_MIN_SOL` | `0.08` | Cron (`*/15 * * * *`) auto-unwraps WSOL / swaps fee tokens back to SOL below this threshold |
+| `REFILL_MIN_TOKEN_USD` | `5` | Minimum USD balance per fee-token ATA before the refill cron swaps it into SOL |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed browser origins (lock down to your UI origin if private) |
 
 ---

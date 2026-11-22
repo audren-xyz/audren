@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -41,11 +44,11 @@ jobs:
             . -> target
             program -> program/target
             tests/mock-router -> tests/mock-router/target
-      - name: Check isolated sBPFv3 program manifest
+      - name: Check & unit-test isolated sBPFv3 program manifest
         run: |
           cargo check --manifest-path program/Cargo.toml
           cargo check --manifest-path program/Cargo.toml --features no-entrypoint
-          cargo check --manifest-path program/Cargo.toml --tests
+          cargo test --manifest-path program/Cargo.toml
       - name: Check isolated mock-router manifest
         run: cargo check --manifest-path tests/mock-router/Cargo.toml
       - name: Check host workspace & tests

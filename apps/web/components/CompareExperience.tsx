@@ -262,7 +262,7 @@ export function CompareExperience() {
             </div>
             <p>
               Privacy boundaries change between internal transfers, public deposits or withdrawals,
-              and external DEX swaps. Switch views below to compare every field directly.
+              and external DeFi CPIs or session wallets. Switch views below to compare every field directly.
             </p>
           </div>
 
@@ -494,8 +494,8 @@ export function CompareExperience() {
                 <span className={styles.cellIndex}>SURFACE</span>
                 <h3>Unified workflow</h3>
                 <p className={styles.cellLead}>
-                  Deposit, transfer, merge notes, swap through a compatible router, withdraw to any
-                  public address, or disclose a single receipt.
+                  Deposit, transfer, merge notes, execute compatible DeFi CPIs, withdraw or fund
+                  deterministic session wallets, or disclose a single receipt.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
@@ -530,7 +530,7 @@ export function CompareExperience() {
               <h2>Follow the cryptography step by step.</h2>
               <p>
                 See how one reusable <code>aud1…</code> address derives fresh one-time stealth keys,
-                blinds amounts, and settles through Solana DEX liquidity.
+                blinds amounts, and composes with Solana DeFi protocols and deterministic sessions.
               </p>
             </div>
             <div className={styles.closingActions}>

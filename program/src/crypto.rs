@@ -193,8 +193,9 @@ pub fn hash_to_point(domain: &[u8], data: &[u8]) -> Point {
 
 /// Zero-allocation deterministic Fiat-Shamir Hash-to-Scalar (64 uniform bytes reduced mod `l`).
 ///
-/// Maximum caller slice count across the entire protocol is `44` (`xi_slices` for audited `m = 7`),
+/// Maximum caller slice count across the entire protocol is `45` (`xi_slices` for audited `m = 7`),
 /// so a fixed `[&[u8]; 64]` stack array completely eliminates heap allocations.
+#[inline(never)]
 pub fn hash_to_scalar(slices: &[&[u8]]) -> Scalar {
     debug_assert!(slices.len() < 64);
     let mut buf: [&[u8]; 64] = [&[]; 64];

@@ -245,7 +245,7 @@ export function computeSwapFeePlan(params: {
 }
 
 /**
- * Compute an exact v0.3.0 native protocol fee quote (`GET /v1/fee-quote`) for either:
+ * Compute an exact native protocol fee quote (`GET /v1/fee-quote`) for either:
  *   - `withdraw` (Native SOL, atomic `unwrap_wsol`, or SPL/Token-2022)
  *   - `exec_escrow` (any DEX swap, Kamino supply, yield vault, LST mint, RWA vault, etc.)
  *
@@ -263,6 +263,8 @@ export function computeNativeFeeQuote(params: {
   feeDecimals: number
   amount: bigint
   hasChange: boolean
+  missingAtaCount?: number
+  hasUnsafeSelfPayExt?: boolean
   feeRecipient: string | null
   feeRecipientExists: boolean
   solPriceUsd: number | null
@@ -279,6 +281,8 @@ export function computeNativeFeeQuote(params: {
     feeDecimals,
     amount,
     hasChange,
+    missingAtaCount = 0,
+    hasUnsafeSelfPayExt = false,
     feeRecipient,
     feeRecipientExists,
     solPriceUsd,
@@ -287,15 +291,16 @@ export function computeNativeFeeQuote(params: {
 
   const pageRent = hasChange || op === 'exec_escrow' ? rentSchedule.pageRentPerNoteLamports : 0n
   const extraPageNote = op === 'exec_escrow' && hasChange ? rentSchedule.pageRentPerNoteLamports : 0n
+  const extraAtas = BigInt(Math.max(0, Math.min(6, Math.trunc(missingAtaCount)))) * rentSchedule.ataRentLamports
   const txBaseLamports =
-    rentSchedule.nullifierRentLamports + pageRent + extraPageNote + 20_000n
+    rentSchedule.nullifierRentLamports + pageRent + extraPageNote + extraAtas + 20_000n
   const withAtaLamports = txBaseLamports + rentSchedule.ataRentLamports
   const marginMult = cfg.selfPayMarginBps / 10_000
 
   const costUsd = (lamports: bigint) =>
     solPriceUsd && solPriceUsd > 0 ? (Number(lamports) / 1e9) * solPriceUsd : null
 
-  if (!feeRecipient || amount <= 0n) {
+  if (!feeRecipient || amount <= 0n || hasUnsafeSelfPayExt) {
     return {
       ok: true,
       cluster,
@@ -303,14 +308,16 @@ export function computeNativeFeeQuote(params: {
       billingMode: 'sponsored',
       feeMint,
       feeTokenProgram,
-      feeRecipient: null,
-      feeRecipientExists: false,
+      feeRecipient: hasUnsafeSelfPayExt ? feeRecipient : null,
+      feeRecipientExists: hasUnsafeSelfPayExt ? feeRecipientExists : false,
       needsFeeAtaSetup: false,
       relayerFee: '0',
       feeBps: 0,
       estimatedRelayCostLamports: txBaseLamports.toString(),
       estimatedRelayCostUsd: costUsd(txBaseLamports),
-      reason: 'Relayer fee recipient unavailable; sponsored under rate limits.',
+      reason: hasUnsafeSelfPayExt
+        ? 'Token-2022 mint carries extensions excluded from self-pay fee credit; sponsored under rate limits.'
+        : 'Relayer fee recipient unavailable; sponsored under rate limits.',
     }
   }
 

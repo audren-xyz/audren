@@ -6,6 +6,6 @@ contact_links:
   - name: Protocol Documentation & Live App
     url: https://audren.xyz
     about: Architecture, privacy model, deployment register, and interactive Devnet/Mainnet app.
-  - name: Runnable SDK & Rust Examples
+  - name: Runnable 4-Language SDK Examples
     url: https://github.com/audren-xyz/examples
-    about: Standalone Rust and TypeScript integrations for Solana Mainnet and Devnet.
+    about: Standalone Rust, TypeScript, Swift, and Kotlin integrations for Solana Mainnet and Devnet.

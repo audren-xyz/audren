@@ -132,7 +132,7 @@ def main() -> None:
             )
             assert acc["size"] == expected_sizes[name]
 
-    # 5. Verify all 10 PDA constant seeds match crates/audren-core/src/lib.rs
+    # 5. Verify all 11 PDA constant seeds match crates/audren-core/src/lib.rs
     pda_names = {p["name"] for p in prog["pdas"]}
     pda_prefixes = {p["seeds"][0]["value"]["data"] for p in prog["pdas"]}
     core_seeds = set(core["seeds"].values())
@@ -226,10 +226,14 @@ def main() -> None:
     assert "@sha256:" in sh_img, f"upgrade-program.sh VERIFY_BASE_IMAGE must be digest-pinned: {sh_img}"
 
     rust_channel = gen.read_toml_value(ROOT / "rust-toolchain.toml", "toolchain", "channel")
+    host_ver = re.search(r'^HOST_VERSION\s*=\s*"([^"]+)"', build_sbf, re.M).group(1)
+    assert host_ver == rust_channel, (
+        f"scripts/build-sbf.py HOST_VERSION ({host_ver}) != rust-toolchain.toml ({rust_channel})"
+    )
     ci_yml = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    ci_rust_m = re.search(r"toolchain:\s*'([^']+)'", ci_yml)
-    assert ci_rust_m and ci_rust_m.group(1) == rust_channel, (
-        f".github/workflows/ci.yml Rust toolchain ({ci_rust_m.group(1) if ci_rust_m else None}) != rust-toolchain.toml ({rust_channel})"
+    ci_rust_all = re.findall(r"toolchain:\s*'([^']+)'", ci_yml)
+    assert ci_rust_all and all(t == rust_channel for t in ci_rust_all), (
+        f".github/workflows/ci.yml Rust toolchains ({ci_rust_all}) != rust-toolchain.toml ({rust_channel})"
     )
 
     # 11. Verify cross-layer JUPITER_CPI_EXCLUDED_DEXES parity across Rust, SDK, Relayer, and Web Worker
@@ -267,6 +271,56 @@ def main() -> None:
     assert f"AUDREN_PROGRAM_ID_STR = '{CANONICAL_PROGRAM_ID}'" in relay_audren, "Relay AUDREN_PROGRAM_ID_STR mismatch"
     for relay_seed in ("audren_pool", "audren_page", "audren_rent", "audren_lane", "audren_lrent", "audren_vault", "audren_escrow", "audren_unwrap"):
         assert f"'{relay_seed}'" in relay_audren, f"Relay audren.ts missing PDA seed '{relay_seed}'"
+
+    # Verify exact instruction flag bitmasks & proof wire lengths across Rust core, TS SDK, and Relayer
+    core_ix_src = (ROOT / "crates" / "audren-core" / "src" / "instruction.rs").read_text()
+
+    def eval_int_expr(expr: str) -> int:
+        expr = expr.strip().replace("_", "")
+        if "<<" in expr:
+            lhs, rhs = expr.split("<<", 1)
+            return int(lhs.strip(), 0) << int(rhs.strip(), 0)
+        return int(expr, 0)
+
+    def parse_const_val(src: str, sym: str, lang: str) -> int:
+        pat = (
+            rf"pub const {sym}:\s*(?:u8|usize)\s*=\s*([^;]+);"
+            if lang == "rust"
+            else rf"export const {sym}\s*=\s*([^;\n]+)"
+        )
+        m = re.search(pat, src)
+        assert m, f"Missing constant {sym} ({lang})"
+        return eval_int_expr(m.group(1))
+
+    flag_syms = (
+        "DEPOSIT_FLAG_NATIVE_SOL",
+        "DEPOSIT_FLAG_FEE_FROM_AMOUNT",
+        "EXEC_FLAG_HAS_CHANGE",
+        "EXEC_FLAG_ALLOW_PARTIAL_REFUND",
+        "EXEC_FLAG_FEE_ON_OUTPUT",
+        "WITHDRAW_FLAG_NATIVE_SOL",
+        "WITHDRAW_FLAG_HAS_CHANGE",
+        "WITHDRAW_FLAG_UNWRAP_WSOL",
+    )
+    for sym in flag_syms:
+        rv = parse_const_val(core_ix_src, sym, "rust")
+        sv = parse_const_val(sdk_consts, sym, "ts")
+        relv = parse_const_val(relay_audren, sym, "ts")
+        assert rv == sv == relv, f"Flag {sym} drifted: rust={rv}, sdk={sv}, relay={relv}"
+
+    for wire_sym in (
+        "CROSS_BASE_1_LEN",
+        "CROSS_BASE_2_LEN",
+        "AUDITOR_ASSET_PROOF_LEN",
+        "RANGE_U64_PROOF_LEN",
+        "RANGE_U128_PROOF_LEN",
+    ):
+        rv = parse_const_val(core_ix_src, wire_sym, "rust")
+        sv = parse_const_val(sdk_consts, wire_sym, "ts")
+        assert rv == sv, f"Wire constant {wire_sym} drifted: rust={rv}, sdk={sv}"
+
+    for idl_file in (ROOT / "idl" / "audren.codama.json", ROOT / "idl" / "audren.anchor.json"):
+        assert "crossBase1(160)" not in idl_file.read_text(), f"Stale crossBase1(160) doc found in {idl_file}"
 
     # 13. Verify apps/web/lib/protocol.ts & docs/DEPLOYMENTS.md parity
     web_proto = (ROOT / "apps" / "web" / "lib" / "protocol.ts").read_text()
@@ -350,10 +404,13 @@ def main() -> None:
             f"Public {rel_wrangler} must not contain private RPC URLs"
         )
 
-    # 16. License, community health files, brand assets & README release parity
+    # 15. License, community health files, brand assets & README release parity
     license_txt = (ROOT / "LICENSE").read_text(encoding="utf-8")
     assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in license_txt, (
         "LICENSE must contain the full canonical Apache-2.0 text so GitHub detects SPDX Apache-2.0"
+    )
+    assert (ROOT / "packages" / "sdk" / "LICENSE").read_text(encoding="utf-8") == license_txt, (
+        "packages/sdk/LICENSE drifted from root Apache-2.0 LICENSE"
     )
     for req_file in (
         "SECURITY.md",
@@ -387,7 +444,7 @@ def main() -> None:
             f".github/workflows/ci.yml uses deprecated Node 20 action: {deprecated_action}"
         )
 
-    # 17. Cross-language SDK unity (Rust, TypeScript, Swift, Kotlin), canonical test vectors & zero duplicated prover
+    # 16. Cross-language SDK unity (Rust, TypeScript, Swift, Kotlin), canonical test vectors & zero duplicated prover
     vectors_path = ROOT / "spec" / "test-vectors.json"
     assert vectors_path.is_file(), "Missing canonical cross-language test vectors at spec/test-vectors.json"
     vectors = json.loads(vectors_path.read_text(encoding="utf-8"))
@@ -420,7 +477,7 @@ def main() -> None:
         assert "@audren/sdk/prover" in shim_txt, f"{shim_rel} must re-export from @audren/sdk/prover"
         assert len(shim_txt) < 1500, f"{shim_rel} looks duplicated ({len(shim_txt)} B); keep prover solely in packages/sdk"
 
-    # 18. Cross-SDK DEFAULT_RELAY_URL, UniFFI -> Swift/Kotlin binding parity & zero dead doc APIs
+    # 17. Cross-SDK DEFAULT_RELAY_URL, UniFFI -> Swift/Kotlin binding parity & zero dead doc APIs
     rust_relay_m = re.search(r'pub const DEFAULT_RELAY_URL:\s*&str\s*=\s*"([^"]+)"', rust_router)
     assert rust_relay_m, "Missing DEFAULT_RELAY_URL in crates/client/src/router.rs"
     ts_relayer = (ROOT / "packages" / "sdk" / "src" / "relayer.ts").read_text(encoding="utf-8")
@@ -432,7 +489,7 @@ def main() -> None:
 
     ffi_src = (ROOT / "crates" / "audren-ffi" / "src" / "lib.rs").read_text(encoding="utf-8")
     ffi_exports = re.findall(r"#\[uniffi::export\]\s*pub fn (\w+)\s*\(", ffi_src)
-    assert len(ffi_exports) >= 35, f"Expected >= 35 UniFFI exports, found {len(ffi_exports)}"
+    assert len(ffi_exports) >= 47, f"Expected >= 47 UniFFI exports, found {len(ffi_exports)}"
     swift_gen = (ROOT / "packages" / "swift" / "Sources" / "AudrenSDK" / "AudrenSDK.swift").read_text(encoding="utf-8")
     kotlin_gen = (ROOT / "packages" / "kotlin" / "src" / "main" / "kotlin" / "xyz" / "audren" / "sdk" / "audren_ffi.kt").read_text(encoding="utf-8")
     for fn_snake in ffi_exports:

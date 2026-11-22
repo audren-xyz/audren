@@ -22,7 +22,7 @@ export function SiteFooter({ current }: { current?: NavSection }) {
             <span className="brand-name">Audren</span>
           </Link>
           <p className="footer-tagline">
-            Private transfers, compatible DEX swaps, and selective receipts on Solana.
+            Private transfers, protocol-agnostic shielded DeFi, and selective receipts on Solana.
             Self-custodial, Apache-2.0 open source, pre-audit.
           </p>
           <a

@@ -82,7 +82,7 @@ interface JupQuoteRaw extends Record<string, unknown> {
   routePlan?: JupRoutePlanItem[]
 }
 
-// Venues whose on-chain programs reject or penalize wrapped PDA-CPI callers (`SwapViaRouter`):
+// Venues whose on-chain programs reject or penalize wrapped PDA-CPI callers (`ExecViaEscrow`):
 // - Kipseli: inspects Sysvar1nstructions and throws Custom(6022) InvalidRealUser unless user signed top-level
 // - Quantum / BisonFi: allowlist top-level callers and reject wrapping programs (Custom(9) / Custom(53))
 // - BinaryFi / Obsidian: levy unlisted top-level caller penalty fees that diverge from top-level quotes

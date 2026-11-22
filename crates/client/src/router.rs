@@ -155,6 +155,70 @@ pub fn prepare_escrow_accounts(
     })
 }
 
+/// Query parameters for `GET /v1/fee-quote` on `audren-relay`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayerFeeQuoteRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
+    /// `"withdraw"` or `"exec_escrow"`.
+    pub op: String,
+    /// `"native"`, System Program ID, or base58 SPL / Token-2022 mint.
+    pub mint: String,
+    /// Base-unit decimal amount string.
+    pub amount: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unwrap_wsol: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_change: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_ata_count: Option<u8>,
+}
+
+impl RelayerFeeQuoteRequest {
+    /// Format query string for `GET /v1/fee-quote?...`.
+    pub fn to_query_string(&self) -> String {
+        let mut parts = vec![
+            format!("op={}", self.op),
+            format!("mint={}", self.mint),
+            format!("amount={}", self.amount),
+        ];
+        if let Some(c) = &self.cluster {
+            parts.push(format!("cluster={c}"));
+        }
+        if let Some(u) = self.unwrap_wsol {
+            parts.push(format!("unwrapWsol={u}"));
+        }
+        if let Some(h) = self.has_change {
+            parts.push(format!("hasChange={h}"));
+        }
+        if let Some(m) = self.missing_ata_count {
+            parts.push(format!("missingAtaCount={m}"));
+        }
+        parts.join("&")
+    }
+}
+
+/// Response from `GET /v1/fee-quote` matching `NativeFeeQuote` in `audren-relay`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayerFeeQuoteResponse {
+    pub ok: bool,
+    pub cluster: String,
+    pub op: String,
+    pub billing_mode: String,
+    pub fee_mint: String,
+    pub fee_token_program: Option<String>,
+    pub fee_recipient: Option<String>,
+    pub fee_recipient_exists: bool,
+    pub needs_fee_ata_setup: bool,
+    pub relayer_fee: String,
+    pub fee_bps: u32,
+    pub estimated_relay_cost_lamports: String,
+    pub estimated_relay_cost_usd: Option<f64>,
+    pub reason: String,
+}
+
 /// Setup ATA specification passed to `/v1/relay/submit` so the relayer can prepend
 /// idempotent ATA creation when vault, escrow, fee, or recipient ATAs do not exist yet.
 #[derive(Clone, Debug, Serialize, Deserialize)]

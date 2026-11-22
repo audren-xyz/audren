@@ -1,4 +1,5 @@
 import {
+  CLASSIC_TOKEN_PROGRAM_ID_STR,
   SYSTEM_PROGRAM_ID,
   WSOL_MINT_STR,
   base58Decode,
@@ -13,7 +14,7 @@ import {
 import type { AudrenOpKind, SolanaAccountMeta, SolanaInstruction } from '../types'
 
 // ============================================================================
-// Audren v0.3.0 Protocol Constants & PDAs
+// Audren Protocol Constants & PDAs
 // Verified byte-for-byte against `program/src/lib.rs` and `crates/audren-core/`
 // ============================================================================
 
@@ -104,6 +105,10 @@ export function deriveLaneRentVaultPda(poolId: number, laneId: number) {
 
 export function deriveVaultAuthPda(poolId = 0) {
   return findProgramAddressSync([utf8('audren_vault'), u32le(poolId)], AUDREN_PROGRAM_ID)
+}
+
+export function deriveSolVaultPda(poolId = 0) {
+  return findProgramAddressSync([utf8('audren_sol'), u32le(poolId)], AUDREN_PROGRAM_ID)
 }
 
 export function deriveEscrowPda(poolId: number, shardId: number) {
@@ -248,7 +253,7 @@ export interface ParsedExecEscrowMeta {
 }
 
 /**
- * Parse v0.3.0 Tag 5 (`ExecViaEscrow`) wire header and fixed account header.
+ * Parse Tag 5 (`ExecViaEscrow`) wire header and fixed account header.
  * Wire:
  *   [0] tag(5), [1] m, [2] shard_id, [3] flags,
  *   [4..12] amount_in, [12..20] min_amount_out, [20..28] relayer_fee, ...
@@ -313,15 +318,15 @@ export interface ParsedWithdrawMeta {
 }
 
 /**
- * Parse v0.3.0 Tag 6 (`Withdraw`) wire header and fixed account layout.
+ * Parse Tag 6 (`Withdraw`) wire header and fixed account layout.
  * Wire:
  *   [0] tag(6), [1] m, [2] flags, [3..11] amount, [11..19] relayer_fee, ...
  * Accounts:
  *   [0..6] payer, pool, out_page, nullifier, rent_vault, zk_prog, sys_prog
  *   [7] fee_recipient
  *   Native SOL (bit0=1):        [8] sol_vault, [9] recipient, [10..] input_pages
- *   SPL (bit0=0, bit2=0):       [8] mint, [9] vault_auth, [10] vault_ata, [11] recipient_ata, [12] token_prog, [13..] input_pages
- *   Unwrap WSOL (bit0=0,bit2=1):[8] wsol_mint, [9] vault_auth, [10] vault_wsol_ata, [11] recipient_wallet, [12] token_prog, [13] unwrap_pda, [14..] input_pages
+ *   SPL (bit0=0, bit2=0):       [8] vault_auth, [9] mint, [10] vault_ata, [11] recipient_ata, [12] token_prog, [13..] input_pages
+ *   Unwrap WSOL (bit0=0,bit2=1):[8] vault_auth, [9] wsol_mint, [10] vault_wsol_ata, [11] recipient_wallet, [12] classic_token_prog, [13] unwrap_pda, [14..] input_pages
  */
 export function parseWithdrawMeta(
   ixData: Uint8Array,
@@ -354,10 +359,13 @@ export function parseWithdrawMeta(
       recipientAccount: base58Encode(accounts[9]!.pubkey),
     }
   }
+  const expectedVaultAuth = deriveVaultAuthPda(0).address
   if (unwrapWsol) {
     if (accounts.length < 15) return null
-    const mint = base58Encode(accounts[8]!.pubkey)
-    if (mint !== WSOL_MINT_STR) return null
+    if (!bytesEqual(accounts[8]!.pubkey, expectedVaultAuth)) return null
+    const mint = base58Encode(accounts[9]!.pubkey)
+    const tokenProgram = base58Encode(accounts[12]!.pubkey)
+    if (mint !== WSOL_MINT_STR || tokenProgram !== CLASSIC_TOKEN_PROGRAM_ID_STR) return null
     return {
       flags,
       isNativeSol: false,
@@ -367,11 +375,12 @@ export function parseWithdrawMeta(
       relayerFee,
       feeRecipient,
       mint,
-      tokenProgram: base58Encode(accounts[12]!.pubkey),
+      tokenProgram,
       recipientAccount: base58Encode(accounts[11]!.pubkey),
     }
   }
   if (accounts.length < 14) return null
+  if (!bytesEqual(accounts[8]!.pubkey, expectedVaultAuth)) return null
   return {
     flags,
     isNativeSol: false,
@@ -380,7 +389,7 @@ export function parseWithdrawMeta(
     amount,
     relayerFee,
     feeRecipient,
-    mint: base58Encode(accounts[8]!.pubkey),
+    mint: base58Encode(accounts[9]!.pubkey),
     tokenProgram: base58Encode(accounts[12]!.pubkey),
     recipientAccount: base58Encode(accounts[11]!.pubkey),
   }

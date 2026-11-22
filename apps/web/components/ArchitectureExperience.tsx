@@ -14,8 +14,8 @@ const INSTRUCTIONS = [
   { tag: '0x02', name: 'Deposit', summary: 'Shield Native SOL, Classic SPL, or transferable Token-2022 directly to any Audren stealth address (commits exact net_received delta; DEPOSIT_FLAG_FEE_FROM_AMOUNT deducts rent contribution from deposit for 0-dust session sweeps; zero ZK proof required; PoolState stays read-only on parallel lanes 1..15).' },
   { tag: '0x03', name: 'Transfer', summary: 'Private multi-asset 1-in → 2-out transfer: Triptych (m=5/6/7 with strong Fiat-Shamir ring_root + prefix_counts), CrossBase2 (256 B, unlinkable asset tags), native Solana Bulletproof U128, optional AuditorAssetProof. Fits directly in a single Solana v1 transaction (4,096 B).' },
   { tag: '0x04', name: 'Merge', summary: 'Consolidate two same-asset shielded notes via 2 Triptych proofs (combined cap 128 ring slots) + CrossBase1 (128 B) + native Solana Bulletproof U64.' },
-  { tag: '0x05', name: 'ExecViaEscrow', summary: 'Protocol-agnostic 1-tx shielded DeFi CPI (DEX swaps, lending supply, yield vaults, LSTs, perp LP, RWAs) through 16 sharded swap_escrow PDAs into any compatible Token A → Token B Solana program, with native relayer_fee (input or output mint), optional shielded change (flags & 1), and partial-fill refund (flags & 2) in one Solana v1 transaction (4,096 B).' },
-  { tag: '0x06', name: 'Withdraw', summary: 'Unshield exact amount to any wallet/ATA or deterministic DeFi Session keypair with optional native relayer_fee, atomic WSOL → Native SOL unwrap via ephemeral audren_unwrap PDA (flags & 2), and optional shielded change. Full withdrawals (has_change = false, including unwrap_wsol) keep PoolState read-only and bypass pool pause.' },
+  { tag: '0x05', name: 'ExecViaEscrow', summary: 'Protocol-agnostic 1-tx shielded DeFi CPI (DEX swaps, lending supply, yield vaults, LSTs, perp LP, RWAs) through 16 sharded swap_escrow PDAs into any compatible Token A → Token B Solana program, with native relayer_fee (input or output mint, flags & 4), optional shielded change (flags & 1), and partial-fill refund (flags & 2) in one Solana v1 transaction (4,096 B).' },
+  { tag: '0x06', name: 'Withdraw', summary: 'Unshield exact amount to any wallet/ATA or deterministic DeFi Session keypair with optional native relayer_fee, atomic WSOL → Native SOL unwrap via ephemeral audren_unwrap PDA (flags & 4), and optional shielded change (flags & 2). Full withdrawals (has_change = false, including unwrap_wsol) keep PoolState read-only and bypass pool pause.' },
   { tag: '0x07', name: 'SetPaused', summary: 'Emergency authority circuit breaker for deposits, transfers, merges, ExecViaEscrow, and partial withdrawals — never blocks full 100% withdrawals (including unwrap_wsol) and never grants vault custody.' },
   { tag: '0x08', name: 'WriteProofBuffer', summary: 'Optional chunked upload into an ephemeral ProofBuffer PDA tracked via u16 bitmask for standard wallet v0 (1,232 B) signing or oversized multi-hop DeFi CPIs.' },
   { tag: '0x09', name: 'ExecBuffered', summary: 'Zero-copy execute Transfer, Merge, ExecViaEscrow, or Withdraw from a completed ProofBuffer and atomically refund 100% of buffer rent to payer.' },
@@ -312,7 +312,7 @@ export function ArchitectureExperience() {
                 <span className={styles.cellIndex}>CUSTODY &amp; UPGRADES</span>
                 <h3>Pause escape hatch &amp; pre-audit status</h3>
                 <ul className={styles.dashList}>
-                  <li><strong>Non-custodial pause bypass:</strong> <code>SetPaused</code> halts deposits, transfers, merges, swaps, and partial withdrawals, while full 100% withdrawals (<code>has_change = false</code>) keep <code>PoolState</code> read-only and bypass the pause check.</li>
+                  <li><strong>Non-custodial pause bypass:</strong> <code>SetPaused</code> halts deposits, transfers, merges, DeFi CPIs, and partial withdrawals, while full 100% withdrawals (<code>has_change = false</code>, including <code>unwrap_wsol</code>) keep <code>PoolState</code> read-only and bypass the pause check.</li>
                   <li><strong>Mutable upgrade authority:</strong> Program <code>{AUDREN.programId.slice(0, 10)}…</code> is in active pre-audit release with a mutable BPF upgrade authority. Do not treat the deployment as frozen or immutable.</li>
                   <li><strong>Issuer controls:</strong> Token issuers retain mint-level controls such as freeze authority or transfer-hook policies.</li>
                 </ul>
@@ -332,7 +332,7 @@ export function ArchitectureExperience() {
                 <span className={styles.cellIndex}>RELAY CONTRACT</span>
                 <h3>Optional pluggable privacy relay</h3>
                 <ul className={styles.dashList}>
-                  <li>Clients can submit directly through any Solana RPC without a relayer, or submit pre-proved instructions to <code>{AUDREN.relayUrl}</code> or a self-hosted relay with the same HTTP API (<code>/v1/info</code>, <code>/v1/swap/quote</code>, <code>/v1/swap/instructions</code>, <code>/v1/relay/submit</code>).</li>
+                  <li>Clients can submit directly through any Solana RPC without a relayer, or submit pre-proved instructions to <code>{AUDREN.relayUrl}</code> or a self-hosted relay with the same HTTP API (<code>/v1/info</code>, <code>/v1/fee-quote</code>, <code>/v1/swap/quote</code>, <code>/v1/swap/instructions</code>, <code>/v1/relay/submit</code>).</li>
                   <li>Relayers receive zero spend or view keys and cannot alter proof-bound outputs.</li>
                   <li>Relayers observe request metadata and wrap proven instructions into Solana v1 transactions.</li>
                 </ul>

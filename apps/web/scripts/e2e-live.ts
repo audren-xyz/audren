@@ -601,9 +601,9 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------
-  // STEP 5: MAINNET Private Jupiter Swap (Tag 5: SwapViaRouter — 0.01 WSOL -> USDC)
+  // STEP 5: MAINNET Private Jupiter Swap (Tag 5: ExecViaEscrow — 0.01 WSOL -> USDC)
   // --------------------------------------------------------------------------
-  logStep('STEP 5 — MAINNET Private Jupiter Swap (Tag 5 SwapViaRouter: 0.01 WSOL -> USDC)')
+  logStep('STEP 5 — MAINNET Private Jupiter Swap (Tag 5 ExecViaEscrow: 0.01 WSOL -> USDC)')
   let swappedUsdcAmt = 0n
   {
     const swapIn = state.unspent.find((n) => n.mintB58 === WSOL_MINT_STR && n.amount >= 10_000_000n)
@@ -789,7 +789,6 @@ async function main() {
     const note = state.unspent.find((n) => n.mintB58 === WSOL_MINT_STR && n.amount === amt)
     assert.ok(note, 'Expected 0.005 WSOL note')
 
-    const recipientAta = await deriveAta(signer.pubkey, CLASSIC_TOKEN_PROGRAM_ID, WSOL_MINT)
     const ring = extractRingFromPage(state.pageBytesById.get(note.pageId.toString())!)
     const { instruction } = await buildWithdrawInstruction({
       payer: signer.pubkey,
@@ -799,26 +798,17 @@ async function main() {
       ring,
       inputNote: note,
       secretIndex: note.slotIndex,
-      recipientAccount: recipientAta,
+      recipientAccount: signer.pubkey,
       changeAddr: { spendPk: keys.spendPk, viewPk: keys.viewPk },
       amount: amt,
       splTokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+      unwrapWsol: true,
     })
     const wdSent = await submitDirect('mainnet', signer, {
       innerIx: instruction,
       computeUnitLimit: 550_000,
-      preIxs: [
-        buildCreateAtaIdempotentIx({
-          payer: signer.pubkey,
-          ata: recipientAta,
-          owner: signer.pubkey,
-          mint: WSOL_MINT,
-          tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
-        }),
-      ],
-      postIxs: [await buildCloseWsolAtaInstruction(signer.pubkey)],
     })
-    console.log(`✓ Withdrew & atomically unwrapped 0.005 WSOL -> native SOL: https://solscan.io/tx/${wdSent.signature}`)
+    console.log(`✓ Withdrew & atomically unwrapped 0.005 WSOL -> native SOL via audren_unwrap PDA: https://solscan.io/tx/${wdSent.signature}`)
 
     const balCheck = await apiJson<WalletBalancesResponse>(`/api/wallet/balances?cluster=mainnet&address=${signer.address}`)
     assert.ok(!balCheck.data.tokens.some((t) => t.mint === WSOL_MINT_STR), 'WSOL ATA should be cleanly closed!')

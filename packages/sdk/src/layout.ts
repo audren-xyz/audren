@@ -196,7 +196,7 @@ export function decodePageScanSlice(slice: Uint8Array): PageScanSlice {
         break;
       }
     }
-    if (isZero) break;
+    if (isZero) continue;
     ephemeralPks.push(pk);
   }
   return { viewTags, ephemeralPks };

@@ -46,7 +46,7 @@
         "kind": "instructionNode",
         "name": "executeMockSwap",
         "docs": [
-          "Execute honest swap (mode=0) or adversarial custody attack simulation (mode=1 delegate, mode=2 set_authority, mode=3 lamport drain)."
+          "Execute honest swap (mode=0) or adversarial custody attack simulation (mode=1 delegate, mode=2 set_authority, mode=3 lamport drain, mode=4 new escrow ATA hijack, mode=5 Token-2022 MemoTransfer brick)."
         ],
         "accounts": [
           {
@@ -56,7 +56,7 @@
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "PDA ['mock_pool']."
+              "PDA ['mock_pool'] (writable in modes 4 and 5)."
             ],
             "defaultValue": {
               "kind": "pdaValueNode",
@@ -74,7 +74,7 @@
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Audren swap_escrow input ATA."
+              "Audren escrow input ATA."
             ]
           },
           {
@@ -89,12 +89,12 @@
           },
           {
             "kind": "instructionAccountNode",
-            "name": "swapEscrow",
+            "name": "escrow",
             "isWritable": true,
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Audren swap_escrow PDA signer."
+              "Audren escrow PDA signer."
             ]
           },
           {
@@ -104,7 +104,7 @@
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Audren swap_escrow output ATA."
+              "Audren escrow output ATA."
             ]
           },
           {
@@ -164,7 +164,7 @@
             "isSigner": false,
             "isOptional": true,
             "docs": [
-              "Adversarial target account (modes 1, 2, 3 only)."
+              "Adversarial target account (modes 1, 2, 3, 4) or System Program (mode 5)."
             ]
           },
           {
@@ -174,7 +174,7 @@
             "isSigner": false,
             "isOptional": true,
             "docs": [
-              "System Program (mode 3 only)."
+              "System Program (modes 3, 4)."
             ]
           }
         ],
@@ -188,7 +188,7 @@
               "endian": "le"
             },
             "docs": [
-              "0=honest, 1=approve_delegate, 2=hijack_owner, 3=drain_lamports."
+              "0=honest, 1=approve_delegate, 2=hijack_owner, 3=drain_lamports, 4=new_ata_hijack, 5=memo_transfer_brick."
             ]
           },
           {

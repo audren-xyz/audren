@@ -41,7 +41,7 @@ import {
   WSOL_MINT_STR,
   USDC_MAINNET_MINT_STR,
   buildDepositInstruction,
-  buildSwapViaRouterInstruction,
+  buildExecViaEscrowInstruction,
   buildTransferInstruction,
   buildWithdrawInstruction,
   buildWrapSolInstructions,
@@ -475,7 +475,7 @@ async function main() {
   assert(escrowIdx >= 0 && escrowInIdx >= 0 && escrowOutIdx >= 0, 'Missing escrow indices in Jupiter swapInstruction')
 
   const { outPageId: swapOutPageId, rolloverFromPageId: swapRollover } = await resolveCurrentWritePage()
-  const swapBuilt = await buildSwapViaRouterInstruction({
+  const swapBuilt = await buildExecViaEscrowInstruction({
     payer: relayerPubkey,
     poolId: 0,
     outPageId: swapOutPageId,
@@ -491,9 +491,9 @@ async function main() {
     minAmountOut: BigInt(quoteObj.otherAmountThreshold),
     recipient: { spendPk: audrenKeys.spendPk, viewPk: audrenKeys.viewPk },
     changeAddr: { spendPk: audrenKeys.spendPk, viewPk: audrenKeys.viewPk },
-    routerProgramId: base58Decode(swapIx.programId),
-    routerIxData: fromBase64(swapIx.data),
-    routerAccounts: swapIx.accounts.map((a) => ({
+    targetProgramId: base58Decode(swapIx.programId),
+    targetIxData: fromBase64(swapIx.data),
+    actionAccounts: swapIx.accounts.map((a) => ({
       pubkey: base58Decode(a.pubkey),
       isSigner: a.isSigner,
       isWritable: a.isWritable,

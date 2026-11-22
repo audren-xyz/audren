@@ -747,8 +747,8 @@ export function HowAudrenWorksVisual() {
               <h3>Run these flows yourself on Mainnet or Devnet.</h3>
               <p>
                 Connect Phantom, Solflare, or Backpack to deposit, send to any <code>aud1…</code>{' '}
-                address, and swap through compatible DEX aggregators — or run the free Devnet
-                sandbox without installing a wallet.
+                address, run shielded DeFi CPIs, and fund deterministic session wallets — or run
+                the free Devnet sandbox without installing a wallet.
               </p>
             </div>
             <div className="ink-callout-actions">

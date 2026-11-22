@@ -273,13 +273,19 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
   const cfg = loadPolicyConfig(env)
   const u = new URL(request.url)
   const cluster = parseCluster(u.searchParams.get('cluster'), 'mainnet')
-  const rawOp = (u.searchParams.get('op') ?? 'withdraw').trim().toLowerCase()
+  const rawOp = (u.searchParams.get('op') ?? u.searchParams.get('action') ?? 'withdraw')
+    .trim()
+    .toLowerCase()
   const op: 'withdraw' | 'exec_escrow' =
     rawOp === 'exec_escrow' || rawOp === 'swap' ? 'exec_escrow' : 'withdraw'
   const rawMint = (u.searchParams.get('mint') ?? 'native').trim()
   const rawAmount = (u.searchParams.get('amount') ?? '0').trim()
   const unwrapWsol = u.searchParams.get('unwrapWsol') === 'true'
   const hasChange = u.searchParams.get('hasChange') === 'true'
+  const rawMissingAtas = u.searchParams.get('missingAtaCount') ?? '0'
+  const missingAtaCount = /^\d+$/.test(rawMissingAtas)
+    ? Math.min(6, Math.max(0, Number(rawMissingAtas)))
+    : 0
 
   if (!/^\d+$/.test(rawAmount)) {
     return json(request, cfg.corsOrigins, { error: 'amount must be a non-negative integer string' }, 400)
@@ -314,6 +320,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         feeDecimals: 9,
         amount,
         hasChange,
+        missingAtaCount,
         feeRecipient: relayer?.pubkeyB58 ?? null,
         feeRecipientExists: relayer !== null,
         solPriceUsd: prices[WSOL_MINT_STR] ?? null,
@@ -363,6 +370,8 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       feeDecimals: meta.decimals,
       amount,
       hasChange,
+      missingAtaCount,
+      hasUnsafeSelfPayExt: meta.hasUnsafeSelfPayExt,
       feeRecipient,
       feeRecipientExists,
       solPriceUsd: prices[WSOL_MINT_STR] ?? null,
@@ -912,8 +921,10 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       } else if (requestedLane < MAX_APPEND_LANES) {
         const lanePda = deriveLanePda(0, requestedLane)
         const laneRentVaultPda = deriveLaneRentVaultPda(0, requestedLane)
-        const laneAcc = await fetchAccountBytes(rpcUrl, base58Encode(lanePda.address))
-        const laneState = decodeAppendLaneState(laneAcc.bytes)
+        const laneAcc = await fetchAccountBytes(rpcUrl, base58Encode(lanePda.address)).catch(
+          () => null,
+        )
+        const laneState = laneAcc ? decodeAppendLaneState(laneAcc.bytes) : null
         if (laneState) {
           const curId = laneState.activePageId
           const nextId = pageIdForLane(requestedLane, seqOfPageId(curId) + 1n)
@@ -1016,12 +1027,75 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
-    const postRelayerLamports =
-      sim.accounts[0] !== null && sim.accounts[0] !== undefined
-        ? BigInt(sim.accounts[0].lamports)
-        : preRelayerLamports
-    const simulatedCostLamports =
+    if (sim.accounts[0] === null || sim.accounts[0] === undefined) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: true,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: 'Simulation failed to return post-execution relayer account state',
+          code: 'SIMULATION_INCOMPLETE',
+        },
+        502,
+      )
+    }
+    if (verdict.watchedRelayerFeeAta && !sim.accounts[1]) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: true,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: 'Simulation failed to return post-execution relayer fee ATA state',
+          code: 'SIMULATION_INCOMPLETE',
+        },
+        502,
+      )
+    }
+
+    const postRelayerLamports = BigInt(sim.accounts[0].lamports)
+    const rawOutflowLamports =
       preRelayerLamports > postRelayerLamports ? preRelayerLamports - postRelayerLamports : 0n
+    // Enforce a minimum gas floor (5,000 signature + priority fee) when not offset by native SOL fee
+    // and cap maximum per-tx relayer outflow to protect against runaway rent creation.
+    const minBaselineLamports = 5_000n + cappedPriority
+    const simulatedCostLamports =
+      verdict.nativeSolFeeToRelayer > 0n
+        ? rawOutflowLamports
+        : rawOutflowLamports > minBaselineLamports
+          ? rawOutflowLamports
+          : minBaselineLamports
+
+    const MAX_TX_OUTFLOW_LAMPORTS = 50_000_000n // 0.05 SOL hard per-tx safety ceiling
+    if (simulatedCostLamports > MAX_TX_OUTFLOW_LAMPORTS) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: false,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: `Simulated relayer SOL outflow (${simulatedCostLamports.toString()} lamports) exceeds per-tx safety ceiling`,
+          code: 'COST_CEILING_EXCEEDED',
+        },
+        400,
+      )
+    }
 
     // Measure exact SPL/Token-2022 fee tokens earned by the relayer during simulation
     const postFeeUnits =
@@ -1047,7 +1121,15 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         const feeMeta = mintMetas[verdict.watchedRelayerFeeMint]
         const solUsd = prices[WSOL_MINT_STR]
         const feeUsdPrice = prices[verdict.watchedRelayerFeeMint]
-        if (feeMeta && solUsd && feeUsdPrice && solUsd > 0 && feeUsdPrice > 0) {
+        if (
+          feeMeta &&
+          feeMeta.isValidMint &&
+          !feeMeta.hasUnsafeSelfPayExt &&
+          solUsd &&
+          feeUsdPrice &&
+          solUsd > 0 &&
+          feeUsdPrice > 0
+        ) {
           const feeUsd = (Number(simulatedFeeUnits) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
           const feeSol = feeUsd / solUsd
           feeEquivalentLamports = BigInt(Math.max(0, Math.floor(feeSol * 1e9)))
@@ -1055,7 +1137,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       }
     }
 
-    // Net lamports subsidized by the relay:
+    // Net lamports subsidized by the relay (strict 100% coverage required for `isSelfPaying`):
     //   - For Native SOL / `unwrap_wsol` Withdraw fees, `simulatedCostLamports` is ALREADY post-fee net outflow.
     //   - For SPL/Token-2022 fees, subtract `feeEquivalentLamports` from `simulatedCostLamports`.
     const netSponsoredLamports =
@@ -1066,11 +1148,8 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
           : 0n
     const isSelfPaying =
       verdict.nativeSolFeeToRelayer > 0n
-        ? simulatedCostLamports === 0n ||
-          verdict.nativeSolFeeToRelayer * 10_000n >=
-            (simulatedCostLamports + verdict.nativeSolFeeToRelayer) * 9_000n
-        : feeEquivalentLamports > 0n &&
-          feeEquivalentLamports * 10_000n >= simulatedCostLamports * 9_000n
+        ? netSponsoredLamports === 0n
+        : feeEquivalentLamports > 0n && netSponsoredLamports === 0n
 
     if (verdict.execMeta && !isSelfPaying && !cfg.allowMicroSwapSubsidy) {
       await guard.release({
@@ -1127,11 +1206,35 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     reservationId = reservation.reservationId
 
     // 7. Broadcast & confirm on Solana via RPC
+    let txBroadcast = false
     const sentSig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
       toBase64(signed.wireBytes),
       { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
     ])
-    const { slot } = await waitForConfirmation(rpcUrl, sentSig)
+    txBroadcast = true
+    let slot = 0
+    try {
+      const conf = await waitForConfirmation(rpcUrl, sentSig)
+      slot = conf.slot
+    } catch (confErr) {
+      // Transaction was already broadcast and may still land on-chain — commit conservatively
+      // instead of releasing the pending budget reservation.
+      await guard
+        .commit({
+          reservationId,
+          ipHash,
+          cluster,
+          opKind: verdict.opKind,
+          nullifiers: verdict.nullifiers,
+          sponsoredLamports: Number(netSponsoredLamports),
+          selfPaying: isSelfPaying,
+        })
+        .catch(() => {})
+      lockHeld = false
+      reservationId = undefined
+      throw confErr
+    }
+    void txBroadcast
 
     // 8. Commit EXACT simulated cost into SQLite Durable Object & clear pending reservation
     await guard.commit({

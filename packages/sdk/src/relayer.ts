@@ -25,30 +25,38 @@ export interface RelayInfoResponse {
   balanceSol: number | null;
   rentSchedule: RelayRentSchedule | null;
   aggregators?: unknown;
-  allowedCrankPrograms?: string[];
+  allowedPreIxPrograms?: string[];
   [key: string]: unknown;
 }
 
 export interface RelayFeeQuoteRequest {
   cluster?: RelayCluster;
-  action: 'withdraw' | 'exec_escrow';
+  /** Canonical operation parameter (`withdraw` or `exec_escrow`). */
+  op?: 'withdraw' | 'exec_escrow';
+  /** @deprecated Use `op`. Mapped transparently to `op` when provided. */
+  action?: 'withdraw' | 'exec_escrow';
   mint: string;
-  tokenProgram?: string;
   amount: string;
   unwrapWsol?: boolean;
-  feeSide?: RelayFeeSide;
   hasChange?: boolean;
   missingAtaCount?: number;
 }
 
 export interface RelayFeeQuoteResponse {
+  ok: boolean;
   cluster: RelayCluster;
-  action: 'withdraw' | 'exec_escrow';
+  op: 'withdraw' | 'exec_escrow';
+  billingMode: 'self_paying' | 'sponsored';
   feeMint: string;
-  feeRecipient: string;
+  feeTokenProgram: string | null;
+  feeRecipient: string | null;
+  feeRecipientExists: boolean;
+  needsFeeAtaSetup: boolean;
   relayerFee: string;
   feeBps: number;
-  estimatedRentLamports: string;
+  estimatedRelayCostLamports: string;
+  estimatedRelayCostUsd: number | null;
+  reason: string;
   [key: string]: unknown;
 }
 
@@ -63,7 +71,6 @@ export interface RelaySwapQuoteRequest {
   onlyDirectRoutes?: boolean;
   maxAccounts?: number;
   includeFee?: boolean;
-  feeSide?: RelayFeeSide;
 }
 
 export interface RelaySwapInstructionsRequest {
@@ -74,7 +81,6 @@ export interface RelaySwapInstructionsRequest {
   cluster?: RelayCluster;
   shardId?: number;
   includeFee?: boolean;
-  feeSide?: RelayFeeSide;
 }
 
 export interface RelayMissingAtaPlan {
@@ -90,7 +96,7 @@ export interface RelaySwapInstructionsResponse {
   swapInstruction: RouterSwapInstruction;
   missingAtas: RelayMissingAtaPlan[];
   addressLookupTableAddresses?: string[];
-  lookupTables?: string[];
+  lookupTables?: Record<string, string[]>;
   computeUnitLimit?: number;
   escrowPda?: string;
   vaultAuth?: string;
@@ -101,8 +107,6 @@ export interface RelaySwapInstructionsResponse {
   tokenProgramIn?: string;
   tokenProgramOut?: string;
   relayerFeeAta?: string | null;
-  relayerFeeLamports?: string | null;
-  feeSide?: RelayFeeSide;
   platformFeeBps?: number;
   [key: string]: unknown;
 }
@@ -135,6 +139,7 @@ export interface RelaySubmitResponse {
 }
 
 export const AUDREN_DEFAULT_RELAY_URL = 'https://relay.audren.xyz';
+export const DEFAULT_RELAY_URL = AUDREN_DEFAULT_RELAY_URL;
 
 export class AudrenRelayClient {
   readonly baseUrl: string;
@@ -174,21 +179,24 @@ export class AudrenRelayClient {
     return this.requestJson<Record<string, unknown>>('/v1/stats');
   }
 
-  async quoteFee(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
+  async getFeeQuote(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
+    const op = params.op ?? params.action ?? 'withdraw';
     const qs = new URLSearchParams({
-      action: params.action,
+      op,
       mint: params.mint,
       amount: params.amount,
       ...(params.cluster ? { cluster: params.cluster } : {}),
-      ...(params.tokenProgram ? { tokenProgram: params.tokenProgram } : {}),
       ...(params.unwrapWsol !== undefined ? { unwrapWsol: String(params.unwrapWsol) } : {}),
-      ...(params.feeSide ? { feeSide: params.feeSide } : {}),
       ...(params.hasChange !== undefined ? { hasChange: String(params.hasChange) } : {}),
       ...(params.missingAtaCount !== undefined
         ? { missingAtaCount: String(params.missingAtaCount) }
         : {}),
     });
     return this.requestJson<RelayFeeQuoteResponse>(`/v1/fee-quote?${qs.toString()}`);
+  }
+
+  async quoteFee(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
+    return this.getFeeQuote(params);
   }
 
   async quoteSwap(params: RelaySwapQuoteRequest): Promise<Record<string, unknown>> {
@@ -205,7 +213,6 @@ export class AudrenRelayClient {
         : {}),
       ...(params.maxAccounts !== undefined ? { maxAccounts: String(params.maxAccounts) } : {}),
       ...(params.includeFee !== undefined ? { includeFee: String(params.includeFee) } : {}),
-      ...(params.feeSide ? { feeSide: params.feeSide } : {}),
     });
     return this.requestJson<Record<string, unknown>>(`/v1/swap/quote?${qs.toString()}`);
   }

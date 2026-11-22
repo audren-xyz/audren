@@ -111,7 +111,7 @@ ERROR_DOCS: dict[str, str] = {
     "Unauthorized": "Required signer is missing or does not match pool/buffer authority.",
     "UnsupportedTokenProgram": "Token program must be Classic SPL Token or Token-2022.",
     "UnsafeMintExtension": "Mint carries an unsupported or unsafe extension.",
-    "ZeroAmount": "Deposit, swap, or withdrawal amount must be strictly greater than zero.",
+    "ZeroAmount": "Deposit, execution, or withdrawal amount must be strictly greater than zero.",
     "PageFull": "Target EpochPage is already closed or has reached PAGE_CAPACITY (32 notes).",
     "PageNotReady": "Current EpochPage still has more than PAGE_ROLLOVER_HEADROOM (4) free slots.",
     "PageEmpty": "Input EpochPage contains zero notes and cannot form a Triptych ring.",
@@ -677,7 +677,7 @@ def build_audren_codama(core: dict) -> dict:
                 ix_arg("targetDataLen", num_t("u16")),
                 ix_arg("outDesc", {"kind": "definedTypeLinkNode", "name": "dynamicOutputWire"}),
                 ix_arg("variableTail", bytes_t(), [
-                    "Concatenation: [changeNote(193) + cChg(32) + crossBase1(160) + rangeU64(672) if bit0] || [refundDesc(129) if bit1] || triptychProof || targetInstructionData(targetDataLen)."
+                    "Concatenation: [changeNote(193) + cChg(32) + crossBase1(128) + rangeU64(672) if bit0] || [refundDesc(129) if bit1] || triptychProof || targetInstructionData(targetDataLen)."
                 ]),
             ],
         },
@@ -697,7 +697,7 @@ def build_audren_codama(core: dict) -> dict:
                 ix_acc("pool", True, False, ["PoolState PDA (writable on Lane 0 with change; read-only on Lanes 1..15 or full withdraw)."], pda_name="pool"),
                 ix_acc("outPage", True, False, ["Output EpochPage PDA (writable only when hasChange=true)."], pda_name="epochPage"),
                 ix_acc("nullifier", True, False, ["Uninitialized NullifierPDA."], pda_name="nullifier"),
-                ix_acc("rentVault", True, False, ["PageRentVault or LaneRentVault PDA."]),
+                ix_acc("rentVault", True, False, ["PageRentVault (Lane 0, read-only allowed when hasChange=false) or LaneRentVault (Lanes 1..15 when hasChange=true)."]),
                 ix_acc("zkProgram", False, False, ["Agave native ZK ElGamal Proof program."]),
                 ix_acc("systemProgram", False, False, ["Solana System Program."]),
                 ix_acc("feeRecipient", True, False, ["Relayer fee wallet (Native SOL / unwrapWsol) or token ATA (SPL/Token-2022) when relayerFee > 0; read-only System Program placeholder when 0."]),
@@ -705,8 +705,8 @@ def build_audren_codama(core: dict) -> dict:
                 ix_acc("recipientOrMint", True, False, ["Native SOL: recipient (wr); SPL/Token-2022/unwrapWsol: mint (ro)."]),
                 ix_acc("inputPage0OrVaultAta", True, False, ["Native SOL: inputPage0 (ro); SPL/Token-2022/unwrapWsol: vaultAta (wr)."]),
                 ix_acc("recipientOrRecipientAta", True, False, ["SPL/Token-2022: recipientAta (wr); unwrapWsol: recipient Native SOL wallet (wr)."], is_optional=True),
-                ix_acc("tokenProgram", False, False, ["SPL/Token-2022 / unwrapWsol: Classic SPL Token or Token-2022 program."], is_optional=True),
-                ix_acc("unwrapAcc", True, False, ["unwrapWsol only: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] created and closed atomically."], is_optional=True, pda_name="unwrap"),
+                ix_acc("tokenProgram", False, False, ["SPL/Token-2022: Classic SPL Token or Token-2022 program; unwrapWsol: strictly Classic SPL Token program."], is_optional=True),
+                ix_acc("unwrapAcc", True, False, ["SPL/Token-2022: inputPage0 (ro); unwrapWsol: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] (wr) created and closed atomically."], is_optional=True, pda_name="unwrap"),
             ],
             "arguments": [
                 ix_disc_arg(tags["TAG_WITHDRAW"]),
@@ -715,7 +715,7 @@ def build_audren_codama(core: dict) -> dict:
                 ix_arg("amountOut", num_t("u64"), ["Net amount delivered to recipient (total spent from note is amountOut + relayerFee)."]),
                 ix_arg("relayerFee", num_t("u64"), ["Optional self-paying relayer fee bound inside ctx_hash."]),
                 ix_arg("changeAndTriptychProof", bytes_t(), [
-                    "Concatenation: [changeNote(193) + cChg(32) + crossBase1(160) + rangeU64(672) if hasChange] || triptychProof."
+                    "Concatenation: [changeNote(193) + cChg(32) + crossBase1(128) + rangeU64(672) if hasChange] || triptychProof."
                 ]),
             ],
         },
@@ -1001,24 +1001,24 @@ def build_mock_router_codama() -> dict:
                     "kind": "instructionNode",
                     "name": "executeMockSwap",
                     "docs": [
-                        "Execute honest swap (mode=0) or adversarial custody attack simulation (mode=1 delegate, mode=2 set_authority, mode=3 lamport drain).",
+                        "Execute honest swap (mode=0) or adversarial custody attack simulation (mode=1 delegate, mode=2 set_authority, mode=3 lamport drain, mode=4 new escrow ATA hijack, mode=5 Token-2022 MemoTransfer brick).",
                     ],
                     "accounts": [
-                        ix_acc("poolAuthority", False, False, ["PDA ['mock_pool']."], pda_name="mockPoolAuthority"),
-                        ix_acc("escrowIn", True, False, ["Audren swap_escrow input ATA."]),
+                        ix_acc("poolAuthority", False, False, ["PDA ['mock_pool'] (writable in modes 4 and 5)."], pda_name="mockPoolAuthority"),
+                        ix_acc("escrowIn", True, False, ["Audren escrow input ATA."]),
                         ix_acc("poolIn", True, False, ["Mock pool input liquidity ATA."]),
-                        ix_acc("swapEscrow", True, True, ["Audren swap_escrow PDA signer."]),
-                        ix_acc("escrowOut", True, False, ["Audren swap_escrow output ATA."]),
+                        ix_acc("escrow", True, True, ["Audren escrow PDA signer."]),
+                        ix_acc("escrowOut", True, False, ["Audren escrow output ATA."]),
                         ix_acc("poolOut", True, False, ["Mock pool output liquidity ATA."]),
                         ix_acc("tokenProgramIn", False, False, ["SPL / Token-2022 program for input mint."]),
                         ix_acc("tokenProgramOut", False, False, ["SPL / Token-2022 program for output mint."]),
                         ix_acc("mintIn", False, False, ["Input mint."]),
                         ix_acc("mintOut", False, False, ["Output mint."]),
-                        ix_acc("attacker", True, False, ["Adversarial target account (modes 1, 2, 3 only)."], is_optional=True),
-                        ix_acc("systemProgram", False, False, ["System Program (mode 3 only)."], is_optional=True),
+                        ix_acc("attacker", True, False, ["Adversarial target account (modes 1, 2, 3, 4) or System Program (mode 5)."], is_optional=True),
+                        ix_acc("systemProgram", False, False, ["System Program (modes 3, 4)."], is_optional=True),
                     ],
                     "arguments": [
-                        ix_arg("mode", num_t("u8"), ["0=honest, 1=approve_delegate, 2=hijack_owner, 3=drain_lamports."]),
+                        ix_arg("mode", num_t("u8"), ["0=honest, 1=approve_delegate, 2=hijack_owner, 3=drain_lamports, 4=new_ata_hijack, 5=memo_transfer_brick."]),
                         ix_arg("spendIn", num_t("u64")),
                         ix_arg("payOut", num_t("u64")),
                         ix_arg("decIn", num_t("u8")),

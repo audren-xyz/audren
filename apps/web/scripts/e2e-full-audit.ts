@@ -521,10 +521,10 @@ async function main() {
 
     await cdp.send('Page.navigate', { url: `${BASE_URL}/` })
     await waitFor(() => cdp!.eval<boolean>(`document.querySelectorAll('[aria-label="What you can do inside the ring"] button').length === 4`), 'Homepage use cases')
-    for (const label of ['Pay someone', 'Swap on DEX', 'Pay public wallet', 'Share 1 receipt']) {
+    for (const label of ['Pay someone', 'Shielded DeFi', 'Pay or fund wallet', 'Share 1 receipt']) {
       await clickButton(cdp, label, '[aria-label="What you can do inside the ring"] button')
       await waitFor(() => cdp!.eval<boolean>(`document.querySelector('[aria-label="What you can do inside the ring"] [aria-selected="true"]')?.textContent?.includes(${JSON.stringify(label)})`), `Selected ${label}`)
-      const boundary = await cdp.eval<string>(`document.querySelector('#use-cases')?.textContent || ''`)
+      const boundary = (await cdp.eval<string>(`document.querySelector('#use-cases')?.textContent || ''`)).toUpperCase()
       assert.ok(boundary.includes('CONCEALED') && boundary.includes('PUBLIC'), 'Use-case diagram must show concealed vs. public boundary')
     }
     await cdp.send('Page.navigate', { url: `${BASE_URL}/how-it-works/` })
@@ -535,7 +535,7 @@ async function main() {
     assert.ok(addrText.includes('aud1') && addrText.includes('SPEND PUBLIC KEY') && addrText.includes('VIEW PUBLIC KEY'), 'aud1 address anatomy missing')
     await cdp.eval(`document.querySelector('#how-it-works')?.scrollIntoView({ behavior: 'instant', block: 'start' })`)
     await sleep(200)
-    for (const flowLabel of ['Public → Private', 'Private → Private', 'Private DEX Swap', 'Prove Receipt / Exit']) {
+    for (const flowLabel of ['Public → Private', 'Private → Private', 'Shielded DeFi', 'Receipt / Exit & Sessions']) {
       await clickButton(cdp, flowLabel, '.flow-tab-btn')
       await sleep(160)
       const theaterText = await cdp.eval<string>(`document.querySelector('.flow-theater')?.textContent || ''`)
@@ -883,7 +883,7 @@ async function main() {
     assert.equal(sb2Err, null, `Sandbox Step 2 error: ${sb2Err}`)
     console.log('  ✓ Sandbox Step 2 (Devnet Private Spend) confirmed')
 
-    await clickButton(cdp, 'Next: 3. Test Tamper-Proof Receipt')
+    await clickButton(cdp, 'Next: Verify Commitment Receipt')
     await sleep(300)
     await clickButton(cdp, 'Create Real Receipt')
     await waitFor(

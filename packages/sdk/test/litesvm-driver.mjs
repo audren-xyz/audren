@@ -3,7 +3,7 @@
  * JSON stdin -> stdout driver for `crates/audren-ffi/tests/cross_sdk_litesvm.rs`.
  *
  * Calls the REAL compiled `@audren/sdk` and `@audren/sdk/prover` bundles to build
- * production Solana instructions (Deposit, Transfer, Merge, SwapViaRouter, Withdraw,
+ * production Solana instructions (Deposit, Transfer, Merge, ExecViaEscrow, Withdraw,
  * ProofBuffer) that Rust executes directly against the real sBPFv3 `audren.so` and
  * `audren_mock_router.so` binaries inside LiteSVM.
  */

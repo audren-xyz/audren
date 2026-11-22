@@ -14,10 +14,13 @@ body:
       options:
         - program/ (Solana sBPFv3 program)
         - crates/client or crates/audren-core (Rust)
+        - crates/audren-ffi (UniFFI native bridge)
         - packages/sdk (@audren/sdk TypeScript)
+        - packages/swift (AudrenSDK iOS/macOS)
+        - packages/kotlin (xyz.audren.sdk Android/JVM)
         - apps/relay (Privacy Relayer)
         - apps/web (audren.xyz Web App)
-        - idl/ or docs/
+        - idl/, spec/test-vectors.json, or docs/
     validations:
       required: true
   - type: textarea
@@ -31,4 +34,4 @@ body:
     id: version
     attributes:
       label: Commit / Release Tag
-      placeholder: "e.g. v0.2.0 or git SHA"
+      placeholder: "e.g. v0.3.0 or git SHA"

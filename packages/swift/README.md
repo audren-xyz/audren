@@ -2,7 +2,7 @@
 
 Native Swift Package for **Audren v1** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting **iOS 15+** and **macOS 13+**.
 
-Backed by the single audited Rust core (`crates/audren-client` via `crates/audren-ffi` + UniFFI) so mobile apps get native ~50 ms local zero-knowledge proving (Multi-Base Binary Triptych + Batched Bulletproofs) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
+Backed by the single canonical Rust core (`crates/client` via `crates/audren-ffi` + UniFFI) so mobile apps get native ~50 ms local zero-knowledge proving (Multi-Base Binary Triptych + Batched Bulletproofs) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
 
 ## The 6 Standardized Building Blocks
 

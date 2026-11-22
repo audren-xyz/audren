@@ -13,7 +13,7 @@ import type {
  *   - POST /swap-instructions { userPublicKey, quoteResponse, programAuthority: true, wrapAndUnwrapSol: false, skipUserAccountsRpcCalls: true }
  *
  * Note: Bedrock sets `feeAccount` to the fee collector OWNER wallet (not the ATA) and
- * emits a single zero-ALT `trade` instruction compatible with Audren's `SwapViaRouter` PDA CPI.
+ * emits a single zero-ALT `trade` instruction compatible with Audren's `ExecViaEscrow` PDA CPI.
  */
 interface BedrockQuoteRaw extends Record<string, unknown> {
   inputMint?: string

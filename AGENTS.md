@@ -26,7 +26,7 @@ Standalone open-source repository for the **Audren** Solana shielded protocol, p
    - `vault_auth` and `payer` are never signers on the external CPI; only the selected `swap_escrow` shard PDA (`0..16`) signs.
    - No Audren program, `PoolState`, `AppendLaneState`, `EpochPage`, `NullifierPDA`, or custody vault may appear in `action_accounts`.
    - `swap_escrow` and escrow token accounts (`escrow_in`, `escrow_out`) pass pre- and post-CPI owner, delegate, `close_authority`, lamport non-drain, and slippage (`actual_out >= min_amount_out`) checks.
-   - `Withdraw` with `WITHDRAW_FLAG_UNWRAP_WSOL` (`flags & 2`) initializes an ephemeral 1-shot `audren_unwrap` PDA (`["audren_unwrap", pool_id_le4, nullifier_32]`), transfers WSOL from `vault_auth`, and closes `audren_unwrap` atomically to `recipient` in the same instruction (preserving full-exit pause bypass).
+   - `Withdraw` with `WITHDRAW_FLAG_UNWRAP_WSOL` (`flags & 4`) initializes an ephemeral 1-shot `audren_unwrap` PDA (`["audren_unwrap", pool_id_le4, nullifier_32]`), transfers WSOL from `vault_auth`, and closes `audren_unwrap` atomically to `recipient` in the same instruction (preserving full-exit pause bypass).
 3. **Token-2022 solvency and hook isolation:** `Deposit` (including `DEPOSIT_FLAG_FEE_FROM_AMOUNT` zero-dust sweeps) and `ExecViaEscrow` commit the measured net vault balance delta (`after - before > 0`) so fee-on-transfer (`TransferFeeConfig`) deposits are not credited above the measured net receipt. Transfer-hook mints are rejected unless safely validated; trailing accounts have `is_signer` cleared and Audren custody accounts filtered out.
 4. **Parallel append lanes (`Tag 11` / `Tag 12`):** Lane `0` uses page IDs `(0 << 56) | seq`; parallel lanes `1..15` use `(lane_id << 56) | seq` with `AppendLaneState` (`64 B`), `LaneRentVault`, and read-only `PoolState`, while sharing the unified custody vaults and canonical `NullifierPDA` namespace.
 5. **Solana Transaction Version 1 (`0x81`, `4,096 B`) and atomic `ProofBuffer` rent:** Direct settlement uses Solana Transaction v1 (SIMD-0385) with inline `TransactionConfig`. For oversized payloads or `v0`-only wallets, `WriteProofBuffer` (`Tag 8`) uploads `<= 768 B` chunks and `ExecBuffered` (`Tag 9`) / `CloseProofBuffer` (`Tag 10`) close the buffer atomically and refund 100% of lamports to `authority`/`payer`.
@@ -63,11 +63,11 @@ Every program change, release, and cluster upgrade MUST keep all six trust surfa
 ```bash
 cargo check --manifest-path program/Cargo.toml
 cargo check --manifest-path program/Cargo.toml --features no-entrypoint
-cargo check --manifest-path program/Cargo.toml --tests
+cargo test --manifest-path program/Cargo.toml
 cargo check --manifest-path tests/mock-router/Cargo.toml
 cargo check --workspace --tests
 python3 idl/verify-idl.py
 pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
 pnpm --dir apps/relay typecheck
-pnpm --dir apps/web typecheck
+pnpm --dir apps/web check
 ```

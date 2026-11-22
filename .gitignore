@@ -33,6 +33,8 @@ out/
 credentials/
 *.keypair.json
 *secret*.json
+**/*.pem
+**/*.key
 .env
 .env.*
 !.env.example
@@ -42,10 +44,11 @@ credentials/
 **/wrangler.prod.jsonc
 **/wrangler.local.jsonc
 
-# OS / Python / TypeScript cache noise
+# OS / Python / TypeScript / Package tarball cache noise
 .DS_Store
 **/.DS_Store
 *.log
+*.tgz
 **/__pycache__/
 *.pyc
 **/*.tsbuildinfo

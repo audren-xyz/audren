@@ -7,7 +7,7 @@
  * - Cross-Base Bridges (`CrossBase1` 128 B, `CrossBase2` 256 B)
  * - Native Solana Batched Bulletproofs (`BatchedRangeProofU64` 672 B, `U128` 736 B)
  *   with exact Merlin / Strobe-128 transcript & SHAKE256 generator chains
- * - All user instructions: `Deposit`, `Transfer`, `SwapViaRouter`, `Withdraw`,
+ * - All user instructions: `Deposit`, `Transfer`, `Merge`, `ExecViaEscrow`, `Withdraw`,
  *   plus automatic `WriteProofBuffer` + `ExecBuffered` chunking for v0 wallet signing.
  */
 
@@ -1403,7 +1403,7 @@ export async function computeNoteNullifier(
 
 /**
  * Full owned note decrypted from an on-chain `EpochPage` (supports Deposits,
- * blinded Transfers/Change notes, AND dynamic SwapViaRouter output notes).
+ * blinded Transfers/Change notes, AND dynamic ExecViaEscrow output notes).
  */
 export interface SpendableAudrenNote {
   pageId: bigint
@@ -1530,7 +1530,7 @@ export interface OwnedAudrenNote {
 /**
  * Scan a full `EpochPage` for all notes owned by a `FullViewingKey` (`spendPk + viewSk`)
  * or full keypair (`spendPk + viewSk + spendSk`), including blinded `Transfer`/`Merge`
- * notes and dynamic `SwapViaRouter` outputs.
+ * notes and dynamic `ExecViaEscrow` outputs.
  *
  * When `spendSk` is omitted (read-only viewing key / watch-only wallet / compliance auditor),
  * `spendX`, `nullifier`, and `nullifierPdaB58` are `undefined`.
@@ -1659,7 +1659,7 @@ export async function scanEpochPageSpendable(
 }
 
 // ============================================================================
-// Instruction Builders (Deposit, Transfer, SwapViaRouter, Withdraw, ProofBuffer)
+// Instruction Builders (Deposit, Transfer, Merge, ExecViaEscrow, Withdraw, ProofBuffer)
 // ============================================================================
 
 export function buildCreateAtaIdempotentIx(params: {
@@ -1840,6 +1840,9 @@ export async function buildDepositInstruction(params: {
   createVaultAtaIfMissing?: boolean
 }): Promise<{ instructions: SolanaInstruction[]; note: PreparedFullNote }> {
   const isNative = bytesEqual(params.mint, NATIVE_SOL_MINT)
+  if (params.amount <= 0n) {
+    throw new Error('Deposit amount must be > 0')
+  }
   if (params.feeFromAmount && !isNative) {
     throw new Error('feeFromAmount is only valid for Native SOL deposits')
   }
@@ -2300,6 +2303,15 @@ export async function buildExecViaEscrowInstruction(params: {
   if (params.minAmountOut <= 0n) {
     throw new Error('minAmountOut must be > 0')
   }
+  if (bytesEqual(params.inputNote.mint, NATIVE_SOL_MINT)) {
+    throw new Error('ExecViaEscrow requires an SPL/Token-2022 input note (wrap SOL to WSOL first)')
+  }
+  if (bytesEqual(params.inputNote.mint, params.mintOut)) {
+    throw new Error('ExecViaEscrow input and output mints must differ')
+  }
+  if (params.targetIxData.length > 0xffff) {
+    throw new Error('targetIxData exceeds u16 length limit (65,535 B)')
+  }
   const relayerFee = params.relayerFee ?? 0n
   const feeOnOutput = Boolean(params.feeOnOutput)
   if (relayerFee < 0n) throw new Error('relayerFee cannot be negative')
@@ -2670,6 +2682,9 @@ export async function buildWithdrawInstruction(params: {
     )
   } else if (unwrapWsol) {
     const tokenProg = params.splTokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID
+    if (!bytesEqual(tokenProg, CLASSIC_TOKEN_PROGRAM_ID)) {
+      throw new Error('unwrapWsol requires Classic SPL Token program')
+    }
     const vaultAuth = (await deriveVaultAuthPda(params.poolId)).address
     const [vaultAta, unwrapPda] = await Promise.all([
       deriveAta(vaultAuth, tokenProg, params.inputNote.mint),
@@ -2723,12 +2738,22 @@ export async function buildBufferedExecutionPlan(
   executeIx: SolanaInstruction
 }> {
   if (inner.data.length < 2) throw new Error('Empty inner instruction')
+  if (inner.accounts.length === 0) throw new Error('Inner instruction must include payer at accounts[0]')
   const innerTag = inner.data[0]
+  if (
+    innerTag !== TAG_TRANSFER &&
+    innerTag !== TAG_MERGE &&
+    innerTag !== TAG_EXEC_VIA_ESCROW &&
+    innerTag !== TAG_WITHDRAW
+  ) {
+    throw new Error(`Tag ${innerTag} is not supported by ProofBuffer`)
+  }
   const payload = inner.data.subarray(1)
   if (payload.length > PROOF_BUFFER_MAX_PAYLOAD) {
     throw new Error(`Payload ${payload.length} B exceeds ProofBuffer 9,984 B cap`)
   }
   const payer = inner.accounts[0].pubkey
+  const programId = inner.programId
   const bufNonce =
     nonce ?? readU64le(crypto.getRandomValues(new Uint8Array(8)), 0)
   const proofBufferPda = (await deriveProofBufferPda(payer, bufNonce)).address
@@ -2737,7 +2762,7 @@ export async function buildBufferedExecutionPlan(
   for (let idx = 0, off = 0; off < payload.length; idx++, off += PROOF_BUFFER_CHUNK_SIZE) {
     const chunk = payload.subarray(off, Math.min(off + PROOF_BUFFER_CHUNK_SIZE, payload.length))
     uploadChunks.push({
-      programId: AUDREN_PROGRAM_ID,
+      programId,
       accounts: [
         { pubkey: payer, isSigner: true, isWritable: true },
         { pubkey: proofBufferPda, isSigner: false, isWritable: true },
@@ -2754,7 +2779,7 @@ export async function buildBufferedExecutionPlan(
   }
 
   const executeIx: SolanaInstruction = {
-    programId: AUDREN_PROGRAM_ID,
+    programId,
     accounts: [{ pubkey: proofBufferPda, isSigner: false, isWritable: true }, ...inner.accounts],
     data: new Uint8Array([TAG_EXEC_BUFFERED, innerTag]),
   }

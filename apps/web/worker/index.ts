@@ -461,7 +461,9 @@ function getRelayerSecret(env: Env, cluster: Cluster): Uint8Array | null {
   if (!b64) return null
   try {
     const raw = fromBase64(b64)
-    return raw.length === 32 ? raw : null
+    if (raw.length === 32) return raw
+    if (raw.length === 64) return raw.subarray(0, 32)
+    return null
   } catch {
     return null
   }
@@ -1219,11 +1221,12 @@ async function handleMintLogo(
       status: 200,
       headers: {
         'content-type': 'image/svg+xml; charset=utf-8',
-        'cache-control': 'public, max-age=3600',
+        'cache-control': sym ? 'public, max-age=3600' : 'public, max-age=300',
         'x-content-type-options': 'nosniff',
       },
     })
-    if (edgeCache && !isHead) edgeCache.put(cacheKey, out.clone()).catch(() => {})
+    // Only cache resolved symbols (never untrusted `?s=` query hints) under the query-less key
+    if (edgeCache && !isHead && sym) edgeCache.put(cacheKey, out.clone()).catch(() => {})
     return out
   }
 
@@ -1303,7 +1306,10 @@ async function handleMintLogo(
 
   // Server-side proxy of upstream icon (keeps strict browser CSP `img-src 'self' data:`)
   try {
-    const imgRes = await fetch(iconUrl, { signal: AbortSignal.timeout(3_500) })
+    const imgRes = await fetch(iconUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(3_500),
+    })
     const ct = imgRes.headers.get('content-type') ?? ''
     if (!imgRes.ok || !ct.startsWith('image/')) {
       return fallbackMonogram(resolvedSymbol)
@@ -1357,7 +1363,12 @@ async function handleGetPageSlices(request: Request, env: Env): Promise<Response
 
   // Fast-path edge CDN cache hit for strictly sealed page ranges (0 RPC calls!)
   const cache = wantSealedCache ? await getEdgeCache() : null
-  const cacheReq = cache ? new Request(url.toString(), { method: 'GET' }) : null
+  const cacheReq = cache
+    ? new Request(
+        `${url.origin}/api/pages/slices?cluster=${cluster}&from=${fromSeq}&to=${toSeq}&lane=${laneRaw}&sealed=1`,
+        { method: 'GET' },
+      )
+    : null
   if (cache && cacheReq) {
     const hit = await cache.match(cacheReq)
     if (hit) return hit
@@ -1720,12 +1731,6 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
     )
     const okSigs = (sigs ?? []).filter((s) => !s.err).slice(0, 36)
     const candidateAmounts = new Set<string>()
-    const targetSlot =
-      typeof body.slotIndex === 'number' && Number.isInteger(body.slotIndex) ? body.slotIndex : null
-    const logRe = new RegExp(
-      `audren:(?:swap_router|exec_escrow) page=${body.pageId} idx=(\\d+) net_out=(\\d+) net_refund=(\\d+)`,
-    )
-
     type TxInspect = {
       meta?: {
         logMessages?: string[]
@@ -1733,6 +1738,13 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
         postBalances?: number[]
         preTokenBalances?: Array<{ accountIndex: number; uiTokenAmount: { amount: string } }>
         postTokenBalances?: Array<{ accountIndex: number; uiTokenAmount: { amount: string } }>
+        innerInstructions?: Array<{
+          instructions?: Array<{
+            accounts?: number[]
+            data?: string
+            programIdIndex?: number
+          }>
+        }>
         loadedAddresses?: { writable?: string[]; readonly?: string[] }
       }
       transaction?: { message?: { accountKeys?: Array<string | { pubkey: string }> } }
@@ -1750,23 +1762,8 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
         ),
       )
 
-      let exactHit = false
       for (const tx of txs) {
         if (!tx?.meta) continue
-        if (!isNativeSol) {
-          for (const line of tx.meta.logMessages ?? []) {
-            const m = logRe.exec(line)
-            if (!m) continue
-            const idxOut = Number(m[1])
-            const netOut = m[2]
-            const netRefund = m[3]
-            if (netOut !== '0') candidateAmounts.add(netOut)
-            if (netRefund !== '0') candidateAmounts.add(netRefund)
-            if (targetSlot !== null && idxOut === targetSlot) {
-              exactHit = true
-            }
-          }
-        }
         if (tx.transaction?.message?.accountKeys) {
           const staticKeys = tx.transaction.message.accountKeys.map((k) =>
             typeof k === 'string' ? k : k.pubkey,
@@ -1792,11 +1789,28 @@ async function handleResolveDynamicNote(request: Request, env: Env): Promise<Res
                   .amount ?? '0',
               )
               if (post > pre) candidateAmounts.add((post - pre).toString())
+              // Also extract inner SPL TransferChecked inflows into `vaultB58` so partial refunds
+              // (`escrow_in -> vault_in`, where net vault_in delta is negative) are recovered too.
+              for (const inner of tx.meta.innerInstructions ?? []) {
+                for (const ix of inner.instructions ?? []) {
+                  if (!ix.data || !ix.accounts || ix.accounts.length < 3 || ix.accounts[2] !== idx) {
+                    continue
+                  }
+                  try {
+                    const raw = base58Decode(ix.data)
+                    if (raw.length >= 9 && raw[0] === 12) {
+                      const amt = readU64le(raw, 1)
+                      if (amt > 0n) candidateAmounts.add(amt.toString())
+                    }
+                  } catch {
+                    // ignore non-SPL inner instructions
+                  }
+                }
+              }
             }
           }
         }
       }
-      if (exactHit) break
     }
 
     return jsonResponse({
@@ -2080,7 +2094,7 @@ async function resolveMintTokenPrograms(
   return [progA, progB]
 }
 
-// Venues whose on-chain programs reject or penalize wrapped PDA-CPI callers (`SwapViaRouter`):
+// Venues whose on-chain programs reject or penalize wrapped PDA-CPI callers (`ExecViaEscrow`):
 // - Kipseli: inspects Sysvar1nstructions and throws Custom(6022) InvalidRealUser unless user signed top-level
 // - Quantum / BisonFi: allowlist top-level callers and reject wrapping programs (Custom(9) / Custom(53))
 // - BinaryFi / Obsidian: levy unlisted top-level caller penalty fees that diverge from top-level quotes
@@ -2113,6 +2127,13 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
 
   if (!body.inputMint || !body.outputMint || !body.amount || !/^\d+$/.test(body.amount)) {
     return jsonResponse({ error: 'Missing inputMint, outputMint, or numeric amount' }, 400)
+  }
+  try {
+    if (base58Decode(body.inputMint).length !== 32 || base58Decode(body.outputMint).length !== 32) {
+      return jsonResponse({ error: 'inputMint and outputMint must be 32-byte base58 pubkeys' }, 400)
+    }
+  } catch {
+    return jsonResponse({ error: 'Invalid base58 mint pubkey' }, 400)
   }
   if (body.inputMint === body.outputMint) {
     return jsonResponse({ error: 'Input and output mints must differ' }, 400)
@@ -2312,6 +2333,13 @@ async function handleJupiterSwapInstructions(request: Request, env: Env): Promis
   if (!body.quoteResponse || !body.inputMint || !body.outputMint) {
     return jsonResponse({ error: 'Missing quoteResponse, inputMint, or outputMint' }, 400)
   }
+  try {
+    if (base58Decode(body.inputMint).length !== 32 || base58Decode(body.outputMint).length !== 32) {
+      return jsonResponse({ error: 'inputMint and outputMint must be 32-byte base58 pubkeys' }, 400)
+    }
+  } catch {
+    return jsonResponse({ error: 'Invalid base58 mint pubkey' }, 400)
+  }
   const shardId =
     typeof body.shardId === 'number' &&
     Number.isInteger(body.shardId) &&
@@ -2461,7 +2489,14 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     )
   }
 
-  if (!body.instructionDataB64 || !Array.isArray(body.accounts) || body.accounts.length < 7) {
+  if (
+    typeof body.instructionDataB64 !== 'string' ||
+    body.instructionDataB64.length === 0 ||
+    body.instructionDataB64.length > 5_400 ||
+    !Array.isArray(body.accounts) ||
+    body.accounts.length < 7 ||
+    body.accounts.length > 62
+  ) {
     return jsonResponse({ error: 'Invalid Audren instruction payload' }, 400)
   }
 
@@ -2470,6 +2505,9 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     ixData = fromBase64(body.instructionDataB64)
   } catch {
     return jsonResponse({ error: 'Invalid base64 instructionDataB64' }, 400)
+  }
+  if (ixData.length < 24) {
+    return jsonResponse({ error: 'Audren instruction payload too short' }, 400)
   }
   const tag = ixData[0]
   if (
@@ -2594,23 +2632,28 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     }
 
     // Permit idempotent ATA setup ONLY for:
-    //  (a) Audren's own vault_auth or ANY swap_escrow shard (0..15) PDA, OR
-    //  (b) The exact recipient_ata (accounts[10]) of an SPL/Token-2022 Withdraw (atomic revert on invalid proof)
+    //  (a) Active ExecViaEscrow (Tag 5) vault_auth / selected escrow shard ATAs for its exact mints/token programs, OR
+    //  (b) The exact recipient_ata (accounts[11]) of an SPL/Token-2022 Withdraw (atomic revert on invalid proof)
     if (Array.isArray(body.setupAtas) && body.setupAtas.length > 0) {
-      const [vaultAuthPda, ...escrowPdas] = await Promise.all([
-        deriveVaultAuthPda(0),
-        ...Array.from({ length: MAX_ESCROW_SHARDS }, (_, sid) => deriveEscrowPda(0, sid)),
-      ])
-      const allowedOwners = new Set([
-        base58Encode(vaultAuthPda.address),
-        ...escrowPdas.map((p) => base58Encode(p.address)),
-      ])
+      const vaultAuthPda = await deriveVaultAuthPda(0)
+      const vaultAuthB58 = base58Encode(vaultAuthPda.address)
+      const isExec =
+        tag === TAG_EXEC_VIA_ESCROW &&
+        ixData.length >= 162 &&
+        ixData[2] < MAX_ESCROW_SHARDS &&
+        decodedAccounts.length >= 20
+      const execEscrowB58 = isExec ? base58Encode((await deriveEscrowPda(0, ixData[2])).address) : null
+      const execMintIn = isExec ? base58Encode(decodedAccounts[8].pubkey) : null
+      const execTpIn = isExec ? base58Encode(decodedAccounts[10].pubkey) : null
+      const execMintOut = isExec ? base58Encode(decodedAccounts[11].pubkey) : null
+      const execTpOut = isExec ? base58Encode(decodedAccounts[13].pubkey) : null
       const isSplWithdraw =
         tag === TAG_WITHDRAW &&
         ixData.length >= 3 &&
         (ixData[2] & 0x01) === 0 &&
         (ixData[2] & 0x04) === 0 &&
         decodedAccounts.length >= 14
+      const seenSetupAtas = new Set<string>()
       for (const req of body.setupAtas.slice(0, 4)) {
         if (
           req.tokenProgram !== CLASSIC_TOKEN_PROGRAM_ID_STR &&
@@ -2632,18 +2675,32 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
           return jsonResponse({ error: 'Invalid pubkey length in setupAtas' }, 400)
         }
         const ata = await deriveAta(ownerBytes, tpBytes, mintBytes)
-        const isAllowedPda = allowedOwners.has(req.owner)
+        const ataB58 = base58Encode(ata)
+        if (seenSetupAtas.has(ataB58)) continue
+        const matchesExecMintAndProg =
+          isExec &&
+          ((req.mint === execMintIn && req.tokenProgram === execTpIn) ||
+            (req.mint === execMintOut && req.tokenProgram === execTpOut))
+        const isAllowedPda =
+          isExec &&
+          (req.owner === vaultAuthB58 || req.owner === execEscrowB58) &&
+          matchesExecMintAndProg
+        // SPL Withdraw layout: [8] vault_auth, [9] mint, [10] vault_ata, [11] recipient_ata, [12] token_prog
         const isWithdrawRecipientAta =
           isSplWithdraw &&
           bytesEqual(ata, decodedAccounts[11].pubkey) &&
-          bytesEqual(mintBytes, decodedAccounts[8].pubkey) &&
+          bytesEqual(mintBytes, decodedAccounts[9].pubkey) &&
           bytesEqual(tpBytes, decodedAccounts[12].pubkey)
         if (!isAllowedPda && !isWithdrawRecipientAta) {
           return jsonResponse(
-            { error: 'Relayer setupAtas only allowed for Audren vault/escrow PDAs or SPL Withdraw recipient ATA' },
+            {
+              error:
+                'Relayer setupAtas only allowed for active ExecViaEscrow vault/escrow ATAs or SPL Withdraw recipient ATA',
+            },
             400,
           )
         }
+        seenSetupAtas.add(ataB58)
         instructions.push(
           buildCreateAtaIdempotentIx({
             payer: relayerPubkey,

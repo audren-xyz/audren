@@ -50,10 +50,11 @@ use audren_core::{
         PROOF_BUFFER_HEADER_LEN, PROOF_BUFFER_MAGIC, PROOF_BUFFER_MAX_PAYLOAD,
         SENTINEL_ACCOUNT_LEN, SOL_VAULT_MAGIC,
     },
-    page_id_for_lane, seq_of_page_id, AudrenError, PoolMode, CLASSIC_TOKEN_PROGRAM_ID,
-    ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MAX_APPEND_LANES, NATIVE_SOL_MINT, NULLIFIER_SEED,
-    PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED, PROTOCOL_VERSION, SOL_VAULT_SEED,
-    SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, UNWRAP_SEED, VAULT_AUTH_SEED, WSOL_MINT,
+    page_id_for_lane, seq_of_page_id, AudrenError, PoolMode, ASSOCIATED_TOKEN_PROGRAM_ID,
+    CLASSIC_TOKEN_PROGRAM_ID, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MAX_APPEND_LANES,
+    NATIVE_SOL_MINT, NULLIFIER_SEED, PAGE_RENT_SEED, PAGE_SEED, POOL_SEED, PROOF_BUFFER_SEED,
+    PROTOCOL_VERSION, SOL_VAULT_SEED, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, UNWRAP_SEED,
+    VAULT_AUTH_SEED, WSOL_MINT,
 };
 use core::mem::MaybeUninit;
 use crypto::{
@@ -112,7 +113,7 @@ pub static SECURITY_TXT: &str = concat!(
 const MAX_ROUTER_CPI_ACCOUNTS: usize = 80;
 
 /// Maximum accounts in a `TransferChecked` CPI when a Token-2022 `TransferHook` is active.
-const MAX_HOOK_CPI_ACCOUNTS: usize = 64;
+const MAX_HOOK_CPI_ACCOUNTS: usize = 80;
 
 /// System Program ID (`11111111111111111111111111111111`).
 const SYSTEM_ID: Address = Address::new_from_array(SYSTEM_PROGRAM_ID);
@@ -250,6 +251,8 @@ const SPL_ACCOUNT_LEN: usize = 165;
 const SPL_MULTISIG_LEN: usize = 355;
 const TOKEN_2022_ACCOUNT_TYPE_MINT: u8 = 1;
 const TOKEN_2022_ACCOUNT_TYPE_ACCOUNT: u8 = 2;
+const TOKEN_2022_EXT_MEMO_TRANSFER: u16 = 8;
+const TOKEN_2022_EXT_CPI_GUARD: u16 = 11;
 const TOKEN_2022_EXT_TRANSFER_HOOK: u16 = 14;
 const TOKEN_IX_CLOSE_ACCOUNT: u8 = 9;
 const TOKEN_IX_TRANSFER_CHECKED: u8 = 12;
@@ -327,13 +330,17 @@ fn token_balance(account: &AccountView, token_program: &Address) -> Result<u64, 
 
 struct TokenSecuritySnapshot {
     token_program: Address,
+    mint: Address,
     owner: Address,
     has_delegate: bool,
     close_authority: Option<Address>,
+    data_len: u16,
+    has_restrictive_ext: bool,
 }
 
-/// Zero-copy security snapshot of a Classic SPL or Token-2022 token account (`owner`, `delegate`,
-/// `close_authority`) without unpacking full TLV extensions.
+/// Zero-copy security snapshot of a Classic SPL or Token-2022 token account (`mint`, `owner`,
+/// `delegate`, `close_authority`, `data_len`, and restrictive Token-2022 TLV extensions such as
+/// active `MemoTransfer` or `CpiGuard`).
 fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot> {
     let owner_prog = account.owner().as_ref();
     if owner_prog != &CLASSIC_TOKEN_PROGRAM_ID && owner_prog != &TOKEN_2022_PROGRAM_ID {
@@ -349,6 +356,8 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
     if !valid {
         return None;
     }
+    let data_len = u16::try_from(len).ok()?;
+    let mint_bytes: [u8; 32] = data[0..32].try_into().ok()?;
     let owner_bytes: [u8; 32] = data[32..64].try_into().ok()?;
     let has_delegate = match &data[72..76] {
         [0, 0, 0, 0] => false,
@@ -363,11 +372,39 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
         }
         _ => return None,
     };
+    let mut has_restrictive_ext = false;
+    if len > SPL_ACCOUNT_LEN + 1 {
+        let tlv = &data[SPL_ACCOUNT_LEN + 1..];
+        let mut pos = 0usize;
+        while pos + 4 <= tlv.len() {
+            let ext_type = u16::from_le_bytes([tlv[pos], tlv[pos + 1]]);
+            if ext_type == 0 {
+                break;
+            }
+            let ext_len = u16::from_le_bytes([tlv[pos + 2], tlv[pos + 3]]) as usize;
+            let val_start = pos + 4;
+            let val_end = val_start.saturating_add(ext_len);
+            if val_end > tlv.len() {
+                has_restrictive_ext = true;
+                break;
+            }
+            if ext_type == TOKEN_2022_EXT_MEMO_TRANSFER || ext_type == TOKEN_2022_EXT_CPI_GUARD {
+                if ext_len < 1 || tlv[val_start] != 0 {
+                    has_restrictive_ext = true;
+                    break;
+                }
+            }
+            pos = val_end;
+        }
+    }
     Some(TokenSecuritySnapshot {
         token_program: *account.owner(),
+        mint: Address::new_from_array(mint_bytes),
         owner: Address::new_from_array(owner_bytes),
         has_delegate,
         close_authority,
+        data_len,
+        has_restrictive_ext,
     })
 }
 
@@ -434,13 +471,12 @@ fn invoke_signed_arena<'account, A: AsRef<AccountView>>(
 #[derive(Clone, Copy)]
 struct WatchedEscrowSnap {
     idx: u8,
-    has_close_auth: bool,
+    data_len: u16,
     token_program: Address,
-    close_authority: Address,
 }
 
-/// Static `[16 KiB .. 24 KiB)` SBF heap arena storing pre-CPI `swap_escrow` token account
-/// snapshots (`80 * 66 B = 5,280 B`) with zero dynamic allocation and zero stack bloat.
+/// Static `[16 KiB .. 24 KiB)` SBF heap arena storing pre-CPI `escrow` token account
+/// snapshots (`80 * 36 B = 2,880 B`) with zero dynamic allocation and zero stack bloat.
 struct WatchedEscrowBuf {
     len: usize,
     entries: [WatchedEscrowSnap; MAX_ROUTER_CPI_ACCOUNTS],
@@ -477,13 +513,12 @@ impl WatchedEscrowBuf {
     }
 
     #[inline(always)]
-    fn push(&mut self, idx: usize, token_program: Address, close_authority: Option<Address>) {
+    fn push(&mut self, idx: usize, token_program: Address, data_len: u16) {
         if self.len < MAX_ROUTER_CPI_ACCOUNTS {
             self.entries[self.len] = WatchedEscrowSnap {
                 idx: idx as u8,
-                has_close_auth: close_authority.is_some(),
+                data_len,
                 token_program,
-                close_authority: close_authority.unwrap_or_else(|| Address::new_from_array([0u8; 32])),
             };
             self.len += 1;
         }
@@ -1317,7 +1352,7 @@ fn ix_open_page(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> 
 
 // ============================================================================
 // Tag 2: Deposit (supports both self-shielding and third-party confidential onramps)
-// Data: is_native_sol (1) | amount (8) | dynamic_out_wire (129) = 138 B
+// Data: flags (1) | amount (8) | dynamic_out_wire (129) = 138 B (plus tag = 139 B)
 // ============================================================================
 fn ix_deposit(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> ProgramResult {
     ensure(
@@ -1370,6 +1405,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Pr
         let sol_vault = &accounts[3];
         let rent_vault_acc = &accounts[4];
         let sys_prog = &accounts[5];
+        ensure(sys_prog.address() == &SYSTEM_ID, AudrenError::InvalidAccount)?;
         check_sol_vault(sol_vault, program_id, &pool)?;
         out_lane =
             resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?.0;
@@ -1410,6 +1446,7 @@ fn ix_deposit(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Pr
         let rent_vault_acc = &accounts[7];
         let sys_prog = &accounts[8];
         let hook_accounts = &accounts[9..];
+        ensure(sys_prog.address() == &SYSTEM_ID, AudrenError::InvalidAccount)?;
         check_supported_token_program(token_prog.address())?;
         out_lane =
             resolve_output_target(pool_acc, out_page_acc, rent_vault_acc, program_id, &pool)?.0;
@@ -1820,7 +1857,10 @@ fn ix_exec_via_escrow(
             && target_prog.address() != sys_prog.address()
             && target_prog.address() != zk_prog.address()
             && target_prog.address() != token_prog_in.address()
-            && target_prog.address() != token_prog_out.address(),
+            && target_prog.address() != token_prog_out.address()
+            && target_prog.address().as_ref() != &CLASSIC_TOKEN_PROGRAM_ID
+            && target_prog.address().as_ref() != &TOKEN_2022_PROGRAM_ID
+            && target_prog.address().as_ref() != &ASSOCIATED_TOKEN_PROGRAM_ID,
         AudrenError::InvalidTargetProgram,
     )?;
 
@@ -1981,6 +2021,28 @@ fn ix_exec_via_escrow(
         mint_in.address() != mint_out.address(),
         AudrenError::InvalidInstruction,
     )?;
+    let Some(escrow_in_snap) = token_account_security(escrow_in) else {
+        return Err(err(AudrenError::EscrowAccountAltered));
+    };
+    ensure(
+        escrow_in_snap.token_program == *token_prog_in.address()
+            && escrow_in_snap.owner == expected_escrow
+            && !escrow_in_snap.has_delegate
+            && escrow_in_snap.close_authority.is_none()
+            && !escrow_in_snap.has_restrictive_ext,
+        AudrenError::EscrowAccountAltered,
+    )?;
+    let Some(escrow_out_snap) = token_account_security(escrow_out) else {
+        return Err(err(AudrenError::EscrowAccountAltered));
+    };
+    ensure(
+        escrow_out_snap.token_program == *token_prog_out.address()
+            && escrow_out_snap.owner == expected_escrow
+            && !escrow_out_snap.has_delegate
+            && escrow_out_snap.close_authority.is_none()
+            && !escrow_out_snap.has_restrictive_ext,
+        AudrenError::EscrowAccountAltered,
+    )?;
 
     let expected_sol_vault = sol_vault_from_pool(program_id, &pool)?;
     let fee_recip_bytes = if relayer_fee > 0 {
@@ -2115,6 +2177,7 @@ fn ix_exec_via_escrow(
     let escrow_out_before = token_balance(escrow_out, token_prog_out.address())?;
 
     let escrow_in_funded = WatchedEscrowBuf::with_buf(|watched_escrow_accs| -> Result<u64, ProgramError> {
+        let mut pre_token_mask: u128 = 0;
         for (idx, acc) in action_accounts.iter().enumerate() {
             let k = acc.address();
             ensure(
@@ -2131,13 +2194,23 @@ fn ix_exec_via_escrow(
                     && (relayer_fee == 0 || k != fee_recipient_ata.address()),
                 AudrenError::InvalidAccount,
             )?;
+            let pre_snap = token_account_security(acc);
+            if let Some(ref snap) = pre_snap {
+                ensure(snap.owner != expected_va, AudrenError::InvalidAccount)?;
+            }
             if !acc.is_writable() {
                 continue;
             }
-            if let Some(snap) = token_account_security(acc) {
+            if let Some(snap) = pre_snap {
+                pre_token_mask |= 1u128 << idx;
                 if snap.owner == expected_escrow {
-                    ensure(!snap.has_delegate, AudrenError::EscrowAccountAltered)?;
-                    watched_escrow_accs.push(idx, snap.token_program, snap.close_authority);
+                    ensure(
+                        !snap.has_delegate
+                            && snap.close_authority.is_none()
+                            && !snap.has_restrictive_ext,
+                        AudrenError::EscrowAccountAltered,
+                    )?;
+                    watched_escrow_accs.push(idx, snap.token_program, snap.data_len);
                 }
             }
         }
@@ -2208,14 +2281,37 @@ fn ix_exec_via_escrow(
             let Some(snap) = token_account_security(acc) else {
                 return Err(err(AudrenError::EscrowAccountAltered));
             };
-            let expected_close_auth = entry.has_close_auth.then_some(entry.close_authority);
             ensure(
                 snap.token_program == entry.token_program
                     && snap.owner == expected_escrow
                     && !snap.has_delegate
-                    && snap.close_authority == expected_close_auth,
+                    && snap.close_authority.is_none()
+                    && !snap.has_restrictive_ext
+                    && snap.data_len == entry.data_len,
                 AudrenError::EscrowAccountAltered,
             )?;
+        }
+        // Re-scan writable action_accounts for token accounts newly initialized during CPI so
+        // an adversarial target_prog cannot create a canonical escrow ATA and hijack its owner,
+        // delegate, close_authority, or restrictive Token-2022 extensions (MemoTransfer/CpiGuard).
+        for (idx, acc) in action_accounts.iter().enumerate() {
+            if !acc.is_writable() || (pre_token_mask & (1u128 << idx)) != 0 {
+                continue;
+            }
+            if let Some(post_snap) = token_account_security(acc) {
+                let is_escrow_owned = post_snap.owner == expected_escrow;
+                let is_canonical_escrow_ata = acc.address()
+                    == &expected_ata(&expected_escrow, &post_snap.token_program, &post_snap.mint);
+                if is_escrow_owned || is_canonical_escrow_ata {
+                    ensure(
+                        is_escrow_owned
+                            && !post_snap.has_delegate
+                            && post_snap.close_authority.is_none()
+                            && !post_snap.has_restrictive_ext,
+                        AudrenError::EscrowAccountAltered,
+                    )?;
+                }
+            }
         }
         Ok(funded)
     })?;

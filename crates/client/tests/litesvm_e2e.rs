@@ -1260,13 +1260,14 @@ fn test_institutional_audited_mode_and_decryption() {
 }
 
 // ----------------------------------------------------------------------------
-// TEST 3: SwapViaRouter (Router-Agnostic 1-Tx Private Swap) + ALL Adversarial
-//         Router Attacks (Slippage, Delegate Hijack, Owner Hijack, Lamport Drain,
-//         Dust Theft, Protected Account Smuggling, Self-Reentrancy, Router Swap)!
+// TEST 3: ExecViaEscrow (Protocol-Agnostic 1-Tx Shielded DeFi CPI) + ALL Adversarial
+//         Target-Program Attacks (Slippage, Delegate Hijack, Owner Hijack, Lamport Drain,
+//         Vault Smuggling, Third-Mint Vault Smuggling, Self-Reentrancy, Uninitialized Escrow
+//         ATA Hijack, Token-2022 MemoTransfer Bricking, Unexpected Partial Fill)!
 // ----------------------------------------------------------------------------
 #[test]
-fn test_swap_via_router_and_adversarial_defenses() {
-    println!("\n=== TEST 3: SwapViaRouter (Arbitrary Indices, Change, Partial Refund & 8 Adversarial Attacks) ===");
+fn test_exec_via_escrow_and_adversarial_defenses() {
+    println!("\n=== TEST 3: ExecViaEscrow (Arbitrary Indices, Change, Partial Refund & 10 Adversarial Attacks) ===");
     let mut rng = StdRng::seed_from_u64(0xA0D8_E303);
     let audren_id = Keypair::new().pubkey();
     let router_id = Keypair::new().pubkey();
@@ -1294,7 +1295,7 @@ fn test_swap_via_router_and_adversarial_defenses() {
     );
     expect_ok(
         send_ixs(&mut svm, &authority, &[], &[to_svm_ix(&init_ix)], 300_000),
-        "InitPool for SwapViaRouter",
+        "InitPool for ExecViaEscrow",
     );
 
     let token_prog = Address::new_from_array(CLASSIC_TOKEN_PROGRAM_ID);
@@ -1693,6 +1694,187 @@ fn test_swap_via_router_and_adversarial_defenses() {
         AudrenError::UnexpectedPartialFill,
         "Reject unexpected partial fill",
     );
+
+    // --- ADVERSARIAL 8: Smuggling a THIRD mint's `vault_auth` custody ATA into action_accounts -> InvalidAccount ---
+    let mint_third = create_mint(&mut svm, &payer, &token_prog, 6);
+    let vault_third = create_ata_with_balance(&mut svm, &token_prog, &mint_third.pubkey(), &vault_auth, 1_000);
+    let smuggle_third_accs = make_router_accounts(vec![AudrenAccountMeta::readonly(vault_third)]);
+    let (smug_third_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: payer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring,
+            input_note: &alice_usdc_note,
+            secret_index: alice_usdc_note.slot_index,
+            mint_out: mint_wsol.pubkey().to_bytes(),
+            token_program_in: token_prog,
+            token_program_out: token_prog,
+            amount_in: 30_000_000,
+            min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &ok_data,
+            action_accounts: &smuggle_third_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&smug_third_ix)], 700_000),
+        AudrenError::InvalidAccount,
+        "Reject third-mint vault custody ATA smuggling into action_accounts",
+    );
+
+    // --- ADVERSARIAL 9: Mode 4 — Uninitialized canonical escrow ATA create + AccountOwner hijack during CPI -> EscrowAccountAltered ---
+    svm.airdrop(&mock_pool_auth, 100_000_000).unwrap();
+    let new_escrow_third_ata = derive_ata(&swap_escrow, &token_prog, &mint_third.pubkey());
+    let ata_prog = Address::new_from_array(audren_core::ASSOCIATED_TOKEN_PROGRAM_ID);
+    let sys_prog = Address::new_from_array(audren_core::SYSTEM_PROGRAM_ID);
+    let mut hijack_new_ata_accs = make_router_accounts(vec![
+        AudrenAccountMeta::readonly(attacker.pubkey()),
+        AudrenAccountMeta::readonly(sys_prog),
+        AudrenAccountMeta::writable(new_escrow_third_ata),
+        AudrenAccountMeta::readonly(mint_third.pubkey()),
+        AudrenAccountMeta::readonly(token_prog),
+        AudrenAccountMeta::readonly(ata_prog),
+    ]);
+    hijack_new_ata_accs[0] = AudrenAccountMeta::writable(mock_pool_auth);
+    let hijack_new_ata_data = make_router_data(4, 30_000_000, 250_000_000);
+    let (hijack_new_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: payer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring,
+            input_note: &alice_usdc_note,
+            secret_index: alice_usdc_note.slot_index,
+            mint_out: mint_wsol.pubkey().to_bytes(),
+            token_program_in: token_prog,
+            token_program_out: token_prog,
+            amount_in: 30_000_000,
+            min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &hijack_new_ata_data,
+            action_accounts: &hijack_new_ata_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&hijack_new_ix)], 800_000),
+        AudrenError::EscrowAccountAltered,
+        "Reject uninitialized canonical escrow ATA creation + owner hijack during CPI",
+    );
+
+    // --- ADVERSARIAL 10: Mode 5 — Token-2022 Reallocate([MemoTransfer]) + EnableRequiredMemoTransfers on escrow_in -> EscrowAccountAltered ---
+    let t22_prog = Address::new_from_array(TOKEN_2022_PROGRAM_ID);
+    let mint_t22 = create_mint(&mut svm, &payer, &t22_prog, 6);
+    let payer_t22 = create_ata_with_balance(&mut svm, &t22_prog, &mint_t22.pubkey(), &payer.pubkey(), 100_000_000);
+    let vault_t22 = create_ata_with_balance(&mut svm, &t22_prog, &mint_t22.pubkey(), &vault_auth, 0);
+    let escrow_t22 = create_ata_with_balance(&mut svm, &t22_prog, &mint_t22.pubkey(), &swap_escrow, 0);
+    let mock_pool_t22 = create_ata_with_balance(&mut svm, &t22_prog, &mint_t22.pubkey(), &mock_pool_auth, 500_000_000);
+    let (dep_t22_ix, _) = build_deposit(
+        audren_id,
+        payer.pubkey(),
+        pool_id,
+        0,
+        &alice.address(),
+        mint_t22.pubkey().to_bytes(),
+        40_000_000,
+        Some((t22_prog, payer_t22, vault_t22)),
+        &mut rng,
+    )
+    .unwrap();
+    expect_ok(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&dep_t22_ix)], 300_000),
+        "Deposit Token-2022 note for MemoTransfer bricking defense test",
+    );
+    let t22_notes = scan_and_decrypt_page(&svm, &audren_id, pool_id, 0, &alice, None);
+    let alice_t22_note = t22_notes
+        .into_iter()
+        .find(|n| n.mint == mint_t22.pubkey().to_bytes())
+        .unwrap();
+    let ring_t22 = read_ring(&svm, &audren_id, pool_id, &[0]);
+    let memo_brick_accs = vec![
+        AudrenAccountMeta::writable(mock_pool_auth),
+        AudrenAccountMeta::writable(escrow_t22),
+        AudrenAccountMeta::writable(mock_pool_t22),
+        AudrenAccountMeta::writable_signer(swap_escrow),
+        AudrenAccountMeta::writable(escrow_wsol),
+        AudrenAccountMeta::writable(mock_pool_wsol),
+        AudrenAccountMeta::readonly(t22_prog),
+        AudrenAccountMeta::readonly(token_prog),
+        AudrenAccountMeta::readonly(mint_t22.pubkey()),
+        AudrenAccountMeta::readonly(mint_wsol.pubkey()),
+        AudrenAccountMeta::readonly(sys_prog),
+    ];
+    let memo_brick_data = make_router_data(5, 20_000_000, 250_000_000);
+    let (memo_brick_ix, _, _, _) = build_exec_via_escrow(
+        &ExecViaEscrowParams {
+            program_id: audren_id,
+            payer: payer.pubkey(),
+            pool_id,
+            out_page_id: 0,
+            shard_id,
+            input_page_ids: &[0],
+            ring: &ring_t22,
+            input_note: &alice_t22_note,
+            secret_index: alice_t22_note.slot_index,
+            mint_out: mint_wsol.pubkey().to_bytes(),
+            token_program_in: t22_prog,
+            token_program_out: token_prog,
+            amount_in: 20_000_000,
+            min_amount_out: 200_000_000,
+            relayer_fee: 0,
+            fee_on_output: false,
+            fee_recipient_ata: None,
+            allow_partial_refund: false,
+            recipient: &bob.address(),
+            change_addr: &alice.address(),
+            auditor_pk: None,
+            target_program_id: router_id,
+            escrow_idx,
+            escrow_in_idx,
+            escrow_out_idx,
+            target_ix_data: &memo_brick_data,
+            action_accounts: &memo_brick_accs,
+        },
+        &mut rng,
+    )
+    .unwrap();
+    expect_custom_err(
+        send_ixs(&mut svm, &payer, &[], &[to_svm_ix(&memo_brick_ix)], 800_000),
+        AudrenError::EscrowAccountAltered,
+        "Reject Token-2022 Reallocate([MemoTransfer]) + EnableRequiredMemoTransfers bricking",
+    );
+    // Refresh ring after Token-2022 deposit so subsequent happy-path swap matches current page prefix
+    let ring = read_ring(&svm, &audren_id, pool_id, &[0]);
 
     // --- HAPPY PATH: Partial fill swap WITH change note AND stealth refund note! ---
     // Alice spends 50 USDC note -> swaps 30 USDC (router fills 22 USDC -> pays 250_000_000 WSOL to Bob,
@@ -2165,7 +2347,7 @@ fn test_proof_buffer_mtu_and_adversarial_guards() {
 // TEST 6: Cryptographic & Protocol Security Regressions
 //   6a. Frozen Heart single-tx `[Deposit(solved P_s), Withdraw(forged)]` MUST fail
 //   6b. Open-page concurrent append immunity (immutable per-page prefix_count)
-//   6c. Relayer change-note stealth_pk hijacking on Withdraw & SwapViaRouter MUST fail
+//   6c. Relayer change-note stealth_pk hijacking on Withdraw & ExecViaEscrow MUST fail
 //   6d. Zero ephemeral_pk deposit rejected + scanner continues past zero slot + 128+128 merge cap
 // ----------------------------------------------------------------------------
 #[test]
@@ -2935,17 +3117,17 @@ fn test_multilane_parallel_appends_pause_escape_and_slots() {
 }
 
 // ----------------------------------------------------------------------------
-// TEST 8: v0.3.0 Universal DeFi Execution Rail, Native Relayer Fees,
+// TEST 8: Universal DeFi Execution Rail, Native Relayer Fees,
 //         Atomic WSOL Unwrap -> 0-Lamport Deterministic DeFi Session Wallet,
 //         Pause Escape Hatch on Unwrap, and Zero-Dust `fee_from_amount` Sweep!
 // ----------------------------------------------------------------------------
 #[test]
-fn test_v030_exec_fees_unwrap_wsol_defi_session_and_zero_dust_sweep() {
+fn test_exec_fees_unwrap_wsol_defi_session_and_zero_dust_sweep() {
     use audren_core::WSOL_MINT;
     use solana_system_interface::instruction as sys_ix;
     use spl_token_2022_interface::instruction as token_ix;
 
-    println!("\n=== TEST 8: v0.3.0 ExecViaEscrow Fees, Withdraw unwrap_wsol, DeFi Session B_0 & Zero-Dust Sweep ===");
+    println!("\n=== TEST 8: ExecViaEscrow Fees, Withdraw unwrap_wsol, DeFi Session B_0 & Zero-Dust Sweep ===");
     let mut rng = StdRng::seed_from_u64(0x0303_2026);
     let audren_id = Keypair::new().pubkey();
     let router_id = Keypair::new().pubkey();
@@ -3553,5 +3735,5 @@ fn test_v030_exec_fees_unwrap_wsol_defi_session_and_zero_dust_sweep() {
     );
     assert_eq!(svm.get_account(&b1_kp.pubkey()).map(|a| a.lamports).unwrap_or(0), 0);
     assert_eq!(svm.get_account(&sol_vault).unwrap().lamports - sol_vault_before2, sweep_b1_gross);
-    println!("  [v0.3.0 EXEC FEES + UNWRAP WSOL + DEFI SESSION B_0/B_1 + ZERO-DUST SWEEP PASSED]");
+    println!("  [EXEC FEES + UNWRAP WSOL + DEFI SESSION B_0/B_1 + ZERO-DUST SWEEP PASSED]");
 }

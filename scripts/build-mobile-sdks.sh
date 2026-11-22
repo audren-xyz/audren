@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/build-mobile-sdks.sh bindings     # Build host release lib + regenerate Swift & Kotlin bindings
-#   ./scripts/build-mobile-sdks.sh ios          # Build universal AudrenFFI.xcframework (iOS device + simulator + macOS)
+#   ./scripts/build-mobile-sdks.sh ios          # Build universal AudrenFFI.xcframework (iOS device + iOS simulator)
 #   ./scripts/build-mobile-sdks.sh android      # Build Android jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/libaudren_ffi.so
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

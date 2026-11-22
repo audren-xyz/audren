@@ -157,16 +157,13 @@ verify_onchain_metadata() {
   local seed="$1"
   local rpc_url="$2"
   local expected_path="$3"
-  local fetched
+  local fetched attempt
   fetched="$(mktemp "/tmp/audren-fetch-${seed}-XXXXXX.txt")"
-  if ! npx --yes @solana-program/program-metadata@latest fetch "$seed" \
-    "$PROGRAM_ID" \
-    --rpc "$rpc_url" >"$fetched"; then
-    rm -f "$fetched"
-    echo "Error: failed to fetch on-chain Program Metadata '${seed}' for $PROGRAM_ID" >&2
-    exit 1
-  fi
-  if ! python3 - "$expected_path" "$fetched" "$seed" <<'PY'
+  for attempt in 1 2 3 4; do
+    if npx --yes @solana-program/program-metadata@latest fetch "$seed" \
+      "$PROGRAM_ID" \
+      --rpc "$rpc_url" >"$fetched" 2>/dev/null &&
+      python3 - "$expected_path" "$fetched" "$seed" <<'PY'
 import json, pathlib, sys
 
 expected_path, fetched_path, seed = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -180,11 +177,18 @@ if actual != expected:
     sys.exit(f"Error: on-chain Program Metadata '{seed}' does not match {expected_path}")
 print(f"Verified on-chain Program Metadata '{seed}' matches {expected_path} byte-for-byte.")
 PY
-  then
-    rm -f "$fetched"
-    exit 1
-  fi
+    then
+      rm -f "$fetched"
+      return 0
+    fi
+    if [[ "$attempt" -lt 4 ]]; then
+      echo "Waiting 3s for on-chain Program Metadata '${seed}' RPC propagation (attempt ${attempt}/4)..." >&2
+      sleep 3
+    fi
+  done
   rm -f "$fetched"
+  echo "Error: failed to verify on-chain Program Metadata '${seed}' for $PROGRAM_ID after 4 attempts" >&2
+  exit 1
 }
 
 publish_security() {
@@ -255,6 +259,7 @@ PY
       --format json \
       --keypair "$KEYPAIR" \
       --rpc "$rpc_url"; then
+      npx --yes @solana-program/program-metadata@latest close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
       rm -f "$min_idl"
       exit 1
     fi
@@ -264,6 +269,7 @@ PY
       --close-buffer \
       --keypair "$KEYPAIR" \
       --rpc "$rpc_url"; then
+      npx --yes @solana-program/program-metadata@latest close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
       rm -f "$min_idl"
       exit 1
     fi
@@ -381,24 +387,42 @@ publish_github_release() {
   version="$(read_program_version)"
   tag="v${version}"
 
-  # Verify OtterSec reports verified status matching commit & local ELF hash
-  local exec_hash raw_sha elf_bytes status_json
+  # Poll OtterSec until remote attestation matches commit & local verifiable ELF hash
+  local exec_hash raw_sha elf_bytes status_json poll_attempt max_polls
   exec_hash="$(solana-verify get-executable-hash "$VERIFIABLE_SO_PATH" | tail -n 1 | tr -d '[:space:]')"
   raw_sha="$(shasum -a 256 "$VERIFIABLE_SO_PATH" | awk '{print $1}')"
   elf_bytes="$(wc -c < "$VERIFIABLE_SO_PATH" | tr -d '[:space:]')"
-  status_json="$(curl -fsS "https://verify.osec.io/status/${PROGRAM_ID}")"
-
-  python3 - "$status_json" "$commit" "$exec_hash" <<'PY'
+  max_polls="${AUDREN_VERIFY_POLL_ATTEMPTS:-60}"
+  for ((poll_attempt = 1; poll_attempt <= max_polls; poll_attempt++)); do
+    status_json="$(curl -fsS "https://verify.osec.io/status/${PROGRAM_ID}" || echo '{}')"
+    if python3 - "$status_json" "$commit" "$exec_hash" <<'PY'
 import json, sys
-data = json.loads(sys.argv[1])
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
 commit, exec_hash = sys.argv[2], sys.argv[3]
-if not data.get("is_verified"):
-    sys.exit("Error: Mainnet Verified Build is not yet verified on verify.osec.io")
-if data.get("commit") != commit:
-    sys.exit(f"Error: verify.osec.io commit {data.get('commit')} != release commit {commit}")
-if data.get("on_chain_hash") != exec_hash or data.get("executable_hash") != exec_hash:
-    sys.exit(f"Error: verify.osec.io hash mismatch vs local verifiable ELF {exec_hash}")
+ok = (
+    bool(data.get("is_verified"))
+    and data.get("commit") == commit
+    and data.get("on_chain_hash") == exec_hash
+    and data.get("executable_hash") == exec_hash
+)
+sys.exit(0 if ok else 1)
 PY
+    then
+      echo "OtterSec remote attestation confirmed for commit ${commit} (${exec_hash})."
+      break
+    fi
+    if [[ "$poll_attempt" -eq "$max_polls" ]]; then
+      echo "Error: verify.osec.io did not finish attesting commit ${commit} (${exec_hash}) within $((max_polls * 15))s." >&2
+      echo "Latest response: ${status_json}" >&2
+      echo "Once verified, cut the release with: ./scripts/upgrade-program.sh release --commit ${commit}" >&2
+      exit 1
+    fi
+    echo "Waiting 15s for OtterSec remote build attestation (${poll_attempt}/${max_polls})..." >&2
+    sleep 15
+  done
 
   # Ensure annotated git tag points to the exact verified commit and is pushed to origin
   local existing_tag_sha=""
@@ -684,8 +708,16 @@ case "$1" in
       exit 1
     fi
 
-    echo "Pre-flight: verifying sBPFv3 ELF header ($SO_PATH)..."
+    echo "Pre-flight: verifying sBPFv3 ELF header & embedded .security.txt version ($SO_PATH)..."
     python3 "$ROOT/scripts/build-sbf.py" --check-elf "$SO_PATH"
+    EXPECTED_VERSION="$(read_program_version)"
+    python3 - "$SO_PATH" "$EXPECTED_VERSION" <<'PY'
+import pathlib, sys
+elf = pathlib.Path(sys.argv[1]).read_bytes()
+needle = f"source_release\0v{sys.argv[2]}\0".encode("utf-8")
+if needle not in elf:
+    sys.exit(f"Error: ELF {sys.argv[1]} does not contain embedded .security.txt source_release v{sys.argv[2]} (rebuild with ./scripts/upgrade-program.sh build-verifiable).")
+PY
 
     COMMIT_SHA=""
     if [[ "$CLUSTER" == "mainnet" && "${ALLOW_UNVERIFIED_DEPLOY:-0}" != "1" ]]; then
@@ -702,11 +734,13 @@ case "$1" in
     if [[ "$CLUSTER" == "mainnet" ]]; then
       TOTAL_STEPS=4
     fi
-    echo "Step 1/${TOTAL_STEPS}: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN)..."
+    PRIORITY_FEE="${SOLANA_PRIORITY_FEE_MICROLAMPORTS:-50000}"
+    echo "Step 1/${TOTAL_STEPS}: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN, priority fee ${PRIORITY_FEE} micro-lamports)..."
     "$SOLANA_BIN" program deploy "$SO_PATH" \
       --program-id "$PROGRAM_ID" \
       --upgrade-authority "$KEYPAIR" \
       --keypair "$KEYPAIR" \
+      --with-compute-unit-price "$PRIORITY_FEE" \
       --url "$RPC_URL"
 
     echo "Step 2/${TOTAL_STEPS}: Syncing canonical Program Metadata (security + idl) on $CLUSTER..."

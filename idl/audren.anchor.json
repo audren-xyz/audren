@@ -764,7 +764,7 @@
           "writable": true,
           "signer": false,
           "docs": [
-            "PageRentVault or LaneRentVault PDA."
+            "PageRentVault (Lane 0, read-only allowed when hasChange=false) or LaneRentVault (Lanes 1..15 when hasChange=true)."
           ]
         },
         {
@@ -830,7 +830,7 @@
           "signer": false,
           "optional": true,
           "docs": [
-            "SPL/Token-2022 / unwrapWsol: Classic SPL Token or Token-2022 program."
+            "SPL/Token-2022: Classic SPL Token or Token-2022 program; unwrapWsol: strictly Classic SPL Token program."
           ]
         },
         {
@@ -839,7 +839,7 @@
           "signer": false,
           "optional": true,
           "docs": [
-            "unwrapWsol only: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] created and closed atomically."
+            "SPL/Token-2022: inputPage0 (ro); unwrapWsol: ephemeral 1-shot WSOL PDA ['audren_unwrap', poolId, nullifier] (wr) created and closed atomically."
           ]
         }
       ],
@@ -1889,7 +1889,7 @@
     {
       "code": 10,
       "name": "ZeroAmount",
-      "msg": "Deposit, swap, or withdrawal amount must be strictly greater than zero."
+      "msg": "Deposit, execution, or withdrawal amount must be strictly greater than zero."
     },
     {
       "code": 11,

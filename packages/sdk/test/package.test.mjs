@@ -25,6 +25,8 @@ import {
   base58Encode,
   base58Decode,
   AudrenRelayClient,
+  AUDREN_DEFAULT_RELAY_URL,
+  DEFAULT_RELAY_URL,
   calculateTransferFee,
   compileV1Message,
   serializeV1Transaction,
@@ -162,4 +164,58 @@ test('published Codama and Anchor IDLs match JSON artifacts and protocol counts'
   assert.equal(AUDREN_CODAMA_IDL.program.accounts.length, 7);
   assert.equal(AUDREN_CODAMA_IDL.program.pdas.length, 11);
   assert.equal(AUDREN_CODAMA_IDL.program.errors.length, 33);
+});
+test('AudrenRelayClient.getFeeQuote sends canonical op query param and parses NativeFeeQuote', async () => {
+  assert.equal(DEFAULT_RELAY_URL, AUDREN_DEFAULT_RELAY_URL);
+  let capturedUrl = '';
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    capturedUrl = String(url);
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        cluster: 'mainnet',
+        op: 'exec_escrow',
+        billingMode: 'self_paying',
+        feeMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        feeTokenProgram: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+        feeRecipient: '11111111111111111111111111111111',
+        feeRecipientExists: true,
+        needsFeeAtaSetup: false,
+        relayerFee: '12500',
+        feeBps: 25,
+        estimatedRelayCostLamports: '2340000',
+        estimatedRelayCostUsd: 0.35,
+        reason: 'Self-paying protocol relay fee.',
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+  try {
+    const relay = new AudrenRelayClient('https://relay.audren.xyz/');
+    const res = await relay.getFeeQuote({
+      cluster: 'mainnet',
+      op: 'exec_escrow',
+      mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+      amount: '50000000',
+      hasChange: true,
+      missingAtaCount: 1,
+    });
+    assert.ok(capturedUrl.includes('op=exec_escrow'));
+    assert.ok(capturedUrl.includes('missingAtaCount=1'));
+    assert.equal(res.billingMode, 'self_paying');
+    assert.equal(res.relayerFee, '12500');
+    assert.equal(res.estimatedRelayCostLamports, '2340000');
+    // Deprecated `quoteFee({ action })` still maps transparently to `?op=`
+    await relay.quoteFee({
+      action: 'withdraw',
+      mint: 'native',
+      amount: '1000000000',
+      unwrapWsol: true,
+    });
+    assert.ok(capturedUrl.includes('op=withdraw'));
+    assert.ok(capturedUrl.includes('unwrapWsol=true'));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });

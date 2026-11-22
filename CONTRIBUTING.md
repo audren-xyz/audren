@@ -19,13 +19,14 @@ python3 idl/verify-idl.py
 # 2. Rust program, mock router, and workspace checks
 cargo check --manifest-path program/Cargo.toml
 cargo check --manifest-path program/Cargo.toml --features no-entrypoint
+cargo test --manifest-path program/Cargo.toml
 cargo check --manifest-path tests/mock-router/Cargo.toml
 cargo check --workspace --tests
 
 # 3. TypeScript SDK, Privacy Relayer, and Web UI checks
 pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
 pnpm --dir apps/relay typecheck
-pnpm --dir apps/web typecheck
+pnpm --dir apps/web check
 
 # 4. Cross-language conformance suites (Rust, FFI, Swift & Kotlin)
 cargo test -p audren-client --test conformance_vectors

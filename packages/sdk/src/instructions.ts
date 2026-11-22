@@ -4,7 +4,7 @@
  * `WriteProofBuffer` (8), `ExecBuffered` (9), `CloseProofBuffer` (10),
  * `InitLane` (11), and `OpenLanePage` (12).
  *
- * Zero-knowledge proving instructions (`Transfer`, `Merge`, `SwapViaRouter`, `Withdraw`)
+ * Zero-knowledge proving instructions (`Transfer`, `Merge`, `ExecViaEscrow`, `Withdraw`)
  * invoke `@audren/sdk/prover` (`packages/sdk/src/prover.ts`), the Rust prover
  * (`crates/client`), or the UniFFI native mobile prover (`crates/audren-ffi`).
  */
