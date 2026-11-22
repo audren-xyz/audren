@@ -15,11 +15,12 @@
 import {
   TAG_DEPOSIT_SOL,
   TAG_JOINSPLIT,
-  USDC_MAINNET_MINT_STR,
-  WSOL_MINT_STR,
+  WSOL_MINT,
   base58Decode,
-  toBase64,
 } from '@audren/sdk'
+import { USDC_MAINNET_MINT_STR, toBase64 } from '../src/solana/codec'
+
+const WSOL_MINT_STR = WSOL_MINT
 
 const RELAY_BASE = (process.env.RELAY_BASE ?? 'https://relay.audren.xyz').replace(/\/+$/, '')
 
