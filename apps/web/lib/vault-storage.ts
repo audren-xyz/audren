@@ -1,16 +1,6 @@
-import {
-  MAX_APPEND_LANES,
-  base58Encode,
-  fromBase64,
-  scalarToBytes32LE,
-  sha256,
-  toBase64,
-  u32le,
-  utf8,
-  type AudrenKeypair,
-  type SpendableAudrenNote,
-} from '@audren/sdk/prover'
+import { CompactWalletStore, base58Encode, type AudrenKeys } from '@audren/sdk'
 
+const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
 function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
@@ -19,238 +9,187 @@ function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
   return copy.buffer
 }
 
+function toBase64(bytes: Uint8Array): string {
+  let bin = ''
+  for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]!)
+  return btoa(bin)
+}
+
+function fromBase64(b64: string): Uint8Array {
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
 // ============================================================================
-// Encrypted Persistent Local Vault Inventory (AES-256-GCM keyed from viewSk)
-// Keyed by (cluster, poolId, spendPk) so historical notes never disappear on
-// page rollover and incremental checkpoint recovery resumes where it left off.
+// AES-256-GCM Encrypted IndexedDB Persistence for CompactWalletStore
+// Discards every sealed SubtreePage/MemoPage immediately; persists only frozen
+// intra-subtree siblings, 32 B finalized subroots, frontier leaves, & 16 B nf prefixes.
 // ============================================================================
 
-export interface VaultInventorySnapshot {
-  version: 1
-  birthPageId?: bigint | null
-  lastSealedPageId: bigint | null
-  lastOpenPageId: bigint | null
-  lastOpenPageCount: number
-  laneSealedThrough?: Record<number, bigint>
-  lastVerifiedAtMs: number | null
-  notes: SpendableAudrenNote[]
-  verifiedDynamicAmounts: Record<string, bigint>
+const IDB_NAME = 'audren_v2_vault_store'
+const IDB_STORE = 'compact_stores'
+const IDB_VERSION = 1
+
+function storeKey(cluster: string, poolId: number, spendPkBytes: Uint8Array): string {
+  return `audren_v2_store:${cluster}:${poolId}:${base58Encode(spendPkBytes)}`
 }
 
-interface SerializedSpendableNote {
-  pageId: string
-  slotIndex: number
-  mintB64: string
-  mintB58: string
-  isNativeSol: boolean
-  amount: string
-  isDynamicOutput: boolean
-  amountResolved: boolean
-  memoText: string
-  stealthPkB64: string
-  assetTagB64: string
-  commitmentB64: string
-  assetBlinding: string
-  valueBlinding: string
-  stealthScalar: string
-  spendX: string
-  nullifierB64: string
-  nullifierPdaB58: string
+async function openVaultDb(): Promise<IDBDatabase | null> {
+  if (typeof window === 'undefined' || !('indexedDB' in window)) return null
+  return new Promise((resolve) => {
+    try {
+      const req = window.indexedDB.open(IDB_NAME, IDB_VERSION)
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE)
+        }
+      }
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => resolve(null)
+    } catch {
+      resolve(null)
+    }
+  })
 }
 
-interface SerializedVaultInventory {
-  version: 1
-  birthPageId?: string | null
-  lastSealedPageId: string | null
-  lastOpenPageId: string | null
-  lastOpenPageCount: number
-  laneSealedThrough?: Record<string, string>
-  lastVerifiedAtMs: number | null
-  notes: SerializedSpendableNote[]
-  verifiedDynamicAmounts: Record<string, string>
+async function idbGet(key: string): Promise<string | null> {
+  const db = await openVaultDb()
+  if (!db) {
+    try {
+      return window.localStorage.getItem(key)
+    } catch {
+      return null
+    }
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(IDB_STORE, 'readonly')
+    const req = tx.objectStore(IDB_STORE).get(key)
+    req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : null)
+    req.onerror = () => resolve(null)
+  })
 }
 
-function vaultStorageKey(cluster: string, poolId: number, spendPk: Uint8Array): string {
-  return `audren_vault_inv_v1:${cluster}:${poolId}:${base58Encode(spendPk)}`
+async function idbSet(key: string, value: string): Promise<void> {
+  const db = await openVaultDb()
+  if (!db) {
+    try {
+      window.localStorage.setItem(key, value)
+    } catch {
+      // ignore quota errors
+    }
+    return
+  }
+  await new Promise<void>((resolve) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).put(value, key)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => resolve()
+  })
 }
 
-async function deriveVaultStorageKey(
-  viewSk: bigint,
+async function idbDelete(key: string): Promise<void> {
+  const db = await openVaultDb()
+  if (!db) {
+    try {
+      window.localStorage.removeItem(key)
+    } catch {
+      // ignore
+    }
+    return
+  }
+  await new Promise<void>((resolve) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).delete(key)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => resolve()
+  })
+}
+
+async function deriveStoreAesKey(
+  viewSk: Uint8Array,
   cluster: string,
   poolId: number,
 ): Promise<CryptoKey> {
-  const keyBytes = await sha256(
-    utf8('audren/v1/local-inventory-key'),
-    scalarToBytes32LE(viewSk),
-    utf8(cluster),
-    u32le(poolId),
-  )
-  return crypto.subtle.importKey('raw', toArrayBuffer(keyBytes), 'AES-GCM', false, [
+  const info = encoder.encode(`audren/v2/compact-store-key:${cluster}:${poolId}`)
+  const preimage = new Uint8Array(viewSk.byteLength + info.byteLength)
+  preimage.set(viewSk, 0)
+  preimage.set(info, viewSk.byteLength)
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', toArrayBuffer(preimage)))
+  return crypto.subtle.importKey('raw', toArrayBuffer(digest), 'AES-GCM', false, [
     'encrypt',
     'decrypt',
   ])
 }
 
-export async function loadEncryptedVaultInventory(
-  keys: Pick<AudrenKeypair, 'spendPk' | 'viewSk'>,
+export async function loadEncryptedCompactStore(
+  keys: Pick<AudrenKeys, 'spendPkBytes' | 'viewSk'>,
   cluster: string,
   poolId = 0,
-): Promise<VaultInventorySnapshot | null> {
+): Promise<CompactWalletStore | null> {
   if (typeof window === 'undefined') return null
   try {
-    const raw = window.localStorage.getItem(vaultStorageKey(cluster, poolId, keys.spendPk))
+    const raw = await idbGet(storeKey(cluster, poolId, keys.spendPkBytes))
     if (!raw) return null
-    const envelope = JSON.parse(raw) as { iv?: string; ct?: string }
-    if (!envelope.iv || !envelope.ct) return null
-    const aesKey = await deriveVaultStorageKey(keys.viewSk, cluster, poolId)
+    const env = JSON.parse(raw) as { iv?: string; ct?: string }
+    if (!env.iv || !env.ct) return null
+    const aesKey = await deriveStoreAesKey(keys.viewSk, cluster, poolId)
     const plain = await crypto.subtle.decrypt(
       {
         name: 'AES-GCM',
-        iv: toArrayBuffer(fromBase64(envelope.iv)),
-        additionalData: toArrayBuffer(keys.spendPk),
+        iv: toArrayBuffer(fromBase64(env.iv)),
+        additionalData: toArrayBuffer(keys.spendPkBytes),
       },
       aesKey,
-      toArrayBuffer(fromBase64(envelope.ct)),
+      toArrayBuffer(fromBase64(env.ct)),
     )
-    const parsed = JSON.parse(decoder.decode(new Uint8Array(plain))) as SerializedVaultInventory
-    if (parsed.version !== 1 || !Array.isArray(parsed.notes)) return null
-
-    const verifiedDynamicAmounts: Record<string, bigint> = {}
-    for (const [k, v] of Object.entries(parsed.verifiedDynamicAmounts ?? {})) {
-      if (/^\d+$/.test(v)) verifiedDynamicAmounts[k] = BigInt(v)
-    }
-
-    const laneSealedThrough: Record<number, bigint> = {}
-    for (const [k, v] of Object.entries(parsed.laneSealedThrough ?? {})) {
-      const lid = Number(k)
-      if (Number.isInteger(lid) && lid >= 0 && lid < MAX_APPEND_LANES && /^\d+$/.test(v)) {
-        laneSealedThrough[lid] = BigInt(v)
-      }
-    }
-
-    const notes: SpendableAudrenNote[] = parsed.notes.map((n) => ({
-      pageId: BigInt(n.pageId),
-      slotIndex: n.slotIndex,
-      mint: fromBase64(n.mintB64),
-      mintB58: n.mintB58,
-      isNativeSol: n.isNativeSol,
-      amount: BigInt(n.amount),
-      isDynamicOutput: n.isDynamicOutput,
-      amountResolved: n.amountResolved,
-      memoText: n.memoText,
-      stealthPk: fromBase64(n.stealthPkB64),
-      assetTag: fromBase64(n.assetTagB64),
-      commitment: fromBase64(n.commitmentB64),
-      assetBlinding: BigInt(n.assetBlinding),
-      valueBlinding: BigInt(n.valueBlinding),
-      stealthScalar: BigInt(n.stealthScalar),
-      spendX: BigInt(n.spendX),
-      nullifier: fromBase64(n.nullifierB64),
-      nullifierPdaB58: n.nullifierPdaB58,
-    }))
-
-    return {
-      version: 1,
-      birthPageId:
-        parsed.birthPageId !== undefined && parsed.birthPageId !== null
-          ? BigInt(parsed.birthPageId)
-          : null,
-      lastSealedPageId: parsed.lastSealedPageId !== null ? BigInt(parsed.lastSealedPageId) : null,
-      lastOpenPageId: parsed.lastOpenPageId !== null ? BigInt(parsed.lastOpenPageId) : null,
-      lastOpenPageCount: parsed.lastOpenPageCount ?? 0,
-      laneSealedThrough,
-      lastVerifiedAtMs: parsed.lastVerifiedAtMs ?? null,
-      notes,
-      verifiedDynamicAmounts,
-    }
+    return CompactWalletStore.fromJSON(decoder.decode(new Uint8Array(plain)))
   } catch {
     return null
   }
 }
 
-export async function saveEncryptedVaultInventory(
-  keys: Pick<AudrenKeypair, 'spendPk' | 'viewSk'>,
+export async function saveEncryptedCompactStore(
+  keys: Pick<AudrenKeys, 'spendPkBytes' | 'viewSk'>,
   cluster: string,
   poolId: number,
-  snapshot: VaultInventorySnapshot,
+  store: CompactWalletStore,
 ): Promise<void> {
   if (typeof window === 'undefined') return
   try {
-    const serializedDyn: Record<string, string> = {}
-    for (const [k, v] of Object.entries(snapshot.verifiedDynamicAmounts)) {
-      serializedDyn[k] = v.toString()
-    }
-    const serializedLanes: Record<string, string> = {}
-    for (const [k, v] of Object.entries(snapshot.laneSealedThrough ?? {})) {
-      serializedLanes[String(k)] = v.toString()
-    }
-    const payload: SerializedVaultInventory = {
-      version: 1,
-      birthPageId:
-        snapshot.birthPageId !== undefined && snapshot.birthPageId !== null
-          ? snapshot.birthPageId.toString()
-          : null,
-      lastSealedPageId:
-        snapshot.lastSealedPageId !== null ? snapshot.lastSealedPageId.toString() : null,
-      lastOpenPageId: snapshot.lastOpenPageId !== null ? snapshot.lastOpenPageId.toString() : null,
-      lastOpenPageCount: snapshot.lastOpenPageCount,
-      laneSealedThrough: serializedLanes,
-      lastVerifiedAtMs: snapshot.lastVerifiedAtMs,
-      notes: snapshot.notes.map((n) => ({
-        pageId: n.pageId.toString(),
-        slotIndex: n.slotIndex,
-        mintB64: toBase64(n.mint),
-        mintB58: n.mintB58,
-        isNativeSol: n.isNativeSol,
-        amount: n.amount.toString(),
-        isDynamicOutput: n.isDynamicOutput,
-        amountResolved: n.amountResolved,
-        memoText: n.memoText,
-        stealthPkB64: toBase64(n.stealthPk),
-        assetTagB64: toBase64(n.assetTag),
-        commitmentB64: toBase64(n.commitment),
-        assetBlinding: n.assetBlinding.toString(),
-        valueBlinding: n.valueBlinding.toString(),
-        stealthScalar: n.stealthScalar.toString(),
-        spendX: n.spendX.toString(),
-        nullifierB64: toBase64(n.nullifier),
-        nullifierPdaB58: n.nullifierPdaB58,
-      })),
-      verifiedDynamicAmounts: serializedDyn,
-    }
     const iv = crypto.getRandomValues(new Uint8Array(12))
-    const aesKey = await deriveVaultStorageKey(keys.viewSk, cluster, poolId)
+    const aesKey = await deriveStoreAesKey(keys.viewSk, cluster, poolId)
     const ct = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: toArrayBuffer(keys.spendPk) },
+      {
+        name: 'AES-GCM',
+        iv: toArrayBuffer(iv),
+        additionalData: toArrayBuffer(keys.spendPkBytes),
+      },
       aesKey,
-      toArrayBuffer(utf8(JSON.stringify(payload))),
+      toArrayBuffer(encoder.encode(store.toJSON())),
     )
-    window.localStorage.setItem(
-      vaultStorageKey(cluster, poolId, keys.spendPk),
+    await idbSet(
+      storeKey(cluster, poolId, keys.spendPkBytes),
       JSON.stringify({ iv: toBase64(iv), ct: toBase64(new Uint8Array(ct)) }),
     )
   } catch {
-    // Ignore storage quota errors
+    // ignore storage quota errors
   }
 }
 
-export function clearEncryptedVaultInventory(
-  spendPk: Uint8Array,
+export async function clearEncryptedCompactStore(
+  spendPkBytes: Uint8Array,
   cluster: string,
   poolId = 0,
-): void {
+): Promise<void> {
   if (typeof window === 'undefined') return
-  try {
-    window.localStorage.removeItem(vaultStorageKey(cluster, poolId, spendPk))
-  } catch {
-    // Ignore
-  }
+  await idbDelete(storeKey(cluster, poolId, spendPkBytes))
 }
 
 // ============================================================================
-// PBKDF2-SHA256 + AES-256-GCM Encrypted Portable Vault Backup
-// Enables hardware-wallet & cross-device users to back up and restore their
-// shielded vault seed + birth checkpoint + verified dynamic swap settlements.
+// PBKDF2-SHA256 + AES-256-GCM Portable Encrypted Vault Backup
 // ============================================================================
 
 export interface AudrenEncryptedBackupFile {
@@ -265,14 +204,6 @@ export interface AudrenEncryptedBackupFile {
   audrenAddress: string
 }
 
-export interface AudrenBackupPayload {
-  version: 1
-  cluster: 'devnet' | 'mainnet'
-  seedB64: string
-  birthPageId: string | null
-  verifiedDynamicAmounts: Record<string, string>
-}
-
 const BACKUP_PBKDF2_ITERATIONS = 600_000
 
 async function deriveBackupAesKey(
@@ -282,18 +213,13 @@ async function deriveBackupAesKey(
 ): Promise<CryptoKey> {
   const baseKey = await crypto.subtle.importKey(
     'raw',
-    toArrayBuffer(utf8(passphrase)),
+    toArrayBuffer(encoder.encode(passphrase)),
     'PBKDF2',
     false,
     ['deriveKey'],
   )
   return crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      hash: 'SHA-256',
-      salt: toArrayBuffer(salt),
-      iterations,
-    },
+    { name: 'PBKDF2', hash: 'SHA-256', salt: toArrayBuffer(salt), iterations },
     baseKey,
     { name: 'AES-GCM', length: 256 },
     false,
@@ -306,8 +232,7 @@ export async function exportEncryptedVaultBackup(params: {
   audrenAddress: string
   cluster: 'devnet' | 'mainnet'
   passphrase: string
-  birthPageId?: bigint | null
-  verifiedDynamicAmounts?: Record<string, bigint>
+  birthdaySlot?: bigint
 }): Promise<AudrenEncryptedBackupFile> {
   if (params.passphrase.length < 8) {
     throw new Error('Backup passphrase must be at least 8 characters')
@@ -315,30 +240,18 @@ export async function exportEncryptedVaultBackup(params: {
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const aesKey = await deriveBackupAesKey(params.passphrase, salt, BACKUP_PBKDF2_ITERATIONS)
-
-  const dyn: Record<string, string> = {}
-  for (const [k, v] of Object.entries(params.verifiedDynamicAmounts ?? {})) {
-    dyn[k] = v.toString()
-  }
-
-  const payload: AudrenBackupPayload = {
-    version: 1,
+  const payload = {
+    version: 2,
     cluster: params.cluster,
     seedB64: toBase64(params.seed),
-    birthPageId:
-      params.birthPageId !== undefined && params.birthPageId !== null
-        ? params.birthPageId.toString()
-        : null,
-    verifiedDynamicAmounts: dyn,
+    birthdaySlot: (params.birthdaySlot ?? 0n).toString(),
   }
-
-  const aad = utf8(`audren-vault-backup-v1:${params.cluster}:${params.audrenAddress}`)
+  const aad = encoder.encode(`audren-vault-backup-v1:${params.cluster}:${params.audrenAddress}`)
   const ct = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: toArrayBuffer(aad) },
     aesKey,
-    toArrayBuffer(utf8(JSON.stringify(payload))),
+    toArrayBuffer(encoder.encode(JSON.stringify(payload))),
   )
-
   return {
     format: 'audren-vault-backup-v1',
     kdf: 'PBKDF2-SHA256',
@@ -355,124 +268,37 @@ export async function exportEncryptedVaultBackup(params: {
 export async function importEncryptedVaultBackup(
   backup: AudrenEncryptedBackupFile,
   passphrase: string,
-): Promise<{
-  seed: Uint8Array
-  cluster: 'devnet' | 'mainnet'
-  birthPageId: bigint | null
-  verifiedDynamicAmounts: Record<string, bigint>
-}> {
+): Promise<{ seed: Uint8Array; cluster: 'devnet' | 'mainnet'; birthdaySlot: bigint }> {
   if (backup.format !== 'audren-vault-backup-v1' || backup.kdf !== 'PBKDF2-SHA256') {
     throw new Error('Unsupported Audren vault backup format')
   }
   const iterations = Math.max(100_000, Math.min(2_000_000, Number(backup.iterations) || 600_000))
-  const salt = fromBase64(backup.saltB64)
-  const iv = fromBase64(backup.ivB64)
-  const ct = fromBase64(backup.ctB64)
-  const aesKey = await deriveBackupAesKey(passphrase, salt, iterations)
-  const aad = utf8(`audren-vault-backup-v1:${backup.cluster}:${backup.audrenAddress}`)
-
+  const aesKey = await deriveBackupAesKey(passphrase, fromBase64(backup.saltB64), iterations)
+  const aad = encoder.encode(`audren-vault-backup-v1:${backup.cluster}:${backup.audrenAddress}`)
   let plainBuf: ArrayBuffer
   try {
     plainBuf = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: toArrayBuffer(aad) },
+      { name: 'AES-GCM', iv: toArrayBuffer(fromBase64(backup.ivB64)), additionalData: toArrayBuffer(aad) },
       aesKey,
-      toArrayBuffer(ct),
+      toArrayBuffer(fromBase64(backup.ctB64)),
     )
   } catch {
     throw new Error('Wrong passphrase or tampered vault backup file')
   }
-
-  const parsed = JSON.parse(decoder.decode(new Uint8Array(plainBuf))) as AudrenBackupPayload
-  if (parsed.version !== 1 || !parsed.seedB64) {
+  const parsed = JSON.parse(decoder.decode(new Uint8Array(plainBuf))) as {
+    version: number
+    cluster: 'devnet' | 'mainnet'
+    seedB64: string
+    birthdaySlot?: string
+  }
+  if (parsed.version !== 2 || !parsed.seedB64) {
     throw new Error('Malformed decrypted vault backup payload')
   }
   const seed = fromBase64(parsed.seedB64)
-  if (seed.length !== 32) {
-    throw new Error('Invalid vault seed length in backup')
-  }
-  const verifiedDynamicAmounts: Record<string, bigint> = {}
-  for (const [k, v] of Object.entries(parsed.verifiedDynamicAmounts ?? {})) {
-    if (/^\d+$/.test(v)) verifiedDynamicAmounts[k] = BigInt(v)
-  }
+  if (seed.byteLength !== 32) throw new Error('Invalid vault seed length in backup')
   return {
     seed,
     cluster: parsed.cluster,
-    birthPageId: parsed.birthPageId !== null ? BigInt(parsed.birthPageId) : null,
-    verifiedDynamicAmounts,
-  }
-}
-
-// ============================================================================
-// Persistent Self-Pay ProofBuffer Journal (Rent Recovery for Interrupted Uploads)
-// ============================================================================
-
-export interface PendingProofBuffer {
-  nonce: string
-  bufferPdaB58: string
-  label: string
-  createdAtMs: number
-}
-
-function bufferJournalKey(cluster: string, payerB58: string): string {
-  return `audren_pending_bufs_v1:${cluster}:${payerB58}`
-}
-
-export function loadPendingProofBuffers(
-  cluster: string,
-  payerB58: string,
-): PendingProofBuffer[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = window.localStorage.getItem(bufferJournalKey(cluster, payerB58))
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as PendingProofBuffer[]
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (b) =>
-        typeof b.bufferPdaB58 === 'string' &&
-        typeof b.nonce === 'string' &&
-        typeof b.createdAtMs === 'number',
-    )
-  } catch {
-    return []
-  }
-}
-
-export function recordPendingProofBuffer(
-  cluster: string,
-  payerB58: string,
-  entry: PendingProofBuffer,
-): void {
-  if (typeof window === 'undefined') return
-  try {
-    const existing = loadPendingProofBuffers(cluster, payerB58).filter(
-      (b) => b.bufferPdaB58 !== entry.bufferPdaB58,
-    )
-    existing.push(entry)
-    // Cap journal at 16 most recent entries
-    const trimmed = existing.slice(-16)
-    window.localStorage.setItem(bufferJournalKey(cluster, payerB58), JSON.stringify(trimmed))
-  } catch {
-    // Ignore
-  }
-}
-
-export function removePendingProofBuffer(
-  cluster: string,
-  payerB58: string,
-  bufferPdaB58: string,
-): void {
-  if (typeof window === 'undefined') return
-  try {
-    const remaining = loadPendingProofBuffers(cluster, payerB58).filter(
-      (b) => b.bufferPdaB58 !== bufferPdaB58,
-    )
-    if (remaining.length === 0) {
-      window.localStorage.removeItem(bufferJournalKey(cluster, payerB58))
-    } else {
-      window.localStorage.setItem(bufferJournalKey(cluster, payerB58), JSON.stringify(remaining))
-    }
-  } catch {
-    // Ignore
+    birthdaySlot: BigInt(parsed.birthdaySlot ?? '0'),
   }
 }

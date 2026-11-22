@@ -1,221 +1,195 @@
-import { test } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hkdfSync } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+
 import {
-  pageIdForLane,
-  laneOfPageId,
-  seqOfPageId,
-  encodeInitLaneData,
-  encodeOpenLanePageData,
-  decodeAppendLaneState,
-  deriveSubAccountSeed,
-  derivePoolPda,
-  deriveEpochPagePda,
-  deriveVaultAuthPda,
-  deriveSolVaultPda,
-  deriveEscrowPda,
-  deriveUnwrapPda,
-  deriveLanePda,
-  deriveAssociatedTokenAddress,
-  parseAudrenAddress,
-  formatAudrenAddress,
-  isValidRistretto255Point,
-  findProgramAddress,
-  base58Encode,
-  base58Decode,
-  AudrenRelayClient,
-  AUDREN_DEFAULT_RELAY_URL,
-  DEFAULT_RELAY_URL,
-  calculateTransferFee,
-  compileV1Message,
-  serializeV1Transaction,
-  AUDREN_PROGRAM_ID,
   AUDREN_CODAMA_IDL,
   AUDREN_ANCHOR_IDL,
-  SYSTEM_PROGRAM_ID,
-  WSOL_MINT,
-  AudrenError,
+  AUDREN_PROGRAM_ID,
+  CKPT_LEN,
+  CKPT_MAGIC,
+  CK_OFF_LANE_COUNTS,
+  CK_OFF_LANE_ROOTS,
+  CK_OFF_MAGIC,
+  CK_OFF_SUPER_ROOT,
+  CK_OFF_VERSION,
+  CompactWalletStore,
   JUPITER_CPI_EXCLUDED_DEXES,
-} from '@audren/sdk';
+  MEMO_MAGIC,
+  MEMO_PAGE_LEN,
+  MM_OFF_CIPHERTEXTS,
+  MM_OFF_COUNT,
+  MM_OFF_EPHEMERAL_PKS,
+  MM_OFF_MAGIC,
+  MM_OFF_VIEW_TAGS,
+  NATIVE_SOL_MINT_BYTES,
+  NF_OFF_COUNT,
+  NF_OFF_MAGIC,
+  NF_OFF_PREFIXES,
+  NF_PAGE_LEN,
+  NF_PAGE_MAGIC,
+  NF_PREFIX_LEN,
+  NUM_LANES,
+  PROTOCOL_VERSION,
+  SB_OFF_COUNT,
+  SB_OFF_LEAVES,
+  SB_OFF_MAGIC,
+  SUBTREE_LEAVES,
+  SUBTREE_MAGIC,
+  SUBTREE_PAGE_LEN,
+  ZERO_HASHES_4ARY,
+  buildDepositSolInstruction,
+  compileV1Message,
+  computeMerkleRoot4Ary,
+  computeNoteCommitment,
+  computeSubtree256Root,
+  computeSuperRoot4Ary,
+  decodeRootCheckpoint,
+  deriveAssetId,
+  deriveKeysFromSeed,
+  deriveStealthOwner,
+  encryptNoteMemo,
+  exportFullViewingKey,
+  exportSelectiveDisclosureProof,
+  frToBeBytes,
+  poseidon4,
+  toPubkeyBytes,
+  verifySelectiveDisclosureProof,
+} from '../dist/index.js';
 
-test('built package imports in ordinary Node and encodes the lane wire contract', () => {
-  assert.equal(AUDREN_PROGRAM_ID, 'AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3');
-  assert.equal(AudrenError.InvalidLane, 33);
-  assert.ok(JUPITER_CPI_EXCLUDED_DEXES.includes('Kipseli'));
-  assert.deepEqual([...encodeInitLaneData(15)], [11, 15]);
-  assert.deepEqual([...encodeOpenLanePageData(1)], [12, 1]);
-  assert.equal(pageIdForLane(15, 7n), 0x0f00000000000007n);
-  assert.equal(laneOfPageId(0x0f00000000000007n), 15);
-  assert.equal(seqOfPageId(0x0f00000000000007n), 7n);
-  assert.throws(() => encodeInitLaneData(16));
+const enc = new TextEncoder();
 
-  const laneBuf = new Uint8Array(64);
-  laneBuf.set(new TextEncoder().encode('AUDRNLN1'), 0);
-  laneBuf[8] = 1;
-  laneBuf[9] = 3;
-  laneBuf[10] = 251;
-  laneBuf[11] = 249;
-  const dv = new DataView(laneBuf.buffer);
-  dv.setUint32(12, 0, true);
-  dv.setBigUint64(16, pageIdForLane(3, 7n), true);
-  dv.setBigUint64(24, 471_852_922n, true);
-  const lane = decodeAppendLaneState(laneBuf);
-  assert.equal(lane.laneId, 3);
-  assert.equal(lane.currentPageId, pageIdForLane(3, 7n));
-  assert.equal(lane.createdSlot, 471_852_922n);
-});
-
-test('deriveSubAccountSeed matches RFC 5869 HKDF-SHA256 and Rust from_seed_subaccount', async () => {
-  const master = new Uint8Array(32).map((_, i) => i + 1);
-  const s0 = await deriveSubAccountSeed(master, 0);
-  assert.deepEqual(s0, master);
-  assert.notEqual(s0, master);
-
-  const s1 = await deriveSubAccountSeed(master, 1);
-  const expected1 = new Uint8Array(
-    hkdfSync('sha256', master, Buffer.from('audren/v1/subaccount'), Buffer.from([1, 0, 0, 0]), 32),
-  );
-  assert.deepEqual(s1, expected1);
-
-  const s2 = await deriveSubAccountSeed(master, 2);
-  assert.notDeepEqual(s1, s2);
-  await assert.rejects(() => deriveSubAccountSeed(new Uint8Array(31), 1), RangeError);
-  await assert.rejects(() => deriveSubAccountSeed(master, -1), RangeError);
-});
-
-test('zero-dependency PDA derivations match deployed Solana Mainnet PDAs byte-for-byte', async () => {
-  const [pool0, page0, vaultAuth, solVault, escrow0, lane1] = await Promise.all([
-    derivePoolPda(0),
-    deriveEpochPagePda(0, 0n),
-    deriveVaultAuthPda(0),
-    deriveSolVaultPda(0),
-    deriveEscrowPda(0, 0),
-    deriveLanePda(0, 1),
-  ]);
-  assert.equal(pool0.address, '5Bvt5f5QMfsVb9TyX8bzkRMvAX6JSWwRtnymGveF9U3G');
-  assert.equal(page0.address, 'iounHJYNJqhLzSyjcXF5yfyvrVuPgFJ7BwCGqCy1JJg');
-  assert.equal(vaultAuth.address, '7rQ6vQNMwBwzAFK1gcwFuJwK4DybLUGVBfxJfgVw8X9o');
-  assert.equal(solVault.address, 'EhVt54eHXmWzDqngDiBXhw6ePWa9eEoBAHsMfnNCn5nr');
-  assert.equal(escrow0.address, 'AJFrTGiSbJsiXfQA5cZQVF566NEU15yBYzLRTU7J2Hay');
-  assert.equal(lane1.addressBytes.byteLength, 32);
-  const unwrap = await deriveUnwrapPda(0, new Uint8Array(32).fill(7));
-  assert.equal(unwrap.addressBytes.byteLength, 32);
-
-  // Base58 roundtrip (including all-zero System Program ID) & ATA derivation
-  assert.equal(base58Encode(new Uint8Array(32)), SYSTEM_PROGRAM_ID);
-  assert.equal(base58Encode(new Uint8Array([0])), '1');
-  assert.equal(base58Decode(SYSTEM_PROGRAM_ID).byteLength, 32);
-  assert.equal(base58Encode(base58Decode(AUDREN_PROGRAM_ID)), AUDREN_PROGRAM_ID);
-  const escrowWsolAta = await deriveAssociatedTokenAddress(escrow0.address, WSOL_MINT);
-  assert.equal(escrowWsolAta.addressBytes.byteLength, 32);
-  await assert.rejects(
-    () => findProgramAddress(Array.from({ length: 16 }, () => new Uint8Array([1]))),
-    RangeError,
-  );
-
-  // aud1... address format & RFC 9496 Ristretto255 validation roundtrip
-  const sample = 'aud136et2wsvTXKWMrmEQDrG7nRTofxBdSw6ZkwzmUT9vARfpCkY8YR9ENm9QV9WoUW3Nb1tp3BGejPA8BG8PWCWrwFL';
-  const parsed = parseAudrenAddress(sample);
-  assert.equal(parsed.spendPk.byteLength, 32);
-  assert.equal(parsed.viewPk.byteLength, 32);
-  assert.equal(isValidRistretto255Point(parsed.spendPk), true);
-  assert.equal(isValidRistretto255Point(parsed.viewPk), true);
-  assert.equal(formatAudrenAddress(parsed.spendPk, parsed.viewPk), sample);
-  assert.equal(parseAudrenAddress(sample.slice(4)).encoded, sample);
-  // Reject non-canonical Ristretto255 encoding (odd lowest bit is invalid per RFC 9496 §4.3.1)
-  const corrupted = new Uint8Array(64);
-  corrupted.set(parsed.spendPk, 0);
-  corrupted.set(parsed.viewPk, 32);
-  corrupted[0] ^= 1;
-  assert.equal(isValidRistretto255Point(corrupted.slice(0, 32)), false);
-  assert.throws(() => parseAudrenAddress(`aud1${base58Encode(corrupted)}`));
-  assert.throws(() => formatAudrenAddress(new Uint8Array(32), parsed.viewPk));
-  assert.throws(() => parseAudrenAddress('invalid'));
-
-  // Relay client URL normalization
-  const relay = new AudrenRelayClient('https://relay.audren.xyz///');
-  assert.equal(relay.baseUrl, 'https://relay.audren.xyz');
-});
-test('transfer fee rounding and cap match token fee semantics', () => {
-  assert.equal(calculateTransferFee(1n, 1, 100n), 1n);
-  assert.equal(calculateTransferFee(10000n, 100, 50n), 50n);
-  assert.equal(calculateTransferFee(10000n, 0, 50n), 0n);
-});
-test('v1 compiler preserves message prefix and rejects invalid signatures', () => {
-  const key = n => new Uint8Array(32).fill(n);
-  const compiled = compileV1Message({ feePayer: key(1), recentBlockhash: key(2), instructions: [{ programId: key(3), accounts: [], data: new Uint8Array([11, 1]) }], config: { computeUnitLimit: 100000 } });
-  assert.equal(compiled.messageBytes[0], 0x81);
-  assert.equal(compiled.numRequiredSignatures, 1);
-  assert.throws(() => serializeV1Transaction(compiled, []));
-  assert.throws(() => serializeV1Transaction(compiled, [new Uint8Array(63)]));
-  const wire = serializeV1Transaction(compiled, [new Uint8Array(64)]);
-  assert.equal(wire.length, compiled.messageBytes.length + 64);
-  assert.deepEqual(wire.subarray(0, compiled.messageBytes.length), compiled.messageBytes);
-});
-test('published Codama and Anchor IDLs match JSON artifacts and protocol counts', () => {
-  const codamaJson = JSON.parse(readFileSync(new URL('../idl/audren.codama.json', import.meta.url), 'utf8'));
-  const anchorJson = JSON.parse(readFileSync(new URL('../idl/audren.anchor.json', import.meta.url), 'utf8'));
-  assert.deepEqual(AUDREN_CODAMA_IDL, codamaJson);
-  assert.deepEqual(AUDREN_ANCHOR_IDL, anchorJson);
+test('Package exports, IDLs, Transaction v1 compiler, and CompactWalletStore sealing/freezing', () => {
   assert.equal(AUDREN_CODAMA_IDL.program.publicKey, AUDREN_PROGRAM_ID);
-  assert.equal(AUDREN_ANCHOR_IDL.address, AUDREN_PROGRAM_ID);
-  assert.equal(AUDREN_CODAMA_IDL.program.instructions.length, 13);
-  assert.equal(AUDREN_CODAMA_IDL.program.accounts.length, 7);
-  assert.equal(AUDREN_CODAMA_IDL.program.pdas.length, 11);
-  assert.equal(AUDREN_CODAMA_IDL.program.errors.length, 33);
-});
-test('AudrenRelayClient.getFeeQuote sends canonical op query param and parses NativeFeeQuote', async () => {
-  assert.equal(DEFAULT_RELAY_URL, AUDREN_DEFAULT_RELAY_URL);
-  let capturedUrl = '';
-  const origFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => {
-    capturedUrl = String(url);
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        cluster: 'mainnet',
-        op: 'exec_escrow',
-        billingMode: 'self_paying',
-        feeMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
-        feeTokenProgram: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-        feeRecipient: '11111111111111111111111111111111',
-        feeRecipientExists: true,
-        needsFeeAtaSetup: false,
-        relayerFee: '12500',
-        feeBps: 25,
-        estimatedRelayCostLamports: '2340000',
-        estimatedRelayCostUsd: 0.35,
-        reason: 'Self-paying protocol relay fee.',
-      }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    );
-  };
-  try {
-    const relay = new AudrenRelayClient('https://relay.audren.xyz/');
-    const res = await relay.getFeeQuote({
-      cluster: 'mainnet',
-      op: 'exec_escrow',
-      mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
-      amount: '50000000',
-      hasChange: true,
-      missingAtaCount: 1,
-    });
-    assert.ok(capturedUrl.includes('op=exec_escrow'));
-    assert.ok(capturedUrl.includes('missingAtaCount=1'));
-    assert.equal(res.billingMode, 'self_paying');
-    assert.equal(res.relayerFee, '12500');
-    assert.equal(res.estimatedRelayCostLamports, '2340000');
-    // Deprecated `quoteFee({ action })` still maps transparently to `?op=`
-    await relay.quoteFee({
-      action: 'withdraw',
-      mint: 'native',
-      amount: '1000000000',
-      unwrapWsol: true,
-    });
-    assert.ok(capturedUrl.includes('op=withdraw'));
-    assert.ok(capturedUrl.includes('unwrapWsol=true'));
-  } finally {
-    globalThis.fetch = origFetch;
+  assert.equal(AUDREN_CODAMA_IDL.program.instructions.length, 9);
+  assert.equal(AUDREN_ANCHOR_IDL.instructions.length, 9);
+  assert.equal(JUPITER_CPI_EXCLUDED_DEXES.length, 8);
+
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x55));
+  const fvk = exportFullViewingKey(alice);
+  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+
+  // Build a sealed 256-leaf SubtreePage (with Alice's note at slot 7) + MemoPage 0
+  const subRaw = new Uint8Array(SUBTREE_PAGE_LEN);
+  subRaw.set(enc.encode(SUBTREE_MAGIC), SB_OFF_MAGIC);
+  new DataView(subRaw.buffer).setUint16(SB_OFF_COUNT, SUBTREE_LEAVES, true);
+
+  const memoRaw = new Uint8Array(MEMO_PAGE_LEN);
+  memoRaw.set(enc.encode(MEMO_MAGIC), MM_OFF_MAGIC);
+  new DataView(memoRaw.buffer).setUint16(MM_OFF_COUNT, 112, true);
+
+  const leaves = [];
+  for (let i = 0; i < SUBTREE_LEAVES; i++) {
+    if (i === 7) {
+      const { tweak, blinding, memo90 } = encryptNoteMemo(
+        alice.viewPk,
+        new Uint8Array(32).fill(0x66),
+        2_500_000n,
+        NATIVE_SOL_MINT_BYTES,
+      );
+      const cm = computeNoteCommitment(
+        deriveStealthOwner(alice.spendPk, tweak),
+        solAsset,
+        2_500_000n,
+        blinding,
+      );
+      leaves.push(cm);
+      subRaw.set(frToBeBytes(cm), SB_OFF_LEAVES + i * 32);
+      memoRaw.set(memo90.subarray(0, 2), MM_OFF_VIEW_TAGS + i * 2);
+      memoRaw.set(memo90.subarray(2, 34), MM_OFF_EPHEMERAL_PKS + i * 32);
+      memoRaw.set(memo90.subarray(34, 90), MM_OFF_CIPHERTEXTS + i * 56);
+    } else {
+      const leaf = BigInt(i + 1);
+      leaves.push(leaf);
+      subRaw.set(frToBeBytes(leaf), SB_OFF_LEAVES + i * 32);
+    }
   }
+
+  const store = new CompactWalletStore(0, 0n);
+  const discovered = store.ingestLanePages({
+    fvk,
+    laneId: 1,
+    subtreePages: [{ pageSeq: 0n, raw: subRaw }],
+    memoPages: [{ pageSeq: 0n, raw: memoRaw }],
+    nfPages: [],
+  });
+  assert.equal(discovered, 1);
+  assert.equal(store.lanes[1].finalizedSubroots.length, 1);
+  assert.equal(store.lanes[1].frontierSubSeq, 1n);
+  assert.equal(store.lanes[1].frontierLeaves.length, 0);
+  assert.ok(store.notes[0].frozenIntraSiblings, 'sealed page must freeze 12 intra-subtree siblings');
+
+  // Round-trip JSON persistence (IndexedDB / disk)
+  const restored = CompactWalletStore.fromJSON(store.toJSON());
+  assert.equal(restored.notes.length, 1);
+  const note = restored.notes[0];
+  assert.equal(note.amount, 2_500_000n);
+  assert.equal(verifySelectiveDisclosureProof(exportSelectiveDisclosureProof(note), note.commitment), true);
+
+  // Build synthetic RootCheckpoint at count = 256 and reconstruct offline witness
+  let lroot = computeSubtree256Root(leaves, SUBTREE_LEAVES);
+  for (let h = 4; h < 18; h++) {
+    lroot = poseidon4(lroot, ZERO_HASHES_4ARY[h], ZERO_HASHES_4ARY[h], ZERO_HASHES_4ARY[h]);
+  }
+  const laneRoots = new Array(NUM_LANES).fill(ZERO_HASHES_4ARY[18]);
+  laneRoots[1] = lroot;
+  const superRoot = computeSuperRoot4Ary(laneRoots);
+
+  const ckRaw = new Uint8Array(CKPT_LEN);
+  ckRaw.set(enc.encode(CKPT_MAGIC), CK_OFF_MAGIC);
+  ckRaw[CK_OFF_VERSION] = PROTOCOL_VERSION;
+  ckRaw.set(frToBeBytes(superRoot), CK_OFF_SUPER_ROOT);
+  const ckv = new DataView(ckRaw.buffer);
+  for (let i = 0; i < NUM_LANES; i++) {
+    ckRaw.set(frToBeBytes(laneRoots[i]), CK_OFF_LANE_ROOTS + i * 32);
+    ckv.setBigUint64(CK_OFF_LANE_COUNTS + i * 8, i === 1 ? 256n : 0n, true);
+  }
+  const ckpt = decodeRootCheckpoint(ckRaw);
+  const { superRoot: sr, path } = restored.buildWitnessForNote(note, ckpt);
+  assert.equal(sr, superRoot);
+  assert.equal(computeMerkleRoot4Ary(path, leaves[7]), superRoot);
+
+  // NullifierPage ingestion marks note spent locally (0 NullifierPDA RPC lookups!)
+  const nfRaw = new Uint8Array(NF_PAGE_LEN);
+  nfRaw.set(enc.encode(NF_PAGE_MAGIC), NF_OFF_MAGIC);
+  new DataView(nfRaw.buffer).setUint16(NF_OFF_COUNT, 1, true);
+  nfRaw.set(note.nullifier.subarray(0, NF_PREFIX_LEN), NF_OFF_PREFIXES);
+  restored.ingestLanePages({
+    fvk,
+    laneId: 1,
+    subtreePages: [],
+    memoPages: [],
+    nfPages: [{ pageSeq: 0n, raw: nfRaw }],
+  });
+  assert.equal(restored.unspentNotes().length, 0);
+
+  // Transaction v1 (0x81) compilation test
+  const depIx = buildDepositSolInstruction({
+    depositor: '11111111111111111111111111111111',
+    poolId: 0,
+    laneId: 0,
+    subPageSeq: 0n,
+    rootPageSeq: 0n,
+    memoPageSeq: 0n,
+    amount: 1_000_000n,
+    stealthOwner: deriveStealthOwner(alice.spendPk, 1n),
+    blinding: 2n,
+    memo90: new Uint8Array(90),
+  });
+  const compiled = compileV1Message({
+    feePayer: toPubkeyBytes('11111111111111111111111111111111'),
+    recentBlockhash: new Uint8Array(32).fill(7),
+    instructions: [
+      {
+        programId: toPubkeyBytes(depIx.programId),
+        accounts: depIx.accounts.map((a) => ({
+          pubkey: toPubkeyBytes(a.pubkey),
+          isSigner: a.isSigner,
+          isWritable: a.isWritable,
+        })),
+        data: depIx.data,
+      },
+    ],
+    config: { computeUnitLimit: 100_000 },
+  });
+  assert.equal(compiled.messageBytes[0], 0x81);
 });

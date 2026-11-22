@@ -71,35 +71,35 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Alice picks 500 USDC + pastes your aud1…',
         packetLabel: '500 USDC + aud1…',
         detail:
-          'Alice enters your reusable aud1… private address (from your invoice, bio, or payroll form) and chooses 500 USDC, SOL, BONK, or any Token-2022 mint. Zero ZK proof generation is required — she signs a normal Solana deposit transaction.',
-        cryptoTag: 'Tag 2 Deposit · 0 ZK proofs · 1 standard wallet signature',
+          'Alice enters your reusable aud1… private address and chooses 500 USDC, SOL, BONK, or any transferable Token-2022 mint. Zero ZK proof generation is required — she signs a standard DepositSol (Tag 3) or DepositSpl (Tag 4) transaction.',
+        cryptoTag: 'Tag 3 / Tag 4 Deposit · 0 ZK proofs · 1 standard wallet signature',
       },
       {
         actor: 'ONE-TIME STEALTH BOX',
-        title: 'Fresh address derived for this payment',
-        shortLabel: 'P = S + H(r·V)·G (never reuses aud1…)',
-        packetLabel: 'Stealth P + Encrypted Note',
+        title: 'Fresh Poseidon stealth owner + 90 B memo',
+        shortLabel: 'stealth = Poseidon3(2, spend_pk, tweak)',
+        packetLabel: 'Note cm + 90 B Memo',
         detail:
-          'Alice’s wallet picks a random secret r, derives a one-time stealth public key P = S + H(r·V)·G from your aud1… keys, computes a 1-byte view tag, and encrypts the token, amount, and memo with AES-256-GCM. Audren instructions use the derived one-time key instead of the reusable address.',
-        cryptoTag: 'ECDH shared = r·V · AES-256-GCM ciphertext · 1-byte view_tag',
+          'Alice’s wallet performs X25519 ECDH with your view public key, derives a deterministic tweak and blinding scalar, computes stealth_owner = Poseidon3(DOMAIN_STEALTH, spend_pk, tweak), and encrypts (amount, mint) into a 90-byte ChaCha20-Poly1305 memo with a 2-byte view tag.',
+        cryptoTag: 'X25519 ECDH · 2-byte view_tag · ChaCha20-Poly1305 (90 B SoA)',
       },
       {
-        actor: 'SHARED AUDREN POOL #0',
-        title: 'Tokens enter the unified vault',
-        shortLabel: '500 USDC → Pool vault · Note → EpochPage',
-        packetLabel: 'Locked in EpochPage (32 slots)',
+        actor: 'GLOBAL 4-ARY MASP POOL #0',
+        title: 'Tokens enter the unified vault; leaf appends to lane',
+        shortLabel: '500 USDC → Unified vault · cm → SubtreePage',
+        packetLabel: '4^20 Global Tree (16 lanes)',
         detail:
-          'Solana transfers 500 USDC into Audren’s unified permissionless vault ATA (created automatically on first use for any mint) and appends the encrypted stealth note into the active 32-note EpochPage alongside everyone else’s notes.',
-        cryptoTag: 'Unified Pool #0 · Permissionless mint support · 32-note EpochPage',
+          'Solana transfers 500 USDC into Audren’s unified vault ATA, computes cm = Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, net_received, blinding) on-chain, updates the active lane’s 4-ary Depth-18 frontier, and writes the 90 B memo to MemoPage.',
+        cryptoTag: 'Unified Pool #0 · Net-delta Token-2022 solvency · 4→8→16 lanes',
       },
       {
         actor: 'YOUR PRIVATE BALANCE',
-        title: 'Detected & unlocked only by you',
-        shortLabel: 'Your view key spots it · Only your spend key moves it',
+        title: 'Discovered via ordinary RPC — zero indexer',
+        shortLabel: 'CompactWalletStore scans MemoPages & freezes siblings',
         packetLabel: '+500 USDC Private',
         detail:
-          'You don’t need to be online or receive a link. Next time you open Audren, your local view key scans the 1-byte view tags (skipping 255/256 stranger notes instantly), decrypts your 500 USDC, and only your spend key can move it.',
-        cryptoTag: 'Client-side scan · View key reads · Spend key controls funds',
+          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts, checks the 2-byte view tag (skipping 65,535/65,536 stranger memos instantly), verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages permanently.',
+        cryptoTag: 'Ordinary Solana RPC · Zero indexer · 1.28 MB store @ 10M notes',
       },
     ],
     solscan: [
@@ -142,66 +142,66 @@ const FLOWS: FlowDefinition[] = [
     demoLabel: 'Try Private Send live',
     steps: [
       {
-        actor: '1-OF-32 ANONYMITY RING',
-        title: 'Prove ownership without revealing which note',
-        shortLabel: 'Triptych ring proof over 32 notes',
-        packetLabel: 'Triptych Ring Proof + J',
+        actor: 'GLOBAL 4^20 MERKLE PROOF',
+        title: 'Prove ownership across the entire pool history',
+        shortLabel: 'BN254 Groth16 over 20-level 4-ary super_root',
+        packetLabel: '192 B Groth16 Proof',
         detail:
-          'Your browser fetches the 32-note EpochPage holding your private USDC note and builds a Triptych zero-knowledge proof locally: “I own one of these 32 notes, and its unique nullifier J has never been spent.”',
-        cryptoTag: 'Tag 3 Transfer · Triptych 1-of-32 · Unique Nullifier J = x⁻¹·U',
+          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in WASM against a recent RootCheckpoint: “I own 1 or 2 unspent notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and their key-separated nullifiers have never been spent.”',
+        cryptoTag: 'Tag 6 JoinSplit · 17,861 R1CS · Key-separated nk nullifiers',
       },
       {
         actor: 'HIDDEN ASSET & AMOUNT',
-        title: 'Blind both the coin and the dollar value',
-        shortLabel: 'Pedersen commitments + 64-bit Bulletproof',
-        packetLabel: 'Blinded (A, V) + Bulletproof',
+        title: 'Conservation & 64-bit range checks inside R1CS',
+        shortLabel: 'Poseidon5 note commitments + 64-bit bit-decomposition',
+        packetLabel: 'cm0, cm1, cm2 (Hidden)',
         detail:
-          'Your browser hides the token mint inside a blinded asset tag A and hides the amounts (500 USDC to Bob + your private change) inside Pedersen commitments V. A 64-bit Bulletproof proves conservation of value and no negative amounts.',
-        cryptoTag: 'Cross-Base Pedersen ΣV_in = ΣV_out · 64-bit Bulletproofs',
+          'The circuit enforces uniform hidden asset_id across all inputs and outputs, exact value conservation (Σin = Σout + public_out + relayer_fee), and 64-bit unsigned range checks on every output — hiding token mint and amounts completely on-chain.',
+        cryptoTag: 'Poseidon5(3, stealth, asset_id, amt, r) · 1 public_input_hash',
       },
       {
         actor: 'OPEN PRIVACY RELAYER',
         title: 'Relayer pays gas — your wallet never signs',
-        shortLabel: '1 Solana v1 tx · 0 user wallet signatures',
+        shortLabel: '1 Solana v1 tx · Optional shielded cm2 fee note',
         packetLabel: 'Relayed Solana v1 Tx',
         detail:
-          'Your browser sends the finished proof to relay.audren.xyz (or your own self-hosted relay). The relayer pays Solana fees and submits 1 Solana v1 transaction. Your Phantom wallet never signs and never appears in the tx accounts (0 / 8).',
-        cryptoTag: 'relay.audren.xyz · Solana Tx v1 (0x81) · userWalletPresent = false',
+          'Your browser sends the finished proof to relay.audren.xyz (or your own self-hosted relay). For private transfers, the optional relayer fee can settle as shielded output cm2 verified via the relayer’s read-only FullViewingKey. Your public wallet never signs.',
+        cryptoTag: 'Solana Tx v1 (0x81) · ~130k–160k CU · Zero user wallet signers',
       },
       {
         actor: 'BOB’S PRIVATE BALANCE',
-        title: 'Two opaque stealth boxes land on Solana',
+        title: 'Opaque commitments & 90 B memos land on Solana',
         shortLabel: 'Bob gets 500 USDC · You keep hidden change',
         packetLabel: 'Bob +500 · Your Change',
         detail:
-          'Solana verifies the math on-chain, records nullifier J to reject repeat spends, and appends two encrypted notes: Bob’s 500 USDC (locked to Bob’s aud1…) and your remaining private change (locked back to your aud1…).',
-        cryptoTag: 'On-chain sBPFv3 verified · Blinded transfer outputs · Fresh recipient keys',
+          'Solana verifies the 192 B Groth16 proof via native alt_bn128 pairing syscalls, locks NullifierPDA(s) and appends 16 B prefixes to NullifierPage, and writes the new commitments and 90 B SoA memos to your chosen append lane.',
+        cryptoTag: 'alt_bn128 syscall verified · 16 B NullifierPage sync',
       },
     ],
     solscan: [
       {
         label: 'Sender wallet',
         visibility: 'hidden',
-        badge: 'ABSENT (0 / 8)',
-        value: 'Signed only by Relayer H2Jc…p3vY — your wallet is not on the tx',
+        badge: 'ABSENT (0 SIGNERS)',
+        value: 'Signed only by Relayer — your wallet never appears on the transaction',
       },
       {
         label: 'Recipient (Bob)',
         visibility: 'hidden',
         badge: 'HIDDEN',
-        value: 'One-time stealth key P_bob — Bob’s aud1… & wallet never appear',
+        value: 'One-time Poseidon stealth owner — Bob’s aud1… & wallet never appear',
       },
       {
         label: 'Token & amount',
         visibility: 'hidden',
-        badge: 'BLINDED',
-        value: 'Blinded curve commitments (A, V) conceal the mint and amount on-chain',
+        badge: 'HIDDEN IN POSEIDON5',
+        value: 'All asset IDs and amounts remain hidden inside opaque 32 B commitments',
       },
       {
         label: 'Link to past deposits',
         visibility: 'hidden',
-        badge: '1-OF-32 RING',
-        value: 'Proof conceals the spent record; effective privacy depends on plausible candidates',
+        badge: 'GLOBAL 4^20 MASP',
+        value: 'Proof spans the entire historical pool; timing & outside metadata still matter',
       },
     ],
   },
@@ -211,29 +211,29 @@ const FLOWS: FlowDefinition[] = [
     tabSub: 'ExecViaEscrow: swap, lend, stake in 1 tx',
     exampleHeadline: 'Swap, lend, stake, or mint yield tokens from your Private Balance in 1 tx',
     exampleNote:
-      'Tag 5 ExecViaEscrow is protocol-agnostic: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) are just one example alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA vaults. External DeFi mints, amounts, and output record remain public.',
+      'Tag 7 ExecViaEscrow is protocol-agnostic: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA vaults. External DeFi mints, amounts, and output record remain public.',
     txHref: solscanTx(AUDREN.mainnet.swapTx, 'mainnet'),
-    txLabel: 'Inspect Mainnet ExecViaEscrow Tx',
+    txLabel: 'Inspect ExecViaEscrow Tx',
     demoHref: '/demo',
     demoLabel: 'Try Shielded DeFi live',
     steps: [
       {
         actor: 'PRIVATE NOTE PROOF',
-        title: 'Spend full or partial note + native relayer fee',
-        shortLabel: 'Prove input note · Optional shielded change',
-        packetLabel: 'ExecViaEscrow Proof',
+        title: 'Spend 1–2 global pool notes + native relayer fee',
+        shortLabel: 'Prove input notes · Optional shielded change',
+        packetLabel: '192 B Groth16 Proof',
         detail:
-          'Your browser proves ownership of your private note inside its ring, binds the target Solana program and min_amount_out in the Fiat-Shamir transcript, and optionally pays the relayer directly from the input or output token. Your public wallet stays completely off-chain.',
-        cryptoTag: 'Tag 5 ExecViaEscrow · Native relayer_fee · Transcript-bound target CPI',
+          'Your browser proves ownership of 1–2 global pool notes, binds router_program, every router account (pubkey + is_writable), min_amount_out, and relayer_fee inside ctx_hash, and optionally pays the relayer from the input or output leg (EXEC_FLAG_FEE_ON_OUTPUT).',
+        cryptoTag: 'Tag 7 ExecViaEscrow · ctx_hash-bound router_accounts · ~158k CU',
       },
       {
         actor: 'SHARED ESCROW SHARD',
         title: 'Program unlocks into isolated sharded PDA',
-        shortLabel: 'Pool vault → Sharded swap_escrow (0..15)',
+        shortLabel: 'Unified vault → Sharded swap_escrow (0..15)',
         packetLabel: 'Token A → Escrow PDA',
         detail:
-          'Audren’s on-chain program verifies your proof, locks the nullifier, and moves the exact input amount into one of 16 shared escrow PDAs. Only the escrow PDA signs the external CPI — vault_auth and custody vaults are never exposed.',
-        cryptoTag: 'Sharded swap_escrow PDA (0..15) · Strict custody isolation',
+          'Audren verifies the 192 B Groth16 proof, locks nullifiers, snapshots pre-CPI owners/delegates/lamports in WatchedEscrowBuf, and moves exact amount_in into one of 16 sharded escrow PDAs. Only the escrow PDA signs the external CPI.',
+        cryptoTag: 'Sharded swap_escrow PDA (0..15) · WatchedEscrowBuf firewall',
       },
       {
         actor: 'PROTOCOL-AGNOSTIC DEFI CPI',
@@ -241,17 +241,17 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'DEX · Lending Supply · LST · Yield Vault · RWA',
         packetLabel: 'DeFi Fill ≥ min_out',
         detail:
-          'Inside the same transaction, Audren invokes the target Solana program via PDA CPI — a DEX aggregator swap, lending reserve supply minting kTokens, liquid staking into JitoSOL/INF, or yield-vault deposit. If net output is below min_amount_out, the entire transaction reverts cleanly.',
+          'Inside the same Solana Transaction v1, Audren invokes the target Solana program via PDA CPI — leaving >1.2M CU for multi-hop DEXs, lending reserves, liquid staking, or vaults. If net output falls below min_amount_out, the entire transaction reverts cleanly.',
         cryptoTag: 'Any stateless Token A → Token B CPI · min_amount_out enforced',
       },
       {
         actor: 'AUTO-RESHIELDED ON-CHAIN',
-        title: 'Exact output or yield receipt lands in your vault',
-        shortLabel: 'On-chain delta committed to your stealth key',
+        title: 'Exact output settles to your XOR-masked dynamic note',
+        shortLabel: 'Measured net vault delta committed on-chain',
         packetLabel: 'Private Token B Note',
         detail:
-          'Audren measures the exact vault balance delta received, deducts any configured output relayer fee, sweeps every remaining atom into the unified vault, and commits the exact net receipt on-chain to your fresh stealth key P_out.',
-        cryptoTag: 'Measured net delta · Token-2022 safe · Instant private Token B note',
+          'Audren measures the exact vault balance delta received, settles any EXEC_FLAG_FEE_ON_OUTPUT relayer fee, sweeps every remaining atom into the unified vault, and writes an XOR-masked AUD2DYN2 dynamic memo (zero plaintext markers at rest) + Poseidon5 commitment to your stealth owner.',
+        cryptoTag: 'Measured net delta · Token-2022 safe · Zero-plaintext dynamic memo',
       },
     ],
     solscan: [
@@ -278,7 +278,7 @@ const FLOWS: FlowDefinition[] = [
         label: 'New token or yield receipt',
         visibility: 'hidden',
         badge: 'OWNERSHIP PRIVATE',
-        value: 'Reshielded immediately to your fresh stealth key inside Pool #0',
+        value: 'Reshielded immediately to your fresh Poseidon stealth owner inside Pool #0',
       },
     ],
   },
@@ -288,47 +288,47 @@ const FLOWS: FlowDefinition[] = [
     tabSub: 'Selective disclosure, unwrap WSOL, or DeFi sessions',
     exampleHeadline: 'Prove 1 invoice, self-pay an exit, or fund a 0-SOL DeFi session wallet',
     exampleNote:
-      'Export a single-note opening for compliance, exit with self-paying native fees and atomic WSOL → SOL unwrap, or fund a deterministic session wallet (B_0, B_1…) for stateful borrow/perp protocols and later sweep every remaining lamport back with zero dust.',
+      'Export a Mode 1 SelectiveDisclosureProof (1 Poseidon5 check) or Mode 2 FullViewingKey, exit with self-paying native fees and atomic WSOL → SOL unwrap, or fund a deterministic session wallet (B_0, B_1…) for stateful borrow/perp protocols and sweep every remaining lamport back with zero dust.',
     txHref: solscanTx(AUDREN.mainnet.withdrawTx, 'mainnet'),
-    txLabel: 'Inspect Mainnet Go Public Withdraw',
+    txLabel: 'Inspect Go Public Withdraw',
     demoHref: '/demo?mode=sandbox',
     demoLabel: 'Test Receipts & Exit Flows',
     steps: [
       {
         actor: 'LOCKED NOTE ON SOLANA',
-        title: 'Cryptographic commitment on-chain',
-        shortLabel: 'EpochPage records the note commitments',
-        packetLabel: 'On-Chain (A, V)',
+        title: 'Poseidon5 commitment on SubtreePage',
+        shortLabel: 'SubtreePage records cm = Poseidon5(3, stealth, asset, amt, r)',
+        packetLabel: 'On-Chain Leaf cm',
         detail:
-          'A private Transfer stores binding Pedersen commitments for token and amount in an EpochPage. The current program has no instruction to edit confirmed note contents; the deployment remains upgradeable.',
-        cryptoTag: 'Binding Pedersen Commitments · A = G_mint + a·H · V = v·A + r_v·H',
+          'Every deposit, private JoinSplit, and shielded DeFi settlement writes a canonical 32-byte Poseidon5 commitment into a fixed 8,256 B SubtreePage PDA. Confirmed leaf commitments are append-only; note the deployment remains upgradeable during pre-audit.',
+        cryptoTag: 'Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, amount, blinding)',
       },
       {
-        actor: 'SINGLE-PAYMENT RECEIPT',
-        title: 'Export proof for just one note',
-        shortLabel: 'JSON opening for 1 payment only',
-        packetLabel: 'Viewing Receipt JSON',
+        actor: 'MODE 1 RECEIPT & MODE 2 FVK',
+        title: 'Prove 1 note — or export read-only viewing access',
+        shortLabel: 'Mode 1 = 1 Poseidon hash · Mode 2 = FullViewingKey',
+        packetLabel: 'Receipt / FVK JSON',
         detail:
-          'Click Receipt on any single note to export its cryptographic opening (mint, exact amount, blinding factors a and r_v, page & slot). Other notes and spending keys are not included. This does not prove a real-world identity.',
-        cryptoTag: 'Zero spend key shared · Scoped strictly to 1 note slot',
+          'Mode 1 SelectiveDisclosureProof discloses (mint, amount, blinding, stealth_owner) for strictly 1 chosen note verified in 1 Poseidon5 check against SubtreePage (zero keys shared). Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) tracks both incoming notes AND spent nullifiers with zero spend authority.',
+        cryptoTag: 'Zero spend_sk shared · Mode 1 single-note · Mode 2 key-separated nk',
       },
       {
         actor: 'SELF-PAYING EXIT & UNWRAP',
         title: 'Native relayer fee + atomic WSOL → Native SOL',
-        shortLabel: 'Tag 6 Withdraw · unwrap_wsol · Pause-immune full exit',
+        shortLabel: 'Tag 6 JoinSplit · WITHDRAW_FLAG_UNWRAP_WSOL · Pause-immune',
         packetLabel: 'Direct Native SOL',
         detail:
-          'Withdraw SOL or any SPL token to any wallet or deterministic DeFi Session keypair B_i with zero prior gas: pay the relayer natively from the withdrawn note and unwrap WSOL straight into Native SOL in one instruction via an ephemeral unwrap PDA.',
-        cryptoTag: 'Tag 6 Withdraw · Native relayer_fee · Atomic audren_unwrap PDA',
+          'Withdraw SOL or any SPL token to any wallet or deterministic DeFi Session keypair B_i with zero prior gas: pay relayer_fee natively from the withdrawn note and unwrap WSOL straight into Native SOL in one instruction via an ephemeral audren_v2_unwrap PDA (full exit bypasses SetPaused).',
+        cryptoTag: 'Tag 6 JoinSplit · WITHDRAW_FLAG_UNWRAP_WSOL · ~103k–148k CU',
       },
       {
         actor: 'ZERO-DUST SESSION SWEEP',
         title: 'Return every lamport back to the pool',
-        shortLabel: 'Tag 2 Deposit(fee_from_amount) → 0 lamports left',
+        shortLabel: 'Tag 3 DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT) → 0 lamports',
         packetLabel: '0-Dust Reshield',
         detail:
-          'After closing a stateful borrow or perp position on a session wallet B_i, sweep 100% of remaining SOL back into the pool with Deposit(fee_from_amount=true): the protocol deducts the rent contribution from the deposit itself, leaving 0 lamports behind. Remember that stateful DeFi positions opened by B_i remain public on Solana.',
-        cryptoTag: 'Tag 2 Deposit · DEPOSIT_FLAG_FEE_FROM_AMOUNT · Clean 0-lamport sweep',
+          'After closing a stateful borrow or perp position on a session wallet B_i, sweep 100% of remaining SOL back into the pool with DepositSol(fee_from_amount=true): the protocol deducts deterministic LaneRentVault rent from the deposit itself, leaving 0 lamports behind. Remember that stateful DeFi positions opened by B_i remain public on Solana.',
+        cryptoTag: 'Tag 3 DepositSol · DEPOSIT_FLAG_FEE_FROM_AMOUNT · 0-lamport sweep',
       },
     ],
     solscan: [
@@ -372,50 +372,50 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
   {
     tag: 'DOUBLE-SPEND',
     question: 'Can anyone spend the same private note twice?',
-    verdict: 'REJECTED BY NULLIFIER CHECKS',
+    verdict: 'REJECTED BY NULLIFIER PDAS',
     answer:
-      'Every note derives exactly one deterministic nullifier J = x⁻¹·U from your private spend key. The first spend initializes a Solana PDA seeded by J. Any replay fails immediately at Solana’s runtime — without ever revealing which deposit was spent.',
-    primitive: 'Deterministic Nullifier J = x⁻¹·U · Solana PDA Uniqueness',
+      'Every note derives one deterministic nullifier Poseidon4(4, nk, cm, global_leaf_index). The first spend initializes a permanent 0-byte Solana NullifierPDA and appends a 16-byte prefix to NullifierPage for zero-indexer wallet sync. Replays fail immediately at Solana’s runtime.',
+    primitive: 'Key-Separated nk = Poseidon2(10, spend_sk) · NullifierPDA + NullifierPage',
   },
   {
     tag: 'CONSERVATION',
     question: 'Can anyone counterfeit tokens or use negative amounts?',
-    verdict: 'CHECKED BY RANGE & BALANCE PROOFS',
+    verdict: 'ENFORCED IN FROZEN R1CS',
     answer:
-      'Solana checks two things on every private spend without seeing the coin or number: every output commitment is proven to lie in [0, 2⁶⁴−1] via Bulletproofs, and input commitments equal output commitments for the exact same hidden asset.',
-    primitive: '64-Bit Bulletproofs · Cross-Base Pedersen ΣV_in = ΣV_out',
+      'The single minimal BN254 Groth16 circuit (17,861 constraints) enforces uniform asset_id across all inputs and outputs, exact value conservation, and 64-bit unsigned bit-decomposition range checks on every output commitment and public leg.',
+    primitive: '17,861 R1CS · 64-Bit Range Gadgets · alt_bn128 Pairing Syscall',
   },
   {
-    tag: 'TRANSPARENCY',
-    question: 'Is there a trusted setup ceremony or “toxic waste”?',
-    verdict: 'ZERO TRUSTED SETUP',
+    tag: 'SETUP & CEREMONY',
+    question: 'What is the Groth16 trusted-setup provenance?',
+    verdict: 'SINGLE FROZEN CIRCUIT · MPC BEFORE MAINNET',
     answer:
-      'Audren uses transparent Ristretto255 group proofs with hash-to-curve generators. No trusted-setup ceremony or proving-key download is required. This does not replace an independent security audit.',
-    primitive: 'Ristretto255 (Prime Order ℓ) · SHA-256 Fiat-Shamir (Native Syscalls)',
+      'Audren freezes one minimal 17,861-constraint JoinSplit circuit capable of scaling 4→8→16 lanes without ever re-running a ceremony. Pre-audit deployments use DEV_DETERMINISTIC_VK; a public Phase-2 MPC ceremony and independent audit are planned prior to production custody.',
+    primitive: 'BN254 Groth16 (vk_id = 0) · 192 B Proof · 3.75 MB Compressed PK',
   },
   {
     tag: 'STEALTH KEYS',
     question: 'Can anyone link two payments sent to my aud1… address?',
-    verdict: 'FRESH STEALTH KEYS',
+    verdict: 'FRESH POSEIDON STEALTH OWNERS',
     answer:
-      'Audren instructions use a one-time key instead of your reusable aud1… address. Each sender multiplies your public view key by fresh randomness to create a unique one-time stealth key P = S + H(r·V)·G. The keys do not directly identify the reusable address, but amounts, timing, viewing access and other observations can still connect payments.',
-    primitive: 'Ristretto255 ECDH Stealth · 1-Byte View Tag · AES-256-GCM',
+      'Audren instructions never write your reusable 65-byte aud1… address on-chain. Each sender derives a unique X25519 shared secret, computes stealth_owner = Poseidon3(2, spend_pk, tweak), and encrypts a 90 B ChaCha20-Poly1305 memo. Timing, public amounts, and external metadata can still correlate payments.',
+    primitive: 'X25519 ECDH · Poseidon3 Stealth · 2-Byte View Tag · ChaCha20-Poly1305',
   },
   {
     tag: 'CUSTODY',
-    question: 'Can Audren, a relayer, or an auditor steal or freeze funds?',
+    question: 'Can Audren, a relayer, or a viewing-key holder steal or freeze funds?',
     verdict: 'FULL-NOTE EXIT BYPASSES PAUSE',
     answer:
-      'The current pool authority cannot spend private notes. Full-note withdrawals bypass its pause; partial withdrawals do not. Relayers cannot alter proof-bound outputs. Auditor keys are read-only. Token issuer controls and the mutable program upgrade authority remain separate risks; see /architecture.',
-    primitive: 'Transcript-Bound Outputs · Full-Note Direct RPC Exit',
+      'Pool authority cannot spend shielded notes. Full withdrawals (output_mask == 0, including atomic WSOL unwrap) bypass SetPaused. Relayers cannot alter ctx_hash-bound outputs or router accounts. FullViewingKey (spend_pk, nk, view_sk, view_pk) is strictly read-only. Token issuer controls and mutable upgrade authority remain separate risks.',
+    primitive: 'ctx_hash-Bound Outputs · Pause-Immune Full Exit · Key Separation',
   },
   {
     tag: 'ATOMIC ESCROW',
-    question: 'Can a shielded DeFi CPI hide slippage or trap funds in escrow?',
-    verdict: 'ATOMIC 1-TX ESCROW · EXACT DELTA',
+    question: 'Can a shielded DeFi CPI hijack escrow accounts or steal slippage?',
+    verdict: 'HARDENED ESCROW FIREWALL · EXACT DELTA',
     answer:
-      'During ExecViaEscrow (Tag 5), the Solana program binds target_program and min_amount_out inside the proof transcript, measures the vault’s exact pre- and post-CPI balance delta, reverts atomically if actual_out < min_amount_out, sweeps every remaining atom back into Pool #0, and commits the exact net receipt on-chain.',
-    primitive: 'ExecViaEscrow (Tag 5) · Native Relayer Fee · On-Chain Delta Commitment',
+      'During ExecViaEscrow (Tag 7), Audren binds router_program, every router account (pubkey + is_writable), min_amount_out, and relayer_fee inside ctx_hash, snapshots pre/post owner, delegate, close_authority, and lamports on escrow & token accounts, supports EXEC_FLAG_FEE_ON_OUTPUT, and commits the exact measured vault delta on-chain.',
+    primitive: 'ExecViaEscrow (Tag 7) · WatchedEscrowBuf Firewall · ~158k CU',
   },
 ]
 
@@ -486,7 +486,7 @@ export function HowAudrenWorksVisual() {
                 <h3>Share one <code>aud1…</code> address. Receive through fresh one-time keys.</h3>
               </div>
               <span className="mono" style={{ fontSize: 11, color: '#55574e' }}>
-                Derived locally · 64-byte public keys
+                Derived locally · 65-byte payload (0x02 | spend_pk | view_pk)
               </span>
             </div>
 
@@ -495,11 +495,11 @@ export function HowAudrenWorksVisual() {
                 <span className="aud-seg is-prefix" title="Audren protocol prefix">
                   aud1
                 </span>
-                <span className="aud-seg is-spend" title="32-byte Ristretto255 Spend Public Key S">
-                  36et2wsvTXKWMrmEQDrG7nRTofxBdSw6ZkwzmUT9vAR
+                <span className="aud-seg is-spend" title="Version 0x02 + 32-byte BN254 Poseidon Spend Public Key">
+                  Bzeekem3VfwxvTueYbWyZvRxvon9eD8duQLdj3FPEEZZ
                 </span>
-                <span className="aud-seg is-view" title="32-byte Ristretto255 View Public Key V">
-                  fpCkY8YR9ENm9QV9WoUW3Nb1tp3BGejPA8BG8PWCWrwFL
+                <span className="aud-seg is-view" title="32-byte X25519 View Public Key">
+                  e12BggMChombGhV3Ywujmet3YSXSoMd7jkd3WBaisnvF
                 </span>
               </div>
               <button

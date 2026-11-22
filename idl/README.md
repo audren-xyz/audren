@@ -1,6 +1,6 @@
 # Audren Program IDLs & On-Chain Metadata
 
-Complete, machine-verified Interface Definition Languages (IDLs) and canonical security metadata for every Solana program in this repository.
+Complete, machine-verified Interface Definition Languages (IDLs) and canonical security metadata for the Audren Solana programs.
 
 ## Published Files
 
@@ -19,7 +19,7 @@ import { AUDREN_CODAMA_IDL, AUDREN_ANCHOR_IDL } from "@audren/sdk";
 
 ## Regenerating & Verifying Against Rust Source
 
-IDLs are deterministically derived from `crates/audren-core/src/{lib.rs,instruction.rs,layout.rs}` so instruction tags (`0..=12`), account byte layouts (`PoolState` 192 B, `EpochPage` 6,240 B, `AppendLaneState` 64 B, sentinels 16 B, `ProofBuffer` 48+N B, `NullifierPDA` 0 B), PDA seeds (all 11, including `audren_unwrap`), and error codes (`1..=33`) remain strictly synchronized with the on-chain sBPFv3 program:
+IDLs are deterministically derived from `crates/audren-core/src/{lib.rs,instruction.rs,layout.rs}` so all 9 instruction tags (`0..=8`), 8 account byte layouts (`PoolState` 128 B, `LaneTreeState` 1,824 B, `SubtreePage` 8,256 B, `SubtreeRootPage` 9,664 B, `MemoPage` 10,144 B, `NullifierPage` 9,664 B, `RootCheckpoint` 704 B, `NullifierPDA` 0 B), 13 PDA seeds (`audren_v2_*`), and 33 error codes (`1..=33`) remain strictly synchronized with the on-chain sBPFv3 program:
 
 ```bash
 python3 idl/generate-idl.py
@@ -30,49 +30,4 @@ python3 idl/verify-idl.py
 
 Audren publishes both its canonical **Codama IDL** (`seed: "idl"`, PDA `5QoLwK1C3NpUXjsHEV14RsQE65MaaiT9WxGvoTyxBPsn`) and **Security metadata** (`seed: "security"`, PDA `GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj`) on-chain via the Solana Foundation Program Metadata standard (`@solana-program/program-metadata`), read directly by Solana Explorer, Solscan, and Codama tooling.
 
-### Publishing with the upgrade authority
-
-```bash
-# Publish canonical security metadata
-npx @solana-program/program-metadata write security \
-  AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3 \
-  ./idl/security.json \
-  --format json \
-  --keypair /path/to/upgrade-authority.json \
-  --rpc "$SOLANA_RPC_URL"
-
-# Publish canonical Codama IDL
-npx @solana-program/program-metadata write idl \
-  AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3 \
-  ./idl/audren.codama.json \
-  --format json \
-  --keypair /path/to/upgrade-authority.json \
-  --rpc "$SOLANA_RPC_URL"
-```
-
-Or publish and round-trip verify both in one step using `./scripts/upgrade-program.sh metadata <devnet|mainnet>`. Every program upgrade through `./scripts/upgrade-program.sh <devnet|mainnet>` automatically republishes both `security` and `idl` metadata (and updates Solana Verified Build attestation on Mainnet) so on-chain metadata never drifts from the deployed program.
-
-Audit live cluster parity anytime with:
-
-```bash
-./scripts/upgrade-program.sh check mainnet
-./scripts/upgrade-program.sh check devnet
-```
-
-### Fetching & verifying on-chain metadata
-
-```bash
-npx @solana-program/program-metadata fetch security \
-  AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3 \
-  --rpc "$SOLANA_RPC_URL"
-
-npx @solana-program/program-metadata fetch idl \
-  AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3 \
-  --rpc "$SOLANA_RPC_URL"
-```
-
-## Generating Clients with Codama
-
-```bash
-npx @codama/cli generate --idl ./idl/audren.codama.json
-```
+Use `./scripts/upgrade-program.sh metadata <devnet|mainnet>` to publish and round-trip verify both accounts, or `./scripts/upgrade-program.sh check <devnet|mainnet>` to audit live cluster parity.

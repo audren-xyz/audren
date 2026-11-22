@@ -1,9 +1,9 @@
 [package]
 name = "audren-core"
-version = "0.3.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 publish = false
-description = "Shared no_std wire layouts, PDA seeds, error codes, and proof framing for Audren."
+description = "Shared no_std wire layouts, PDA seeds, Poseidon domain constants, instruction tags, and error codes for Audren."
 
 [dependencies]

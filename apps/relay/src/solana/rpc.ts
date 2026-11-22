@@ -201,8 +201,9 @@ const RENT_CACHE = new Map<string, LiveRentSchedule>()
 const RENT_CACHE_TTL_MS = 300_000
 
 const NULLIFIER_ACCOUNT_LEN = 0 // On-chain claim_nullifier creates a 0-byte sentinel PDA
-const EPOCH_PAGE_LEN = 6_240 // PAGE_LEN in audren-core
-const EPOCH_PAGE_CAPACITY = 32 // PAGE_CAPACITY in audren-core
+const SUBTREE_PAGE_LEN = 8_256
+const SUBROOT_PAGE_LEN = 9_664
+const MEMO_PAGE_LEN = 10_144
 const SPL_TOKEN_ACCOUNT_LEN = 165
 
 export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSchedule> {
@@ -213,18 +214,23 @@ export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSch
   }
 
   const poolPdaB58 = base58Encode(derivePoolPda(0).address)
-  const [nullifierRent, pageRent, ataRent, poolAcc] = await Promise.all([
+  const [nullifierRent, subRent, srRent, memoRent, ataRent, poolAcc] = await Promise.all([
     rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [NULLIFIER_ACCOUNT_LEN]),
-    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [EPOCH_PAGE_LEN]),
+    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBTREE_PAGE_LEN]),
+    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBROOT_PAGE_LEN]),
+    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [MEMO_PAGE_LEN]),
     rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SPL_TOKEN_ACCOUNT_LEN]),
     fetchAccountBytes(rpcUrl, poolPdaB58).catch(() => null),
   ])
 
   const nullifierLamports = BigInt(nullifierRent)
-  const pageLamports = BigInt(pageRent)
   const ataLamports = BigInt(ataRent)
-  const livePerNote = (pageLamports + BigInt(EPOCH_PAGE_CAPACITY - 1)) / BigInt(EPOCH_PAGE_CAPACITY)
-  const poolConfigured = poolAcc ? decodePoolState(poolAcc.bytes).pageRentFeeLamports : livePerNote
+  const divCeil = (a: bigint, b: bigint) => (a + b - 1n) / b
+  const livePerNote =
+    divCeil(BigInt(subRent), 256n) +
+    divCeil(BigInt(srRent), 256n * 300n) +
+    divCeil(BigInt(memoRent), 112n)
+  const poolConfigured = poolAcc ? decodePoolState(poolAcc.bytes).noteRentFee : livePerNote
   const pageRentPerNoteLamports =
     poolConfigured > 0n && poolConfigured < livePerNote ? poolConfigured : livePerNote
   const baseTxFeeLamports = 5_000n

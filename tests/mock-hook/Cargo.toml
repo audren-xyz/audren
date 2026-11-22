@@ -1,0 +1,39 @@
+[package]
+name = "audren-mock-hook"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Minimal Pinocchio sBPFv3 Token-2022 TransferHook program for Audren integration tests."
+
+[lib]
+name = "audren_mock_hook"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pinocchio = { version = "=0.11.1", default-features = false, features = ["copy", "cpi"] }
+pinocchio-system = "=0.6.1"
+
+[target.'cfg(not(any(target_os = "solana", target_arch = "bpf")))'.dependencies]
+solana-address = { version = "2", features = ["curve25519"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))', 'cfg(target_arch, values("bpf"))'] }
+
+[workspace]
+resolver = "2"
+members = ["."]
+
+[workspace.metadata.cli]
+solana = "4.3.0"
+
+[profile.release]
+overflow-checks = true
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+overflow-checks = true

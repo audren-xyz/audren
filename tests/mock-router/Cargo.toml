@@ -1,10 +1,10 @@
 [package]
 name = "audren-mock-router"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
-description = "Minimal Pinocchio sBPFv3 mock target program for Audren ExecViaEscrow integration tests."
+description = "Minimal Pinocchio sBPFv3 mock target router (AMM, lending/yield, and adversarial exploit harness) for Audren ExecViaEscrow integration tests."
 
 [lib]
 name = "audren_mock_router"
@@ -15,7 +15,7 @@ pinocchio = { version = "=0.11.1", default-features = false, features = ["copy",
 pinocchio-system = "=0.6.1"
 
 [target.'cfg(not(any(target_os = "solana", target_arch = "bpf")))'.dependencies]
-solana-address = { version = "~2.7.0", features = ["curve25519"] }
+solana-address = { version = "2", features = ["curve25519"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))', 'cfg(target_arch, values("bpf"))'] }

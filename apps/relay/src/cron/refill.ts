@@ -1,6 +1,20 @@
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { getAggregatorAdapter, quoteWithSelection } from '../aggregators/registry'
-import type { Env, RelayPolicyConfig } from '../env'
+import { getRelayerSecretsB64, type Env, type RelayPolicyConfig } from '../env'
+import {
+  buildOpenPageSolanaIx,
+  buildPublishCheckpointSolanaIx,
+  decodeLaneHeader,
+  decodePoolState,
+  deriveLanePda,
+  deriveMemoPda,
+  deriveNfPagePda,
+  derivePoolPda,
+  deriveSubtreePda,
+  OPEN_PAGE_KIND_MEMO,
+  OPEN_PAGE_KIND_NULLIFIER,
+  OPEN_PAGE_KIND_SUBTREE,
+} from '../solana/audren'
 import {
   CLASSIC_TOKEN_PROGRAM_ID,
   WSOL_MINT,
@@ -16,15 +30,158 @@ import {
   toBase64,
 } from '../solana/codec'
 import {
+  fetchAccountBytes,
   fetchAllOwnedTokenAccounts,
   fetchBalance,
   fetchMintMetas,
+  fetchMultipleAccounts,
   rpcCall,
   simulateV1Transaction,
   waitForConfirmation,
 } from '../solana/rpc'
-import type { SolanaInstruction } from '../types'
+import type { Cluster, SolanaInstruction } from '../types'
 import { fetchMintPricesUsd } from '../policy/pricing'
+
+/**
+ * Permissionless Maintenance Crank:
+ *   1. Publishes a fresh `RootCheckpoint` (`PublishCheckpoint`, Tag 5) when `slot >= nextEpoch`.
+ *   2. Pre-opens upcoming `SubtreePage`/`MemoPage`/`NullifierPage` PDAs (`OpenPage`, Tag 2)
+ *      reimbursed from `LaneRentVault` when any active lane approaches page boundary (`>= 80%` full).
+ */
+export async function runV2MaintenanceCrank(
+  env: Env,
+  cluster: Cluster,
+): Promise<{ publishedCheckpoint: string | null; openedPages: string[]; notes: string[] }> {
+  const rpcUrl = cluster === 'mainnet' ? env.MAINNET_RPC_URL : env.DEVNET_RPC_URL
+  const firstSecret = getRelayerSecretsB64(env, cluster)[0] ?? null
+  const secret32 = decodeRelayerSecret(firstSecret)
+  if (!rpcUrl || !secret32) {
+    return { publishedCheckpoint: null, openedPages: [], notes: ['unconfigured'] }
+  }
+  const relayerPubkey = ed25519.getPublicKey(secret32)
+  const relayerB58 = base58Encode(relayerPubkey)
+  const poolAcc = await fetchAccountBytes(rpcUrl, base58Encode(derivePoolPda(0).address)).catch(
+    () => null,
+  )
+  if (!poolAcc) return { publishedCheckpoint: null, openedPages: [], notes: ['pool not initialized'] }
+  const pool = decodePoolState(poolAcc.bytes)
+  if (pool.activeLanes === 0) {
+    return { publishedCheckpoint: null, openedPages: [], notes: ['no active lanes'] }
+  }
+
+  const slot = await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'confirmed' }])
+  const epoch = Math.floor(slot / Number(pool.ckptInterval))
+  const slotIdx = epoch % 256
+  const notes: string[] = []
+  let publishedCheckpoint: string | null = null
+  const openedPages: string[] = []
+
+  // Try publishing current epoch RootCheckpoint (simulation skips if already published)
+  const ckIx = buildPublishCheckpointSolanaIx({
+    payer: relayerB58,
+    poolId: 0,
+    slotIdx,
+    activeLanes: pool.activeLanes,
+  })
+  const bh = await rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
+    { commitment: 'confirmed' },
+  ])
+  const ckSigned = buildAndSignV1Transaction(secret32, bh.value.blockhash, [ckIx], {
+    computeUnitLimit: 120_000,
+    priorityFeeLamports: 5_000n,
+  })
+  const ckSim = await simulateV1Transaction(rpcUrl, ckSigned.wireBytes, [relayerB58])
+  if (!ckSim.err) {
+    const sig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
+      toBase64(ckSigned.wireBytes),
+      { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 2 },
+    ])
+    publishedCheckpoint = sig
+    notes.push(`Published RootCheckpoint slotIdx=${slotIdx} (${sig})`)
+  }
+
+  // Pre-open next SubtreePage / MemoPage / NullifierPage for any lane >= 80% full
+  const lanePdas = Array.from({ length: pool.activeLanes }, (_, l) =>
+    base58Encode(deriveLanePda(0, l).address),
+  )
+  const laneAccs = await fetchMultipleAccounts(rpcUrl, lanePdas)
+  const openIxs: SolanaInstruction[] = []
+  for (let l = 0; l < laneAccs.length; l++) {
+    const raw = laneAccs[l]?.bytes
+    if (!raw) continue
+    const hdr = decodeLaneHeader(raw)
+    if (Number(hdr.nextLeaf % 256n) >= 200) {
+      const nextSub = hdr.nextLeaf / 256n + 1n
+      const [exists] = await fetchMultipleAccounts(rpcUrl, [
+        base58Encode(deriveSubtreePda(0, l, nextSub).address),
+      ])
+      if (!exists) {
+        openIxs.push(
+          buildOpenPageSolanaIx({
+            payer: relayerB58,
+            pageKind: OPEN_PAGE_KIND_SUBTREE,
+            poolId: 0,
+            laneId: l,
+            pageSeq: nextSub,
+          }),
+        )
+      }
+    }
+    if (Number(hdr.nextLeaf % 112n) >= 90) {
+      const nextMemo = hdr.nextLeaf / 112n + 1n
+      const [exists] = await fetchMultipleAccounts(rpcUrl, [
+        base58Encode(deriveMemoPda(0, l, nextMemo).address),
+      ])
+      if (!exists) {
+        openIxs.push(
+          buildOpenPageSolanaIx({
+            payer: relayerB58,
+            pageKind: OPEN_PAGE_KIND_MEMO,
+            poolId: 0,
+            laneId: l,
+            pageSeq: nextMemo,
+          }),
+        )
+      }
+    }
+    if (Number(hdr.nfCount % 600n) >= 500) {
+      const nextNf = hdr.nfCount / 600n + 1n
+      const [exists] = await fetchMultipleAccounts(rpcUrl, [
+        base58Encode(deriveNfPagePda(0, l, nextNf).address),
+      ])
+      if (!exists) {
+        openIxs.push(
+          buildOpenPageSolanaIx({
+            payer: relayerB58,
+            pageKind: OPEN_PAGE_KIND_NULLIFIER,
+            poolId: 0,
+            laneId: l,
+            pageSeq: nextNf,
+          }),
+        )
+      }
+    }
+  }
+  for (const ix of openIxs.slice(0, 4)) {
+    const bh2 = await rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
+      { commitment: 'confirmed' },
+    ])
+    const tx = buildAndSignV1Transaction(secret32, bh2.value.blockhash, [ix], {
+      computeUnitLimit: 100_000,
+      priorityFeeLamports: 5_000n,
+    })
+    const sim = await simulateV1Transaction(rpcUrl, tx.wireBytes, [relayerB58])
+    if (!sim.err) {
+      const sig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
+        toBase64(tx.wireBytes),
+        { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 2 },
+      ])
+      openedPages.push(sig)
+    }
+  }
+
+  return { publishedCheckpoint, openedPages, notes }
+}
 
 export interface RefillReport {
   checkedAt: string

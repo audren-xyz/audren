@@ -8,11 +8,14 @@ importers:
 
   .:
     dependencies:
+      '@audren/sdk':
+        specifier: file:../../packages/sdk
+        version: file:../../packages/sdk
       '@noble/curves':
-        specifier: ^2.0.1
+        specifier: ^2.4.0
         version: 2.4.0
       '@noble/hashes':
-        specifier: ^2.0.1
+        specifier: ^2.4.0
         version: 2.4.0
     devDependencies:
       '@cloudflare/workers-types':
@@ -29,6 +32,10 @@ importers:
         version: 4.166.0(@cloudflare/workers-types@5.20261120.1)
 
 packages:
+
+  '@audren/sdk@file:../../packages/sdk':
+    resolution: {directory: ../../packages/sdk, type: directory}
+    engines: {node: '>=22'}
 
   '@cloudflare/kv-asset-handler@0.5.1':
     resolution: {integrity: sha512-48OysfSW3MkQY1XjkhkpPkgrEkOvgfoyHzA2eyX5wpzFpijC02uWigv3hkNdJdT3C7ybW/U17yYHXeR68pLeww==}
@@ -714,6 +721,11 @@ packages:
     resolution: {integrity: sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ==}
 
 snapshots:
+
+  '@audren/sdk@file:../../packages/sdk':
+    dependencies:
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
 
   '@cloudflare/kv-asset-handler@0.5.1': {}
 

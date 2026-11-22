@@ -1,20 +1,23 @@
+import type { FullViewingKey } from '@audren/sdk'
 import {
+  ASSET_MODE_PRIVATE,
+  ASSET_MODE_SOL,
+  ASSET_MODE_SPL,
   AUDREN_PROGRAM_ID,
   AUDREN_PROGRAM_ID_STR,
-  TAG_DEPOSIT,
+  TAG_DEPOSIT_SOL,
+  TAG_DEPOSIT_SPL,
   TAG_EXEC_VIA_ESCROW,
-  TAG_MERGE,
-  TAG_TRANSFER,
-  TAG_WITHDRAW,
+  TAG_JOINSPLIT,
   derivePoolPda,
   deriveSolVaultPda,
   deriveVaultAuthPda,
   extractNullifierPdas,
-  opKindFromTag,
   parseExecEscrowMeta,
-  parseWithdrawMeta,
+  parseJoinSplitMeta,
+  verifyShieldedCm2RelayerFee,
   type ParsedExecEscrowMeta,
-  type ParsedWithdrawMeta,
+  type ParsedJoinSplitMeta,
 } from '../solana/audren'
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID_STR,
@@ -58,16 +61,17 @@ export interface FirewallVerdict {
   ixData: Uint8Array
   decodedAccounts: SolanaAccountMeta[]
   nullifiers: string[]
-  writesOutput: boolean
+  outLaneId: number
   setupAtas: ValidatedSetupAta[]
   preInstructions: SolanaInstruction[]
+  joinSplitMeta: ParsedJoinSplitMeta | null
   execMeta: ParsedExecEscrowMeta | null
-  withdrawMeta: ParsedWithdrawMeta | null
-  /** Relayer fee SPL/Token-2022 ATA to watch during simulation (for Tag 5 native/router fee or SPL Tag 6 native fee). */
+  /** Mode 1 (Private Transfer): shielded `cm2` fee note verified via relayer read-only FVK. */
+  shieldedCm2Fee: { mint: string; amount: bigint } | null
+  /** Mode 2/3 SPL/Token-2022 fee ATA watched during `simulateV1Transaction`. */
   watchedRelayerFeeAta: string | null
-  /** Mint of `watchedRelayerFeeAta` (if SPL/Token-2022 fee). */
   watchedRelayerFeeMint: string | null
-  /** True when Withdraw pays native SOL `relayer_fee > 0` directly to `relayerPubkey` (Native SOL or `unwrap_wsol`). */
+  /** Mode 2/3 Native SOL fee paid directly to `relayerPubkey` (Native SOL or `unwrap_wsol`). */
   nativeSolFeeToRelayer: bigint
 }
 
@@ -78,19 +82,25 @@ const MAX_PRE_IX_ACCOUNTS = 24
 /**
  * Strict Zero-Trust Audren Instruction Firewall.
  *
- * Guarantees the relayer keypair can ONLY ever sign:
- *   - Audren Tag 3 (`Transfer`), Tag 4 (`Merge`), Tag 5 (`ExecViaEscrow`), Tag 6 (`Withdraw`) on canonical Pool #0
- *   - Explicitly rejects Tag 2 (`Deposit` — deposits are naturally public, signed by depositor)
- *   - Enforces `accounts[0] === relayerPubkey` (writable signer) and ZERO other signers
- *   - Enforces strict `preInstructions` allowlist: ONLY zero-signer refresh cranks from
- *     `allowedPreIxPrograms` immediately preceding Tag 5 (`ExecViaEscrow`), unconditionally
- *     forbidding `relayerPubkey` and relayer/Audren custody accounts anywhere in `preInstructions`
- *   - Enforces strict `setupAtas` allowlist bound to the active instruction's mints/token programs
+ * Guarantees the relayer fee-payer keypair can ONLY ever sign:
+ *   - Audren Tag 6 (`JoinSplit` — private transfer or public SOL/SPL/WSOL-unwrap withdraw)
+ *     and Tag 7 (`ExecViaEscrow` — atomic DeFi CPI with optional `EXEC_FLAG_FEE_ON_OUTPUT`)
+ *     on canonical Pool #0 (`audren_v2_pool`).
+ *   - Explicitly rejects Tag 3 (`DepositSol`) and Tag 4 (`DepositSpl`) — deposits are public
+ *     and signed directly by the depositor's wallet.
+ *   - Enforces `accounts[0] === relayerPubkey` (writable signer) and ZERO other signers.
+ *   - Enforces strict `preInstructions` allowlist (Tag 7 only, zero signers, never references
+ *     relayer or Audren custody accounts) and strict `setupAtas` allowlist.
+ *   - Verifies all 3 relayer fee channels:
+ *       1. Mode 1 Private Transfer: shielded `cm2` fee note verified via read-only `FullViewingKey`
+ *       2. Mode 2 Public Withdraw: Native SOL / `unwrap_wsol` -> `relayerPubkey`, or SPL -> relayer ATA
+ *       3. Mode 3 `ExecViaEscrow`: input-leg or `EXEC_FLAG_FEE_ON_OUTPUT` output-leg fee -> relayer
  */
 export function validateRelaySubmission(
   body: RelaySubmitRequest,
   relayerPubkey: Uint8Array,
   allowedPreIxPrograms: Set<string>,
+  relayerFvk: FullViewingKey | null = null,
 ): FirewallVerdict {
   if (!body || typeof body !== 'object') {
     throw new FirewallError('Invalid JSON request body', 400)
@@ -102,7 +112,7 @@ export function validateRelaySubmission(
   ) {
     throw new FirewallError('Invalid or missing instructionDataB64', 400)
   }
-  if (!Array.isArray(body.accounts) || body.accounts.length < 7 || body.accounts.length > 62) {
+  if (!Array.isArray(body.accounts) || body.accounts.length < 12 || body.accounts.length > 62) {
     throw new FirewallError(`Invalid Audren account count (${body.accounts?.length ?? 0})`, 400)
   }
 
@@ -112,21 +122,20 @@ export function validateRelaySubmission(
   } catch {
     throw new FirewallError('instructionDataB64 must be valid base64', 400)
   }
-  if (ixData.length < 24) {
+  if (ixData.length < 378) {
     throw new FirewallError('Audren instruction payload too short', 400)
   }
 
   const tag = ixData[0]!
-  if (tag === TAG_DEPOSIT) {
+  if (tag === TAG_DEPOSIT_SOL || tag === TAG_DEPOSIT_SPL) {
     throw new FirewallError(
-      'Deposits (Tag 2 / Go Private) are naturally public and are not sponsored by relay.audren.xyz. Sign deposits directly with your wallet.',
+      'Deposits (DepositSol Tag 3 / DepositSpl Tag 4) are naturally public and are not sponsored by the relay. Sign deposits directly with your wallet.',
       400,
     )
   }
-  const opKind = opKindFromTag(tag)
-  if (!opKind) {
+  if (tag !== TAG_JOINSPLIT && tag !== TAG_EXEC_VIA_ESCROW) {
     throw new FirewallError(
-      `Audren instruction tag ${tag} is not permitted on this relay. Allowed: Transfer (3), Merge (4), ExecViaEscrow (5), Withdraw (6).`,
+      `Audren instruction tag ${tag} is not permitted on this relay. Allowed: JoinSplit (6), ExecViaEscrow (7).`,
       400,
     )
   }
@@ -179,25 +188,26 @@ export function validateRelaySubmission(
     throw new FirewallError('Could not extract nullifier PDA from Audren accounts', 400)
   }
 
+  const joinSplitMeta = tag === TAG_JOINSPLIT ? parseJoinSplitMeta(ixData, decodedAccounts) : null
+  if (tag === TAG_JOINSPLIT && !joinSplitMeta) {
+    throw new FirewallError('Malformed JoinSplit (Tag 6) instruction or accounts', 400)
+  }
+  if (joinSplitMeta && joinSplitMeta.poolId !== 0) {
+    throw new FirewallError('Only canonical Pool #0 is permitted on this relay', 400)
+  }
+
   const execMeta = tag === TAG_EXEC_VIA_ESCROW ? parseExecEscrowMeta(ixData, decodedAccounts) : null
   if (tag === TAG_EXEC_VIA_ESCROW && !execMeta) {
-    throw new FirewallError('Malformed ExecViaEscrow (Tag 5) instruction or accounts', 400)
+    throw new FirewallError('Malformed ExecViaEscrow (Tag 7) instruction or accounts', 400)
+  }
+  if (execMeta && execMeta.poolId !== 0) {
+    throw new FirewallError('Only canonical Pool #0 is permitted on this relay', 400)
   }
 
-  const withdrawMeta = tag === TAG_WITHDRAW ? parseWithdrawMeta(ixData, decodedAccounts) : null
-  if (tag === TAG_WITHDRAW && !withdrawMeta) {
-    throw new FirewallError('Malformed Withdraw (Tag 6) instruction or accounts', 400)
-  }
+  const opKind: AudrenOpKind = execMeta ? 'exec_escrow' : joinSplitMeta!.opKind
+  const outLaneId = execMeta ? execMeta.outLaneId : joinSplitMeta!.outLaneId
 
-  const writesOutput =
-    tag === TAG_TRANSFER ||
-    tag === TAG_MERGE ||
-    tag === TAG_EXEC_VIA_ESCROW ||
-    (withdrawMeta !== null && withdrawMeta.hasChange)
-
-  // Validate strictly allowlisted zero-signer DeFi refresh cranks (`preInstructions`).
-  // CRITICAL: Because Solana grants `relayerPubkey` transaction-level signer+writable privileges,
-  // `relayerPubkey` MUST NEVER appear anywhere in `preInstructions[i].accounts` (even as read-only!).
+  // Validate strictly allowlisted zero-signer DeFi refresh cranks (`preInstructions`, Tag 7 only).
   const FORBIDDEN_PRE_IX_PROGRAMS = new Set([
     AUDREN_PROGRAM_ID_STR,
     SYSTEM_PROGRAM_ID_STR,
@@ -205,18 +215,20 @@ export function validateRelaySubmission(
     TOKEN_2022_PROGRAM_ID_STR,
     ASSOCIATED_TOKEN_PROGRAM_ID_STR,
   ])
-  const relayerExecInAta = execMeta
-    ? deriveAta(relayerPubkey, base58Decode(execMeta.tokenProgIn), base58Decode(execMeta.mintIn))
-    : null
-  const relayerExecOutAta = execMeta
-    ? deriveAta(relayerPubkey, base58Decode(execMeta.tokenProgOut), base58Decode(execMeta.mintOut))
-    : null
+  const relayerExecInAta =
+    execMeta && execMeta.mintIn && execMeta.tokenProgIn
+      ? deriveAta(relayerPubkey, base58Decode(execMeta.tokenProgIn), base58Decode(execMeta.mintIn))
+      : null
+  const relayerExecOutAta =
+    execMeta && execMeta.mintOut && execMeta.tokenProgOut
+      ? deriveAta(relayerPubkey, base58Decode(execMeta.tokenProgOut), base58Decode(execMeta.mintOut))
+      : null
 
   const preInstructions: SolanaInstruction[] = []
   if (Array.isArray(body.preInstructions) && body.preInstructions.length > 0) {
     if (tag !== TAG_EXEC_VIA_ESCROW) {
       throw new FirewallError(
-        'preInstructions are only permitted immediately before ExecViaEscrow (Tag 5)',
+        'preInstructions are only permitted immediately before ExecViaEscrow (Tag 7)',
         400,
       )
     }
@@ -267,13 +279,8 @@ export function validateRelaySubmission(
             400,
           )
         }
-        if (bytesEqual(pk, relayerPubkey)) {
-          throw new FirewallError(
-            `preInstructions[${i}] cannot reference the relayer pubkey`,
-            400,
-          )
-        }
         if (
+          bytesEqual(pk, relayerPubkey) ||
           bytesEqual(pk, pool0Pda) ||
           bytesEqual(pk, vaultAuthPda) ||
           bytesEqual(pk, solVaultPda) ||
@@ -282,7 +289,7 @@ export function validateRelaySubmission(
           (relayerExecOutAta && bytesEqual(pk, relayerExecOutAta))
         ) {
           throw new FirewallError(
-            `preInstructions[${i}] cannot reference Audren custody or relayer fee accounts`,
+            `preInstructions[${i}] cannot reference relayer, Audren custody, or fee accounts`,
             400,
           )
         }
@@ -292,6 +299,7 @@ export function validateRelaySubmission(
     }
   }
 
+  // Validate setupAtas strictly bound to active ExecViaEscrow or SPL JoinSplit Withdraw accounts
   const setupAtas: ValidatedSetupAta[] = []
   const seenSetupAtas = new Set<string>()
   if (Array.isArray(body.setupAtas) && body.setupAtas.length > 0) {
@@ -299,10 +307,9 @@ export function validateRelaySubmission(
       throw new FirewallError('setupAtas supports at most 6 entries', 400)
     }
     const isSplWithdraw =
-      withdrawMeta !== null &&
-      !withdrawMeta.isNativeSol &&
-      !withdrawMeta.unwrapWsol &&
-      decodedAccounts.length >= 14
+      joinSplitMeta !== null &&
+      joinSplitMeta.assetMode === ASSET_MODE_SPL &&
+      !joinSplitMeta.unwrapWsol
 
     for (const req of body.setupAtas) {
       if (
@@ -332,31 +339,36 @@ export function validateRelaySubmission(
 
       const matchesExecMintAndProg =
         execMeta !== null &&
-        ((req.mint === execMeta.mintIn && req.tokenProgram === execMeta.tokenProgIn) ||
-          (req.mint === execMeta.mintOut && req.tokenProgram === execMeta.tokenProgOut))
+        ((execMeta.mintIn !== null &&
+          req.mint === execMeta.mintIn &&
+          req.tokenProgram === execMeta.tokenProgIn) ||
+          (execMeta.mintOut !== null &&
+            req.mint === execMeta.mintOut &&
+            req.tokenProgram === execMeta.tokenProgOut))
       const isAllowedPda =
         execMeta !== null &&
         (req.owner === vaultAuthB58 || req.owner === execMeta.escrowPda) &&
         matchesExecMintAndProg
-      // SPL Withdraw layout: [7] fee_recipient, [8] vault_auth, [9] mint, [10] vault_ata, [11] recipient_ata, [12] token_prog
       const isWithdrawRecipientAta =
         isSplWithdraw &&
-        bytesEqual(ata, decodedAccounts[11]!.pubkey) &&
-        bytesEqual(mintBytes, decodedAccounts[9]!.pubkey) &&
-        bytesEqual(tpBytes, decodedAccounts[12]!.pubkey)
+        ataB58 === joinSplitMeta!.recipientAccount &&
+        req.mint === joinSplitMeta!.mint &&
+        req.tokenProgram === joinSplitMeta!.tokenProgram
       const isRelayerWithdrawFeeAta =
         isSplWithdraw &&
-        withdrawMeta!.relayerFee > 0n &&
+        joinSplitMeta!.relayerFee > 0n &&
         bytesEqual(ownerBytes, relayerPubkey) &&
-        bytesEqual(ata, decodedAccounts[7]!.pubkey) &&
-        bytesEqual(mintBytes, decodedAccounts[9]!.pubkey) &&
-        bytesEqual(tpBytes, decodedAccounts[12]!.pubkey)
+        ataB58 === joinSplitMeta!.feeRecipient &&
+        req.mint === joinSplitMeta!.mint &&
+        req.tokenProgram === joinSplitMeta!.tokenProgram
       const isRelayerExecFeeAta =
         execMeta !== null &&
         bytesEqual(ownerBytes, relayerPubkey) &&
         matchesExecMintAndProg &&
-        ((execMeta.relayerFee > 0n && ataB58 === execMeta.feeRecipientAta) ||
-          decodedAccounts.slice(16).some((a) => bytesEqual(a.pubkey, ata)))
+        ((execMeta.relayerFee > 0n && ataB58 === execMeta.feeRecipient) ||
+          decodedAccounts
+            .slice(execMeta.routerAccountsStartIdx)
+            .some((a) => bytesEqual(a.pubkey, ata)))
 
       if (
         !isAllowedPda &&
@@ -369,70 +381,88 @@ export function validateRelaySubmission(
           400,
         )
       }
-
       seenSetupAtas.add(ataB58)
       setupAtas.push({ owner: ownerBytes, mint: mintBytes, tokenProgram: tpBytes, ata })
     }
   }
 
-  // Detect relayer fee channel to watch during `simulateV1Transaction` and reject spoofed fee recipients:
-  //   1. Tag 5 (`ExecViaEscrow`): native `[15] fee_recipient_ata` (in `mintIn` or `mintOut`) OR
-  //      aggregator-route fee ATA inside `action_accounts` (`accounts[16..]`).
-  //   2. Tag 6 (`Withdraw`):
-  //      - Native SOL or `unwrap_wsol`: native SOL lamports directly to `[7] fee_recipient === relayerPubkey`!
-  //      - SPL Withdraw: `[7] fee_recipient === relayerFeeAta` for `withdrawMeta.mint`!
+  // Verify the 3 relayer fee channels
+  let shieldedCm2Fee: { mint: string; amount: bigint } | null = null
   let watchedRelayerFeeAta: string | null = null
   let watchedRelayerFeeMint: string | null = null
   let nativeSolFeeToRelayer = 0n
 
-  if (execMeta) {
-    const feeMintBytes = base58Decode(execMeta.feeMint)
-    const feeTpBytes = base58Decode(execMeta.feeTokenProg)
-    const expectedNativeFeeAta = base58Encode(deriveAta(relayerPubkey, feeTpBytes, feeMintBytes))
-    if (execMeta.relayerFee > 0n) {
-      if (execMeta.feeRecipientAta !== expectedNativeFeeAta) {
-        throw new FirewallError(
-          `ExecViaEscrow relayer_fee > 0 requires fee_recipient_ata to match relayer ATA (${expectedNativeFeeAta})`,
-          400,
-        )
+  if (joinSplitMeta) {
+    if (joinSplitMeta.assetMode === ASSET_MODE_PRIVATE) {
+      // Mode 1: Private shielded transfer — verify optional `cm2` fee note using read-only FVK!
+      if (relayerFvk) {
+        shieldedCm2Fee = verifyShieldedCm2RelayerFee(relayerFvk, joinSplitMeta)
       }
-      watchedRelayerFeeAta = expectedNativeFeeAta
-      watchedRelayerFeeMint = execMeta.feeMint
+    } else if (joinSplitMeta.relayerFee > 0n) {
+      // Mode 2: Public JoinSplit Withdraw (Native SOL, atomic WSOL unwrap, or SPL/Token-2022)
+      if (joinSplitMeta.assetMode === ASSET_MODE_SOL || joinSplitMeta.unwrapWsol) {
+        if (joinSplitMeta.feeRecipient !== relayerB58) {
+          throw new FirewallError(
+            `Withdraw relayer_fee > 0 requires relayer_fee_recipient to match relayer (${relayerB58})`,
+            400,
+          )
+        }
+        nativeSolFeeToRelayer = joinSplitMeta.relayerFee
+      } else if (joinSplitMeta.mint && joinSplitMeta.tokenProgram) {
+        const expectedFeeAta = base58Encode(
+          deriveAta(
+            relayerPubkey,
+            base58Decode(joinSplitMeta.tokenProgram),
+            base58Decode(joinSplitMeta.mint),
+          ),
+        )
+        if (joinSplitMeta.feeRecipient !== expectedFeeAta) {
+          throw new FirewallError(
+            `SPL Withdraw relayer_fee > 0 requires relayer_fee_recipient to match relayer ATA (${expectedFeeAta})`,
+            400,
+          )
+        }
+        watchedRelayerFeeAta = expectedFeeAta
+        watchedRelayerFeeMint = joinSplitMeta.mint
+      }
+    }
+  } else if (execMeta) {
+    // Mode 3: ExecViaEscrow (input-leg fee OR `EXEC_FLAG_FEE_ON_OUTPUT` output-leg fee)
+    if (execMeta.relayerFee > 0n) {
+      if (execMeta.feeIsNativeSol) {
+        if (execMeta.feeRecipient !== relayerB58) {
+          throw new FirewallError(
+            `ExecViaEscrow native SOL relayer_fee > 0 requires relayer_fee_recipient to match relayer (${relayerB58})`,
+            400,
+          )
+        }
+        nativeSolFeeToRelayer = execMeta.relayerFee
+      } else if (execMeta.feeMint && execMeta.feeTokenProg) {
+        const expectedFeeAta = base58Encode(
+          deriveAta(
+            relayerPubkey,
+            base58Decode(execMeta.feeTokenProg),
+            base58Decode(execMeta.feeMint),
+          ),
+        )
+        if (execMeta.feeRecipient !== expectedFeeAta) {
+          throw new FirewallError(
+            `ExecViaEscrow relayer_fee > 0 requires relayer_fee_recipient to match relayer ATA (${expectedFeeAta})`,
+            400,
+          )
+        }
+        watchedRelayerFeeAta = expectedFeeAta
+        watchedRelayerFeeMint = execMeta.feeMint
+      }
     } else {
-      // Check aggregator-embedded fee ATA in action_accounts (`accounts[16..]`) on output or input mint
-      if (relayerExecOutAta && decodedAccounts.slice(16).some((a) => bytesEqual(a.pubkey, relayerExecOutAta))) {
+      const routerSlice = decodedAccounts.slice(execMeta.routerAccountsStartIdx)
+      if (relayerExecOutAta && routerSlice.some((a) => bytesEqual(a.pubkey, relayerExecOutAta))) {
         watchedRelayerFeeAta = base58Encode(relayerExecOutAta)
         watchedRelayerFeeMint = execMeta.mintOut
-      } else if (relayerExecInAta && decodedAccounts.slice(16).some((a) => bytesEqual(a.pubkey, relayerExecInAta))) {
+      } else if (relayerExecInAta && routerSlice.some((a) => bytesEqual(a.pubkey, relayerExecInAta))) {
         watchedRelayerFeeAta = base58Encode(relayerExecInAta)
         watchedRelayerFeeMint = execMeta.mintIn
       }
-    }
-  } else if (withdrawMeta && withdrawMeta.relayerFee > 0n) {
-    if (withdrawMeta.isNativeSol || withdrawMeta.unwrapWsol) {
-      if (withdrawMeta.feeRecipient !== relayerB58) {
-        throw new FirewallError(
-          `Withdraw relayer_fee > 0 requires fee_recipient to match relayer wallet (${relayerB58})`,
-          400,
-        )
-      }
-      nativeSolFeeToRelayer = withdrawMeta.relayerFee
-    } else if (withdrawMeta.mint && withdrawMeta.tokenProgram) {
-      const expectedFeeAta = base58Encode(
-        deriveAta(
-          relayerPubkey,
-          base58Decode(withdrawMeta.tokenProgram),
-          base58Decode(withdrawMeta.mint),
-        ),
-      )
-      if (withdrawMeta.feeRecipient !== expectedFeeAta) {
-        throw new FirewallError(
-          `SPL Withdraw relayer_fee > 0 requires fee_recipient to match relayer ATA (${expectedFeeAta})`,
-          400,
-        )
-      }
-      watchedRelayerFeeAta = expectedFeeAta
-      watchedRelayerFeeMint = withdrawMeta.mint
     }
   }
 
@@ -442,11 +472,12 @@ export function validateRelaySubmission(
     ixData,
     decodedAccounts,
     nullifiers,
-    writesOutput,
+    outLaneId,
     setupAtas,
     preInstructions,
+    joinSplitMeta,
     execMeta,
-    withdrawMeta,
+    shieldedCm2Fee,
     watchedRelayerFeeAta,
     watchedRelayerFeeMint,
     nativeSolFeeToRelayer,

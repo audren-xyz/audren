@@ -40,76 +40,76 @@ const RING_CASES: readonly RingCase[] = [
   {
     id: 'pay',
     tab: 'Pay someone',
-    stageTitle: 'Shared pool · Triptych ring proof',
-    stageTag: 'Tag 3 · Transfer',
+    stageTitle: 'Global MASP · BN254 Groth16 (4^20 tree)',
+    stageTag: 'Tag 6 · JoinSplit',
     title: 'Pay privately with your existing tokens.',
     detail:
-      'Pay a reusable aud1… address with a supported asset. The proof conceals the spent note among selected candidates and creates a fresh recipient key with blinded token and amount commitments. Timing and outside information can still create links.',
-    hiddenLabel: 'Spent note within ring, recipient, token & amount',
-    publicLabel: 'Candidate pages, timing & fee payer',
+      'Pay any reusable aud1… address with SOL, Classic SPL, or Token-2022 inside a single global Multi-Asset Shielded Pool (4-ary Depth-20 Merkle tree, 1.099T note capacity). A 192-byte Groth16 proof conceals the spent notes across the entire pool history and creates fresh one-time stealth outputs with hidden asset and amount. Timing and external information can still create links.',
+    hiddenLabel: 'Spent notes across global pool, recipient, token & amount',
+    publicLabel: 'Checkpoint root, lane append slot, timing & fee payer',
     packetLabel: '•••• USDC',
-    beamLabel: 'Proof verified · input concealed',
+    beamLabel: '192 B Groth16 verified',
     outcomeTitle: 'Fresh 1-time note',
-    outcomeSub: 'One-time stealth key',
-    outcomeCaption: '4 fields blinded',
-    resultText: 'Private transfer: hidden input, fresh recipient, blinded token and amount.',
+    outcomeSub: 'Poseidon stealth owner',
+    outcomeCaption: 'All 4 fields hidden',
+    resultText: 'Private JoinSplit: hidden inputs across global pool, fresh stealth recipient, hidden asset & amount.',
     txHref: solscanTx(AUDREN.mainnet.transferTx),
-    txLabel: 'Inspect Mainnet private send',
+    txLabel: 'Inspect settled private send',
   },
   {
     id: 'swap',
     tab: 'Shielded DeFi',
     stageTitle: 'Protocol-agnostic CPI · sharded escrow',
-    stageTag: 'Tag 5 · ExecViaEscrow',
+    stageTag: 'Tag 7 · ExecViaEscrow',
     title: 'Swap, lend, stake, or deploy into Solana DeFi — settle back into the pool.',
     detail:
-      'ExecViaEscrow turns any Token A → Token B Solana program call into a single shielded transaction: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) are just one example alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA mint/redeem. Native relayer fees settle from input or output tokens; external DeFi amounts, mints and output record remain public.',
-    hiddenLabel: 'Spent note within selected candidates & owner wallet',
+      'ExecViaEscrow turns any Token A → Token B Solana program call into a single shielded Transaction v1: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA mint/redeem. Native relayer fees settle from input or output tokens (EXEC_FLAG_FEE_ON_OUTPUT); external DeFi amounts, mints, and output record remain public.',
+    hiddenLabel: 'Spent pool notes & user wallet',
     publicLabel: 'External DeFi program, mints, routed amounts, output slot & fee payer',
     packetLabel: 'Token A → B',
     beamLabel: 'Escrow PDA → DeFi CPI',
     outcomeTitle: 'Any Solana DeFi CPI',
     outcomeSub: 'DEX · Lend · LST · Vault',
     outcomeCaption: 'Swept back to pool',
-    resultText: 'Output token or yield receipt settles straight into a fresh pool record.',
+    resultText: 'Output token or yield receipt settles straight into a fresh dynamic pool note (~158k CU).',
     txHref: solscanTx(AUDREN.mainnet.swapTx),
-    txLabel: 'Inspect Mainnet ExecViaEscrow tx',
+    txLabel: 'Inspect ExecViaEscrow tx',
   },
   {
     id: 'withdraw',
     tab: 'Pay or fund wallet',
     stageTitle: 'Self-paying payout · atomic WSOL unwrap',
-    stageTag: 'Tag 6 · Withdraw',
+    stageTag: 'Tag 6 · JoinSplit Exit',
     title: 'Pay any address — or fund a fresh DeFi session wallet with zero prior SOL.',
     detail:
-      'Send SOL or SPL tokens from the shared pool to any wallet, exchange, or deterministic Private DeFi Session keypair (B_0, B_1…) for stateful borrow or perp protocols. Pay the relayer directly from the withdrawn note, optionally unwrap WSOL atomically to Native SOL in the same instruction, and later sweep remaining gas back with zero-dust Deposit(fee_from_amount). Public payouts and any stateful DeFi position opened by a session wallet remain public on Solana.',
-    hiddenLabel: 'Which candidate note funded the payout or session wallet',
+      'Exit SOL or SPL tokens from the global pool to any wallet, exchange, or deterministic Private DeFi Session keypair (B_0, B_1…) for stateful borrow or perp protocols. Pay the relayer directly from the withdrawn note, optionally unwrap WSOL atomically to Native SOL in the same instruction (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune on full exit), and later sweep remaining gas back with zero-dust DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT). Positions opened by session wallets remain public on Solana.',
+    hiddenLabel: 'Which historical pool note funded the payout or session wallet',
     publicLabel: 'Destination wallet, token, payout amount, fee payer & any DeFi positions opened',
     packetLabel: 'SOL / WSOL',
     beamLabel: 'Self-paying · atomic unwrap',
     outcomeTitle: 'Wallet or Session Bᵢ',
     outcomeSub: '0-SOL bootstrap ready',
     outcomeCaption: 'Public payout',
-    resultText: 'Public payout or 0-SOL DeFi session funded; proof conceals its input note.',
+    resultText: 'Public payout or 0-SOL DeFi session funded; Groth16 proof conceals its pool origin (~103k CU).',
     txHref: solscanTx(AUDREN.mainnet.withdrawTx),
-    txLabel: 'Inspect Mainnet full withdrawal',
+    txLabel: 'Inspect full withdrawal',
   },
   {
     id: 'receipt',
     tab: 'Share 1 receipt',
-    stageTitle: 'Selective disclosure · single-note opening',
+    stageTitle: 'Selective disclosure · 1 Poseidon check',
     stageTag: 'Read-only proof',
     title: 'Verify one note. Keep spending keys private.',
     detail:
-      'Export a cryptographic opening for a single chosen note and let an accountant or counterparty verify it directly against Solana’s on-chain record. SDK-derived sub-accounts also support stream-scoped read-only viewing keys.',
-    hiddenLabel: 'Spending keys & all other notes',
+      'Export a Mode 1 SelectiveDisclosureProof for a single chosen note and let an accountant or counterparty verify it in 1 Poseidon5 hash directly against Solana’s SubtreePage commitment. Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) supports watch-only auditing of both incoming notes and spent nullifiers with zero spend authority.',
+    hiddenLabel: 'spend_sk & all other notes',
     publicLabel: 'Disclosed note commitment, asset & amount',
-    packetLabel: 'Opening ✓',
+    packetLabel: 'Poseidon5 ✓',
     beamLabel: 'Single-note opening',
     outcomeTitle: 'Your verifier',
     outcomeSub: '420.00 USDC checked',
     outcomeCaption: '1 note disclosed',
-    resultText: 'Selected note verified against Solana; a receipt grants no spending authority.',
+    resultText: 'Selected note verified against SubtreePage; zero spending or viewing keys revealed.',
     txHref: null,
     txLabel: 'Try receipt verification on Devnet',
   },
@@ -214,7 +214,7 @@ function PrivacyComparisonCard() {
 
       <div key={replay} className={`${styles.comparisonRow} ${styles.audrenRow}`}>
         <div className={styles.rowName}>
-          Audren Private Ring
+          Audren Global MASP
           <span>SOL · Classic SPL · Token&#8209;2022</span>
         </div>
         <div className={styles.privatePeople}>
@@ -387,7 +387,7 @@ function SharedVaultRingStage({
           strokeWidth="1.25"
         />
 
-        {/* Rotating cryptographic sweep arc showing ring-wide Triptych verification */}
+        {/* Rotating cryptographic sweep arc showing global BN254 Groth16 MASP verification */}
         {!isReceipt && (
           <circle
             cx={RING_CX}
@@ -1011,38 +1011,39 @@ export function LandingExperience() {
               </h2>
             </div>
             <p>
-              <code>ExecViaEscrow</code> (Tag 5) executes any stateless{' '}
-              <code>Token A → Token B</code> Solana CPI through a sharded escrow PDA and reshields
-              the exact net vault delta on-chain. DEX swaps are only one example — and stateful
+              <code>ExecViaEscrow</code> (Tag 7) executes any stateless{' '}
+              <code>Token A → Token B</code> Solana CPI through 16 sharded escrow PDAs and reshields
+              the exact net vault delta on-chain (~158k CU, leaving &gt;1.2M CU for DeFi). Stateful
               protocols work cleanly through self-funded ephemeral session wallets.
             </p>
           </div>
 
           <div className={styles.defiLedger}>
             <article className={styles.defiCell}>
-              <span className={styles.colKicker}>Tag 5 · 1 Tx · Stateless CPI</span>
+              <span className={styles.colKicker}>Tag 7 · 1 Tx · Stateless CPI</span>
               <h3>DEX Aggregators &amp; AMMs</h3>
               <p>
                 Route across Jupiter, Titan, DFlow, OKX DEX, Raydium, Orca, Meteora, or custom
-                routers with transcript-bound <code>min_amount_out</code> and native input/output
-                relayer fees.
+                routers with <code>ctx_hash</code>-bound <code>router_accounts</code>,{' '}
+                <code>min_amount_out</code>, and native input/output relayer fees (
+                <code>EXEC_FLAG_FEE_ON_OUTPUT</code>).
               </p>
-              <span className={styles.defiFlowTag}>WSOL / SPL → Any SPL → Shielded Note</span>
+              <span className={styles.defiFlowTag}>SOL / SPL → Any SPL → Shielded Note</span>
             </article>
 
             <article className={styles.defiCell}>
-              <span className={styles.colKicker}>Tag 5 · 1 Tx · Receipt Token</span>
+              <span className={styles.colKicker}>Tag 7 · 1 Tx · Receipt Token</span>
               <h3>Lending Supply</h3>
               <p>
                 Supply USDC or SOL into Solana lending reserves (such as Kamino Lend) and reshield
                 the minted interest-bearing receipt token (<code>kUSDC</code>, <code>kSOL</code>)
-                directly into the shared pool.
+                directly into the unified global pool.
               </p>
               <span className={styles.defiFlowTag}>USDC → Reserve Deposit → kUSDC Note</span>
             </article>
 
             <article className={styles.defiCell}>
-              <span className={styles.colKicker}>Tag 5 · 1 Tx · Yield Share</span>
+              <span className={styles.colKicker}>Tag 7 · 1 Tx · Yield Share</span>
               <h3>Yield &amp; Auto-Compounding Vaults</h3>
               <p>
                 Enter or exit ERC-4626-style Solana vaults (Kamino Vaults, Meteora Dynamic Vaults,
@@ -1053,18 +1054,18 @@ export function LandingExperience() {
             </article>
 
             <article className={styles.defiCell}>
-              <span className={styles.colKicker}>Tag 5 · 1 Tx · Stake Pool</span>
+              <span className={styles.colKicker}>Tag 7 · 1 Tx · Stake Pool</span>
               <h3>Liquid Staking (LSTs)</h3>
               <p>
-                Convert shielded WSOL into yield-bearing liquid staking tokens (<code>JitoSOL</code>
-                , <code>mSOL</code>, Sanctum <code>INF</code>) and hold or unwind them back inside
-                the unified pool.
+                Convert shielded SOL or WSOL into yield-bearing liquid staking tokens (
+                <code>JitoSOL</code>, <code>mSOL</code>, Sanctum <code>INF</code>) and hold or
+                unwind them back inside the unified pool.
               </p>
-              <span className={styles.defiFlowTag}>WSOL → Stake Pool CPI → LST Note</span>
+              <span className={styles.defiFlowTag}>SOL / WSOL → Stake Pool CPI → LST Note</span>
             </article>
 
             <article className={styles.defiCell}>
-              <span className={styles.colKicker}>Tag 5 · 1 Tx · LP &amp; Treasury</span>
+              <span className={styles.colKicker}>Tag 7 · 1 Tx · LP &amp; Treasury</span>
               <h3>Perp LP &amp; Tokenized RWAs</h3>
               <p>
                 Mint or redeem pooled liquidity tokens (such as Jupiter <code>JLP</code>) or
@@ -1075,17 +1076,17 @@ export function LandingExperience() {
             </article>
 
             <article className={`${styles.defiCell} ${styles.defiCellSession}`}>
-              <span className={styles.colKicker}>Tag 6 + Tag 2 · Stateful Sessions</span>
+              <span className={styles.colKicker}>Tag 6 + Tag 3 · Stateful Sessions</span>
               <h3>Borrowing &amp; Perps via Session Wallets</h3>
               <p>
                 Fund deterministic session wallets (<code>B₀, B₁…</code>) from zero prior SOL via
-                self-paying <code>Withdraw(unwrap_wsol)</code>, trade or borrow on stateful
-                protocols, then sweep every remaining lamport back with zero-dust{' '}
-                <code>Deposit(fee_from_amount)</code>. Positions opened by <code>Bᵢ</code> remain
-                public on Solana.
+                self-paying <code>JoinSplit(WITHDRAW_FLAG_UNWRAP_WSOL)</code>, trade or borrow on
+                stateful protocols, then sweep every remaining lamport back with zero-dust{' '}
+                <code>DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code>. Positions opened by{' '}
+                <code>Bᵢ</code> remain public on Solana.
               </p>
               <span className={styles.defiFlowTag}>
-                Withdraw(unwrap_wsol) → Bᵢ DeFi → 0-Dust Sweep
+                JoinSplit(unwrap_wsol) → Bᵢ DeFi → 0-Dust Sweep
               </span>
             </article>
           </div>
@@ -1094,8 +1095,8 @@ export function LandingExperience() {
             <strong>Clear DeFi privacy boundary.</strong> External CPI legs expose the target
             program, mints, routed amounts and output slot; stateful positions opened by a session
             wallet <code>Bᵢ</code> (collateral, debt, margin, liquidations) remain public on that
-            protocol. Audren conceals the funding note inside the pool ring and eliminates the
-            on-chain link to your primary wallet.
+            protocol. Audren conceals the funding notes inside the global 4<sup>20</sup> MASP and
+            eliminates the on-chain link to your primary wallet.
           </p>
         </section>
 
@@ -1146,17 +1147,17 @@ export function LandingExperience() {
               </article>
 
               <article className={`${styles.compareCol} ${styles.compareColAudren}`}>
-                <span className={styles.colKicker}>Shared Shielded Pool</span>
+                <span className={styles.colKicker}>Zero-Indexer Global MASP</span>
                 <h3>Audren</h3>
                 <p className={styles.colLead}>
-                  One permissionless pool with local proofs, standard account RPC discovery, and no
-                  Audren-issued wrapper token.
+                  One 4<sup>20</sup> global Multi-Asset Shielded Pool with 192 B BN254 Groth16
+                  proofs, ordinary Solana RPC discovery, and no Audren wrapper token.
                 </p>
                 <ul className={styles.colList}>
-                  <li>Private transfers conceal input record, fresh recipient, token and amount</li>
-                  <li>Supports SOL, Classic SPL and transferable Token-2022; issuer controls apply</li>
-                  <li>Protocol-agnostic ExecViaEscrow CPI (DEXs, lending, LSTs, vaults) + self-paying WSOL unwrap</li>
-                  <li>No protocol-specific indexer or trusted setup; pre-audit and upgradeable</li>
+                  <li>Private JoinSplit conceals spent notes across the entire pool history, recipient, token &amp; amount</li>
+                  <li>Supports SOL, Classic SPL and transferable Token-2022 in one shared anonymity set</li>
+                  <li>Protocol-agnostic ExecViaEscrow CPI + fee-on-output + self-paying WSOL unwrap (~103k–158k CU)</li>
+                  <li>Zero indexer or CDN required (CompactWalletStore = 1.28 MB @ 10M notes); Phase-2 MPC &amp; audit pending</li>
                 </ul>
               </article>
             </div>
@@ -1196,9 +1197,9 @@ export function LandingExperience() {
                 <KeyRound size={24} />
                 <strong>Your device</strong>
                 <span>
-                  Scans compact RPC slices.
+                  Syncs via ordinary Solana RPC.
                   <br />
-                  Creates proofs locally.
+                  Generates 192 B Groth16 proofs locally.
                 </span>
                 <small>Spending keys stay local</small>
               </div>
@@ -1233,9 +1234,9 @@ export function LandingExperience() {
               <div className={styles.chain}>
                 <strong>Solana verifies on-chain</strong>
                 <ul>
-                  <li>Ring membership (32 / 64 / 128 slots, not guaranteed users)</li>
-                  <li>Pedersen value conservation and 64-bit range proofs</li>
-                  <li>Nullifier PDAs reject repeated spends</li>
+                  <li>Global 4-ary Depth-20 Merkle membership against RootCheckpoint</li>
+                  <li>BN254 Groth16 value conservation &amp; 64-bit range checks (17,861 R1CS)</li>
+                  <li>Nullifier PDAs reject repeated spends across all 16 append lanes</li>
                 </ul>
                 <div className={styles.vaultLinks}>
                   <a href={solscanAddress(AUDREN.solVaultPda)} target="_blank" rel="noreferrer">

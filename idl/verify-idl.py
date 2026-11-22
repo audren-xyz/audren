@@ -3,12 +3,14 @@
 
 Verifies byte-for-byte parity across:
   1. Published Codama & Anchor IDLs (`idl/` and `packages/sdk/`)
-  2. Rust protocol crates (`crates/audren-core/`, `program/`, `tests/mock-router/`, `crates/client/`)
+  2. Rust protocol crates (`crates/audren-core/`, `crates/audren-circuits/`, `program/`, `tests/mock-router/`, `tests/mock-hook/`, `crates/client/`, `crates/audren-ffi/`)
   3. Canonical Program Metadata (`idl/security.json`) & embedded `.security.txt`
-  4. Unified release version across all Rust & TypeScript packages
+  4. Unified release version across all 12 Rust, TypeScript & Kotlin manifests
   5. Verified Build toolchain & Docker image pins (`scripts/build-sbf.py`, `scripts/upgrade-program.sh`)
-  6. Cross-layer SDK, Relayer, and Web UI constants (`JUPITER_CPI_EXCLUDED_DEXES`, PDAs, tags, `protocol.ts`)
-  7. Documentation links, deployment register parity, and open-source Wrangler hygiene
+  6. Cross-layer SDK, Relayer, and Web UI constants (`JUPITER_CPI_EXCLUDED_DEXES`, PDAs, flags, tags, `protocol.ts`)
+  7. WASM prover binary parity (`packages/sdk/wasm/audren_circuits.wasm` == `apps/web/public/wasm/audren_circuits.wasm`)
+  8. 4-language SDK unity (`crates/client`, `packages/sdk`, `packages/swift`, `packages/kotlin`, UniFFI exports, `spec/test-vectors.json`)
+  9. Documentation links, deployment register parity, brand assets, and open-source Wrangler hygiene
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ spec.loader.exec_module(gen)
 
 CANONICAL_PROGRAM_ID = "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3"
 CANONICAL_PROGRAM_DATA = "Gj4hW4KuMTNR9YTPmixRPsNcMNwRvYTXdksxLgoGRiVM"
-CANONICAL_POOL0_PDA = "5Bvt5f5QMfsVb9TyX8bzkRMvAX6JSWwRtnymGveF9U3G"
+CANONICAL_POOL0_PDA = "8CN7uxRdQGjuAaZQVVcHRZbptSzvgfUv7tg8EarLHztF"
 CANONICAL_IDL_PDA = "5QoLwK1C3NpUXjsHEV14RsQE65MaaiT9WxGvoTyxBPsn"
 CANONICAL_SECURITY_PDA = "GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj"
 CANONICAL_OTTER_VERIFY_PDA = "FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt"
@@ -59,7 +61,7 @@ def fixed_type_size(t: dict, defined: dict) -> int | None:
 
 
 def parse_ts_string_array(text: str, symbol: str) -> list[str]:
-    m = re.search(rf"{symbol}[^=]*=\s*\[([^\]]+)\]", text, re.S)
+    m = re.search(rf"{symbol}[^=]*=\s*&?\[([^\]]+)\]", text, re.S)
     assert m, f"Missing {symbol} array"
     return re.findall(r"['\"]([^'\"]+)['\"]", m.group(1))
 
@@ -102,9 +104,10 @@ def main() -> None:
     prog = expected_codama["program"]
     defined = {dt["name"]: dt for dt in prog["definedTypes"]}
 
-    # 2. Verify all 13 instruction tags 0..=12
+    # 2. Verify all 9 instruction tags 0..=8
     ix_tags = sorted(ix["discriminators"][0]["constant"]["value"]["number"] for ix in prog["instructions"])
     assert ix_tags == list(range(len(core["tags"]))), f"Instruction tag gap: {ix_tags}"
+    assert len(ix_tags) == 9, f"Expected 9 instructions, found {len(ix_tags)}"
     assert len(expected_anchor["instructions"]) == len(core["tags"])
 
     # 3. Verify all 33 error codes 1..=33
@@ -117,10 +120,12 @@ def main() -> None:
     # 4. Verify every fixed-size account's field sum matches crates/audren-core/src/layout.rs
     expected_sizes = {
         "poolState": core["lengths"]["POOL_STATE_LEN"],
-        "epochPage": core["lengths"]["PAGE_LEN"],
-        "appendLaneState": core["lengths"]["LANE_STATE_LEN"],
-        "solVaultSentinel": core["lengths"]["SENTINEL_ACCOUNT_LEN"],
-        "pageRentSentinel": core["lengths"]["SENTINEL_ACCOUNT_LEN"],
+        "laneTreeState": core["lengths"]["LANE_STATE_LEN"],
+        "subtreePage": core["lengths"]["SUBTREE_PAGE_LEN"],
+        "subtreeRootPage": core["lengths"]["SUBROOT_PAGE_LEN"],
+        "memoPage": core["lengths"]["MEMO_PAGE_LEN"],
+        "nullifierPage": core["lengths"]["NF_PAGE_LEN"],
+        "rootCheckpoint": core["lengths"]["CKPT_LEN"],
         "nullifierPda": 0,
     }
     for acc in prog["accounts"]:
@@ -132,11 +137,12 @@ def main() -> None:
             )
             assert acc["size"] == expected_sizes[name]
 
-    # 5. Verify all 11 PDA constant seeds match crates/audren-core/src/lib.rs
+    # 5. Verify all 13 PDA constant seeds match crates/audren-core/src/lib.rs
     pda_names = {p["name"] for p in prog["pdas"]}
     pda_prefixes = {p["seeds"][0]["value"]["data"] for p in prog["pdas"]}
     core_seeds = set(core["seeds"].values())
     assert pda_prefixes == core_seeds, f"PDA seeds mismatch: {pda_prefixes ^ core_seeds}"
+    assert len(pda_prefixes) == 13, f"Expected 13 PDA seeds, found {len(pda_prefixes)}"
 
     # 6. Verify instruction pdaValueNode links reference valid PDAs and have no duplicate Explorer rows
     seen_acc_to_pda: dict[str, str] = {}
@@ -169,14 +175,22 @@ def main() -> None:
         f"security.json source_release {sec['source_release']} != v{prog_version}; run python3 idl/generate-idl.py"
     )
 
-    # 8. Verify unified release version parity across all Rust, TypeScript & Kotlin manifests
+    # 8. Verify unified release version parity across all 12 Rust, TypeScript & Kotlin manifests
     root_ws_ver = gen.read_toml_value(ROOT / "Cargo.toml", "workspace.package", "version")
     assert root_ws_ver == prog_version, f"Cargo.toml [workspace.package].version {root_ws_ver} != program/Cargo.toml {prog_version}"
-    for rel_manifest in ("crates/audren-core/Cargo.toml", "crates/client/Cargo.toml", "tests/mock-router/Cargo.toml"):
+    for rel_manifest in (
+        "crates/audren-core/Cargo.toml",
+        "crates/audren-circuits/Cargo.toml",
+        "crates/client/Cargo.toml",
+        "crates/audren-ffi/Cargo.toml",
+        "tests/mock-router/Cargo.toml",
+        "tests/mock-hook/Cargo.toml",
+    ):
+        txt = (ROOT / rel_manifest).read_text()
+        if "version.workspace = true" in txt:
+            continue
         ver = gen.read_cargo_version(ROOT / rel_manifest)
         assert ver == prog_version, f"{rel_manifest} version {ver} != program/Cargo.toml {prog_version}"
-    ffi_toml = (ROOT / "crates" / "audren-ffi" / "Cargo.toml").read_text()
-    assert "version.workspace = true" in ffi_toml, "crates/audren-ffi/Cargo.toml must inherit workspace version"
     for rel_pkg in ("packages/sdk/package.json", "apps/relay/package.json", "apps/web/package.json"):
         pkg = json.loads((ROOT / rel_pkg).read_text())
         assert pkg["version"] == prog_version, (
@@ -205,16 +219,18 @@ def main() -> None:
     for rel_manifest, expected_lib in (
         ("program/Cargo.toml", "audren"),
         ("tests/mock-router/Cargo.toml", "audren_mock_router"),
+        ("tests/mock-hook/Cargo.toml", "audren_mock_hook"),
     ):
         manifest_path = ROOT / rel_manifest
         lib_name = gen.read_toml_value(manifest_path, "lib", "name")
         assert lib_name == expected_lib, (
-            f"{rel_manifest} must declare explicit [lib] name = \"{expected_lib}\" for solana-verify (got {lib_name})"
+            f"{rel_manifest} must declare explicit [lib] name = \"{expected_lib}\" (got {lib_name})"
         )
-        cli_solana = gen.read_toml_value(manifest_path, "workspace.metadata.cli", "solana")
-        assert cli_solana == builder_ver, (
-            f"{rel_manifest} [workspace.metadata.cli] solana ({cli_solana}) must match build-sbf.py BUILDER_VERSION ({builder_ver})"
-        )
+        if rel_manifest != "tests/mock-hook/Cargo.toml":
+            cli_solana = gen.read_toml_value(manifest_path, "workspace.metadata.cli", "solana")
+            assert cli_solana == builder_ver, (
+                f"{rel_manifest} [workspace.metadata.cli] solana ({cli_solana}) must match build-sbf.py BUILDER_VERSION ({builder_ver})"
+            )
 
     sh_agave = re.search(r'^AGAVE_VERSION="([^"]+)"', upgrade_sh, re.M).group(1)
     sh_tools = re.search(r'^TOOLS_VERSION="([^"]+)"', upgrade_sh, re.M).group(1)
@@ -238,9 +254,7 @@ def main() -> None:
 
     # 11. Verify cross-layer JUPITER_CPI_EXCLUDED_DEXES parity across Rust, SDK, Relayer, and Web Worker
     rust_router = (ROOT / "crates" / "client" / "src" / "router.rs").read_text()
-    rust_m = re.search(r'pub const JUPITER_CPI_EXCLUDED_DEXES:\s*&str\s*=\s*"([^"]+)"', rust_router)
-    assert rust_m, "Missing JUPITER_CPI_EXCLUDED_DEXES in crates/client/src/router.rs"
-    rust_dexes = [x.strip() for x in rust_m.group(1).split(",") if x.strip()]
+    rust_dexes = parse_ts_string_array(rust_router, "JUPITER_CPI_EXCLUDED_DEXES")
     sdk_dexes = parse_ts_string_array((ROOT / "packages" / "sdk" / "src" / "swap.ts").read_text(), "JUPITER_CPI_EXCLUDED_DEXES")
     relay_dexes = parse_ts_string_array(
         (ROOT / "apps" / "relay" / "src" / "aggregators" / "jupiter.ts").read_text(),
@@ -257,23 +271,31 @@ def main() -> None:
     assert f"AUDREN_PROGRAM_ID = '{CANONICAL_PROGRAM_ID}'" in sdk_consts, "SDK AUDREN_PROGRAM_ID mismatch"
     for seed_val in core_seeds:
         assert f"'{seed_val}'" in sdk_consts, f"SDK constants.ts missing PDA seed '{seed_val}'"
-    for len_key in ("POOL_STATE_LEN", "PAGE_LEN", "LANE_STATE_LEN", "SENTINEL_ACCOUNT_LEN"):
+    for len_key in (
+        "POOL_STATE_LEN",
+        "LANE_STATE_LEN",
+        "SUBTREE_PAGE_LEN",
+        "SUBROOT_PAGE_LEN",
+        "MEMO_PAGE_LEN",
+        "NF_PAGE_LEN",
+        "CKPT_LEN",
+    ):
         m = re.search(rf"export const {len_key} = ([0-9_]+);", sdk_consts)
         assert m and int(m.group(1).replace("_", "")) == core["lengths"][len_key], (
             f"SDK constants.ts {len_key} drifted from crates/audren-core"
         )
     for err_name, err_code in core["errors"]:
-        assert re.search(rf"\b{err_name}\s*=\s*{err_code}\b", sdk_consts), (
-            f"SDK AudrenError.{err_name} = {err_code} missing or drifted"
+        assert re.search(rf"\b{err_code}:\s*'{err_name}'", sdk_consts), (
+            f"SDK AUDREN_ERRORS[{err_code}] = '{err_name}' missing or drifted"
         )
 
-    relay_audren = (ROOT / "apps" / "relay" / "src" / "solana" / "audren.ts").read_text()
-    assert f"AUDREN_PROGRAM_ID_STR = '{CANONICAL_PROGRAM_ID}'" in relay_audren, "Relay AUDREN_PROGRAM_ID_STR mismatch"
-    for relay_seed in ("audren_pool", "audren_page", "audren_rent", "audren_lane", "audren_lrent", "audren_vault", "audren_escrow", "audren_unwrap"):
-        assert f"'{relay_seed}'" in relay_audren, f"Relay audren.ts missing PDA seed '{relay_seed}'"
-
-    # Verify exact instruction flag bitmasks & proof wire lengths across Rust core, TS SDK, and Relayer
-    core_ix_src = (ROOT / "crates" / "audren-core" / "src" / "instruction.rs").read_text()
+    core_ix_src = (
+        (ROOT / "crates" / "audren-core" / "src" / "instruction.rs").read_text()
+        + "\n"
+        + (ROOT / "crates" / "audren-core" / "src" / "layout.rs").read_text()
+        + "\n"
+        + (ROOT / "crates" / "audren-core" / "src" / "lib.rs").read_text()
+    )
 
     def eval_int_expr(expr: str) -> int:
         expr = expr.strip().replace("_", "")
@@ -292,37 +314,29 @@ def main() -> None:
         assert m, f"Missing constant {sym} ({lang})"
         return eval_int_expr(m.group(1))
 
-    flag_syms = (
-        "DEPOSIT_FLAG_NATIVE_SOL",
+    for sym in (
         "DEPOSIT_FLAG_FEE_FROM_AMOUNT",
-        "EXEC_FLAG_HAS_CHANGE",
-        "EXEC_FLAG_ALLOW_PARTIAL_REFUND",
-        "EXEC_FLAG_FEE_ON_OUTPUT",
-        "WITHDRAW_FLAG_NATIVE_SOL",
-        "WITHDRAW_FLAG_HAS_CHANGE",
         "WITHDRAW_FLAG_UNWRAP_WSOL",
-    )
-    for sym in flag_syms:
+        "EXEC_FLAG_FEE_ON_OUTPUT",
+        "GROTH16_PROOF_LEN",
+        "MEMO_CT_LEN",
+    ):
         rv = parse_const_val(core_ix_src, sym, "rust")
         sv = parse_const_val(sdk_consts, sym, "ts")
-        relv = parse_const_val(relay_audren, sym, "ts")
-        assert rv == sv == relv, f"Flag {sym} drifted: rust={rv}, sdk={sv}, relay={relv}"
+        assert rv == sv, f"Wire constant {sym} drifted: rust={rv}, sdk={sv}"
 
-    for wire_sym in (
-        "CROSS_BASE_1_LEN",
-        "CROSS_BASE_2_LEN",
-        "AUDITOR_ASSET_PROOF_LEN",
-        "RANGE_U64_PROOF_LEN",
-        "RANGE_U128_PROOF_LEN",
-    ):
-        rv = parse_const_val(core_ix_src, wire_sym, "rust")
-        sv = parse_const_val(sdk_consts, wire_sym, "ts")
-        assert rv == sv, f"Wire constant {wire_sym} drifted: rust={rv}, sdk={sv}"
+    relay_audren = (ROOT / "apps" / "relay" / "src" / "solana" / "audren.ts").read_text()
+    assert "@audren/sdk" in relay_audren, "apps/relay/src/solana/audren.ts must import canonical helpers from @audren/sdk"
 
-    for idl_file in (ROOT / "idl" / "audren.codama.json", ROOT / "idl" / "audren.anchor.json"):
-        assert "crossBase1(160)" not in idl_file.read_text(), f"Stale crossBase1(160) doc found in {idl_file}"
+    # 13. Verify WASM prover artifact parity across SDK and Web App
+    sdk_wasm = ROOT / "packages" / "sdk" / "wasm" / "audren_circuits.wasm"
+    web_wasm = ROOT / "apps" / "web" / "public" / "wasm" / "audren_circuits.wasm"
+    assert sdk_wasm.is_file() and web_wasm.is_file(), "Missing audren_circuits.wasm in packages/sdk/wasm or apps/web/public/wasm"
+    assert sdk_wasm.read_bytes() == web_wasm.read_bytes(), (
+        "apps/web/public/wasm/audren_circuits.wasm drifted from packages/sdk/wasm/audren_circuits.wasm"
+    )
 
-    # 13. Verify apps/web/lib/protocol.ts & docs/DEPLOYMENTS.md parity
+    # 14. Verify apps/web/lib/protocol.ts & docs/DEPLOYMENTS.md parity
     web_proto = (ROOT / "apps" / "web" / "lib" / "protocol.ts").read_text()
     assert parse_ts_const_str(web_proto, "version") == prog_version, "apps/web/lib/protocol.ts version drifted"
     assert parse_ts_const_str(web_proto, "releaseTag") == f"v{prog_version}", "apps/web/lib/protocol.ts releaseTag drifted"
@@ -336,7 +350,6 @@ def main() -> None:
         "apps/web/lib/protocol.ts githubRelease does not match releaseTag"
     )
     assert re.fullmatch(r"[0-9a-f]{64}", parse_ts_const_str(web_proto, "elfSha256")), "Invalid elfSha256 in protocol.ts"
-    assert re.fullmatch(r"[0-9a-f]{64}", parse_ts_const_str(web_proto, "executableHash")), "Invalid executableHash in protocol.ts"
 
     deployments_md = (ROOT / "docs" / "DEPLOYMENTS.md").read_text()
     for must_have in (
@@ -352,7 +365,7 @@ def main() -> None:
     ):
         assert must_have in deployments_md, f"docs/DEPLOYMENTS.md missing canonical identifier: {must_have}"
 
-    # 14. Verify all relative markdown links, no stale monorepo paths, and clean public wrangler.jsonc
+    # 15. Verify all relative markdown links, no stale monorepo paths, and clean public wrangler.jsonc
     skip_dirs = {
         "node_modules",
         "target",
@@ -404,7 +417,7 @@ def main() -> None:
             f"Public {rel_wrangler} must not contain private RPC URLs"
         )
 
-    # 15. License, community health files, brand assets & README release parity
+    # 16. License, community health files, brand assets & README release parity
     license_txt = (ROOT / "LICENSE").read_text(encoding="utf-8")
     assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in license_txt, (
         "LICENSE must contain the full canonical Apache-2.0 text so GitHub detects SPDX Apache-2.0"
@@ -444,19 +457,18 @@ def main() -> None:
             f".github/workflows/ci.yml uses deprecated Node 20 action: {deprecated_action}"
         )
 
-    # 16. Cross-language SDK unity (Rust, TypeScript, Swift, Kotlin), canonical test vectors & zero duplicated prover
+    # 17. Cross-language SDK unity (Rust, TypeScript, Swift, Kotlin), canonical test vectors & zero duplicated prover
     vectors_path = ROOT / "spec" / "test-vectors.json"
     assert vectors_path.is_file(), "Missing canonical cross-language test vectors at spec/test-vectors.json"
     vectors = json.loads(vectors_path.read_text(encoding="utf-8"))
-    assert vectors["spec_version"] == prog_version, (
-        f"spec/test-vectors.json spec_version {vectors['spec_version']} != {prog_version}"
+    assert vectors["protocol_version"] == 2, (
+        f"spec/test-vectors.json protocol_version {vectors['protocol_version']} != 2"
     )
     assert vectors["program_id"] == CANONICAL_PROGRAM_ID, "spec/test-vectors.json program_id mismatch"
-    assert vectors["jupiter_cpi_excluded_dexes"] == ",".join(rust_dexes), (
-        "spec/test-vectors.json jupiter_cpi_excluded_dexes drifted from Rust"
-    )
+    assert len(vectors["groth16"]["proof_192_hex"]) == 384, "spec/test-vectors.json groth16.proof_192_hex must be 192 bytes"
 
     for sdk_artifact in (
+        "crates/audren-circuits/src/lib.rs",
         "crates/client/src/lib.rs",
         "crates/audren-ffi/src/lib.rs",
         "packages/sdk/src/prover.ts",
@@ -472,12 +484,15 @@ def main() -> None:
     ):
         assert (ROOT / sdk_artifact).is_file(), f"Missing canonical 4-language SDK artifact: {sdk_artifact}"
 
-    for shim_rel in ("apps/web/lib/audren-prover.ts", "apps/web/lib/audren-crypto.ts"):
-        shim_txt = (ROOT / shim_rel).read_text(encoding="utf-8")
-        assert "@audren/sdk/prover" in shim_txt, f"{shim_rel} must re-export from @audren/sdk/prover"
-        assert len(shim_txt) < 1500, f"{shim_rel} looks duplicated ({len(shim_txt)} B); keep prover solely in packages/sdk"
+    web_prover_txt = (ROOT / "apps" / "web" / "lib" / "audren-prover.ts").read_text(encoding="utf-8")
+    assert "@audren/sdk/prover" in web_prover_txt, "apps/web/lib/audren-prover.ts must import from @audren/sdk/prover"
+    assert len(web_prover_txt) < 2500, f"apps/web/lib/audren-prover.ts looks duplicated ({len(web_prover_txt)} B)"
 
-    # 17. Cross-SDK DEFAULT_RELAY_URL, UniFFI -> Swift/Kotlin binding parity & zero dead doc APIs
+    web_crypto_txt = (ROOT / "apps" / "web" / "lib" / "audren-crypto.ts").read_text(encoding="utf-8")
+    assert "@audren/sdk" in web_crypto_txt, "apps/web/lib/audren-crypto.ts must re-export from @audren/sdk"
+    assert len(web_crypto_txt) < 3000, f"apps/web/lib/audren-crypto.ts looks duplicated ({len(web_crypto_txt)} B)"
+
+    # 18. Cross-SDK DEFAULT_RELAY_URL, UniFFI -> Swift/Kotlin binding parity & zero dead doc APIs
     rust_relay_m = re.search(r'pub const DEFAULT_RELAY_URL:\s*&str\s*=\s*"([^"]+)"', rust_router)
     assert rust_relay_m, "Missing DEFAULT_RELAY_URL in crates/client/src/router.rs"
     ts_relayer = (ROOT / "packages" / "sdk" / "src" / "relayer.ts").read_text(encoding="utf-8")
@@ -488,8 +503,8 @@ def main() -> None:
     )
 
     ffi_src = (ROOT / "crates" / "audren-ffi" / "src" / "lib.rs").read_text(encoding="utf-8")
-    ffi_exports = re.findall(r"#\[uniffi::export\]\s*pub fn (\w+)\s*\(", ffi_src)
-    assert len(ffi_exports) >= 47, f"Expected >= 47 UniFFI exports, found {len(ffi_exports)}"
+    ffi_exports = re.findall(r"#\[uniffi::export\](?:\s*#\[[^\]]+\])*\s*pub fn (\w+)\s*\(", ffi_src)
+    assert len(ffi_exports) >= 41, f"Expected >= 41 UniFFI exports, found {len(ffi_exports)}"
     swift_gen = (ROOT / "packages" / "swift" / "Sources" / "AudrenSDK" / "AudrenSDK.swift").read_text(encoding="utf-8")
     kotlin_gen = (ROOT / "packages" / "kotlin" / "src" / "main" / "kotlin" / "xyz" / "audren" / "sdk" / "audren_ffi.kt").read_text(encoding="utf-8")
     for fn_snake in ffi_exports:
@@ -512,10 +527,10 @@ def main() -> None:
         assert tab_id in dev_tsx, f"apps/web/components/DevelopersExperience.tsx missing SDK tab {tab_id}"
 
     print(
-        f"verify-idl: ok (v{prog_version}, {len(ix_tags)} instructions, {len(expected_sizes)} fixed accounts + ProofBuffer, "
+        f"verify-idl: ok (v{prog_version}, {len(ix_tags)} instructions, {len(expected_sizes)} accounts, "
         f"{len(pda_prefixes)} PDAs ({len(seen_pda_to_acc)} linked in ixs), {len(core_errs)} errors, "
-        f"10 version manifests, 4 SDKs (Rust/TS/Swift/Kotlin, {len(ffi_exports)} synced UniFFI exports) + spec/test-vectors.json, "
-        f"{len(rust_dexes)} CPI-excluded DEXes, {len(md_files)} docs, "
+        f"12 version manifests, 4 SDKs (Rust/TS/Swift/Kotlin, {len(ffi_exports)} synced UniFFI exports) + spec/test-vectors.json, "
+        f"WASM prover parity ({sdk_wasm.stat().st_size:,} B), {len(rust_dexes)} CPI-excluded DEXes, {len(md_files)} docs, "
         f"Apache-2.0, brand/OG parity, security.json, .security.txt, protocol.ts, and Agave {builder_ver}/{tools_ver}/sBPF{sbf_arch} pins matched)"
     )
 

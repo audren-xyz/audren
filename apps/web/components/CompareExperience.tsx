@@ -51,11 +51,11 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
       },
       {
         method: 'Audren',
-        sub: 'Private Transfer (Tag 3)',
+        sub: 'JoinSplit Private Transfer (Tag 6)',
         highlight: true,
-        senderRecipient: { text: 'Hidden input · one-time recipient key', state: 'hidden' },
-        token: { text: 'Blinded asset tag', state: 'hidden' },
-        amount: { text: 'Blinded commitment', state: 'hidden' },
+        senderRecipient: { text: 'Hidden across global 4²⁰ pool · one-time stealth owner', state: 'hidden' },
+        token: { text: 'Hidden inside Poseidon5 commitment', state: 'hidden' },
+        amount: { text: 'Hidden inside Poseidon5 commitment', state: 'hidden' },
         assets: 'SOL, classic SPL, transferable Token-2022',
       },
     ],
@@ -91,11 +91,11 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
       },
       {
         method: 'Audren',
-        sub: 'Deposit (Tag 2) · Withdraw (Tag 6)',
+        sub: 'DepositSol / DepositSpl (Tags 3–4) · JoinSplit Exit (Tag 6)',
         highlight: true,
-        senderRecipient: { text: 'One-time output on deposit; hidden source on withdraw', state: 'partial' },
+        senderRecipient: { text: 'One-time stealth output on deposit; global pool proof on exit', state: 'partial' },
         token: { text: 'Public at entry & exit', state: 'public' },
-        amount: { text: 'Public at entry & exit (change blinded)', state: 'public' },
+        amount: { text: 'Public at entry & exit (change hidden)', state: 'public' },
         assets: 'SOL, classic SPL, transferable Token-2022',
       },
     ],
@@ -131,11 +131,11 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
       },
       {
         method: 'Audren',
-        sub: 'Atomic ExecViaEscrow (Tag 5) + Self-Paying DeFi Sessions (Tag 6 + Tag 2)',
+        sub: 'Atomic ExecViaEscrow (Tag 7) + Self-Paying DeFi Sessions (Tag 6 + Tag 3)',
         highlight: true,
-        senderRecipient: { text: 'Hidden input · shared escrow CPI (or Bᵢ session) · fresh output note', state: 'partial' },
+        senderRecipient: { text: 'Global pool proof · sharded escrow CPI (or Bᵢ session) · fresh stealth note', state: 'partial' },
         token: { text: 'Public external DeFi mints', state: 'public' },
-        amount: { text: 'Public external DeFi amounts (optional blinded change)', state: 'public' },
+        amount: { text: 'Public external DeFi amounts (optional hidden change)', state: 'public' },
         assets: 'Any compatible Token A → B DeFi CPI (DEX, lend, LST, vault, RWA) + stateful Bᵢ sessions',
       },
     ],
@@ -416,11 +416,11 @@ export function CompareExperience() {
 
           <div className={styles.ledger4}>
             <div className={styles.ledgerCell}>
-              <span className={styles.cellIndex}>CANDIDATES</span>
-              <h3>Ring capacity ≠ users</h3>
+              <span className={styles.cellIndex}>ANONYMITY SET</span>
+              <h3>Global tree ≠ automatic privacy</h3>
               <p className={styles.cellLead}>
-                32 / 64 / 128 slots describe ring capacity. Populated records, candidate selection,
-                and known public data determine how many inputs remain plausible.
+                A global 4²⁰ Merkle tree eliminates small ring leaks, but timing, public entry/exit
+                amounts, and input-count modes (padded vs omit_nf1) still shape effective anonymity.
               </p>
             </div>
             <div className={styles.ledgerCell}>
@@ -441,10 +441,10 @@ export function CompareExperience() {
             </div>
             <div className={styles.ledgerCell}>
               <span className={styles.cellIndex}>ASSURANCE</span>
-              <h3>Audit evidence</h3>
+              <h3>MPC ceremony &amp; audit</h3>
               <p className={styles.cellLead}>
-                Published audits cover specific review scopes. Audren is pre-audit and upgradeable
-                and does not yet have equivalent independent review evidence.
+                Audren freezes one minimal 17,861-R1CS circuit; a public Phase-2 MPC ceremony
+                and independent program + circuit audit are planned before production custody.
               </p>
             </div>
           </div>
@@ -458,9 +458,9 @@ export function CompareExperience() {
                 <h2>What Audren keeps small.</h2>
               </div>
               <p>
-                Transparent proofs with zero trusted setup and minimal moving parts. These choices
-                simplify integration; they do not by themselves make Audren more private, more
-                secure, or faster than another system.
+                One minimal frozen Groth16 circuit, ordinary Solana RPC discovery with zero
+                mandatory indexer, and 9 single-transaction v1 instructions. These choices minimize
+                infrastructure without claiming unconditional anonymity.
               </p>
             </div>
 
@@ -469,25 +469,25 @@ export function CompareExperience() {
                 <span className={styles.cellIndex}>ASSETS</span>
                 <h3>Existing assets</h3>
                 <p className={styles.cellLead}>
-                  Original SOL, classic SPL, and transferable Token-2022 enter program-controlled
-                  vaults without an Audren-issued wrapper token or bridge. SOL DEX routes can use
-                  wSOL.
+                  Original SOL, classic SPL, and transferable Token-2022 enter unified custody
+                  vaults without an Audren-issued wrapper token or bridge.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>PROVING</span>
-                <h3>Local proving</h3>
+                <h3>Local Groth16 proving</h3>
                 <p className={styles.cellLead}>
-                  Clients derive keys and build proofs locally. Optional permissionless relayers
-                  submit authorized transactions without spending keys.
+                  Clients generate 192 B BN254 Groth16 proofs locally (native Rust/Swift/Kotlin or
+                  browser WASM). Optional permissionless relayers submit without spending keys.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>DISCOVERY</span>
-                <h3>Standard RPC only</h3>
+                <h3>Ordinary Solana RPC only</h3>
                 <p className={styles.cellLead}>
-                  Discover private records via standard Solana account RPC and WebSocket dataSlices.
-                  No protocol-specific indexer or proving service is required.
+                  <code>CompactWalletStore</code> scans sequential pages via{' '}
+                  <code>getMultipleAccounts</code>, freezes sealed siblings, and discards raw pages
+                  (1.28 MB @ 10M notes) — zero mandatory indexer or CDN.
                 </p>
               </div>
               <div className={styles.ledgerCell}>

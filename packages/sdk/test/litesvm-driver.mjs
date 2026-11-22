@@ -1,329 +1,310 @@
-#!/usr/bin/env node
 /**
- * JSON stdin -> stdout driver for `crates/audren-ffi/tests/cross_sdk_litesvm.rs`.
+ * Live Cross-SDK LiteSVM Driver for `crates/audren-ffi/tests/cross_sdk_litesvm.rs`.
  *
- * Calls the REAL compiled `@audren/sdk` and `@audren/sdk/prover` bundles to build
- * production Solana instructions (Deposit, Transfer, Merge, ExecViaEscrow, Withdraw,
- * ProofBuffer) that Rust executes directly against the real sBPFv3 `audren.so` and
- * `audren_mock_router.so` binaries inside LiteSVM.
+ * Reads a JSON request from stdin describing on-chain `RootCheckpoint` + `SubtreePage` + `MemoPage`
+ * raw bytes from a live LiteSVM instance, ingests them via TypeScript `CompactWalletStore`,
+ * builds a real BN254 Groth16 proof inside `@audren/sdk/prover` WASM, compiles a complete
+ * Audren `JoinSplit` instruction (private transfer or public withdrawal), and writes the
+ * resulting instruction JSON to stdout for Rust LiteSVM to execute on-chain against `audren.so`!
  */
-import fs from 'node:fs';
+
+import { readFileSync } from 'node:fs';
 import {
-  PAGE_SCAN_OFFSET,
-  PAGE_SCAN_LEN,
-  prepareEscrowAccounts,
+  ASSET_MODE_PRIVATE,
+  ASSET_MODE_SOL,
+  CompactWalletStore,
+  NATIVE_SOL_MINT_BYTES,
+  buildDepositSolInstruction,
+  buildJoinsplitInstruction,
+  computeJoinsplitCtxHash,
+  decodeRootCheckpoint,
+  deriveAssetId,
+  deriveKeysFromSeed,
+  deriveStealthOwner,
+  encryptNoteMemo,
+  exportFullViewingKey,
+  frFromBeBytesStrict,
+  frToBeBytes,
 } from '../dist/index.js';
 import {
-  base58Decode,
-  base58Encode,
-  buildBufferedExecutionPlan,
-  buildCloseProofBufferInstruction,
-  buildDepositInstruction,
-  buildExecViaEscrowInstruction,
-  buildMergeInstruction,
-  buildTransferInstruction,
-  buildWithdrawInstruction,
-  createSelectiveDisclosureProof,
-  deriveKeysFromSeed,
-  exportFullViewingKey,
-  extractRingFromPage,
-  scanEpochPage,
-  scanEpochPageSpendable,
-  scanPageScanSlice,
-  verifySelectiveDisclosureOnPage,
+  AudrenWasmProver,
+  dummyInputWitness,
+  dummyOutputWitness,
 } from '../dist/prover-entry.js';
 
-function fromHex(h) {
-  return new Uint8Array(Buffer.from(h, 'hex'));
-}
+const fromHex = (h) => new Uint8Array(Buffer.from(h, 'hex'));
+const toHex = (b) => Buffer.from(b).toString('hex');
 
-function toHex(u8) {
-  return Buffer.from(u8).toString('hex');
-}
+const req = JSON.parse(readFileSync(0, 'utf8'));
 
-function serializeIx(ix) {
-  return {
-    programId: base58Encode(ix.programId),
-    accounts: ix.accounts.map((k) => ({
-      pubkey: base58Encode(k.pubkey),
-      isSigner: k.isSigner,
-      isWritable: k.isWritable,
-    })),
-    dataHex: toHex(ix.data),
-  };
-}
-
-function serializeNote(n) {
-  return {
-    pageId: n.pageId.toString(),
-    slotIndex: n.slotIndex,
-    mintHex: toHex(n.mint),
-    amount: n.amount.toString(),
-    isDynamicOutput: n.isDynamicOutput,
-    amountResolved: n.amountResolved,
-    stealthPkHex: toHex(n.stealthPk),
-    assetTagHex: toHex(n.assetTag),
-    commitmentHex: toHex(n.commitment),
-    nullifierHex: n.nullifier ? toHex(n.nullifier) : null,
-    nullifierPdaB58: n.nullifierPdaB58 ?? null,
-  };
-}
-
-const raw = fs.readFileSync(0, 'utf8');
-const req = JSON.parse(raw);
-
-let out;
-switch (req.op) {
-  case 'deposit': {
-    const res = await buildDepositInstruction({
-      depositor: base58Decode(req.depositor),
-      poolId: req.poolId,
-      activePageId: BigInt(req.activePageId),
-      recipient: req.recipientAddr,
-      mint: fromHex(req.mintHex),
-      amount: BigInt(req.amount),
-      feeFromAmount: Boolean(req.feeFromAmount),
-      tokenProgram: req.tokenProgram ? base58Decode(req.tokenProgram) : undefined,
-      memoText: req.memoText ?? 'TS',
-      createVaultAtaIfMissing: Boolean(req.createVaultAtaIfMissing),
-    });
-    out = {
-      instructions: res.instructions.map(serializeIx),
-      stealthPkHex: toHex(res.note.stealthPk),
-    };
-    break;
-  }
-
-  case 'scan': {
-    const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
-    const fvk = exportFullViewingKey(keys);
-    const pageBytes = fromHex(req.pageHex);
-    const slice = pageBytes.subarray(PAGE_SCAN_OFFSET, PAGE_SCAN_OFFSET + PAGE_SCAN_LEN);
-    const sliceHits = await scanPageScanSlice(fvk, slice);
-    const knownDynamic = req.knownDynamic
-      ? Object.fromEntries(Object.entries(req.knownDynamic).map(([k, v]) => [k, BigInt(v)]))
-      : undefined;
-    const fvkNotes = await scanEpochPage(fvk, pageBytes, req.poolId, knownDynamic);
-    const spendNotes = await scanEpochPageSpendable(keys, pageBytes, req.poolId, knownDynamic);
-    out = {
-      address: keys.address,
-      sliceHits,
-      fvkNotes: fvkNotes.map(serializeNote),
-      spendNotes: spendNotes.map(serializeNote),
-    };
-    break;
-  }
-
-  case 'transfer': {
-    const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
-    const pages = req.pagesHex.map(fromHex);
-    const inputPageIds = req.inputPageIds.map((p) => BigInt(p));
-    const ring = pages.flatMap((p) => extractRingFromPage(p));
-    const owned = await scanEpochPageSpendable(keys, pages[req.notePagePos ?? 0], req.poolId);
-    const note = owned.find((n) => n.slotIndex === req.noteSlot);
-    if (!note) throw new Error(`TS scan did not find note at slot ${req.noteSlot}`);
-    const res = await buildTransferInstruction({
-      payer: base58Decode(req.payer),
-      poolId: req.poolId,
-      outPageId: BigInt(req.outPageId),
-      inputPageIds,
-      ring,
-      inputNote: note,
-      secretIndex: req.secretIndex,
-      recipient: req.recipientAddr,
-      changeAddr: req.changeAddr,
-      payAmount: BigInt(req.payAmount),
-      memoText: req.memoText ?? 'TSXFER',
-    });
-    out = {
-      instruction: serializeIx(res.instruction),
-      nullifierHex: toHex(res.nullifier),
-    };
-    break;
-  }
-
-  case 'merge': {
-    const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
-    const pages1 = req.pages1Hex.map(fromHex);
-    const pages2 = req.pages2Hex.map(fromHex);
-    const ring1 = pages1.flatMap((p) => extractRingFromPage(p));
-    const ring2 = pages2.flatMap((p) => extractRingFromPage(p));
-    const owned1 = await scanEpochPageSpendable(keys, pages1[0], req.poolId);
-    const owned2 = await scanEpochPageSpendable(keys, pages2[0], req.poolId);
-    const note1 = owned1.find((n) => n.slotIndex === req.slot1);
-    const note2 = owned2.find((n) => n.slotIndex === req.slot2);
-    if (!note1 || !note2) throw new Error('TS scan did not find merge notes');
-    const res = await buildMergeInstruction({
-      payer: base58Decode(req.payer),
-      poolId: req.poolId,
-      outPageId: BigInt(req.outPageId),
-      input1PageIds: req.input1PageIds.map((p) => BigInt(p)),
-      ring1,
-      note1,
-      secretIndex1: req.secretIndex1,
-      input2PageIds: req.input2PageIds.map((p) => BigInt(p)),
-      ring2,
-      note2,
-      secretIndex2: req.secretIndex2,
-      ownerAddr: req.ownerAddr,
-      memoText: 'TSMRG',
-    });
-    out = {
-      instruction: serializeIx(res.instruction),
-      nullifier1Hex: toHex(res.nullifier1),
-      nullifier2Hex: toHex(res.nullifier2),
-    };
-    break;
-  }
-
-  case 'exec_escrow':
-  case 'swap': {
-    const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
-    const pages = req.pagesHex.map(fromHex);
-    const ring = pages.flatMap((p) => extractRingFromPage(p));
-    const owned = await scanEpochPageSpendable(keys, pages[0], req.poolId);
-    const note = owned.find((n) => n.slotIndex === req.noteSlot);
-    if (!note) throw new Error(`TS scan did not find exec_escrow note at slot ${req.noteSlot}`);
-    const prep = await prepareEscrowAccounts({
-      poolId: req.poolId,
-      shardId: req.shardId,
-      inputMint: req.inputMintB58,
-      outputMint: req.outputMintB58,
-      inputTokenProgram: req.tokenProgramIn,
-      outputTokenProgram: req.tokenProgramOut,
-      actionAccounts: req.actionAccounts ?? req.routerAccounts,
-    });
-    const res = await buildExecViaEscrowInstruction({
-      payer: base58Decode(req.payer),
-      poolId: req.poolId,
-      outPageId: BigInt(req.outPageId),
-      shardId: req.shardId,
-      inputPageIds: req.inputPageIds.map((p) => BigInt(p)),
-      ring,
-      inputNote: note,
-      secretIndex: req.secretIndex,
-      mintOut: base58Decode(req.outputMintB58),
-      tokenProgramIn: base58Decode(req.tokenProgramIn),
-      tokenProgramOut: base58Decode(req.tokenProgramOut),
-      amountIn: BigInt(req.amountIn),
-      minAmountOut: BigInt(req.minAmountOut),
-      relayerFee: req.relayerFee ? BigInt(req.relayerFee) : 0n,
-      feeOnOutput: Boolean(req.feeOnOutput),
-      feeRecipientAta: req.feeRecipientAta ? base58Decode(req.feeRecipientAta) : undefined,
-      allowPartialRefund: Boolean(req.allowPartialRefund),
-      recipient: req.recipientAddr,
-      changeAddr: req.changeAddr,
-      targetProgramId: base58Decode(req.targetProgramId ?? req.routerProgramId),
-      targetIxData: fromHex(req.targetIxDataHex ?? req.routerIxDataHex),
-      actionAccounts: prep.accounts.map((a) => ({
-        pubkey: base58Decode(a.pubkey),
-        isSigner: a.isSigner,
-        isWritable: a.isWritable,
+if (req.action === 'deposit_sol') {
+  const recip = deriveKeysFromSeed(fromHex(req.recipient_seed_hex));
+  const { tweak, blinding, memo90 } = encryptNoteMemo(
+    recip.viewPk,
+    fromHex(req.eph_secret_hex),
+    BigInt(req.amount),
+    NATIVE_SOL_MINT_BYTES,
+  );
+  const stealth = deriveStealthOwner(recip.spendPk, tweak);
+  const ix = buildDepositSolInstruction({
+    programId: req.program_id,
+    depositor: req.depositor,
+    poolId: req.pool_id,
+    laneId: req.lane_id,
+    subPageSeq: BigInt(req.sub_page_seq),
+    rootPageSeq: BigInt(req.root_page_seq),
+    memoPageSeq: BigInt(req.memo_page_seq),
+    feeFromAmount: Boolean(req.fee_from_amount),
+    amount: BigInt(req.amount),
+    stealthOwner: stealth,
+    blinding,
+    memo90,
+  });
+  process.stdout.write(
+    JSON.stringify({
+      program_id: ix.programId,
+      accounts: ix.accounts.map((a) => ({
+        pubkey: a.pubkey,
+        is_signer: a.isSigner,
+        is_writable: a.isWritable,
       })),
-      escrowIdx: prep.escrowIdx,
-      escrowInIdx: prep.escrowInIdx,
-      escrowOutIdx: prep.escrowOutIdx,
-      memoText: 'TSEXEC',
-    });
-    out = {
-      instruction: serializeIx(res.instruction),
-      outStealthPkB58: base58Encode(res.outDesc.stealthPk),
-      nullifierHex: toHex(res.nullifier),
-    };
-    break;
-  }
+      data_hex: toHex(ix.data),
+    }),
+  );
+} else if (req.action === 'joinsplit_transfer') {
+  const sender = deriveKeysFromSeed(fromHex(req.sender_seed_hex));
+  const recip = deriveKeysFromSeed(fromHex(req.recipient_seed_hex));
+  const fvk = exportFullViewingKey(sender);
 
-  case 'withdraw': {
-    const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
-    const pages = req.pagesHex.map(fromHex);
-    const ring = pages.flatMap((p) => extractRingFromPage(p));
-    const owned = await scanEpochPageSpendable(keys, pages[0], req.poolId);
-    const note = owned.find((n) => n.slotIndex === req.noteSlot);
-    if (!note) throw new Error(`TS scan did not find withdraw note at slot ${req.noteSlot}`);
-    const res = await buildWithdrawInstruction({
-      payer: base58Decode(req.payer),
-      poolId: req.poolId,
-      outPageId: BigInt(req.outPageId),
-      inputPageIds: req.inputPageIds.map((p) => BigInt(p)),
-      ring,
-      inputNote: note,
-      secretIndex: req.secretIndex,
-      recipientAccount: base58Decode(req.recipientAccount),
-      changeAddr: req.changeAddr,
-      amount: BigInt(req.amount),
-      relayerFee: req.relayerFee ? BigInt(req.relayerFee) : 0n,
-      feeRecipient: req.feeRecipient ? base58Decode(req.feeRecipient) : undefined,
-      unwrapWsol: Boolean(req.unwrapWsol),
-      splTokenProgram: req.splTokenProgram ? base58Decode(req.splTokenProgram) : undefined,
-    });
-    out = {
-      instruction: serializeIx(res.instruction),
-      nullifierHex: toHex(res.nullifier),
-    };
-    break;
-  }
+  const store = new CompactWalletStore(req.pool_id, 0n);
+  store.ingestLanePages({
+    fvk,
+    laneId: req.in_lane_id,
+    subtreePages: [{ pageSeq: BigInt(req.in_sub_seq), raw: fromHex(req.subtree_raw_hex) }],
+    memoPages: [{ pageSeq: BigInt(req.in_memo_seq), raw: fromHex(req.memo_raw_hex) }],
+    nfPages: [],
+  });
 
-  case 'buffered_transfer': {
-    const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
-    const pages = req.pagesHex.map(fromHex);
-    const ring = pages.flatMap((p) => extractRingFromPage(p));
-    const owned = await scanEpochPageSpendable(keys, pages[0], req.poolId);
-    const note = owned.find((n) => n.slotIndex === req.noteSlot);
-    if (!note) throw new Error(`TS scan did not find buffered note at slot ${req.noteSlot}`);
-    const xfer = await buildTransferInstruction({
-      payer: base58Decode(req.payer),
-      poolId: req.poolId,
-      outPageId: BigInt(req.outPageId),
-      inputPageIds: req.inputPageIds.map((p) => BigInt(p)),
-      ring,
-      inputNote: note,
-      secretIndex: req.secretIndex,
-      recipient: req.recipientAddr,
-      changeAddr: req.changeAddr,
-      payAmount: BigInt(req.payAmount),
-      memoText: 'TSBUF',
-    });
-    const plan = await buildBufferedExecutionPlan(xfer.instruction, BigInt(req.nonce));
-    const closeIx = buildCloseProofBufferInstruction({
-      payer: base58Decode(req.payer),
-      proofBufferPda: plan.proofBufferPda,
-    });
-    out = {
-      proofBufferPda: base58Encode(plan.proofBufferPda),
-      uploadChunks: plan.uploadChunks.map(serializeIx),
-      executeIx: serializeIx(plan.executeIx),
-      closeIx: serializeIx(closeIx),
-    };
-    break;
-  }
+  const note = store.unspentNotes()[0];
+  if (!note) throw new Error('TS CompactWalletStore found no unspent note');
 
-  case 'disclosure': {
-    const keys = await deriveKeysFromSeed(fromHex(req.seedHex));
-    const pageBytes = fromHex(req.pageHex);
-    const owned = await scanEpochPageSpendable(keys, pageBytes, req.poolId);
-    const note = owned.find((n) => n.slotIndex === req.noteSlot);
-    if (!note) throw new Error(`TS scan did not find disclosure note at slot ${req.noteSlot}`);
-    const proof = createSelectiveDisclosureProof(note);
-    const onPage = await verifySelectiveDisclosureOnPage(proof, pageBytes);
-    const tampered = { ...proof, amount: (BigInt(proof.amount) + 1n).toString() };
-    const tamperedCheck = await verifySelectiveDisclosureOnPage(tampered, pageBytes);
-    out = {
-      proof,
-      onPageValid: onPage.valid,
-      tamperedValid: tamperedCheck.valid,
-    };
-    break;
-  }
+  const ckpt = decodeRootCheckpoint(fromHex(req.checkpoint_raw_hex));
+  const { superRoot, path } = store.buildWitnessForNote(note, ckpt);
+  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
 
-  case 'verify_disclosure': {
-    const pageBytes = fromHex(req.pageHex);
-    const onPage = await verifySelectiveDisclosureOnPage(req.proof, pageBytes);
-    out = { valid: onPage.valid, reason: onPage.reason };
-    break;
-  }
+  const sendAmt = BigInt(req.send_amount);
+  const changeAmt = note.amount - sendAmt;
 
-  default:
-    throw new Error(`Unknown op: ${req.op}`);
+  const out0 = encryptNoteMemo(
+    recip.viewPk,
+    fromHex(req.eph0_hex),
+    sendAmt,
+    NATIVE_SOL_MINT_BYTES,
+  );
+  const out1 = encryptNoteMemo(
+    sender.viewPk,
+    fromHex(req.eph1_hex),
+    changeAmt,
+    NATIVE_SOL_MINT_BYTES,
+  );
+  const memosBytes = new Uint8Array(180);
+  memosBytes.set(out0.memo90, 0);
+  memosBytes.set(out1.memo90, 90);
+
+  const ctxHash = computeJoinsplitCtxHash({
+    programId: req.program_id,
+    poolId: req.pool_id,
+    outLaneId: req.out_lane_id,
+    outputMask: 0b011,
+    assetMode: ASSET_MODE_PRIVATE,
+    unwrapWsol: false,
+    publicAssetId: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes,
+  });
+
+  const prover = await AudrenWasmProver.init();
+  const res = prover.proveJoinsplit(
+    {
+      superRoot,
+      txAssetId: solAsset,
+      publicAssetId: 0n,
+      publicAmountOut: 0n,
+      relayerFeeAmount: 0n,
+      ctxHash,
+      omitNf1: true,
+      inputs: [
+        {
+          spendSk: sender.spendSk,
+          tweak: frFromBeBytesStrict(note.tweak),
+          assetId: solAsset,
+          amount: note.amount,
+          blinding: frFromBeBytesStrict(note.blinding),
+          isDummy: false,
+          merklePath: path,
+        },
+        dummyInputWitness(sender.spendSk, solAsset, 0x7777n),
+      ],
+      outputs: [
+        {
+          stealthOwner: deriveStealthOwner(recip.spendPk, out0.tweak),
+          assetId: solAsset,
+          amount: sendAmt,
+          blinding: out0.blinding,
+        },
+        {
+          stealthOwner: deriveStealthOwner(sender.spendPk, out1.tweak),
+          assetId: solAsset,
+          amount: changeAmt,
+          blinding: out1.blinding,
+        },
+        dummyOutputWitness(solAsset, 0x8888n),
+      ],
+    },
+    new Uint8Array(32).fill(0xab),
+  );
+
+  const ix = buildJoinsplitInstruction({
+    programId: req.program_id,
+    payer: req.payer,
+    poolId: req.pool_id,
+    ckptSlotIdx: req.ckpt_slot_idx,
+    outLaneId: req.out_lane_id,
+    outSubSeq: BigInt(req.out_sub_seq),
+    outRootSeq: BigInt(req.out_root_seq),
+    outMemoSeq: BigInt(req.out_memo_seq),
+    outNfSeq: BigInt(req.out_nf_seq),
+    outputMask: 0b011,
+    assetMode: ASSET_MODE_PRIVATE,
+    proof192: res.proof192,
+    nf0: res.nf0,
+    nf1: res.nf1,
+    cm0: res.cm0,
+    cm1: res.cm1,
+    cm2: res.cm2,
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes,
+  });
+
+  process.stdout.write(
+    JSON.stringify({
+      program_id: ix.programId,
+      accounts: ix.accounts.map((a) => ({
+        pubkey: a.pubkey,
+        is_signer: a.isSigner,
+        is_writable: a.isWritable,
+      })),
+      data_hex: toHex(ix.data),
+      nf0_hex: toHex(res.nf0),
+      cm0_hex: toHex(res.cm0),
+      cm1_hex: toHex(res.cm1),
+    }),
+  );
+} else if (req.action === 'joinsplit_withdraw_sol') {
+  const sender = deriveKeysFromSeed(fromHex(req.sender_seed_hex));
+  const fvk = exportFullViewingKey(sender);
+  const store = new CompactWalletStore(req.pool_id, 0n);
+  store.ingestLanePages({
+    fvk,
+    laneId: req.in_lane_id,
+    subtreePages: [{ pageSeq: BigInt(req.in_sub_seq), raw: fromHex(req.subtree_raw_hex) }],
+    memoPages: [{ pageSeq: BigInt(req.in_memo_seq), raw: fromHex(req.memo_raw_hex) }],
+    nfPages: [],
+  });
+  const note = store.unspentNotes()[0];
+  if (!note) throw new Error('TS CompactWalletStore found no unspent note for withdraw');
+
+  const ckpt = decodeRootCheckpoint(fromHex(req.checkpoint_raw_hex));
+  const { superRoot, path } = store.buildWitnessForNote(note, ckpt);
+  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const feeAmt = BigInt(req.relayer_fee_amount);
+  const pubOut = note.amount - feeAmt;
+
+  const ctxHash = computeJoinsplitCtxHash({
+    programId: req.program_id,
+    poolId: req.pool_id,
+    outLaneId: req.out_lane_id,
+    outputMask: 0,
+    assetMode: ASSET_MODE_SOL,
+    unwrapWsol: false,
+    recipient: req.recipient,
+    relayerFeeRecipient: req.relayer_fee_recipient,
+    publicAssetId: frToBeBytes(solAsset),
+    publicAmountOut: pubOut,
+    relayerFeeAmount: feeAmt,
+    memosBytes: new Uint8Array(0),
+  });
+
+  const prover = await AudrenWasmProver.init();
+  const res = prover.proveJoinsplit(
+    {
+      superRoot,
+      txAssetId: solAsset,
+      publicAssetId: solAsset,
+      publicAmountOut: pubOut,
+      relayerFeeAmount: feeAmt,
+      ctxHash,
+      omitNf1: true,
+      inputs: [
+        {
+          spendSk: sender.spendSk,
+          tweak: frFromBeBytesStrict(note.tweak),
+          assetId: solAsset,
+          amount: note.amount,
+          blinding: frFromBeBytesStrict(note.blinding),
+          isDummy: false,
+          merklePath: path,
+        },
+        dummyInputWitness(sender.spendSk, solAsset, 0x9999n),
+      ],
+      outputs: [
+        dummyOutputWitness(solAsset, 0xa1n),
+        dummyOutputWitness(solAsset, 0xa2n),
+        dummyOutputWitness(solAsset, 0xa3n),
+      ],
+    },
+    new Uint8Array(32).fill(0xcd),
+  );
+
+  const ix = buildJoinsplitInstruction({
+    programId: req.program_id,
+    payer: req.payer,
+    poolId: req.pool_id,
+    ckptSlotIdx: req.ckpt_slot_idx,
+    outLaneId: req.out_lane_id,
+    outSubSeq: BigInt(req.out_sub_seq),
+    outRootSeq: BigInt(req.out_root_seq),
+    outMemoSeq: BigInt(req.out_memo_seq),
+    outNfSeq: BigInt(req.out_nf_seq),
+    outputMask: 0,
+    assetMode: ASSET_MODE_SOL,
+    proof192: res.proof192,
+    nf0: res.nf0,
+    nf1: res.nf1,
+    cm0: res.cm0,
+    cm1: res.cm1,
+    cm2: res.cm2,
+    publicAmountOut: pubOut,
+    relayerFeeAmount: feeAmt,
+    recipient: req.recipient,
+    relayerFeeRecipient: req.relayer_fee_recipient,
+    memosBytes: new Uint8Array(0),
+  });
+
+  process.stdout.write(
+    JSON.stringify({
+      program_id: ix.programId,
+      accounts: ix.accounts.map((a) => ({
+        pubkey: a.pubkey,
+        is_signer: a.isSigner,
+        is_writable: a.isWritable,
+      })),
+      data_hex: toHex(ix.data),
+      public_amount_out: pubOut.toString(),
+    }),
+  );
+} else {
+  throw new Error(`Unknown action ${req.action}`);
 }
-
-process.stdout.write(JSON.stringify(out));

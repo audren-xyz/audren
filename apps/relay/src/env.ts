@@ -1,5 +1,7 @@
 import type { AggregatorId, Cluster } from './types'
 import type { RelayGuard } from './policy/guard-do'
+import type { FullViewingKey } from '@audren/sdk'
+import { formatAudrenAddress } from '@audren/sdk'
 
 export interface Env {
   RELAY_GUARD: DurableObjectNamespace<RelayGuard>
@@ -9,8 +11,21 @@ export interface Env {
   DEVNET_RPC_URL?: string
   MAINNET_RELAYER_SECRET_B64?: string
   DEVNET_RELAYER_SECRET_B64?: string
+  /**
+   * Optional JSON array of base64 32- or 64-byte Ed25519 fee-payer secrets (`>= active_lanes`)
+   * for zero-contention parallel lane submission. Falls back to single `*_RELAYER_SECRET_B64`.
+   */
+  MAINNET_RELAYER_SECRETS_JSON?: string
+  DEVNET_RELAYER_SECRETS_JSON?: string
+  /**
+   * Optional read-only relayer `FullViewingKey` JSON (`{ spendPkHex, nkHex, viewSkHex, viewPkHex }`)
+   * with ZERO spend authority on the hot Worker, enabling Mode 1 shielded `cm2` fee verification
+   * on private `JoinSplit` transfers (`ASSET_MODE_PRIVATE`).
+   */
+  MAINNET_RELAYER_FVK_JSON?: string
+  DEVNET_RELAYER_FVK_JSON?: string
 
-  // Aggregator API credentials (configure the providers you want active via `wrangler secret put`)
+  // Aggregator API credentials
   JUPITER_API_URL?: string
   JUPITER_API_KEY?: string
   BEDROCK_API_URL?: string
@@ -24,7 +39,7 @@ export interface Env {
   OKX_SECRET_KEY?: string
   OKX_PASSPHRASE?: string
 
-  // Optional internal admin bearer token for manual refill / diagnostics
+  // Optional internal admin bearer token for manual refill / maintenance crank
   RELAY_ADMIN_TOKEN?: string
 
   // Non-secret tunable policy vars (from wrangler.jsonc)
@@ -50,7 +65,7 @@ export interface Env {
 export interface RelayPolicyConfig {
   defaultAggregator: AggregatorId
   enabledAggregators: Set<AggregatorId>
-  /** Strictly allowlisted zero-signer crank programs permitted in `preInstructions` before Tag 5. */
+  /** Strictly allowlisted zero-signer crank programs permitted in `preInstructions` before Tag 7. */
   allowedPreIxPrograms: Set<string>
   baseSwapFeeBps: number
   maxSelfPayBps: number
@@ -72,8 +87,8 @@ const VALID_AGGREGATORS: readonly AggregatorId[] = ['jupiter', 'bedrock', 'dflow
 
 /**
  * Default zero-signer DeFi refresh/oracle crank programs permitted in `preInstructions`
- * immediately before Audren Tag 5 (`ExecViaEscrow`):
- *   - Kamino Lending (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`) — `RefreshReserve`
+ * immediately before Audren Tag 7 (`ExecViaEscrow`):
+ *   - Kamino Lending (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`)
  *   - Kamino Vaults (`kvauTFR8qm1dhniz6pYuBZkuene3Hfrs1VQhVRgCNrr`)
  *   - Pyth Solana Receiver (`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`)
  *   - Sanctum S Controller (`5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx`)
@@ -153,8 +168,49 @@ export function getRpcUrl(env: Env, cluster: Cluster): string | null {
   return cluster === 'mainnet' ? env.MAINNET_RPC_URL ?? null : env.DEVNET_RPC_URL ?? null
 }
 
-export function getRelayerSecretB64(env: Env, cluster: Cluster): string | null {
-  return cluster === 'mainnet'
-    ? env.MAINNET_RELAYER_SECRET_B64 ?? null
-    : env.DEVNET_RELAYER_SECRET_B64 ?? null
+export function getRelayerSecretsB64(env: Env, cluster: Cluster): string[] {
+  const poolJson =
+    cluster === 'mainnet' ? env.MAINNET_RELAYER_SECRETS_JSON : env.DEVNET_RELAYER_SECRETS_JSON
+  if (poolJson?.trim()) {
+    try {
+      const parsed = JSON.parse(poolJson) as unknown
+      if (Array.isArray(parsed)) {
+        const list = parsed.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+        if (list.length > 0) return list
+      }
+    } catch {
+      // fall back to single secret
+    }
+  }
+  const single =
+    cluster === 'mainnet' ? env.MAINNET_RELAYER_SECRET_B64 : env.DEVNET_RELAYER_SECRET_B64
+  return single?.trim() ? [single.trim()] : []
+}
+
+function hexToBytes32(hex: unknown): Uint8Array | null {
+  if (typeof hex !== 'string' || !/^[0-9a-fA-F]{64}$/.test(hex.trim())) return null
+  const h = hex.trim()
+  const out = new Uint8Array(32)
+  for (let i = 0; i < 32; i++) out[i] = Number.parseInt(h.slice(i * 2, i * 2 + 2), 16)
+  return out
+}
+
+export function getRelayerFvk(
+  env: Env,
+  cluster: Cluster,
+): { fvk: FullViewingKey; shieldedAddress: string } | null {
+  const raw = cluster === 'mainnet' ? env.MAINNET_RELAYER_FVK_JSON : env.DEVNET_RELAYER_FVK_JSON
+  if (!raw?.trim()) return null
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>
+    const spendPk = hexToBytes32(obj.spendPkHex)
+    const nk = hexToBytes32(obj.nkHex)
+    const viewSk = hexToBytes32(obj.viewSkHex)
+    const viewPk = hexToBytes32(obj.viewPkHex)
+    if (!spendPk || !nk || !viewSk || !viewPk) return null
+    const fvk: FullViewingKey = { spendPk, nk, viewSk, viewPk }
+    return { fvk, shieldedAddress: formatAudrenAddress(spendPk, viewPk) }
+  } catch {
+    return null
+  }
 }

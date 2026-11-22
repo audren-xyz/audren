@@ -74,10 +74,10 @@ export function PrivacyExperience() {
               <text x="28" y="62" fill="#f4f1ea" fontSize="15" fontWeight="700">
                 Local keys &amp; prover
               </text>
-              <text x="28" y="88" fill="#e6efe4" fontSize="11">— Spend &amp; view key derivation</text>
-              <text x="28" y="109" fill="#e6efe4" fontSize="11">— AES-256-GCM note decryption</text>
-              <text x="28" y="130" fill="#e6efe4" fontSize="11">— Triptych &amp; Bulletproof creation</text>
-              <text x="28" y="151" fill="#e6efe4" fontSize="11">— Receipt verification openings</text>
+              <text x="28" y="88" fill="#e6efe4" fontSize="11">— Spend, nk &amp; view key derivation</text>
+              <text x="28" y="109" fill="#e6efe4" fontSize="11">— ChaCha20-Poly1305 memo scan</text>
+              <text x="28" y="130" fill="#e6efe4" fontSize="11">— BN254 Groth16 WASM proving</text>
+              <text x="28" y="151" fill="#e6efe4" fontSize="11">— CompactWalletStore &amp; receipts</text>
               <text x="28" y="174" fill="#b9d1be" fontSize="9.8">Never sent in ordinary RPC or relay calls</text>
 
               {/* Web Host / RPC / Relay */}
@@ -104,10 +104,10 @@ export function PrivacyExperience() {
               <text x="656" y="62" fill="#121210" fontSize="15" fontWeight="700">
                 On-chain visibility
               </text>
-              <text x="656" y="88" fill="#3b3f36" fontSize="11">— Transfer: blinded mint, amount &amp; key</text>
-              <text x="656" y="109" fill="#3b3f36" fontSize="11">— Deposit / Withdraw: public amounts</text>
+              <text x="656" y="88" fill="#3b3f36" fontSize="11">— JoinSplit: hidden mint, amt &amp; key</text>
+              <text x="656" y="109" fill="#3b3f36" fontSize="11">— Deposit / Exit: public amounts</text>
               <text x="656" y="130" fill="#3b3f36" fontSize="11">— DeFi CPI &amp; Bᵢ: public protocol legs</text>
-              <text x="656" y="151" fill="#3b3f36" fontSize="11">— Candidate pages, fee payer &amp; timing</text>
+              <text x="656" y="151" fill="#3b3f36" fontSize="11">— Checkpoint, lane, fee payer &amp; timing</text>
               <text x="656" y="174" fill="#6e4928" fontSize="9.8">Permanent public blockchain record</text>
             </svg>
           </div>

@@ -5,32 +5,24 @@ import {
   listAggregators,
   quoteWithSelection,
 } from './aggregators/registry'
-import { runAutoRefill } from './cron/refill'
-import { getRelayerSecretB64, getRpcUrl, loadPolicyConfig, type Env } from './env'
+import { runAutoRefill, runV2MaintenanceCrank } from './cron/refill'
+import {
+  getRelayerFvk,
+  getRelayerSecretsB64,
+  getRpcUrl,
+  loadPolicyConfig,
+  type Env,
+} from './env'
 import { FirewallError, validateRelaySubmission } from './policy/firewall'
 import { RelayGuard } from './policy/guard-do'
 import { computeNativeFeeQuote, computeSwapFeePlan, fetchMintPricesUsd } from './policy/pricing'
 import {
   AUDREN_PROGRAM_ID,
   AUDREN_PROGRAM_ID_STR,
-  MAX_APPEND_LANES,
   MAX_ESCROW_SHARDS,
-  PAGE_ROLLOVER_THRESHOLD,
-  buildOpenLanePageIx,
-  buildOpenPageIx,
-  decodeAppendLaneState,
-  decodeEpochPageHeader,
-  decodePoolState,
-  deriveEpochPagePda,
+  PROTOCOL_VERSION,
   deriveEscrowPda,
-  deriveLanePda,
-  deriveLaneRentVaultPda,
-  derivePageRentVaultPda,
-  derivePoolPda,
   deriveVaultAuthPda,
-  laneOfPageId,
-  pageIdForLane,
-  seqOfPageId,
 } from './solana/audren'
 import {
   SYSTEM_PROGRAM_ID_STR,
@@ -39,7 +31,6 @@ import {
   base58Encode,
   buildAndSignV1Transaction,
   buildCreateAtaIdempotentIx,
-  bytesEqual,
   decodeRelayerSecret,
   deriveAta,
   isValidPubkey,
@@ -50,7 +41,6 @@ import {
 } from './solana/codec'
 import {
   explorerTxUrl,
-  fetchAccountBytes,
   fetchBalance,
   fetchLiveRentSchedule,
   fetchMintMetas,
@@ -65,6 +55,7 @@ import {
 import type {
   AggregatorId,
   AggregatorSelection,
+  AudrenOpKind,
   Cluster,
   MissingAtaPlan,
   RelaySubmitRequest,
@@ -148,15 +139,36 @@ function sanitizeError(err: unknown, fallback: string): string {
   return raw.replace(/https?:\/\/\S+/gi, '[redacted-url]').slice(0, 320)
 }
 
-function getRelayerPubkeyForCluster(env: Env, cluster: Cluster): {
+interface RelayerSignerEntry {
   secret32: Uint8Array
   pubkey: Uint8Array
   pubkeyB58: string
-} | null {
-  const secret32 = decodeRelayerSecret(getRelayerSecretB64(env, cluster))
-  if (!secret32) return null
-  const pubkey = ed25519.getPublicKey(secret32)
-  return { secret32, pubkey, pubkeyB58: base58Encode(pubkey) }
+}
+
+function getRelayerPoolForCluster(env: Env, cluster: Cluster): RelayerSignerEntry[] {
+  const secrets = getRelayerSecretsB64(env, cluster)
+  const out: RelayerSignerEntry[] = []
+  for (const raw of secrets) {
+    const secret32 = decodeRelayerSecret(raw)
+    if (!secret32) continue
+    const pubkey = ed25519.getPublicKey(secret32)
+    out.push({ secret32, pubkey, pubkeyB58: base58Encode(pubkey) })
+  }
+  return out
+}
+
+function getRelayerPubkeyForCluster(
+  env: Env,
+  cluster: Cluster,
+  requestedPubkeyB58?: string,
+): RelayerSignerEntry | null {
+  const pool = getRelayerPoolForCluster(env, cluster)
+  if (pool.length === 0) return null
+  if (requestedPubkeyB58) {
+    const matched = pool.find((r) => r.pubkeyB58 === requestedPubkeyB58)
+    if (matched) return matched
+  }
+  return pool[0]!
 }
 
 // ============================================================================
@@ -170,11 +182,15 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
 
   const clusterInfo = async (cluster: Cluster) => {
     const rpcUrl = getRpcUrl(env, cluster)
-    const relayer = getRelayerPubkeyForCluster(env, cluster)
+    const pool = getRelayerPoolForCluster(env, cluster)
+    const relayer = pool[0] ?? null
+    const fvkInfo = getRelayerFvk(env, cluster)
     if (!rpcUrl || !relayer) {
       return {
         configured: false,
         relayerPubkey: null as string | null,
+        relayerPubkeys: [] as string[],
+        relayerShieldedAddress: fvkInfo?.shieldedAddress ?? null,
         balanceSol: null as number | null,
         lowBalance: false,
       }
@@ -188,6 +204,8 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
     return {
       configured: true,
       relayerPubkey: relayer.pubkeyB58,
+      relayerPubkeys: pool.map((p) => p.pubkeyB58),
+      relayerShieldedAddress: fvkInfo?.shieldedAddress ?? null,
       balanceSol,
       lowBalance: balanceSol !== null && balanceSol < cfg.refillMinSol,
     }
@@ -203,26 +221,24 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
   const activeCluster = requestedCluster === 'devnet' ? devnet : mainnet
   return json(request, cfg.corsOrigins, {
     ok: true,
+    protocolVersion: PROTOCOL_VERSION,
     service: 'audren-relay',
     domain: 'relay.audren.xyz',
     programId: AUDREN_PROGRAM_ID_STR,
     cluster: requestedCluster,
-    // Flat convenience fields for the requested cluster
     configured: activeCluster.configured,
     relayerPubkey: activeCluster.relayerPubkey,
+    relayerPubkeys: activeCluster.relayerPubkeys,
+    relayerShieldedAddress: activeCluster.relayerShieldedAddress,
     balanceSol: activeCluster.balanceSol,
     clusters: { mainnet, devnet },
     supportedOperations: {
-      transfer: { tag: 3, sponsored: true },
-      merge: { tag: 4, sponsored: true },
-      exec_escrow: {
-        tag: 5,
-        selfPaying: true,
-        nativeRelayerFee: true,
-        supportsPreInstructions: true,
-        microSwapSubsidy: cfg.allowMicroSwapSubsidy,
+      transfer: {
+        tag: 6,
+        assetMode: 0,
+        shieldedCm2Fee: activeCluster.relayerShieldedAddress !== null,
+        sponsored: true,
       },
-      swap: { tag: 5, selfPaying: true, microSwapSubsidy: cfg.allowMicroSwapSubsidy },
       withdraw: {
         tag: 6,
         selfPaying: true,
@@ -230,7 +246,19 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
         supportsUnwrapWsol: true,
         sponsored: true,
       },
-      deposit: { tag: 2, sponsored: false, reason: 'Deposits are naturally public; sign directly.' },
+      exec_escrow: {
+        tag: 7,
+        selfPaying: true,
+        nativeRelayerFee: true,
+        supportsFeeOnOutput: true,
+        supportsPreInstructions: true,
+        microSwapSubsidy: cfg.allowMicroSwapSubsidy,
+      },
+      deposit: {
+        tags: [3, 4],
+        sponsored: false,
+        reason: 'Deposits (DepositSol / DepositSpl) are naturally public; sign directly.',
+      },
     },
     allowedPreIxPrograms: Array.from(cfg.allowedPreIxPrograms),
     aggregators: listAggregators(env, cfg),
@@ -251,6 +279,7 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
     rentSchedule: rentSchedule
       ? {
           nullifierRentLamports: rentSchedule.nullifierRentLamports.toString(),
+          noteRentPerLeafLamports: rentSchedule.pageRentPerNoteLamports.toString(),
           pageRentPerNoteLamports: rentSchedule.pageRentPerNoteLamports.toString(),
           ataRentLamports: rentSchedule.ataRentLamports.toString(),
           swapBaselineLamports: rentSchedule.swapBaselineLamports.toString(),
@@ -276,12 +305,30 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
   const rawOp = (u.searchParams.get('op') ?? u.searchParams.get('action') ?? 'withdraw')
     .trim()
     .toLowerCase()
-  const op: 'withdraw' | 'exec_escrow' =
-    rawOp === 'exec_escrow' || rawOp === 'swap' ? 'exec_escrow' : 'withdraw'
+  const op: AudrenOpKind =
+    rawOp === 'exec_escrow' || rawOp === 'swap'
+      ? 'exec_escrow'
+      : rawOp === 'transfer'
+        ? 'transfer'
+        : 'withdraw'
   const rawMint = (u.searchParams.get('mint') ?? 'native').trim()
   const rawAmount = (u.searchParams.get('amount') ?? '0').trim()
   const unwrapWsol = u.searchParams.get('unwrapWsol') === 'true'
+  const feeOnOutput = u.searchParams.get('feeOnOutput') === 'true'
+  const rawOutputs = u.searchParams.get('outputCount')
   const hasChange = u.searchParams.get('hasChange') === 'true'
+  const outputCount =
+    rawOutputs && /^\d+$/.test(rawOutputs)
+      ? Math.min(3, Math.max(0, Number(rawOutputs)))
+      : op === 'transfer'
+        ? 3
+        : op === 'exec_escrow'
+          ? hasChange
+            ? 2
+            : 1
+          : hasChange
+            ? 1
+            : 0
   const rawMissingAtas = u.searchParams.get('missingAtaCount') ?? '0'
   const missingAtaCount = /^\d+$/.test(rawMissingAtas)
     ? Math.min(6, Math.max(0, Number(rawMissingAtas)))
@@ -294,12 +341,16 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
 
   const rpcUrl = getRpcUrl(env, cluster)
   const relayer = getRelayerPubkeyForCluster(env, cluster)
+  const fvkInfo = getRelayerFvk(env, cluster)
   if (!rpcUrl) {
     return json(request, cfg.corsOrigins, { error: `${cluster} RPC is not configured` }, 503)
   }
 
   const isNativeSolFee =
-    op === 'withdraw' && (rawMint === 'native' || rawMint === SYSTEM_PROGRAM_ID_STR || unwrapWsol)
+    rawMint === 'native' ||
+    rawMint === SYSTEM_PROGRAM_ID_STR ||
+    (op === 'withdraw' && unwrapWsol)
+  const feeSide = op === 'transfer' ? 'shielded_cm2' : feeOnOutput ? 'out' : 'in'
 
   try {
     if (isNativeSolFee) {
@@ -315,13 +366,15 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         cfg,
         rentSchedule,
         isNativeSolFee: true,
+        feeSide,
         feeMint: SYSTEM_PROGRAM_ID_STR,
         feeTokenProgram: null,
         feeDecimals: 9,
         amount,
-        hasChange,
+        outputCount,
         missingAtaCount,
         feeRecipient: relayer?.pubkeyB58 ?? null,
+        feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
         feeRecipientExists: relayer !== null,
         solPriceUsd: prices[WSOL_MINT_STR] ?? null,
         feeTokenPriceUsd: prices[WSOL_MINT_STR] ?? null,
@@ -350,7 +403,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
     }
     let feeRecipient: string | null = null
     let feeRecipientExists = false
-    if (relayer) {
+    if (relayer && op !== 'transfer') {
       feeRecipient = base58Encode(
         deriveAta(relayer.pubkey, base58Decode(meta.tokenProgram), base58Decode(rawMint)),
       )
@@ -365,14 +418,16 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       cfg,
       rentSchedule,
       isNativeSolFee: false,
+      feeSide,
       feeMint: rawMint,
       feeTokenProgram: meta.tokenProgram,
       feeDecimals: meta.decimals,
       amount,
-      hasChange,
+      outputCount,
       missingAtaCount,
       hasUnsafeSelfPayExt: meta.hasUnsafeSelfPayExt,
       feeRecipient,
+      feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
       feeRecipientExists,
       solPriceUsd: prices[WSOL_MINT_STR] ?? null,
       feeTokenPriceUsd: prices[rawMint] ?? null,
@@ -827,7 +882,12 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
 
   const cluster = parseCluster(body.cluster, 'mainnet')
   const rpcUrl = getRpcUrl(env, cluster)
-  const relayer = getRelayerPubkeyForCluster(env, cluster)
+  const requestedPayer =
+    Array.isArray(body.accounts) && typeof body.accounts[0]?.pubkey === 'string'
+      ? body.accounts[0]!.pubkey
+      : undefined
+  const relayer = getRelayerPubkeyForCluster(env, cluster, requestedPayer)
+  const fvkInfo = getRelayerFvk(env, cluster)
   if (!rpcUrl || !relayer) {
     return json(
       request,
@@ -837,10 +897,15 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     )
   }
 
-  // 1. Strict Zero-Trust Audren Firewall (blocks Tag 2 Deposit, extra signers, unallowlisted preInstructions, bad setupAtas)
+  // 1. Strict Zero-Trust Audren Firewall (permits JoinSplit Tag 6 & ExecViaEscrow Tag 7; rejects Deposits)
   let verdict: ReturnType<typeof validateRelaySubmission>
   try {
-    verdict = validateRelaySubmission(body, relayer.pubkey, cfg.allowedPreIxPrograms)
+    verdict = validateRelaySubmission(
+      body,
+      relayer.pubkey,
+      cfg.allowedPreIxPrograms,
+      fvkInfo?.fvk ?? null,
+    )
   } catch (err) {
     if (err instanceof FirewallError) {
       return json(request, cfg.corsOrigins, { error: err.message, code: 'FIREWALL_REJECTED' }, err.status)
@@ -884,73 +949,8 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   let lockHeld = true
   let reservationId: string | undefined
   try {
-    // 2. Build full instruction list (automatic permissionless page rollover + validated setupAtas + Audren ix)
+    // 2. Build full instruction list (validated setupAtas + strictly allowlisted preInstructions + Audren ix)
     const instructions: SolanaInstruction[] = []
-    let prependedRollover = false
-
-    if (verdict.writesOutput && verdict.decodedAccounts.length >= 3) {
-      const requestedFromId =
-        body.rolloverFromPageId !== undefined && /^\d+$/.test(body.rolloverFromPageId)
-          ? BigInt(body.rolloverFromPageId)
-          : null
-      const requestedLane = requestedFromId !== null ? laneOfPageId(requestedFromId) : 0
-      const poolPda = derivePoolPda(0)
-
-      if (requestedLane === 0) {
-        const rentVaultPda = derivePageRentVaultPda(0)
-        const poolAcc = await fetchAccountBytes(rpcUrl, base58Encode(poolPda.address))
-        const pool = decodePoolState(poolAcc.bytes)
-        const curPagePda = deriveEpochPagePda(0, pool.currentPageId)
-        const nextPagePda = deriveEpochPagePda(0, pool.currentPageId + 1n)
-        if (bytesEqual(verdict.decodedAccounts[2]!.pubkey, nextPagePda.address)) {
-          const curPageAcc = await fetchAccountBytes(rpcUrl, base58Encode(curPagePda.address))
-          const curHdr = decodeEpochPageHeader(curPageAcc.bytes)
-          if (curHdr.closed || curHdr.count >= PAGE_ROLLOVER_THRESHOLD) {
-            instructions.push(
-              buildOpenPageIx({
-                relayerPubkey: relayer.pubkey,
-                poolPda: poolPda.address,
-                curPagePda: curPagePda.address,
-                nextPagePda: nextPagePda.address,
-                rentVaultPda: rentVaultPda.address,
-              }),
-            )
-            prependedRollover = true
-          }
-        }
-      } else if (requestedLane < MAX_APPEND_LANES) {
-        const lanePda = deriveLanePda(0, requestedLane)
-        const laneRentVaultPda = deriveLaneRentVaultPda(0, requestedLane)
-        const laneAcc = await fetchAccountBytes(rpcUrl, base58Encode(lanePda.address)).catch(
-          () => null,
-        )
-        const laneState = laneAcc ? decodeAppendLaneState(laneAcc.bytes) : null
-        if (laneState) {
-          const curId = laneState.activePageId
-          const nextId = pageIdForLane(requestedLane, seqOfPageId(curId) + 1n)
-          const curPagePda = deriveEpochPagePda(0, curId)
-          const nextPagePda = deriveEpochPagePda(0, nextId)
-          if (bytesEqual(verdict.decodedAccounts[2]!.pubkey, nextPagePda.address)) {
-            const curPageAcc = await fetchAccountBytes(rpcUrl, base58Encode(curPagePda.address))
-            const curHdr = decodeEpochPageHeader(curPageAcc.bytes)
-            if (curHdr.closed || curHdr.count >= PAGE_ROLLOVER_THRESHOLD) {
-              instructions.push(
-                buildOpenLanePageIx({
-                  relayerPubkey: relayer.pubkey,
-                  poolPda: poolPda.address,
-                  lanePda: lanePda.address,
-                  curPagePda: curPagePda.address,
-                  nextPagePda: nextPagePda.address,
-                  laneRentVaultPda: laneRentVaultPda.address,
-                  laneId: requestedLane,
-                }),
-              )
-              prependedRollover = true
-            }
-          }
-        }
-      }
-    }
 
     for (const s of verdict.setupAtas) {
       instructions.push(
@@ -964,7 +964,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
-    // Prepend strictly-allowlisted zero-signer DeFi refresh cranks (Tag 5 only)
+    // Prepend strictly-allowlisted zero-signer DeFi refresh cranks (Tag 7 only)
     for (const preIx of verdict.preInstructions) {
       instructions.push(preIx)
     }
@@ -975,10 +975,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       data: verdict.ixData,
     })
 
-    const requestedCu =
-      Math.trunc(rawCu) +
-      (prependedRollover ? 50_000 : 0) +
-      verdict.preInstructions.length * 40_000
+    const requestedCu = Math.trunc(rawCu) + verdict.preInstructions.length * 40_000
     const cuLimit = Math.min(Math.max(requestedCu, 200_000), 1_400_000)
 
     // 3. Fetch blockhash + pre-simulation balances in ONE parallel RPC batch
@@ -1104,12 +1101,37 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         : 0n
     const simulatedFeeUnits = postFeeUnits > preFeeUnits ? postFeeUnits - preFeeUnits : 0n
 
-    // Dynamically value simulated fee earnings in lamports (zero hardcoded decimals or mints!)
+    // Dynamically value simulated fee earnings in lamports (Modes 1, 2 & 3!)
     let feeEquivalentLamports = 0n
     if (verdict.nativeSolFeeToRelayer > 0n) {
-      // Native SOL / `unwrap_wsol` Withdraw paid lamports directly to `relayerPubkey`!
-      // `simulatedCostLamports` already reflects the NET lamport delta after receiving `nativeSolFeeToRelayer`.
+      // Mode 2/3 Native SOL or `unwrap_wsol` Withdraw paid lamports directly to `relayerPubkey`!
       feeEquivalentLamports = verdict.nativeSolFeeToRelayer
+    } else if (verdict.shieldedCm2Fee) {
+      // Mode 1 Private Transfer: shielded `cm2` fee note cryptographically verified via read-only FVK!
+      const { mint: cm2Mint, amount: cm2Amt } = verdict.shieldedCm2Fee
+      if (cm2Mint === SYSTEM_PROGRAM_ID_STR || cm2Mint === WSOL_MINT_STR) {
+        feeEquivalentLamports = cm2Amt
+      } else if (cluster === 'mainnet') {
+        const [mintMetas, prices] = await Promise.all([
+          fetchMintMetas(rpcUrl, [cm2Mint]),
+          fetchMintPricesUsd(env, [WSOL_MINT_STR, cm2Mint]),
+        ])
+        const feeMeta = mintMetas[cm2Mint]
+        const solUsd = prices[WSOL_MINT_STR]
+        const feeUsdPrice = prices[cm2Mint]
+        if (
+          feeMeta &&
+          feeMeta.isValidMint &&
+          !feeMeta.hasUnsafeSelfPayExt &&
+          solUsd &&
+          feeUsdPrice &&
+          solUsd > 0 &&
+          feeUsdPrice > 0
+        ) {
+          const feeUsd = (Number(cm2Amt) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
+          feeEquivalentLamports = BigInt(Math.max(0, Math.floor((feeUsd / solUsd) * 1e9)))
+        }
+      }
     } else if (simulatedFeeUnits > 0n && verdict.watchedRelayerFeeMint) {
       if (verdict.watchedRelayerFeeMint === WSOL_MINT_STR) {
         feeEquivalentLamports = simulatedFeeUnits
@@ -1408,13 +1430,19 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const cfg = loadPolicyConfig(env)
     ctx.waitUntil(
-      runAutoRefill(env, cfg)
-        .then((report) => {
+      Promise.all([
+        runAutoRefill(env, cfg).then((report) => {
           console.log('[audren-relay cron refill]', JSON.stringify(report))
-        })
-        .catch((err) => {
-          console.error('[audren-relay cron refill error]', err)
         }),
+        runV2MaintenanceCrank(env, 'mainnet').then((crank) => {
+          console.log('[audren-relay cron crank mainnet]', JSON.stringify(crank))
+        }),
+        runV2MaintenanceCrank(env, 'devnet').then((crank) => {
+          console.log('[audren-relay cron crank devnet]', JSON.stringify(crank))
+        }),
+      ]).catch((err) => {
+        console.error('[audren-relay cron error]', err)
+      }),
     )
   },
 } satisfies ExportedHandler<Env>

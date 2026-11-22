@@ -3,7 +3,7 @@ export type Cluster = 'mainnet' | 'devnet'
 export type AggregatorId = 'jupiter' | 'bedrock' | 'dflow' | 'titan' | 'okx'
 export type AggregatorSelection = AggregatorId | 'auto'
 
-export type AudrenOpKind = 'transfer' | 'merge' | 'exec_escrow' | 'withdraw'
+export type AudrenOpKind = 'transfer' | 'withdraw' | 'exec_escrow'
 
 export type BillingMode = 'self_paying' | 'sponsored'
 
@@ -48,7 +48,6 @@ export interface SwapFeePlan {
   feeSide: 'output' | 'input'
   feeAccount: string | null
   feeAccountExists: boolean
-  /** True when the action is large enough to fund first-time creation of `feeAccount` atomically. */
   needsFeeAtaSetup: boolean
   estimatedRelayCostLamports: string
   estimatedRelayCostUsd: number | null
@@ -60,14 +59,16 @@ export interface SwapFeePlan {
 export interface NativeFeeQuote {
   ok: true
   cluster: Cluster
-  op: 'withdraw' | 'exec_escrow'
+  op: AudrenOpKind
   billingMode: BillingMode
+  feeSide: 'in' | 'out' | 'shielded_cm2'
   feeMint: string
   feeTokenProgram: string | null
   feeRecipient: string | null
+  feeShieldedAddress: string | null
   feeRecipientExists: boolean
   needsFeeAtaSetup: boolean
-  /** Native on-chain `relayer_fee` in raw base units of `feeMint` (lamports for Native SOL / unwrap_wsol). */
+  /** Exact raw fee in base units of `feeMint` (lamports for Native SOL / unwrap_wsol / shielded SOL note). */
   relayerFee: string
   feeBps: number
   estimatedRelayCostLamports: string
@@ -100,7 +101,6 @@ export interface NormalizedQuote {
   routePlan: Array<{ swapInfo: RouteLegSummary; percent?: number }>
   contextSlot?: number | null
   latencyMs: number
-  /** Opaque provider quote object passed back to `/v1/swap/instructions`. */
   rawQuote: Record<string, unknown>
 }
 
@@ -119,12 +119,11 @@ export interface RelaySubmitRequest {
   setupAtas?: Array<{ owner: string; mint: string; tokenProgram: string }>
   /**
    * Optional strictly-allowlisted zero-signer DeFi refresh cranks prepended BEFORE
-   * Tag 5 (`ExecViaEscrow`), e.g. Kamino `RefreshReserve` / Pyth oracle updates.
+   * Tag 7 (`ExecViaEscrow`), e.g. Kamino `RefreshReserve` / Pyth oracle updates.
    */
   preInstructions?: EncodedRouterInstruction[]
   computeUnitLimit?: number
   priorityFeeLamports?: string
   vaultOutAta?: string
-  rolloverFromPageId?: string
   provider?: AggregatorId
 }

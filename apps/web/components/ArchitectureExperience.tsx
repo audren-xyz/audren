@@ -9,46 +9,152 @@ import { AUDREN, MEASURED_CU_ROWS, explorerAddress, solscanAddress } from '@/lib
 import styles from '@/components/SubpageShell.module.css'
 
 const INSTRUCTIONS = [
-  { tag: '0x00', name: 'InitPool', summary: 'Create PoolState (192 B), EpochPage #0 (6,240 B < 10 KiB CPI cap), sol_vault, and page_rent_vault.' },
-  { tag: '0x01', name: 'OpenPage', summary: 'Permissionless rollover sealing current Lane 0 EpochPage and opening page_id + 1 funded by PageRentVault via live Rent::get().' },
-  { tag: '0x02', name: 'Deposit', summary: 'Shield Native SOL, Classic SPL, or transferable Token-2022 directly to any Audren stealth address (commits exact net_received delta; DEPOSIT_FLAG_FEE_FROM_AMOUNT deducts rent contribution from deposit for 0-dust session sweeps; zero ZK proof required; PoolState stays read-only on parallel lanes 1..15).' },
-  { tag: '0x03', name: 'Transfer', summary: 'Private multi-asset 1-in → 2-out transfer: Triptych (m=5/6/7 with strong Fiat-Shamir ring_root + prefix_counts), CrossBase2 (256 B, unlinkable asset tags), native Solana Bulletproof U128, optional AuditorAssetProof. Fits directly in a single Solana v1 transaction (4,096 B).' },
-  { tag: '0x04', name: 'Merge', summary: 'Consolidate two same-asset shielded notes via 2 Triptych proofs (combined cap 128 ring slots) + CrossBase1 (128 B) + native Solana Bulletproof U64.' },
-  { tag: '0x05', name: 'ExecViaEscrow', summary: 'Protocol-agnostic 1-tx shielded DeFi CPI (DEX swaps, lending supply, yield vaults, LSTs, perp LP, RWAs) through 16 sharded swap_escrow PDAs into any compatible Token A → Token B Solana program, with native relayer_fee (input or output mint, flags & 4), optional shielded change (flags & 1), and partial-fill refund (flags & 2) in one Solana v1 transaction (4,096 B).' },
-  { tag: '0x06', name: 'Withdraw', summary: 'Unshield exact amount to any wallet/ATA or deterministic DeFi Session keypair with optional native relayer_fee, atomic WSOL → Native SOL unwrap via ephemeral audren_unwrap PDA (flags & 4), and optional shielded change (flags & 2). Full withdrawals (has_change = false, including unwrap_wsol) keep PoolState read-only and bypass pool pause.' },
-  { tag: '0x07', name: 'SetPaused', summary: 'Emergency authority circuit breaker for deposits, transfers, merges, ExecViaEscrow, and partial withdrawals — never blocks full 100% withdrawals (including unwrap_wsol) and never grants vault custody.' },
-  { tag: '0x08', name: 'WriteProofBuffer', summary: 'Optional chunked upload into an ephemeral ProofBuffer PDA tracked via u16 bitmask for standard wallet v0 (1,232 B) signing or oversized multi-hop DeFi CPIs.' },
-  { tag: '0x09', name: 'ExecBuffered', summary: 'Zero-copy execute Transfer, Merge, ExecViaEscrow, or Withdraw from a completed ProofBuffer and atomically refund 100% of buffer rent to payer.' },
-  { tag: '0x0A', name: 'CloseProofBuffer', summary: 'Reclaim 100% of rent lamports from an abandoned or interrupted ProofBuffer back to its authority.' },
-  { tag: '0x0B', name: 'InitLane', summary: 'Authority-signed parallel lane initializer enabling parallel append lanes 1..15 inside an existing pool (page_id = (lane_id << 56) | seq) sharing one unified vault & nullifier namespace.' },
-  { tag: '0x0C', name: 'OpenLanePage', summary: 'Permissionless rollover for parallel append lanes 1..15 funded by per-lane LaneRentVault while keeping PoolState strictly read-only.' },
+  {
+    tag: '0x00',
+    name: 'InitPool',
+    summary:
+      'Create PoolState (128 B, audren_v2_pool) and unified sol_vault PDA with ring-wrap deadlock guard (max_ckpt_age <= ckpt_interval * 256).',
+  },
+  {
+    tag: '0x01',
+    name: 'InitLane',
+    summary:
+      'Authority-signed monotonic lane initializer (active_lanes = 4 → 8 → 16) creating LaneTreeState (1,824 B), LaneRentVault, and seq-0 SubtreePage/SubtreeRootPage/MemoPage/NullifierPage PDAs.',
+  },
+  {
+    tag: '0x02',
+    name: 'OpenPage',
+    summary:
+      'Permissionless page opener for SubtreePage (8,256 B), SubtreeRootPage (9,664 B), MemoPage (10,144 B), or NullifierPage (9,664 B) reimbursed deterministically from LaneRentVault.',
+  },
+  {
+    tag: '0x03',
+    name: 'DepositSol',
+    summary:
+      'Shield Native SOL into the unified sol_vault (~42.5k CU, 0 ZK proof). Computes Poseidon5 commitment on-chain, updates the lane 4-ary frontier, appends 90 B SoA memo, and supports DEPOSIT_FLAG_FEE_FROM_AMOUNT for zero-dust session sweeps.',
+  },
+  {
+    tag: '0x04',
+    name: 'DepositSpl',
+    summary:
+      'Shield Classic SPL or Token-2022 tokens (~48k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe) and validates sanitized trailing TransferHook accounts.',
+  },
+  {
+    tag: '0x05',
+    name: 'PublishCheckpoint',
+    summary:
+      'Permissionless 256-slot cyclic RootCheckpoint (704 B) publisher hashing all active lane roots (plus Z[18] for unactivated lanes) into one global 4-ary Depth-20 super_root (16.8k / 23.6k / 44.5k CU for 4 / 8 / 16 lanes).',
+  },
+  {
+    tag: '0x06',
+    name: 'JoinSplit',
+    summary:
+      '192 B BN254 Groth16 2-in/3-out spend (~103k–160k CU) across the global 4^20 MASP. Supports private transfers (ASSET_MODE_PRIVATE with optional shielded cm2 relayer fee), public SOL/SPL exits, and atomic WSOL→SOL unwrap (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune when output_mask == 0).',
+  },
+  {
+    tag: '0x07',
+    name: 'ExecViaEscrow',
+    summary:
+      'Protocol-agnostic 1-tx shielded DeFi CPI (~158k–189k CU, leaving >1.2M CU for DeFi) through 16 sharded swap_escrow PDAs with WatchedEscrowBuf firewall, ctx_hash-bound router_accounts, input or output relayer fees (EXEC_FLAG_FEE_ON_OUTPUT), and XOR-masked dynamic output notes.',
+  },
+  {
+    tag: '0x08',
+    name: 'SetPaused',
+    summary:
+      'Emergency authority circuit breaker halting deposits, private transfers, DeFi CPIs, and partial exits while preserving permissionless full withdrawals (output_mask == 0, including WSOL unwrap).',
+  },
 ] as const
 
-const TRIPTYCH_EQS = [
-  { id: 'Eq 1', label: 'Bit linearity', formula: 'A + ξ·B − Σ fⱼ·Hⱼ − z_A·H = 0' },
-  { id: 'Eq 2', label: 'Bit booleanity (lⱼ ∈ {0,1})', formula: 'ξ·C + D − Σ fⱼ(ξ − fⱼ)·Hⱼ − z_C·H = 0' },
-  { id: 'Eq 3', label: 'Stealth ownership (Pₗ = x·G)', formula: 'Σ pₖ(ξ)·Pₖ − Σ ξʲ·Xⱼ − z_x·G = 0' },
-  { id: 'Eq 4', label: 'Unique nullifier (x·J = U)', formula: 'ξᵐ·U − Σ ξʲ·Yⱼ − z_x·J = 0' },
-  { id: 'Eq 5', label: 'Multi-asset & value balance', formula: 'Σ pₖ(ξ)·(Aₖ + α·Vₖ) − ξᵐ·(A_spend + α·V_spend) − Σ ξʲ·Wⱼ − z_q·H = 0' },
-  { id: 'Eq 6', label: 'Audited ElGamal S₁ = rₛ·G', formula: 'ξᵐ·S₁ − Σ ξʲ·Tⱼ − z_aud·G = 0  (InstitutionalAudited)' },
-  { id: 'Eq 7', label: 'Audited ElGamal S₂ = Pₗ + rₛ·K_aud', formula: 'ξᵐ·S₂ − Σ pₖ(ξ)·Pₖ − Σ ξʲ·Eⱼ − z_aud·K_aud = 0  (InstitutionalAudited)' },
+const CIRCUIT_CONSTRAINTS = [
+  {
+    id: 'Keying',
+    label: 'Key separation (spend_pk & nk)',
+    formula: 'spend_pk = Poseidon2(1, spend_sk)  ·  nk = Poseidon2(10, spend_sk)',
+  },
+  {
+    id: 'Stealth',
+    label: 'One-time stealth owner',
+    formula: 'stealth_owner = Poseidon3(2, spend_pk, tweak)',
+  },
+  {
+    id: 'Note',
+    label: 'Canonical multi-asset note commitment',
+    formula: 'cm = Poseidon5(3, stealth_owner, asset_id, amount, blinding)',
+  },
+  {
+    id: 'Tree',
+    label: '4-ary Depth-20 global Merkle membership',
+    formula: '20 levels × Poseidon4(c0, c1, c2, c3) == RootCheckpoint.super_root  (4²⁰ = 1.099T notes)',
+  },
+  {
+    id: 'Nullifier',
+    label: 'Real & padded dummy nullifiers',
+    formula: 'nf = Poseidon4(4, nk, cm, (lane_id << 36) | leaf_idx)  [or Poseidon3(5, nk, r) / 0 if omit_nf1]',
+  },
+  {
+    id: 'Balance',
+    label: 'Uniform asset & 64-bit value conservation',
+    formula: 'in₀ + in₁ == out₀ + out₁ + out₂ + public_out + relayer_fee  (all amounts ∈ [0, 2⁶⁴))',
+  },
+  {
+    id: 'Public',
+    label: 'Single compressed Groth16 public input',
+    formula: 'pub_hash = Poseidon4(9, Poseidon5(7, super_root, nf₀, nf₁, cm₀), Poseidon5(8, cm₁, cm₂, pub_asset, packed_amts), ctx_hash)',
+  },
 ] as const
 
-const PAGE_MAP = [
-  { offset: '0..64', bytes: '64 B', weight: 6, short: 'Hdr', field: 'PageHeader', inSlice: false, bg: '#e6e2d7', color: '#2b2d26', desc: 'AUDRNPG1 magic, version, bump, closed flag, count (0..=32), pool_id, page_id, slots.' },
-  { offset: '64..96', bytes: '32 B', weight: 6, short: 'Tags', field: 'view_tags[32]', inSlice: true, bg: '#184433', color: '#f4f1ea', desc: '1-byte fast scan filter (included in RPC & WS dataSlice — rejects 255/256 non-owned notes).' },
-  { offset: '96..1,120', bytes: '1,024 B', weight: 18, short: 'eph_pks', field: 'ephemeral_pks[32]', inSlice: true, bg: '#255a44', color: '#f4f1ea', desc: 'Stealth ECDH R_k points (included in dataSlice → 1,056 B total per 32-note page).' },
-  { offset: '1,120..2,144', bytes: '1,024 B', weight: 17, short: 'stealth_pks', field: 'stealth_pks[32]', inSlice: false, bg: '#dfe5dc', color: '#1b2b22', desc: 'One-time spend keys P_k read zero-copy under Direct Mapping (SIMD-0460).' },
-  { offset: '2,144..3,168', bytes: '1,024 B', weight: 17, short: 'asset_tags', field: 'asset_tags[32]', inSlice: false, bg: '#eaede6', color: '#1b2b22', desc: 'Re-randomized hidden asset commitments A_k = G_mint + a·H.' },
-  { offset: '3,168..4,192', bytes: '1,024 B', weight: 17, short: 'commitments', field: 'commitments[32]', inSlice: false, bg: '#f1f0e8', color: '#262922', desc: 'Pedersen value commitments V_k = v·A_k + r·H.' },
-  { offset: '4,192..6,240', bytes: '2,048 B', weight: 28, short: 'ciphertexts[32]', field: 'ciphertexts[32]', inSlice: false, bg: '#faf8f3', color: '#262922', desc: 'AES-256-GCM encrypted note memos (48 B payload + 16 B auth tag per note).' },
+const MEMO_PAGE_MAP = [
+  {
+    offset: '0..64',
+    bytes: '64 B',
+    weight: 8,
+    short: 'Hdr',
+    field: 'MemoPageHeader',
+    inScan: false,
+    bg: '#e6e2d7',
+    color: '#2b2d26',
+    desc: 'AUD2MM03 magic, lane_id, bump, count (0..=112), pool_id, page_seq, created_slot, closed_slot.',
+  },
+  {
+    offset: '64..288',
+    bytes: '224 B',
+    weight: 14,
+    short: 'view_tags',
+    field: 'view_tags[112] (2 B each)',
+    inScan: true,
+    bg: '#184433',
+    color: '#f4f1ea',
+    desc: '16-bit view tag rejects 65,535 / 65,536 non-owned notes before AEAD decryption.',
+  },
+  {
+    offset: '288..3,872',
+    bytes: '3,584 B',
+    weight: 32,
+    short: 'ephemeral_pks',
+    field: 'ephemeral_pks[112] (32 B each)',
+    inScan: true,
+    bg: '#255a44',
+    color: '#f4f1ea',
+    desc: 'X25519 ephemeral public keys for deterministic ECDH shared secret derivation.',
+  },
+  {
+    offset: '3,872..10,144',
+    bytes: '6,272 B',
+    weight: 46,
+    short: 'ciphertexts',
+    field: 'ciphertexts[112] (56 B each)',
+    inScan: false,
+    bg: '#eaede6',
+    color: '#1b2b22',
+    desc: 'ChaCha20-Poly1305 encrypted (amount_u64 || mint_32) + 16 B tag (or XOR-masked AUD2DYN2 swap note).',
+  },
 ] as const
 
 const MAX_TX_CU = 1_400_000
 
 export function ArchitectureExperience() {
   const [activeSlice, setActiveSlice] = useState<number>(1)
-  const slice = PAGE_MAP[activeSlice]
+  const slice = MEMO_PAGE_MAP[activeSlice] ?? MEMO_PAGE_MAP[0]
 
   return (
     <div className={`page-shell ${styles.page}`}>
@@ -61,10 +167,12 @@ export function ArchitectureExperience() {
             <ArrowLeft size={12} /> audren.xyz
           </Link>
           <div className={styles.heroSingle}>
-            <h1>Cryptographic &amp; On-Chain Specification</h1>
+            <h1>Audren Cryptographic &amp; On-Chain Specification</h1>
             <p className={styles.heroLead}>
-              Exact binary layouts, Multi-Base Binary Triptych verification equations,
-              Structure-of-Arrays byte offsets, and measured sBPFv3 Compute Units implemented in{' '}
+              Minimal frozen BN254 Groth16 circuit ({AUDREN.circuitConstraints.toLocaleString()}{' '}
+              R1CS, 4-ary Depth-20 global MASP), 9 instructions, fixed &lt;10 KiB zero-realloc
+              accounts, ordinary-RPC <code>CompactWalletStore</code>, and measured sBPFv3 Compute
+              Units in{' '}
               <a
                 href={AUDREN.githubCore}
                 target="_blank"
@@ -87,49 +195,51 @@ export function ArchitectureExperience() {
               </strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Verified Build Hash</span>
+              <span>Frozen Circuit</span>
               <strong className="mono">
-                <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer">
-                  {AUDREN.executableHash.slice(0, 16)}… <ArrowUpRight size={11} />
-                </a>
+                {AUDREN.circuitConstraints.toLocaleString()} R1CS · {AUDREN.proofBytes} B Groth16
               </strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Deployed ELF</span>
+              <span>Compiled ELF</span>
               <strong className="mono">{AUDREN.elfBytes.toLocaleString()} B · sBPFv3</strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>On-Chain IDL &amp; Heap</span>
+              <span>On-Chain IDL &amp; Pool Capacity</span>
               <strong className="mono">
                 <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer">
-                  Codama 1.8.0 · 32 KiB <ArrowUpRight size={11} />
+                  Codama 1.8.0 · 4²⁰ Notes <ArrowUpRight size={11} />
                 </a>
               </strong>
             </div>
           </div>
         </section>
 
-        {/* INTERACTIVE EPOCHPAGE SOA MEMORY MAP */}
+        {/* INTERACTIVE MEMOPAGE SOA MEMORY MAP */}
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>Structure-of-Arrays EpochPage (6,240 B)</h2>
+              <h2>Structure-of-Arrays MemoPage (10,144 B) &amp; CompactWalletStore</h2>
             </div>
             <p>
-              Every <code>EpochPage</code> PDA holds up to 32 notes in column-major order under
-              Solana’s 10 KiB CPI cap. Wallets fetch only <code>dataSlice: 64..1,120</code>{' '}
-              (1,056 B) to scan 3,200 notes across 100 pages in ~106 KB.
+              Every on-chain account fits strictly below Solana’s 10,240 B CPI allocation cap with zero{' '}
+              <code>realloc</code>. Wallets fetch sequential <code>SubtreePage</code> (8,256 B),{' '}
+              <code>MemoPage</code> (10,144 B), and <code>NullifierPage</code> (9,664 B, 600 × 16 B
+              prefixes) via ordinary <code>getMultipleAccounts</code>, verify every decrypted memo
+              against <code>SubtreePage</code>, freeze 12 intra-subtree siblings on sealed pages,
+              and discard raw pages permanently (<strong>1.28 MB</strong> local store at 10M pool
+              notes).
             </p>
           </div>
 
           <div className={styles.diagramStagePaper}>
             <div className={styles.stageHead}>
-              <strong>Interactive byte layout — click any region to inspect</strong>
-              <span>Green highlight = RPC dataSlice (offset 64, length 1,056 B)</span>
+              <strong>Interactive MemoPage byte layout — click any region to inspect</strong>
+              <span>Green highlight = 2-byte view_tags + X25519 ephemeral_pks (112 notes/page)</span>
             </div>
 
-            <div className={styles.soaBar} role="tablist" aria-label="EpochPage memory slices">
-              {PAGE_MAP.map((seg, idx) => (
+            <div className={styles.soaBar} role="tablist" aria-label="MemoPage memory slices">
+              {MEMO_PAGE_MAP.map((seg, idx) => (
                 <button
                   key={seg.field}
                   type="button"
@@ -163,11 +273,11 @@ export function ArchitectureExperience() {
                 className="mono"
                 style={{
                   fontSize: 10.5,
-                  color: slice.inSlice ? '#184433' : '#6a6d62',
+                  color: slice.inScan ? '#184433' : '#6a6d62',
                   fontWeight: 600,
                 }}
               >
-                {slice.inSlice ? 'IN RPC DATASLICE' : 'ON-DEMAND / PROOF'}
+                {slice.inScan ? 'FAST VIEW-TAG FILTER' : 'HEADER / AEAD PAYLOAD'}
               </span>
             </div>
           </div>
@@ -181,16 +291,17 @@ export function ArchitectureExperience() {
                 <h2>Measured sBPFv3 Compute Units</h2>
               </div>
               <p>
-                Measured directly on the deployed {AUDREN.elfBytes.toLocaleString()}-byte sBPFv3
-                ELF with radix-29 scalar arithmetic and native Solana Ristretto255 + ZK ElGamal
-                Proof syscalls against Solana’s 1.4M CU transaction limit.
+                Measured directly against the compiled {AUDREN.elfBytes.toLocaleString()}-byte
+                sBPFv3 ELF using native Solana <code>sol_poseidon</code> and{' '}
+                <code>alt_bn128</code> pairing syscalls over Solana Transaction v1 (
+                <code>0x81</code>).
               </p>
             </div>
 
             <div className={styles.diagramStagePaper}>
               <div className={styles.stageHead}>
                 <strong>CU consumption vs. 1,400,000 CU Solana transaction cap</strong>
-                <span>ExecViaEscrow leaves ~1.0M CU for external DeFi CPI</span>
+                <span>ExecViaEscrow leaves &gt;1.2M CU for external DeFi CPI</span>
               </div>
               <div className={styles.cuList}>
                 {MEASURED_CU_ROWS.map((row) => {
@@ -214,16 +325,17 @@ export function ArchitectureExperience() {
           </div>
         </section>
 
-        {/* INSTRUCTION SET & TRIPTYCH EQUATIONS */}
+        {/* 9 INSTRUCTIONS & FROZEN CIRCUIT SPEC */}
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>13 Instructions &amp; Multi-Base Binary Triptych</h2>
+              <h2>9 Instructions &amp; Frozen JoinSplit4AryCircuit</h2>
             </div>
             <p>
-              For ring size <code>N = 2ᵐ</code> (32 / 64 / 128 slots), Fiat-Shamir weights batch
-              all verification equations into chunked 8 KiB invocations of Solana’s native{' '}
-              <code>sol_curve_multiscalar_mul</code> syscall.
+              All 9 instructions settle in a single Solana Transaction v1 (<code>0x81</code>) with
+              no multi-tx upload buffers. One frozen <code>vk_id = 0</code> circuit
+              covers private transfers, public exits, atomic WSOL unwrap, and protocol-agnostic DeFi
+              CPIs while scaling monotonically across 4 → 8 → 16 append lanes.
             </p>
           </div>
 
@@ -252,13 +364,13 @@ export function ArchitectureExperience() {
             <table className={styles.table}>
               <thead>
                 <tr>
-                  <th>Eq</th>
+                  <th>Gadget</th>
                   <th>Property</th>
-                  <th>Verification Equation</th>
+                  <th>Constraint Specification (BN254 Fr · Circom Poseidon)</th>
                 </tr>
               </thead>
               <tbody>
-                {TRIPTYCH_EQS.map((eq) => (
+                {CIRCUIT_CONSTRAINTS.map((eq) => (
                   <tr key={eq.id}>
                     <td><code>{eq.id}</code></td>
                     <td>{eq.label}</td>
@@ -270,16 +382,16 @@ export function ArchitectureExperience() {
           </div>
         </section>
 
-        {/* PRIVACY SCOPE, ACCOUNTING EVIDENCE & SECURITY BOUNDARIES */}
+        {/* PRIVACY SCOPE, TRUSTED SETUP & SECURITY BOUNDARIES */}
         <section className={styles.sectionAlt}>
           <div className="container">
             <div className={styles.sectionIntro}>
               <div>
-                <h2>Privacy scope, security boundaries &amp; accounting evidence.</h2>
+                <h2>Privacy scope, ceremony provenance &amp; security boundaries.</h2>
               </div>
               <p>
-                On-chain balance and range checks, independent implementation review, and practical
-                anonymity measurements are separate forms of evidence.
+                Cryptographic unlinkability, provider metadata visibility, custody controls, and
+                independent review are distinct properties evaluated separately.
               </p>
             </div>
 
@@ -288,20 +400,24 @@ export function ArchitectureExperience() {
                 <span className={styles.cellIndex}>BOUNDARIES</span>
                 <h3>Public entry/exit &amp; effective anonymity</h3>
                 <ul className={styles.dashList}>
-                  <li>Public deposits, withdrawals, external DeFi CPI legs (<code>ExecViaEscrow</code>), and stateful positions opened by deterministic session wallets (<code>Bᵢ</code> via <code>HKDF-SHA256(&quot;audren/v1/defi_session&quot;)</code>) are intentional public boundaries; spending proofs conceal input selection within a candidate set.</li>
-                  <li>Ring sizes (32 / 64 / 128) are slot capacities, not guaranteed counts of plausible notes or independent users.</li>
-                  <li>More TVL alone does not guarantee more privacy; empty slots, known records, timing, and candidate selection reduce effective anonymity.</li>
-                  <li>Public vault balances show held assets; they do not independently prove that every private liability is covered.</li>
+                  <li>
+                    Public deposits, public withdrawals, external DeFi CPI legs (
+                    <code>ExecViaEscrow</code>), and stateful positions opened by deterministic
+                    session wallets (<code>Bᵢ</code> via{' '}
+                    <code>HKDF-SHA256(&quot;audren/v2/defi_session&quot;)</code>) remain public on
+                    Solana.
+                  </li>
+                  <li>
+                    <code>JoinSplit</code> supports both padded 2-nullifier mode (hides 1-in vs
+                    2-in arity) and economic 1-nullifier mode (<code>omit_nf1 = true</code>, saves
+                    1 permanent NullifierPDA rent while exposing 1-input count).
+                  </li>
+                  <li>
+                    More TVL alone does not guarantee more privacy; timing, public amounts, and
+                    network correlation still narrow effective anonymity.
+                  </li>
                 </ul>
                 <div className={styles.cellFoot}>
-                  <a
-                    href="https://github.com/audren-xyz/audren/blob/main/ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity"
-                    target="_blank"
-                    rel="noreferrer"
-                    className={styles.textLink}
-                  >
-                    Full privacy specification <ArrowUpRight size={13} />
-                  </a>
                   <Link href="/privacy" className={styles.textLink}>
                     Provider metadata notice <ArrowRight size={13} />
                   </Link>
@@ -309,36 +425,72 @@ export function ArchitectureExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>CUSTODY &amp; UPGRADES</span>
-                <h3>Pause escape hatch &amp; pre-audit status</h3>
+                <span className={styles.cellIndex}>CUSTODY &amp; CEREMONY</span>
+                <h3>Pause escape hatch, MPC setup &amp; pre-audit status</h3>
                 <ul className={styles.dashList}>
-                  <li><strong>Non-custodial pause bypass:</strong> <code>SetPaused</code> halts deposits, transfers, merges, DeFi CPIs, and partial withdrawals, while full 100% withdrawals (<code>has_change = false</code>, including <code>unwrap_wsol</code>) keep <code>PoolState</code> read-only and bypass the pause check.</li>
-                  <li><strong>Mutable upgrade authority:</strong> Program <code>{AUDREN.programId.slice(0, 10)}…</code> is in active pre-audit release with a mutable BPF upgrade authority. Do not treat the deployment as frozen or immutable.</li>
-                  <li><strong>Issuer controls:</strong> Token issuers retain mint-level controls such as freeze authority or transfer-hook policies.</li>
+                  <li>
+                    <strong>Non-custodial pause bypass:</strong> <code>SetPaused</code> halts new
+                    deposits, private transfers, DeFi CPIs, and partial exits, while full 100%
+                    withdrawals (<code>output_mask == 0</code>, including WSOL unwrap) bypass the
+                    pause check.
+                  </li>
+                  <li>
+                    <strong>Trusted setup provenance:</strong> Current builds embed{' '}
+                    <code>DEV_DETERMINISTIC_VK</code> for local testing and Devnet. Mainnet
+                    deployment requires replacing <code>vk_generated.rs</code> with a public
+                    Phase-2 MPC ceremony artifact and completing an independent audit.
+                  </li>
+                  <li>
+                    <strong>Upgrade authority &amp; issuers:</strong> The BPF upgrade authority
+                    remains mutable during pre-audit releases, and token issuers retain mint-level
+                    controls (freeze authority, transfer-hook rules).
+                  </li>
                 </ul>
               </article>
 
               <article className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>SCALING &amp; DISCLOSURE</span>
-                <h3>Parallel lanes &amp; scoped sub-accounts</h3>
+                <h3>4 → 8 → 16 append lanes &amp; two-mode compliance</h3>
                 <ul className={styles.dashList}>
-                  <li>Pools scale up to 16 independent append lanes (<code>page_id = (lane_id &lt;&lt; 56) | seq</code>); Lanes 1..15 keep <code>PoolState</code> read-only while sharing one vault and nullifier set.</li>
-                  <li>Sealed <code>EpochPage</code> PDAs are not modified by current instructions and support immutable edge caching.</li>
-                  <li>Single-note receipts disclose one commitment opening with zero spend/view keys; child sub-accounts derive isolated <code>FullViewingKey</code> streams via <code>HKDF-SHA256(&quot;audren/v1/subaccount&quot;)</code>.</li>
+                  <li>
+                    Pools launch with 4 active lanes (<code>~48M CU/slot</code> aggregate lane
+                    ceiling) and expand monotonically to 8 or 16 lanes via <code>InitLane</code>{' '}
+                    with zero circuit changes and zero migration of existing notes.
+                  </li>
+                  <li>
+                    Mode 1 <code>SelectiveDisclosureProof</code> verifies one note against{' '}
+                    <code>SubtreePage</code> in 1 Poseidon5 hash with zero keys disclosed.
+                  </li>
+                  <li>
+                    Mode 2 <code>FullViewingKey</code> (<code>spend_pk, nk, view_sk, view_pk</code>)
+                    tracks both incoming notes AND outgoing spent nullifiers with zero spend
+                    authority.
+                  </li>
                 </ul>
               </article>
 
               <article className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>RELAY CONTRACT</span>
-                <h3>Optional pluggable privacy relay</h3>
+                <h3>Three-mode pluggable privacy relay</h3>
                 <ul className={styles.dashList}>
-                  <li>Clients can submit directly through any Solana RPC without a relayer, or submit pre-proved instructions to <code>{AUDREN.relayUrl}</code> or a self-hosted relay with the same HTTP API (<code>/v1/info</code>, <code>/v1/fee-quote</code>, <code>/v1/swap/quote</code>, <code>/v1/swap/instructions</code>, <code>/v1/relay/submit</code>).</li>
-                  <li>Relayers receive zero spend or view keys and cannot alter proof-bound outputs.</li>
-                  <li>Relayers observe request metadata and wrap proven instructions into Solana v1 transactions.</li>
+                  <li>
+                    Clients submit directly through any Solana RPC or via{' '}
+                    <code>{AUDREN.relayUrl}</code> / a self-hosted relay supporting rotating
+                    fee-payer pools (<code>&gt;= active_lanes</code> signers).
+                  </li>
+                  <li>
+                    Supports Mode 1 shielded <code>cm2</code> transfer fees verified via read-only
+                    relayer FVK, Mode 2 public withdraw fees, and Mode 3 <code>ExecViaEscrow</code>{' '}
+                    input/output fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>).
+                  </li>
+                  <li>
+                    Relayers hold zero user spend keys and cannot alter <code>ctx_hash</code>-bound
+                    outputs or router accounts.
+                  </li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a href={`${AUDREN.relayUrl}/v1/info`} target="_blank" rel="noreferrer" className={styles.textLink}>
-                    Inspect live relay /v1/info <ArrowUpRight size={13} />
+                    Inspect relay /v1/info <ArrowUpRight size={13} />
                   </a>
                 </div>
               </article>
@@ -352,8 +504,8 @@ export function ArchitectureExperience() {
             <div>
               <h2>Ready to integrate?</h2>
               <p>
-                Start with our Rust, TypeScript, Swift (iOS), or Kotlin (Android) SDK — all four
-                verified byte-for-byte against <code>spec/test-vectors.json</code>.
+                Start with our Rust, TypeScript (+ WASM prover), Swift (iOS), or Kotlin (Android)
+                SDK — all four verified byte-for-byte against <code>spec/test-vectors.json</code>.
               </p>
             </div>
             <div className={styles.closingActions}>

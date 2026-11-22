@@ -10,151 +10,127 @@
 
 <p>
   <a href="https://github.com/audren-xyz/audren/actions/workflows/ci.yml"><img src="https://github.com/audren-xyz/audren/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/audren-xyz/audren/releases/tag/v0.3.0"><img src="https://img.shields.io/badge/release-v0.3.0-121210" alt="Release v0.3.0" /></a>
+  <a href="https://github.com/audren-xyz/audren/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/release-v1.0.0-121210" alt="Release v1.0.0" /></a>
   <a href="https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build"><img src="https://img.shields.io/badge/Solana%20Verified%20Build-sBPFv3-184433" alt="Solana Verified Build" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-434039" alt="Apache-2.0 License" /></a>
   <a href="https://audren.xyz"><img src="https://img.shields.io/badge/app-audren.xyz-C83E2B" alt="audren.xyz" /></a>
 </p>
 
-**Private money on Solana. Existing tokens. One shared pool.**
+**Private money on Solana. Existing tokens. One global multi-asset shielded pool.**
 
-Audren is an open-source, self-custodial privacy protocol on Solana (`sBPFv3`, `pinocchio 0.11.1`, `#![no_std]`). Native SOL, Classic SPL tokens, and transferable Token-2022 mints share one permissionless pool (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`). Shield assets without wrapper tokens, send private transfers across 32/64/128-slot rings, compose with Solana DeFi via protocol-agnostic `ExecViaEscrow` CPI (DEX swaps, lending supply, yield vaults, liquid staking, perp LP, RWAs), fund 0-SOL wallets or deterministic DeFi session keypairs with self-paying fees & atomic WSOL unwrap, sweep back with zero dust, and generate selective receipts — with local proofs, keys you control, no trusted setup, and no off-chain indexer.
+Audren is an open-source, self-custodial privacy protocol on Solana (`sBPFv3`, `pinocchio 0.11.1`, `#![no_std]`). Native SOL, Classic SPL tokens, and transferable Token-2022 mints share one permissionless global 4-ary Depth-20 Multi-Asset Shielded Pool (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`, capacity $4^{20} \approx 1.099 \times 10^{12}$ notes) verified on-chain via `192 B` BN254 Groth16 proofs (`17,861` R1CS constraints, `alt_bn128` syscall). Shield assets without wrapper tokens, send private 2-in/3-out transfers with hidden asset, amount, sender, and recipient, compose with arbitrary Solana DeFi via isolated `ExecViaEscrow` CPIs (`Tag 7`), fund pseudonymous `DefiSessionKeypair`s with atomic WSOL unwrapping (`WITHDRAW_FLAG_UNWRAP_WSOL`) and zero-dust sweeps (`DEPOSIT_FLAG_FEE_FROM_AMOUNT`), and sync wallets directly over ordinary Solana RPC with zero mandatory indexer.
 
-## Privacy and accounting boundaries
+## Privacy, ceremony, and accounting boundaries
 
-Public deposits, withdrawals, external DeFi CPI calls (`ExecViaEscrow`), and stateful positions opened by deterministic session wallets (`B_0, B_1…`) are intentional boundaries: their accounts, programs, tokens and amounts remain observable on Solana. Private proofs conceal input selection within a candidate set; they do not guarantee that outside information cannot reconnect activity. Compatible relayers are permissionless and optional, hold no user spending keys, and can observe request metadata. Direct submission exposes its fee payer.
-
-Ring capacity is not a count of equally plausible notes or independent users. Empty slots, candidate selection and known public records affect effective anonymity. More TVL alone does not guarantee more privacy. Visible vault assets do not independently prove coverage of private liabilities. See [the specification](ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity) for the operation-specific scope and security assumptions.
+- **Pre-audit & Groth16 MPC ceremony status:** Audren is pre-audit and currently compiles a deterministic development verifying key (`DEV_DETERMINISTIC_VK`, `vk_id = 0`). A public Phase-2 Groth16 MPC ceremony and independent audit are planned prior to production custody, and the program remains upgradeable until audits and ceremony verification conclude.
+- **Public boundaries:** Deposits (`Tag 3`/`Tag 4`), withdrawals (`Tag 6`), external DeFi CPI calls (`Tag 7 ExecViaEscrow`), and stateful positions opened by deterministic session wallets (`DefiSessionKeypair`) are public boundaries on Solana. Cryptographic proofs enforce global pool unlinkability within the active note set; timing, amount matching, asset choice, and network metadata remain operational factors.
+- **Permissionless optional relayers:** Relayers hold no user spend or viewing keys, accept only `JoinSplit` (`Tag 6`) and `ExecViaEscrow` (`Tag 7`), and can observe IP/request metadata. Direct submission exposes its fee payer. See [`ARCHITECTURE.md`](ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity).
 
 ## How Audren fits together
 
 ```text
-  Rust / TypeScript / Swift (iOS) / Kotlin (Android) SDK
-    │  1. Scans EpochPage dataSlices via standard Solana RPC
-    │  2. Builds Ristretto255 Multi-Base Triptych + Agave Bulletproof locally
+  Rust / TypeScript (WASM) / Swift (iOS) / Kotlin (Android) SDK
+    │  1. Syncs SubtreePage, MemoPage & NullifierPage via ordinary Solana RPC getMultipleAccounts
+    │  2. Persists CompactWalletStore locally (freezes 384 B intra-subtree siblings; discards raw pages)
+    │  3. Generates 192 B BN254 Groth16 JoinSplit proof locally (17,861 R1CS, 2^15 FFT)
     ▼
   Optional Pluggable Privacy Relayer (`apps/relay/`, self-hostable or `relay.audren.xyz` — or Direct wallet)
-    │  3. Submits single Solana v1 (0x81) tx (or ProofBuffer chunks via v0 wallet)
+    │  4. Submits single Solana Transaction v1 (`0x81`, <= 4,096 B)
     ▼
   Audren sBPFv3 Program (`program/`, AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3)
-       • `#![no_std]` Pinocchio 0.11.1 zero-copy entrypoint & stack CPIs
-       • Verifies Triptych via native `sol_curve_multiscalar_mul` + precomputed NUMS generators
-       • Verifies 64-bit Bulletproofs via native `ZkE1Gama1Proof` CPI
-       • Enforces NullifierPDA uniqueness, ExecViaEscrow custody isolation & atomic WSOL unwrap
+       • `#![no_std]` Pinocchio 0.11.1 zero-copy entrypoint & disjoint SBF heap arenas
+       • Verifies 192 B BN254 Groth16 via `groth16-solana` + `alt_bn128` syscall (~103k–159k CU)
+       • 16-lane-capable 4-ary Poseidon Merkle tree (4 active lanes by default, monotonic 4 -> 8 -> 16)
+       • Unified custody vaults, NullifierPDA + NullifierPage, ExecViaEscrow firewall & atomic WSOL unwrap
 ```
 
 ## Official SDKs (4 Languages, 1 Shared Conformance Spec)
 
-All four official Audren SDKs share the exact same **6 standardized building blocks** (`keys`, `pda & layout`, `scanner`, `prover`, `disclosure & audit`, `relayer & idl`), consumed directly from source (zero package-registry lock-in) and proven byte-for-byte in CI against one shared canonical vector suite ([`spec/test-vectors.json`](spec/test-vectors.json)):
+All four official Audren SDKs share the same canonical building blocks (`keys`, `pda & layout`, `CompactWalletStore & RPC scanner`, `BN254 Groth16 prover & 9 instruction builders`, `Mode 1 & Mode 2 disclosure`, `relayer & IDLs`) and are verified byte-for-byte in CI against [`spec/test-vectors.json`](spec/test-vectors.json):
 
-| Language | Package Path | Engine | Target Runtime | Local Proof Speed (`m=5`) |
+| Language | Package Path | Engine | Target Runtime | Local Proof Speed (`17,861` R1CS) |
 |---|---|---|---|---|
-| **Rust** | [`crates/client/`](crates/client/Cargo.toml) | Native `audren-client` | Services, CLIs, bots, validators | ~50 ms |
-| **TypeScript** | [`packages/sdk/`](packages/sdk/README.md) (`@audren/sdk` + `@audren/sdk/prover`) | Zero-dep core + pure-TS `@noble/curves` prover | Browsers, Node 22+, Cloudflare Workers | ~0.8–1.5 s |
-| **Swift (iOS / macOS)** | [`packages/swift/`](packages/swift/README.md) (`AudrenSDK`) | UniFFI over `crates/audren-ffi` (`audren-client`) | iOS 15+, macOS 13+ (`XCFramework` / SwiftPM) | ~50 ms |
-| **Kotlin (Android / JVM)** | [`packages/kotlin/`](packages/kotlin/README.md) (`xyz.audren.sdk`) | UniFFI + JNA over `crates/audren-ffi` (`audren-client`) | Android API 24+ (`jniLibs`), JVM 21+ | ~50 ms |
+| **Rust** | [`crates/client/`](crates/client/Cargo.toml) | Native `audren-circuits` (`ark-groth16`) | Services, CLIs, bots, validators | ~90–140 ms |
+| **TypeScript** | [`packages/sdk/`](packages/sdk/README.md) (`@audren/sdk` + `@audren/sdk/prover`) | Zero-WASM pure-TS Poseidon core + `audren_circuits.wasm` (`2.1 MB`) | Browsers, Node 22+, Cloudflare Workers | ~2.0 s |
+| **Swift (iOS / macOS)** | [`packages/swift/`](packages/swift/README.md) (`AudrenSDK`) | UniFFI over `crates/audren-ffi` (`audren-client`) | iOS 15+, macOS 13+ (`XCFramework` / SwiftPM) | ~120 ms |
+| **Kotlin (Android / JVM)** | [`packages/kotlin/`](packages/kotlin/README.md) (`xyz.audren.sdk`) | UniFFI + JNA over `crates/audren-ffi` (`audren-client`) | Android API 24+ (`jniLibs`), JVM 21+ | ~120 ms |
 
-Runnable examples for all 4 languages — verified in CI for **100% byte-for-byte canonical stdout parity** (`Rust == TypeScript == Swift == Kotlin`) — live in [`audren-xyz/examples`](https://github.com/audren-xyz/examples).
-
-### The 6 Standardized Building Blocks Across All 4 SDKs
-
-1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — all 11 canonical PDAs (`pool`, `epoch_page`, `sol_vault`, `vault_auth`, `page_rent_vault`, `swap_escrow`, `unwrap`, `lane`, `lane_rent_vault`, `nullifier`, `proof_buffer`), `deriveAssociatedTokenAddress`, lane `page_id` bit-packing, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`
-3. **Scanner** — `dataSlice: { offset: 64, length: 1056 }` view-tag filtering (`scanPageDataslice`), read-only FVK & spendable note decryption (`scanEpochPage`) with per-slot decoy fault isolation
-4. **Prover** — local proof generation & instruction builders (`Deposit` incl. `fee_from_amount`, `Transfer`, `Merge`, `ExecViaEscrow` incl. native `relayer_fee`, `Withdraw` incl. native `relayer_fee` & atomic `unwrap_wsol`, `ProofBuffer`, `CloseProofBuffer`, `OpenPage`, `OpenLanePage`)
-5. **Disclosure & Audit** — Mode 1 Selective Disclosure proof (64-bit safe across parallel lanes `1..15`) + standalone/on-page verify, Mode 2 Full Viewing Key, and Institutional Auditor ElGamal decryption
-6. **Relayer, Escrow CPI & IDLs** — `DEFAULT_RELAY_URL`, `prepareEscrowAccounts`, `JUPITER_CPI_EXCLUDED_DEXES`, Solana v1 (`0x81`), Codama v1.8.0 & Anchor v0.30+ IDLs (`47` synced UniFFI exports verified by `idl/verify-idl.py`)
+Runnable examples for all 4 languages live in [`audren-xyz/examples`](https://github.com/audren-xyz/examples).
 
 ## Repository layout
 
 ```text
-program/              On-chain sBPFv3 Solana program (#![no_std], pinocchio 0.11.1, lto = "fat")
-crates/audren-core/   #![no_std] account layouts, PDA seeds, wire sizes, and AudrenError codes
-crates/client/        Rust SDK (provers, RPC/WS scanner, router swap builder, LiteSVM & live tests)
-crates/audren-ffi/    UniFFI native FFI layer backing the Swift (iOS/macOS) & Kotlin (Android/JVM) SDKs
-packages/sdk/         TypeScript SDK (@audren/sdk zero-dep core + @audren/sdk/prover pure-TS prover)
-packages/swift/       Swift SDK (AudrenSDK SwiftPM package + iOS XCFramework build script)
-packages/kotlin/      Kotlin SDK (xyz.audren.sdk Gradle/JVM + Android jniLibs build script)
-spec/                 Canonical cross-language conformance vectors (spec/test-vectors.json)
-idl/                  Published Codama v1.8.0 & Anchor v0.30+ IDLs, security.json, and verifier
-apps/relay/           Open-source, self-hostable Cloudflare Worker Privacy Relayer
-apps/web/             Next.js 16 + Cloudflare Worker web app, Wallet Vault & Devnet sandbox
-tests/mock-router/    Isolated Pinocchio sBPFv3 mock router for adversarial ExecViaEscrow tests
-scripts/              Deterministic sBPFv3 build helper (`build-sbf.py`), upgrade script & mobile SDK builder
-assets/brand/         Canonical Audren SVG/PNG logos, README wordmarks, and social preview cards
-docs/                 Self-host relayer guide and canonical deployment addresses
-ARCHITECTURE.md       Account byte layouts, cryptographic soundness proofs, and runtime specification
-SECURITY.md           Responsible disclosure policy (`security@audren.xyz`)
-CONTRIBUTING.md       Contributor workflow and zero-drift verification checklist
+program/                On-chain sBPFv3 Solana program (#![no_std], pinocchio 0.11.1, groth16-solana)
+crates/audren-core/     #![no_std] account layouts, 13 PDA seeds, 9 tags, and 33 AudrenError codes
+crates/audren-circuits/ BN254 Groth16 JoinSplit4AryCircuit (17,861 R1CS), VK codegen, & wasm32 prover
+crates/client/          Rust SDK (prover, CompactWalletStore, RPC scanner, ExecViaEscrow, LiteSVM E2E)
+crates/audren-ffi/      UniFFI native FFI layer backing Swift & Kotlin + cross-SDK LiteSVM harness
+packages/sdk/           TypeScript SDK (@audren/sdk zero-WASM core + @audren/sdk/prover WASM prover)
+packages/swift/         Swift SDK (AudrenSDK SwiftPM package + iOS XCFramework build script)
+packages/kotlin/        Kotlin SDK (xyz.audren.sdk Gradle/JVM + Android jniLibs build script)
+spec/                   Canonical cross-language conformance vectors (spec/test-vectors.json)
+idl/                    Published Codama v1.8.0 & Anchor v0.30+ IDLs, security.json, and verifier
+apps/relay/             Open-source, self-hostable Cloudflare Worker Privacy Relayer (firewall & crank)
+apps/web/               Next.js 16 + Cloudflare Worker landing page, Wallet Vault & WASM Sandbox
+tests/mock-router/      Isolated Pinocchio sBPFv3 mock router for adversarial ExecViaEscrow tests
+tests/mock-hook/        Isolated Pinocchio sBPFv3 TransferHook mock for Token-2022 solvency tests
+scripts/                Deterministic sBPFv3 build helper (`build-sbf.py`), upgrade & mobile SDK scripts
+assets/brand/           Canonical Audren SVG/PNG logos, README wordmarks, and social preview cards
+docs/                   Self-host relayer guide and canonical deployment register
+ARCHITECTURE.md         Account byte layouts, BN254 Groth16 equations, and security specification
+SECURITY.md             Responsible disclosure policy (`security@audren.xyz`)
+CONTRIBUTING.md         Contributor workflow and zero-drift verification checklist
 ```
 
-## Published IDLs, Security & Documentation
-
-- **Published IDLs & On-Chain Metadata (`idl/`):** Deterministic Codama v1.8.0 ([`idl/audren.codama.json`](idl/audren.codama.json)) and Anchor v0.30+ ([`idl/audren.anchor.json`](idl/audren.anchor.json)) schemas covering all 13 instructions, 7 account layouts, 11 PDA seeds, and 33 errors — mirrored into `@audren/sdk` (`AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`) and published on-chain on Mainnet and Devnet via Solana Program Metadata ([`idl/README.md`](idl/README.md)).
-- **Security & Disclosure:** [`SECURITY.md`](SECURITY.md) and canonical on-chain security metadata ([`idl/security.json`](idl/security.json), `security@audren.xyz`), published via Solana Program Metadata (`GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj`) and embedded in the sBPFv3 program binary.
-- **Verified Builds & Releases:** Reproducible Docker sBPFv3 builds pinned to the Solana Foundation Agave `4.3.0` (`v1.57`) verifiable build image (`solana-verify`) with automated PDA attestation, GitHub Releases, and zero-drift CI verification via [`scripts/upgrade-program.sh`](scripts/upgrade-program.sh) and [`.github/workflows/ci.yml`](.github/workflows/ci.yml) ([`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md#solana-verified-builds-verifycly8mb96wd9wqq3wdxqwm4ou6r42th37db9fc)).
-- **Protocol Architecture:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — account layouts, Ristretto255 Multi-Base Triptych soundness proofs, swap custody isolation, Token-2022 solvency, and sBPFv3 runtime engineering.
-- **Deploy Your Own Relayer:** [`docs/DEPLOY_YOUR_OWN_RELAY.md`](docs/DEPLOY_YOUR_OWN_RELAY.md) — step-by-step guide to deploy an independent Audren relayer with zero shared credentials.
-- **Canonical Deployments:** [`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md) — Mainnet & Devnet Program ID, Pool #0 PDA, Program Metadata PDAs, and reference endpoints.
-
-## Instruction set
+## Instruction set (`0x00..=0x08`)
 
 | Tag | Instruction | Description |
 | --- | --- | --- |
-| `0x00` | `InitPool` | Create `PoolState` (`192 B`), `EpochPage #0` (`6,240 B`), `sol_vault`, `page_rent_vault` |
-| `0x01` | `OpenPage` | Permissionless Lane `0` rollover allocating `page_id + 1` funded by `PageRentVault` |
-| `0x02` | `Deposit` | Shield Native SOL, Classic SPL, or Token-2022 to any stealth address (`flags & 2` deducts rent fee from deposit for 0-dust sweeps; zero ZK proof) |
-| `0x03` | `Transfer` | Private 1-in → 2-out transfer (`m = 5/6/7`, Triptych + CrossBase2 + `BatchedRangeProofU128`) |
-| `0x04` | `Merge` | Consolidate 2 shielded notes of the same hidden asset into 1 note |
-| `0x05` | `ExecViaEscrow` | Protocol-agnostic 1-tx Token A → Token B CPI via isolated `swap_escrow` (DEXs, lending supply, yield vaults, LSTs, perp LP, RWAs) with native input/output `relayer_fee` (`flags & 4`), optional shielded change (`flags & 1`), and partial refund (`flags & 2`) |
-| `0x06` | `Withdraw` | Unshield exact amount to any wallet/ATA with optional native `relayer_fee`, shielded change (`flags & 2`), and atomic WSOL → Native SOL unwrap (`flags & 4` via `audren_unwrap` PDA); full withdrawals keep `PoolState` read-only and bypass `SetPaused` |
-| `0x07` | `SetPaused` | Emergency pause toggle by pool authority (zero vault custody) |
-| `0x08` | `WriteProofBuffer` | Upload `<= 768 B` payload chunk into ephemeral `ProofBuffer` PDA (`<= 10,032 B`) |
-| `0x09` | `ExecBuffered` | Execute buffered instruction zero-copy and atomically refund 100% of buffer rent |
-| `0x0A` | `CloseProofBuffer` | Reclaim 100% of rent from an abandoned `ProofBuffer` PDA |
-| `0x0B` | `InitLane` | Initialize parallel append lane `1..15` (`AppendLaneState` + `LaneRentVault` + initial page) |
-| `0x0C` | `OpenLanePage` | Permissionless self-funding rollover for parallel lane `1..15` with read-only `PoolState` |
+| `0x00` | `InitPool` | Create `PoolState` (`128 B`), `sol_vault`, `vault_auth`, and configure checkpoint interval/age & rent caps |
+| `0x01` | `InitLane` | Initialize append lane `0..15` (`LaneTreeState` `1,824 B` + `LaneRentVault`); monotonically expands `active_lanes` (`4 -> 8 -> 16`) |
+| `0x02` | `OpenPage` | Permissionlessly allocate next `SubtreePage`, `SubtreeRootPage`, `MemoPage`, or `NullifierPage` funded by `LaneRentVault` |
+| `0x03` | `DepositSol` | Shield Native SOL into active lane (`DEPOSIT_FLAG_FEE_FROM_AMOUNT` deducts rent from amount for 0-dust sweeps; 0 ZK proof) |
+| `0x04` | `DepositSpl` | Shield Classic SPL or Token-2022 mints using net vault delta solvency + safe `TransferHook` execution |
+| `0x05` | `PublishCheckpoint` | Permissionless 256-slot `RootCheckpoint` ring update across all active lanes (`16.8k`–`44.5k` CU) |
+| `0x06` | `JoinSplit` | 2-in/3-out global MASP private transfer or public withdrawal (`192 B` Groth16, `WITHDRAW_FLAG_UNWRAP_WSOL`, pause bypass for full exits) |
+| `0x07` | `ExecViaEscrow` | Protocol-agnostic Token A -> Token B DeFi CPI via isolated `escrow` shard (`0..16`) with `EXEC_FLAG_FEE_ON_OUTPUT` & dynamic XOR-masked memo |
+| `0x08` | `SetPaused` | Emergency pause toggle by pool authority (zero vault custody; full exits remain enabled) |
 
 ## Quickstart: Verification, Build & Testing
 
-### 1. Fast host checks (Rust, IDLs, TypeScript, Swift & Kotlin)
 ```bash
-# Rust typechecks & canonical conformance tests
+# 1. Rust program, circuits, host workspace & canonical conformance tests
 cargo check --manifest-path program/Cargo.toml
 cargo check --manifest-path program/Cargo.toml --features no-entrypoint
 cargo test --manifest-path program/Cargo.toml
 cargo check --manifest-path tests/mock-router/Cargo.toml
+cargo check --manifest-path tests/mock-hook/Cargo.toml
 cargo check --workspace --tests
-cargo test -p audren-client --test conformance_vectors
-cargo test -p audren-ffi
+cargo test -p audren-core
+cargo test -p audren-circuits --release
+cargo test -p audren-client --release --test conformance_vectors
+cargo test -p audren-ffi --release --test conformance_ffi
 
-# Verify IDLs, 4-language SDKs, docs & zero-drift invariants
+# 2. Verify IDLs, 4-language SDKs, WASM binary parity, docs & zero-drift invariants
 python3 idl/verify-idl.py
 
-# TypeScript SDK (core + pure-TS prover conformance), Relayer & Web UI
+# 3. TypeScript SDK (WASM prover conformance), Relayer & Web App
 pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
-pnpm --dir apps/relay typecheck
-pnpm --dir apps/web check
+pnpm --dir apps/relay typecheck && pnpm --dir apps/relay test
+pnpm --dir apps/web check && pnpm --dir apps/web e2e:audit
 
-# Mobile SDKs (Swift iOS/macOS & Kotlin Android/JVM conformance + native provers)
+# 4. Mobile SDKs (Swift iOS/macOS & Kotlin Android/JVM)
 ./scripts/build-mobile-sdks.sh bindings
 (cd packages/swift && swift test)
 (cd packages/kotlin && gradle test)
-```
 
-### 2. Compile sBPFv3 `.so` artifacts & run LiteSVM E2E tests
-```bash
-# Build deterministic sBPFv3 artifacts
+# 5. Deterministic sBPFv3 ELFs & full LiteSVM + Cross-SDK suites
 python3 scripts/build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy
 python3 scripts/build-sbf.py --manifest-path tests/mock-router/Cargo.toml --sbf-out-dir target/deploy
-
-# Run all 8 LiteSVM integration & adversarial suites + real-sBPFv3 Cross-SDK LiteSVM suite
-cargo test --test litesvm_e2e -- --nocapture
-AUDREN_REQUIRE_SBF=1 cargo test -p audren-ffi --test cross_sdk_litesvm -- --nocapture
+python3 scripts/build-sbf.py --manifest-path tests/mock-hook/Cargo.toml --sbf-out-dir target/deploy
+cargo test -p audren-client --release --test litesvm_e2e -- --nocapture
+AUDREN_REQUIRE_SBF=1 cargo test -p audren-ffi --release --test cross_sdk_litesvm -- --nocapture
 ```
-
-### 3. Cluster deployment, Program Metadata & Verified Builds
-See [`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md) and [`idl/README.md`](idl/README.md) for deployment addresses, atomic program upgrades (`scripts/upgrade-program.sh`), Solana Program Metadata (`idl` & `security`), and Solana Verified Build attestation. Keep local keypairs in gitignored `.credentials/` and private operator Wrangler configs in gitignored `wrangler.prod.jsonc`.
 
 ## License
 

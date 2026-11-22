@@ -1,17 +1,16 @@
 # `xyz.audren.sdk` — Audren Kotlin SDK (Android & JVM)
 
-Native Kotlin SDK for **Audren v1** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting **Android (API 24+)** and **JVM 21+**.
+Native Kotlin SDK for **Audren** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting **Android (API 24+)** and **JVM 21+**.
 
-Backed by the single canonical Rust core (`crates/client` via `crates/audren-ffi` + UniFFI + JNA) so Android wallets and JVM backends run native ~50 ms local zero-knowledge proving (Multi-Base Binary Triptych + Batched Bulletproofs) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
+Backed by the canonical Rust core (`crates/client` + `crates/audren-circuits` via `crates/audren-ffi` + UniFFI + JNA) so Android wallets and JVM backends run native local BN254 Groth16 proving (`17,861` R1CS, 4-ary Depth-20 global MASP, 16-lane-capable architecture) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
 
-## The 6 Standardized Building Blocks
+## Core Building Blocks
 
-1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveEscrowPda`, `deriveUnwrapPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `deriveAssociatedTokenAddress`, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`, `pageIdForLane`, `laneOfPageId`, `seqOfPageId`, `netDepositAmount`
-3. **Scanner** — `pageScanDataSlice` (`offset: 64, length: 1056`), `scanPageDataslice`, `scanEpochPage` (read-only FVK or spendable)
-4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildExecViaEscrowInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`, `buildOpenPageInstruction`, `buildOpenLanePageInstruction`
-5. **Disclosure & Audit** — `createSelectiveDisclosureProof`, `verifySelectiveDisclosureProof`, `verifySelectiveDisclosureOnPage`, `deriveAuditorKeypair`, `auditorDecryptNote`
-6. **Relayer & Escrow CPI** — `jupiterCpiExcludedDexes`, `defaultRelayUrl`, `prepareEscrowAccounts`
+1. **Keys & Compliance** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `exportFullViewingKey`, `deriveDefiSessionKeypair` (pseudonymous session keypair for stateful public DeFi), `decodeAudrenAddress`, `deriveAssetIdBytes`
+2. **PDAs & Zero-Copy Decoders** — `derivePoolPda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `deriveLanePda`, `deriveLaneRentPda`, `deriveSubtreePda`, `deriveSubrootPda`, `deriveMemoPda`, `deriveNfPagePda`, `deriveCheckpointPda`, `deriveNullifierPda`, `deriveEscrowPda`, `deriveUnwrapPda`, `deriveAta`, `decodePoolStateAccount`, `decodeLaneHeaderAccount`, `decodeRootCheckpointAccount`
+3. **Zero-Indexer Wallet Store & Memos** — `encryptNoteMemo`, `prepareDynamicSwapMemo`, `decryptAndVerifyMemoEntry`, `verifySelectiveDisclosureProof`, `compactStoreNewJson` (ordinary Solana RPC `getMultipleAccounts` sync, freezes sealed subtree siblings and discards raw pages)
+4. **Local BN254 Groth16 Prover & Builders** — `proveJoinsplitWitnessBytes`, `computeJoinsplitCtxHashFfi`, `computeExecCtxHashFfi`, `deterministicNoteRentFeeFfi`, `buildInitPoolIx`, `buildInitLaneIx`, `buildOpenPageIx`, `buildDepositSolIx`, `buildDepositSplIx`, `buildPublishCheckpointIx`, `buildJoinsplitIx`, `buildExecViaEscrowIx`, `buildSetPausedIx`
+5. **Relayer & Escrow CPI** — `canonicalProgramId`, `protocolVersion`, `defaultRelayUrl`, `jupiterCpiExcludedDexes`
 
 ## Build & Run Conformance Tests Locally
 
@@ -19,7 +18,7 @@ Backed by the single canonical Rust core (`crates/client` via `crates/audren-ffi
 # 1. Build native Rust FFI library & refresh Kotlin bindings (from repo root)
 ./scripts/build-mobile-sdks.sh bindings
 
-# 2. Run full 6-building-block Kotlin conformance & ZK prover suite
+# 2. Run full Kotlin conformance & Groth16 prover suite (requires JDK 21)
 cd packages/kotlin && gradle test
 ```
 
@@ -48,6 +47,7 @@ import java.security.SecureRandom
 val seed = ByteArray(32).also { SecureRandom().nextBytes(it) }
 val alice = deriveKeysFromSeed(seed)
 val sub1 = deriveSubaccountKeys(seed, 1u)
-val pool = derivePoolPda(0u, programId())
-val slice = pageScanDataSlice() // offset: 64, length: 1056
+val fvk = exportFullViewingKey(seed)
+val pool = derivePoolPda(canonicalProgramId(), 0u)
+val storeJson = compactStoreNewJson(0u, 0uL)
 ```

@@ -1,13 +1,18 @@
-# Host workspace: shared core library and client SDK (prover, pure-RPC/WS scanner, router-agnostic swap builder).
-# Each deployed on-chain program builds in its own isolated workspace (`program/`, `tests/mock-router/`)
-# with its own pinned `Cargo.lock` for deterministic sBPFv3 builds.
+# Host workspace: shared core library, BN254 Groth16 circuits, Rust SDK, and UniFFI mobile facade.
+# Each deployed on-chain program builds in its own isolated workspace (`program/`, `tests/mock-router/`,
+# `tests/mock-hook/`) with its own pinned `Cargo.lock` for deterministic sBPFv3 builds.
 [workspace]
 resolver = "2"
-members = ["crates/audren-core", "crates/client", "crates/audren-ffi"]
-exclude = ["program", "tests/mock-router"]
+members = [
+    "crates/audren-core",
+    "crates/audren-circuits",
+    "crates/client",
+    "crates/audren-ffi",
+]
+exclude = ["program", "tests/mock-router", "tests/mock-hook"]
 
 [workspace.package]
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false

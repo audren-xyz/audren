@@ -1,255 +1,263 @@
 /**
- * Standard Solana RPC `getMultipleAccounts` and Agave `programSubscribe` (`dataSlice`) scanner.
- * Scans up to 100 `EpochPage` PDAs (`3,200` shielded notes) per RPC call (~`106 KB`)
- * and checks spent status via 0-byte `NullifierPDA` existence.
+ * Indexer-free ordinary Solana RPC (`getMultipleAccounts`) sync & historical witness reconstruction.
  */
 
 import {
   AUDREN_PROGRAM_ID,
-  PAGE_LEN,
-  PAGE_MAGIC,
-  PAGE_OFF_POOL_ID,
-  PAGE_SCAN_LEN,
-  PAGE_SCAN_OFFSET,
+  MEMO_NOTES_PER_PAGE,
+  NF_PER_PAGE,
+  SUBROOTS_PER_PAGE,
+  SUBTREE_LEAVES,
 } from './constants.ts';
-import { decodePageScanSlice, type PageScanSlice } from './layout.ts';
+import type { FullViewingKey } from './keys.ts';
+import {
+  decodeLaneHeader,
+  decodePoolState,
+  decodeRootCheckpoint,
+  decodeSubtreePage,
+  decodeSubtreeRootPage,
+  type DecodedLaneHeader,
+  type DecodedPoolState,
+  type DecodedRootCheckpoint,
+} from './layout.ts';
+import {
+  deriveCheckpointPdaSync,
+  deriveLanePdaSync,
+  deriveMemoPdaSync,
+  deriveNfPagePdaSync,
+  derivePoolPdaSync,
+  deriveSubrootPdaSync,
+  deriveSubtreePdaSync,
+} from './pda.ts';
+import { frFromBeBytesStrict } from './poseidon.ts';
+import {
+  buildHistoricalWitness4Ary,
+  type CompactWalletStore,
+  type MerklePath4Ary,
+} from './store.ts';
 
-export const MAX_RPC_MULTI_ACCOUNTS = 100;
+export type AccountBatchFetcher = (addresses: readonly string[]) => Promise<(Uint8Array | null)[]>;
 
-export interface RpcMultipleAccountsRequest {
-  jsonrpc: '2.0';
-  id: number;
-  method: 'getMultipleAccounts';
-  params: [
-    string[],
-    {
-      encoding: 'base64';
-      commitment: 'confirmed' | 'finalized';
-      dataSlice: { offset: number; length: number };
-    },
-  ];
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
-export interface RpcProgramSubscribeRequest {
-  jsonrpc: '2.0';
-  id: number;
-  method: 'programSubscribe';
-  params: [
-    string,
-    {
-      encoding: 'base64';
-      commitment: 'confirmed' | 'finalized';
-      dataSlice: { offset: number; length: number };
-      filters: Array<
-        | { dataSize: number }
-        | { memcmp: { offset: number; bytes: string; encoding: 'base64' } }
-      >;
-    },
-  ];
-}
-
-function encodeBase64(bytes: Uint8Array): string {
-  if (typeof globalThis.btoa === 'function') {
-    let bin = '';
-    for (let i = 0; i < bytes.length; i++) {
-      bin += String.fromCharCode(bytes[i]);
-    }
-    return globalThis.btoa(bin);
-  }
-  const buf = (globalThis as { Buffer?: { from(b: Uint8Array): { toString(enc: string): string } } })
-    .Buffer;
-  if (!buf) throw new Error('No base64 encoder available');
-  return buf.from(bytes).toString('base64');
-}
-
-/**
- * Build an Agave 4.4+ WebSocket `programSubscribe` payload that streams real-time
- * `1,056 B` `EpochPage` scan slices (`dataSlice`) for a given `poolId` (~83% less WS bandwidth).
- */
-export function buildPageSubscribeWsPayload(
-  programId: string,
-  poolId: number,
-  id = 3,
-  commitment: 'confirmed' | 'finalized' = 'confirmed',
-): RpcProgramSubscribeRequest {
-  const magicBytes = new TextEncoder().encode(PAGE_MAGIC);
-  const poolIdBytes = new Uint8Array(4);
-  new DataView(poolIdBytes.buffer).setUint32(0, poolId, true);
-  return {
-    jsonrpc: '2.0',
-    id,
-    method: 'programSubscribe',
-    params: [
-      programId,
-      {
-        encoding: 'base64',
-        commitment,
-        dataSlice: {
-          offset: PAGE_SCAN_OFFSET,
-          length: PAGE_SCAN_LEN,
-        },
-        filters: [
-          { dataSize: PAGE_LEN },
-          { memcmp: { offset: 0, bytes: encodeBase64(magicBytes), encoding: 'base64' } },
-          { memcmp: { offset: PAGE_OFF_POOL_ID, bytes: encodeBase64(poolIdBytes), encoding: 'base64' } },
-        ],
-      },
-    ],
-  };
-}
-
-export function buildPageScanRpcPayload(
-  pageAddresses: readonly string[],
-  id = 1,
-  commitment: 'confirmed' | 'finalized' = 'confirmed',
-): RpcMultipleAccountsRequest {
-  if (pageAddresses.length > MAX_RPC_MULTI_ACCOUNTS) {
-    throw new Error(`Batch exceeds Solana getMultipleAccounts limit (${MAX_RPC_MULTI_ACCOUNTS})`);
-  }
-  return {
-    jsonrpc: '2.0',
-    id,
-    method: 'getMultipleAccounts',
-    params: [
-      [...pageAddresses],
-      {
-        encoding: 'base64',
-        commitment,
-        dataSlice: {
-          offset: PAGE_SCAN_OFFSET,
-          length: PAGE_SCAN_LEN,
-        },
-      },
-    ],
-  };
-}
-
-export function buildNullifierCheckRpcPayload(
-  nullifierAddresses: readonly string[],
-  id = 2,
-  commitment: 'confirmed' | 'finalized' = 'confirmed',
-): RpcMultipleAccountsRequest {
-  if (nullifierAddresses.length > MAX_RPC_MULTI_ACCOUNTS) {
-    throw new Error(`Batch exceeds Solana getMultipleAccounts limit (${MAX_RPC_MULTI_ACCOUNTS})`);
-  }
-  return {
-    jsonrpc: '2.0',
-    id,
-    method: 'getMultipleAccounts',
-    params: [
-      [...nullifierAddresses],
-      {
-        encoding: 'base64',
-        commitment,
-        dataSlice: { offset: 0, length: 0 },
-      },
-    ],
-  };
-}
-
-function decodeBase64(b64: string): Uint8Array {
-  if (typeof globalThis.atob === 'function') {
-    const bin = globalThis.atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) {
-      out[i] = bin.charCodeAt(i);
-    }
-    return out;
-  }
-  // Node.js fallback without importing node:buffer into browser bundles.
-  const buf = (globalThis as { Buffer?: { from(s: string, enc: string): Uint8Array } }).Buffer;
-  if (!buf) throw new Error('No base64 decoder available');
-  return new Uint8Array(buf.from(b64, 'base64'));
-}
-
-interface RpcAccountEntry {
-  data: [string, string];
-  lamports: number;
-  owner: string;
-}
-
-/**
- * Fetch arbitrary numbers of `EpochPage` scan slices (`1,056 B` each, automatically chunked in
- * batches of 100 = `3,200` notes / ~`106 KB` per RPC call), verifying account ownership.
- */
-export async function fetchPageScanSlices(
+/** Ordinary Solana JSON-RPC `getMultipleAccounts` batch fetcher (chunks by 100 accounts). */
+export function createSolanaRpcBatchFetcher(
   rpcUrl: string,
-  pageAddresses: readonly string[],
   commitment: 'confirmed' | 'finalized' = 'confirmed',
-  programId: string = AUDREN_PROGRAM_ID,
-): Promise<(PageScanSlice | null)[]> {
-  if (pageAddresses.length === 0) return [];
-  const results: (PageScanSlice | null)[] = [];
-  for (let i = 0; i < pageAddresses.length; i += MAX_RPC_MULTI_ACCOUNTS) {
-    const chunk = pageAddresses.slice(i, i + MAX_RPC_MULTI_ACCOUNTS);
-    const res = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(buildPageScanRpcPayload(chunk, 1, commitment)),
-    });
-    if (!res.ok) {
-      throw new Error(`Solana RPC error: HTTP ${res.status}`);
-    }
-    const json = (await res.json()) as {
-      result?: { value: (RpcAccountEntry | null)[] };
-      error?: { message: string };
-    };
-    if (json.error || !json.result) {
-      throw new Error(json.error?.message ?? 'Missing getMultipleAccounts result');
-    }
-    if (!Array.isArray(json.result.value) || json.result.value.length !== chunk.length) {
-      throw new Error(
-        `Unexpected page slice count: expected ${chunk.length}, got ${json.result.value?.length ?? 0}`,
-      );
-    }
-    for (const acc of json.result.value) {
-      if (!acc || acc.owner !== programId) {
-        results.push(null);
-      } else {
-        results.push(decodePageScanSlice(decodeBase64(acc.data[0])));
+): AccountBatchFetcher {
+  return async (addresses: readonly string[]) => {
+    const out: (Uint8Array | null)[] = new Array(addresses.length).fill(null);
+    for (let off = 0; off < addresses.length; off += 100) {
+      const chunk = addresses.slice(off, off + 100);
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getMultipleAccounts',
+          params: [chunk, { encoding: 'base64', commitment }],
+        }),
+      });
+      if (!res.ok) throw new Error(`Solana RPC getMultipleAccounts HTTP ${res.status}`);
+      const json = (await res.json()) as {
+        result?: { value: Array<{ data: [string, string] } | null> };
+        error?: { message?: string };
+      };
+      if (json.error) throw new Error(`Solana RPC error: ${json.error.message ?? 'unknown'}`);
+      const values = json.result?.value ?? [];
+      for (let i = 0; i < chunk.length; i++) {
+        const acc = values[i];
+        out[off + i] = acc?.data?.[0] ? base64ToBytes(acc.data[0]) : null;
       }
     }
+    return out;
+  };
+}
+
+/** Fetch `PoolState` + all active `LaneTreeState` headers in 2 batched RPC calls. */
+export async function fetchPoolAndLanes(
+  fetchBatch: AccountBatchFetcher,
+  poolId = 0,
+  programId = AUDREN_PROGRAM_ID,
+): Promise<{ pool: DecodedPoolState; lanes: DecodedLaneHeader[] }> {
+  const poolPda = derivePoolPdaSync(poolId, programId).address;
+  const [poolRaw] = await fetchBatch([poolPda]);
+  if (!poolRaw) throw new Error(`PoolState account missing at ${poolPda}`);
+  const pool = decodePoolState(poolRaw);
+
+  const lanePdas: string[] = [];
+  for (let l = 0; l < pool.activeLanes; l++) {
+    lanePdas.push(deriveLanePdaSync(poolId, l, programId).address);
   }
-  return results;
+  const laneRaws = await fetchBatch(lanePdas);
+  const lanes = laneRaws.map((raw, l) => {
+    if (!raw) throw new Error(`LaneTreeState #${l} missing`);
+    return decodeLaneHeader(raw);
+  });
+  return { pool, lanes };
 }
 
 /**
- * Check arbitrary numbers of deterministic `NullifierPDA`s (automatically chunked in batches of 100)
- * in pure Solana RPC calls (`true` == owned by `programId` == spent).
+ * Incrementally sync `CompactWalletStore` across all active lanes via ordinary `getMultipleAccounts`
+ * calls (zero indexer, zero targeted per-note or per-nullifier queries).
  */
-export async function checkNullifiersSpent(
-  rpcUrl: string,
-  nullifierAddresses: readonly string[],
-  commitment: 'confirmed' | 'finalized' = 'confirmed',
-  programId: string = AUDREN_PROGRAM_ID,
-): Promise<boolean[]> {
-  if (nullifierAddresses.length === 0) return [];
-  const results: boolean[] = [];
-  for (let i = 0; i < nullifierAddresses.length; i += MAX_RPC_MULTI_ACCOUNTS) {
-    const chunk = nullifierAddresses.slice(i, i + MAX_RPC_MULTI_ACCOUNTS);
-    const res = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(buildNullifierCheckRpcPayload(chunk, 2, commitment)),
+export async function syncCompactStoreWithRpc(params: {
+  store: CompactWalletStore;
+  fvk: FullViewingKey;
+  fetchBatch: AccountBatchFetcher;
+  programId?: string;
+}): Promise<{ pool: DecodedPoolState; lanes: DecodedLaneHeader[]; discoveredNotes: number }> {
+  const programId = params.programId ?? AUDREN_PROGRAM_ID;
+  const { pool, lanes } = await fetchPoolAndLanes(params.fetchBatch, params.store.poolId, programId);
+  let discoveredNotes = 0;
+
+  for (const laneHdr of lanes) {
+    const l = laneHdr.laneId;
+    const laneState = params.store.lanes[l]!;
+
+    const targetSubMax = laneHdr.nextLeaf / BigInt(SUBTREE_LEAVES);
+    const targetMemoMax = laneHdr.nextLeaf / BigInt(MEMO_NOTES_PER_PAGE);
+    const targetNfMax = laneHdr.nfCount / BigInt(NF_PER_PAGE);
+
+    const startSub = laneState.frontierSubSeq;
+    const startMemo = laneState.nextMemoLeaf / BigInt(MEMO_NOTES_PER_PAGE);
+    const startNf = laneState.nextNfIndex / BigInt(NF_PER_PAGE);
+
+    const addrs: string[] = [];
+    const subSeqs: bigint[] = [];
+    const memoSeqs: bigint[] = [];
+    const nfSeqs: bigint[] = [];
+
+    if (laneHdr.nextLeaf > 0n) {
+      for (let s = startSub; s <= targetSubMax; s++) {
+        subSeqs.push(s);
+        addrs.push(deriveSubtreePdaSync(params.store.poolId, l, s, programId).address);
+      }
+      for (let m = startMemo; m <= targetMemoMax; m++) {
+        memoSeqs.push(m);
+        addrs.push(deriveMemoPdaSync(params.store.poolId, l, m, programId).address);
+      }
+    }
+    if (laneHdr.nfCount > 0n) {
+      for (let n = startNf; n <= targetNfMax; n++) {
+        nfSeqs.push(n);
+        addrs.push(deriveNfPagePdaSync(params.store.poolId, l, n, programId).address);
+      }
+    }
+    if (addrs.length === 0) continue;
+
+    const raws = await params.fetchBatch(addrs);
+    let idx = 0;
+    const subtreePages: Array<{ pageSeq: bigint; raw: Uint8Array }> = [];
+    for (const s of subSeqs) {
+      const r = raws[idx++];
+      if (r) subtreePages.push({ pageSeq: s, raw: r });
+    }
+    const memoPages: Array<{ pageSeq: bigint; raw: Uint8Array }> = [];
+    for (const m of memoSeqs) {
+      const r = raws[idx++];
+      if (r) memoPages.push({ pageSeq: m, raw: r });
+    }
+    const nfPages: Array<{ pageSeq: bigint; raw: Uint8Array }> = [];
+    for (const n of nfSeqs) {
+      const r = raws[idx++];
+      if (r) nfPages.push({ pageSeq: n, raw: r });
+    }
+
+    discoveredNotes += params.store.ingestLanePages({
+      fvk: params.fvk,
+      laneId: l,
+      subtreePages,
+      memoPages,
+      nfPages,
     });
-    if (!res.ok) {
-      throw new Error(`Solana RPC error: HTTP ${res.status}`);
-    }
-    const json = (await res.json()) as {
-      result?: { value: (RpcAccountEntry | null)[] };
-      error?: { message: string };
-    };
-    if (json.error || !json.result) {
-      throw new Error(json.error?.message ?? 'Missing getMultipleAccounts result');
-    }
-    if (!Array.isArray(json.result.value) || json.result.value.length !== chunk.length) {
-      throw new Error(
-        `Unexpected nullifier status count: expected ${chunk.length}, got ${json.result.value?.length ?? 0}`,
-      );
-    }
-    for (const acc of json.result.value) {
-      results.push(acc !== null && acc.owner === programId);
+  }
+
+  return { pool, lanes, discoveredNotes };
+}
+
+/** Stateless witness reconstruction for `(laneId, leafIdx)` at `RootCheckpoint(ckptSlotIdx)`. */
+export async function reconstructWitness(params: {
+  fetchBatch: AccountBatchFetcher;
+  poolId: number;
+  ckptSlotIdx: number;
+  laneId: number;
+  leafIdx: bigint;
+  programId?: string;
+}): Promise<{ ckpt: DecodedRootCheckpoint; superRoot: bigint; path: MerklePath4Ary }> {
+  const programId = params.programId ?? AUDREN_PROGRAM_ID;
+  const ckptAddr = deriveCheckpointPdaSync(params.poolId, params.ckptSlotIdx, programId).address;
+  const [ckptRaw] = await params.fetchBatch([ckptAddr]);
+  if (!ckptRaw) throw new Error(`RootCheckpoint #${params.ckptSlotIdx} missing`);
+  const ckpt = decodeRootCheckpoint(ckptRaw);
+
+  const ckptCount = ckpt.laneCounts[params.laneId]!;
+  if (params.leafIdx >= ckptCount) throw new Error('leafIdx >= checkpoint lane count');
+
+  const targetPageIdx = params.leafIdx / BigInt(SUBTREE_LEAVES);
+  const frontierPageIdx = ckptCount / BigInt(SUBTREE_LEAVES);
+  const frontierRem = Number(ckptCount % BigInt(SUBTREE_LEAVES));
+  const neededSrPages = Math.ceil(Number(frontierPageIdx) / SUBROOTS_PER_PAGE);
+
+  const addrs: string[] = [];
+  for (let rp = 0; rp < neededSrPages; rp++) {
+    addrs.push(deriveSubrootPdaSync(params.poolId, params.laneId, BigInt(rp), programId).address);
+  }
+  const targetSubAddr = deriveSubtreePdaSync(
+    params.poolId,
+    params.laneId,
+    targetPageIdx,
+    programId,
+  ).address;
+  addrs.push(targetSubAddr);
+  const needDistinctFrontier = frontierRem > 0 && frontierPageIdx !== targetPageIdx;
+  if (needDistinctFrontier) {
+    addrs.push(
+      deriveSubtreePdaSync(params.poolId, params.laneId, frontierPageIdx, programId).address,
+    );
+  }
+
+  const raws = await params.fetchBatch(addrs);
+  let cursor = 0;
+  const finalizedRoots: bigint[] = [];
+  for (let rp = 0; rp < neededSrPages; rp++) {
+    const srRaw = raws[cursor++];
+    if (!srRaw) throw new Error(`SubtreeRootPage #${rp} missing`);
+    const sr = decodeSubtreeRootPage(srRaw);
+    for (const r of sr.roots) {
+      if (finalizedRoots.length === Number(frontierPageIdx)) break;
+      finalizedRoots.push(frFromBeBytesStrict(r));
     }
   }
-  return results;
+  const targetSubRaw = raws[cursor++];
+  if (!targetSubRaw) throw new Error(`SubtreePage #${targetPageIdx} missing`);
+  const targetLeaves = decodeSubtreePage(targetSubRaw).leaves.map((b) => frFromBeBytesStrict(b));
+
+  let frontierLeaves: bigint[] | undefined;
+  if (frontierRem > 0) {
+    if (needDistinctFrontier) {
+      const fRaw = raws[cursor++];
+      if (!fRaw) throw new Error(`Frontier SubtreePage #${frontierPageIdx} missing`);
+      frontierLeaves = decodeSubtreePage(fRaw).leaves.map((b) => frFromBeBytesStrict(b));
+    } else {
+      frontierLeaves = targetLeaves;
+    }
+  }
+
+  const path = buildHistoricalWitness4Ary({
+    laneId: params.laneId,
+    targetLeafIdx: params.leafIdx,
+    ckptLaneRoots: ckpt.laneRoots.map((b) => frFromBeBytesStrict(b)),
+    ckptLaneLeafCount: ckptCount,
+    finalizedSubtreeRoots: finalizedRoots,
+    targetPageLeaves: targetLeaves,
+    frontierPageLeaves: frontierLeaves,
+  });
+  return { ckpt, superRoot: frFromBeBytesStrict(ckpt.superRoot), path };
 }

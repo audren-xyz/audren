@@ -616,14 +616,14 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 public struct FfiAccountMeta: Equatable, Hashable {
-    public var pubkey: String
+    public var pubkeyB58: String
     public var isSigner: Bool
     public var isWritable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(pubkey: String, isSigner: Bool, isWritable: Bool) {
-        self.pubkey = pubkey
+    public init(pubkeyB58: String, isSigner: Bool, isWritable: Bool) {
+        self.pubkeyB58 = pubkeyB58
         self.isSigner = isSigner
         self.isWritable = isWritable
     }
@@ -644,14 +644,14 @@ public struct FfiConverterTypeFfiAccountMeta: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAccountMeta {
         return
             try FfiAccountMeta(
-                pubkey: FfiConverterString.read(from: &buf), 
+                pubkeyB58: FfiConverterString.read(from: &buf), 
                 isSigner: FfiConverterBool.read(from: &buf), 
                 isWritable: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiAccountMeta, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.pubkey, into: &buf)
+        FfiConverterString.write(value.pubkeyB58, into: &buf)
         FfiConverterBool.write(value.isSigner, into: &buf)
         FfiConverterBool.write(value.isWritable, into: &buf)
     }
@@ -673,258 +673,20 @@ public func FfiConverterTypeFfiAccountMeta_lower(_ value: FfiAccountMeta) -> Rus
 }
 
 
-public struct FfiAppendLaneState: Equatable, Hashable {
-    public var version: UInt8
-    public var laneId: UInt8
-    public var bump: UInt8
-    public var rentVaultBump: UInt8
-    public var poolId: UInt32
-    public var currentPageId: UInt64
-    public var createdSlot: UInt64
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(version: UInt8, laneId: UInt8, bump: UInt8, rentVaultBump: UInt8, poolId: UInt32, currentPageId: UInt64, createdSlot: UInt64) {
-        self.version = version
-        self.laneId = laneId
-        self.bump = bump
-        self.rentVaultBump = rentVaultBump
-        self.poolId = poolId
-        self.currentPageId = currentPageId
-        self.createdSlot = createdSlot
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiAppendLaneState: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiAppendLaneState: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAppendLaneState {
-        return
-            try FfiAppendLaneState(
-                version: FfiConverterUInt8.read(from: &buf), 
-                laneId: FfiConverterUInt8.read(from: &buf), 
-                bump: FfiConverterUInt8.read(from: &buf), 
-                rentVaultBump: FfiConverterUInt8.read(from: &buf), 
-                poolId: FfiConverterUInt32.read(from: &buf), 
-                currentPageId: FfiConverterUInt64.read(from: &buf), 
-                createdSlot: FfiConverterUInt64.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiAppendLaneState, into buf: inout [UInt8]) {
-        FfiConverterUInt8.write(value.version, into: &buf)
-        FfiConverterUInt8.write(value.laneId, into: &buf)
-        FfiConverterUInt8.write(value.bump, into: &buf)
-        FfiConverterUInt8.write(value.rentVaultBump, into: &buf)
-        FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.currentPageId, into: &buf)
-        FfiConverterUInt64.write(value.createdSlot, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAppendLaneState_lift(_ buf: RustBuffer) throws -> FfiAppendLaneState {
-    return try FfiConverterTypeFfiAppendLaneState.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAppendLaneState_lower(_ value: FfiAppendLaneState) -> RustBuffer {
-    return FfiConverterTypeFfiAppendLaneState.lower(value)
-}
-
-
-public struct FfiAuditorDecryptedNote: Equatable, Hashable {
-    public var spentStealthPk: Data
-    public var assetGenerator: Data
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(spentStealthPk: Data, assetGenerator: Data) {
-        self.spentStealthPk = spentStealthPk
-        self.assetGenerator = assetGenerator
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiAuditorDecryptedNote: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiAuditorDecryptedNote: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAuditorDecryptedNote {
-        return
-            try FfiAuditorDecryptedNote(
-                spentStealthPk: FfiConverterData.read(from: &buf), 
-                assetGenerator: FfiConverterData.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiAuditorDecryptedNote, into buf: inout [UInt8]) {
-        FfiConverterData.write(value.spentStealthPk, into: &buf)
-        FfiConverterData.write(value.assetGenerator, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAuditorDecryptedNote_lift(_ buf: RustBuffer) throws -> FfiAuditorDecryptedNote {
-    return try FfiConverterTypeFfiAuditorDecryptedNote.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAuditorDecryptedNote_lower(_ value: FfiAuditorDecryptedNote) -> RustBuffer {
-    return FfiConverterTypeFfiAuditorDecryptedNote.lower(value)
-}
-
-
-public struct FfiAuditorKeypair: Equatable, Hashable {
-    public var auditorSk: Data
-    public var auditorPk: Data
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(auditorSk: Data, auditorPk: Data) {
-        self.auditorSk = auditorSk
-        self.auditorPk = auditorPk
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiAuditorKeypair: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiAuditorKeypair: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAuditorKeypair {
-        return
-            try FfiAuditorKeypair(
-                auditorSk: FfiConverterData.read(from: &buf), 
-                auditorPk: FfiConverterData.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiAuditorKeypair, into buf: inout [UInt8]) {
-        FfiConverterData.write(value.auditorSk, into: &buf)
-        FfiConverterData.write(value.auditorPk, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAuditorKeypair_lift(_ buf: RustBuffer) throws -> FfiAuditorKeypair {
-    return try FfiConverterTypeFfiAuditorKeypair.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAuditorKeypair_lower(_ value: FfiAuditorKeypair) -> RustBuffer {
-    return FfiConverterTypeFfiAuditorKeypair.lower(value)
-}
-
-
-public struct FfiAudrenAddress: Equatable, Hashable {
-    public var spendPk: Data
-    public var viewPk: Data
-    public var encoded: String
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(spendPk: Data, viewPk: Data, encoded: String) {
-        self.spendPk = spendPk
-        self.viewPk = viewPk
-        self.encoded = encoded
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiAudrenAddress: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiAudrenAddress: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAudrenAddress {
-        return
-            try FfiAudrenAddress(
-                spendPk: FfiConverterData.read(from: &buf), 
-                viewPk: FfiConverterData.read(from: &buf), 
-                encoded: FfiConverterString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiAudrenAddress, into buf: inout [UInt8]) {
-        FfiConverterData.write(value.spendPk, into: &buf)
-        FfiConverterData.write(value.viewPk, into: &buf)
-        FfiConverterString.write(value.encoded, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAudrenAddress_lift(_ buf: RustBuffer) throws -> FfiAudrenAddress {
-    return try FfiConverterTypeFfiAudrenAddress.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiAudrenAddress_lower(_ value: FfiAudrenAddress) -> RustBuffer {
-    return FfiConverterTypeFfiAudrenAddress.lower(value)
-}
-
-
 public struct FfiAudrenKeys: Equatable, Hashable {
     public var spendSk: Data
     public var spendPk: Data
+    public var nk: Data
     public var viewSk: Data
     public var viewPk: Data
     public var address: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(spendSk: Data, spendPk: Data, viewSk: Data, viewPk: Data, address: String) {
+    public init(spendSk: Data, spendPk: Data, nk: Data, viewSk: Data, viewPk: Data, address: String) {
         self.spendSk = spendSk
         self.spendPk = spendPk
+        self.nk = nk
         self.viewSk = viewSk
         self.viewPk = viewPk
         self.address = address
@@ -948,6 +710,7 @@ public struct FfiConverterTypeFfiAudrenKeys: FfiConverterRustBuffer {
             try FfiAudrenKeys(
                 spendSk: FfiConverterData.read(from: &buf), 
                 spendPk: FfiConverterData.read(from: &buf), 
+                nk: FfiConverterData.read(from: &buf), 
                 viewSk: FfiConverterData.read(from: &buf), 
                 viewPk: FfiConverterData.read(from: &buf), 
                 address: FfiConverterString.read(from: &buf)
@@ -957,6 +720,7 @@ public struct FfiConverterTypeFfiAudrenKeys: FfiConverterRustBuffer {
     public static func write(_ value: FfiAudrenKeys, into buf: inout [UInt8]) {
         FfiConverterData.write(value.spendSk, into: &buf)
         FfiConverterData.write(value.spendPk, into: &buf)
+        FfiConverterData.write(value.nk, into: &buf)
         FfiConverterData.write(value.viewSk, into: &buf)
         FfiConverterData.write(value.viewPk, into: &buf)
         FfiConverterString.write(value.address, into: &buf)
@@ -979,19 +743,21 @@ public func FfiConverterTypeFfiAudrenKeys_lower(_ value: FfiAudrenKeys) -> RustB
 }
 
 
-public struct FfiBufferedExecutionPlan: Equatable, Hashable {
-    public var nonce: UInt64
-    public var proofBufferPda: String
-    public var uploadChunks: [FfiBuiltInstruction]
-    public var executeIx: FfiBuiltInstruction
+public struct FfiDecryptedMemo: Equatable, Hashable {
+    public var tweak: Data
+    public var blinding: Data
+    public var amount: UInt64
+    public var mint: Data
+    public var isDynamic: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(nonce: UInt64, proofBufferPda: String, uploadChunks: [FfiBuiltInstruction], executeIx: FfiBuiltInstruction) {
-        self.nonce = nonce
-        self.proofBufferPda = proofBufferPda
-        self.uploadChunks = uploadChunks
-        self.executeIx = executeIx
+    public init(tweak: Data, blinding: Data, amount: UInt64, mint: Data, isDynamic: Bool) {
+        self.tweak = tweak
+        self.blinding = blinding
+        self.amount = amount
+        self.mint = mint
+        self.isDynamic = isDynamic
     }
 
     
@@ -1000,28 +766,30 @@ public struct FfiBufferedExecutionPlan: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiBufferedExecutionPlan: Sendable {}
+extension FfiDecryptedMemo: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiBufferedExecutionPlan: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiBufferedExecutionPlan {
+public struct FfiConverterTypeFfiDecryptedMemo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDecryptedMemo {
         return
-            try FfiBufferedExecutionPlan(
-                nonce: FfiConverterUInt64.read(from: &buf), 
-                proofBufferPda: FfiConverterString.read(from: &buf), 
-                uploadChunks: FfiConverterSequenceTypeFfiBuiltInstruction.read(from: &buf), 
-                executeIx: FfiConverterTypeFfiBuiltInstruction.read(from: &buf)
+            try FfiDecryptedMemo(
+                tweak: FfiConverterData.read(from: &buf), 
+                blinding: FfiConverterData.read(from: &buf), 
+                amount: FfiConverterUInt64.read(from: &buf), 
+                mint: FfiConverterData.read(from: &buf), 
+                isDynamic: FfiConverterBool.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiBufferedExecutionPlan, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.nonce, into: &buf)
-        FfiConverterString.write(value.proofBufferPda, into: &buf)
-        FfiConverterSequenceTypeFfiBuiltInstruction.write(value.uploadChunks, into: &buf)
-        FfiConverterTypeFfiBuiltInstruction.write(value.executeIx, into: &buf)
+    public static func write(_ value: FfiDecryptedMemo, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.tweak, into: &buf)
+        FfiConverterData.write(value.blinding, into: &buf)
+        FfiConverterUInt64.write(value.amount, into: &buf)
+        FfiConverterData.write(value.mint, into: &buf)
+        FfiConverterBool.write(value.isDynamic, into: &buf)
     }
 }
 
@@ -1029,145 +797,29 @@ public struct FfiConverterTypeFfiBufferedExecutionPlan: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiBufferedExecutionPlan_lift(_ buf: RustBuffer) throws -> FfiBufferedExecutionPlan {
-    return try FfiConverterTypeFfiBufferedExecutionPlan.lift(buf)
+public func FfiConverterTypeFfiDecryptedMemo_lift(_ buf: RustBuffer) throws -> FfiDecryptedMemo {
+    return try FfiConverterTypeFfiDecryptedMemo.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiBufferedExecutionPlan_lower(_ value: FfiBufferedExecutionPlan) -> RustBuffer {
-    return FfiConverterTypeFfiBufferedExecutionPlan.lower(value)
-}
-
-
-public struct FfiBuiltInstruction: Equatable, Hashable {
-    public var programId: String
-    public var accounts: [FfiAccountMeta]
-    public var data: Data
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(programId: String, accounts: [FfiAccountMeta], data: Data) {
-        self.programId = programId
-        self.accounts = accounts
-        self.data = data
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiBuiltInstruction: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiBuiltInstruction: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiBuiltInstruction {
-        return
-            try FfiBuiltInstruction(
-                programId: FfiConverterString.read(from: &buf), 
-                accounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf), 
-                data: FfiConverterData.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiBuiltInstruction, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.programId, into: &buf)
-        FfiConverterSequenceTypeFfiAccountMeta.write(value.accounts, into: &buf)
-        FfiConverterData.write(value.data, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiBuiltInstruction_lift(_ buf: RustBuffer) throws -> FfiBuiltInstruction {
-    return try FfiConverterTypeFfiBuiltInstruction.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiBuiltInstruction_lower(_ value: FfiBuiltInstruction) -> RustBuffer {
-    return FfiConverterTypeFfiBuiltInstruction.lower(value)
-}
-
-
-public struct FfiDataSlice: Equatable, Hashable {
-    public var offset: UInt32
-    public var length: UInt32
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(offset: UInt32, length: UInt32) {
-        self.offset = offset
-        self.length = length
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiDataSlice: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiDataSlice: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDataSlice {
-        return
-            try FfiDataSlice(
-                offset: FfiConverterUInt32.read(from: &buf), 
-                length: FfiConverterUInt32.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiDataSlice, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.offset, into: &buf)
-        FfiConverterUInt32.write(value.length, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiDataSlice_lift(_ buf: RustBuffer) throws -> FfiDataSlice {
-    return try FfiConverterTypeFfiDataSlice.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiDataSlice_lower(_ value: FfiDataSlice) -> RustBuffer {
-    return FfiConverterTypeFfiDataSlice.lower(value)
+public func FfiConverterTypeFfiDecryptedMemo_lower(_ value: FfiDecryptedMemo) -> RustBuffer {
+    return FfiConverterTypeFfiDecryptedMemo.lower(value)
 }
 
 
 public struct FfiDefiSessionKeypair: Equatable, Hashable {
     public var sessionIndex: UInt32
     public var secretSeed: Data
-    public var pubkey: Data
-    public var keypairBytes: Data
-    public var address: String
+    public var pubkeyB58: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sessionIndex: UInt32, secretSeed: Data, pubkey: Data, keypairBytes: Data, address: String) {
+    public init(sessionIndex: UInt32, secretSeed: Data, pubkeyB58: String) {
         self.sessionIndex = sessionIndex
         self.secretSeed = secretSeed
-        self.pubkey = pubkey
-        self.keypairBytes = keypairBytes
-        self.address = address
+        self.pubkeyB58 = pubkeyB58
     }
 
     
@@ -1188,18 +840,14 @@ public struct FfiConverterTypeFfiDefiSessionKeypair: FfiConverterRustBuffer {
             try FfiDefiSessionKeypair(
                 sessionIndex: FfiConverterUInt32.read(from: &buf), 
                 secretSeed: FfiConverterData.read(from: &buf), 
-                pubkey: FfiConverterData.read(from: &buf), 
-                keypairBytes: FfiConverterData.read(from: &buf), 
-                address: FfiConverterString.read(from: &buf)
+                pubkeyB58: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiDefiSessionKeypair, into buf: inout [UInt8]) {
         FfiConverterUInt32.write(value.sessionIndex, into: &buf)
         FfiConverterData.write(value.secretSeed, into: &buf)
-        FfiConverterData.write(value.pubkey, into: &buf)
-        FfiConverterData.write(value.keypairBytes, into: &buf)
-        FfiConverterString.write(value.address, into: &buf)
+        FfiConverterString.write(value.pubkeyB58, into: &buf)
     }
 }
 
@@ -1219,35 +867,35 @@ public func FfiConverterTypeFfiDefiSessionKeypair_lower(_ value: FfiDefiSessionK
 }
 
 
-public struct FfiDepositParams: Equatable, Hashable {
+public struct FfiDepositSolParams: Equatable, Hashable {
     public var programId: String
     public var depositor: String
     public var poolId: UInt32
-    public var activePageId: UInt64
-    public var recipientAddress: String
-    public var mint32: Data
-    public var grossAmount: UInt64
-    public var netAmount: UInt64
+    public var laneId: UInt8
+    public var subPageSeq: UInt64
+    public var rootPageSeq: UInt64
+    public var memoPageSeq: UInt64
     public var feeFromAmount: Bool
-    public var tokenProgram: String?
-    public var depositorAta: String?
-    public var vaultAta: String?
+    public var amount: UInt64
+    public var stealthOwner: Data
+    public var blinding: Data
+    public var memo90: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, depositor: String, poolId: UInt32, activePageId: UInt64, recipientAddress: String, mint32: Data, grossAmount: UInt64, netAmount: UInt64, feeFromAmount: Bool, tokenProgram: String?, depositorAta: String?, vaultAta: String?) {
+    public init(programId: String, depositor: String, poolId: UInt32, laneId: UInt8, subPageSeq: UInt64, rootPageSeq: UInt64, memoPageSeq: UInt64, feeFromAmount: Bool, amount: UInt64, stealthOwner: Data, blinding: Data, memo90: Data) {
         self.programId = programId
         self.depositor = depositor
         self.poolId = poolId
-        self.activePageId = activePageId
-        self.recipientAddress = recipientAddress
-        self.mint32 = mint32
-        self.grossAmount = grossAmount
-        self.netAmount = netAmount
+        self.laneId = laneId
+        self.subPageSeq = subPageSeq
+        self.rootPageSeq = rootPageSeq
+        self.memoPageSeq = memoPageSeq
         self.feeFromAmount = feeFromAmount
-        self.tokenProgram = tokenProgram
-        self.depositorAta = depositorAta
-        self.vaultAta = vaultAta
+        self.amount = amount
+        self.stealthOwner = stealthOwner
+        self.blinding = blinding
+        self.memo90 = memo90
     }
 
     
@@ -1256,44 +904,44 @@ public struct FfiDepositParams: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiDepositParams: Sendable {}
+extension FfiDepositSolParams: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDepositParams {
+public struct FfiConverterTypeFfiDepositSolParams: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDepositSolParams {
         return
-            try FfiDepositParams(
+            try FfiDepositSolParams(
                 programId: FfiConverterString.read(from: &buf), 
                 depositor: FfiConverterString.read(from: &buf), 
                 poolId: FfiConverterUInt32.read(from: &buf), 
-                activePageId: FfiConverterUInt64.read(from: &buf), 
-                recipientAddress: FfiConverterString.read(from: &buf), 
-                mint32: FfiConverterData.read(from: &buf), 
-                grossAmount: FfiConverterUInt64.read(from: &buf), 
-                netAmount: FfiConverterUInt64.read(from: &buf), 
+                laneId: FfiConverterUInt8.read(from: &buf), 
+                subPageSeq: FfiConverterUInt64.read(from: &buf), 
+                rootPageSeq: FfiConverterUInt64.read(from: &buf), 
+                memoPageSeq: FfiConverterUInt64.read(from: &buf), 
                 feeFromAmount: FfiConverterBool.read(from: &buf), 
-                tokenProgram: FfiConverterOptionString.read(from: &buf), 
-                depositorAta: FfiConverterOptionString.read(from: &buf), 
-                vaultAta: FfiConverterOptionString.read(from: &buf)
+                amount: FfiConverterUInt64.read(from: &buf), 
+                stealthOwner: FfiConverterData.read(from: &buf), 
+                blinding: FfiConverterData.read(from: &buf), 
+                memo90: FfiConverterData.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiDepositParams, into buf: inout [UInt8]) {
+    public static func write(_ value: FfiDepositSolParams, into buf: inout [UInt8]) {
         FfiConverterString.write(value.programId, into: &buf)
         FfiConverterString.write(value.depositor, into: &buf)
         FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.activePageId, into: &buf)
-        FfiConverterString.write(value.recipientAddress, into: &buf)
-        FfiConverterData.write(value.mint32, into: &buf)
-        FfiConverterUInt64.write(value.grossAmount, into: &buf)
-        FfiConverterUInt64.write(value.netAmount, into: &buf)
+        FfiConverterUInt8.write(value.laneId, into: &buf)
+        FfiConverterUInt64.write(value.subPageSeq, into: &buf)
+        FfiConverterUInt64.write(value.rootPageSeq, into: &buf)
+        FfiConverterUInt64.write(value.memoPageSeq, into: &buf)
         FfiConverterBool.write(value.feeFromAmount, into: &buf)
-        FfiConverterOptionString.write(value.tokenProgram, into: &buf)
-        FfiConverterOptionString.write(value.depositorAta, into: &buf)
-        FfiConverterOptionString.write(value.vaultAta, into: &buf)
+        FfiConverterUInt64.write(value.amount, into: &buf)
+        FfiConverterData.write(value.stealthOwner, into: &buf)
+        FfiConverterData.write(value.blinding, into: &buf)
+        FfiConverterData.write(value.memo90, into: &buf)
     }
 }
 
@@ -1301,39 +949,55 @@ public struct FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiDepositParams_lift(_ buf: RustBuffer) throws -> FfiDepositParams {
-    return try FfiConverterTypeFfiDepositParams.lift(buf)
+public func FfiConverterTypeFfiDepositSolParams_lift(_ buf: RustBuffer) throws -> FfiDepositSolParams {
+    return try FfiConverterTypeFfiDepositSolParams.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiDepositParams_lower(_ value: FfiDepositParams) -> RustBuffer {
-    return FfiConverterTypeFfiDepositParams.lower(value)
+public func FfiConverterTypeFfiDepositSolParams_lower(_ value: FfiDepositSolParams) -> RustBuffer {
+    return FfiConverterTypeFfiDepositSolParams.lower(value)
 }
 
 
-public struct FfiEpochPageHeader: Equatable, Hashable {
-    public var version: UInt8
-    public var bump: UInt8
-    public var closed: Bool
-    public var count: UInt8
+public struct FfiDepositSplParams: Equatable, Hashable {
+    public var programId: String
+    public var depositor: String
     public var poolId: UInt32
-    public var pageId: UInt64
-    public var createdSlot: UInt64
-    public var closedSlot: UInt64
+    public var mint: String
+    public var depositorAta: String
+    public var vaultAta: String
+    public var tokenProg: String
+    public var laneId: UInt8
+    public var subPageSeq: UInt64
+    public var rootPageSeq: UInt64
+    public var memoPageSeq: UInt64
+    public var amount: UInt64
+    public var stealthOwner: Data
+    public var blinding: Data
+    public var memo90: Data
+    public var transferHookAccounts: [FfiAccountMeta]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(version: UInt8, bump: UInt8, closed: Bool, count: UInt8, poolId: UInt32, pageId: UInt64, createdSlot: UInt64, closedSlot: UInt64) {
-        self.version = version
-        self.bump = bump
-        self.closed = closed
-        self.count = count
+    public init(programId: String, depositor: String, poolId: UInt32, mint: String, depositorAta: String, vaultAta: String, tokenProg: String, laneId: UInt8, subPageSeq: UInt64, rootPageSeq: UInt64, memoPageSeq: UInt64, amount: UInt64, stealthOwner: Data, blinding: Data, memo90: Data, transferHookAccounts: [FfiAccountMeta]) {
+        self.programId = programId
+        self.depositor = depositor
         self.poolId = poolId
-        self.pageId = pageId
-        self.createdSlot = createdSlot
-        self.closedSlot = closedSlot
+        self.mint = mint
+        self.depositorAta = depositorAta
+        self.vaultAta = vaultAta
+        self.tokenProg = tokenProg
+        self.laneId = laneId
+        self.subPageSeq = subPageSeq
+        self.rootPageSeq = rootPageSeq
+        self.memoPageSeq = memoPageSeq
+        self.amount = amount
+        self.stealthOwner = stealthOwner
+        self.blinding = blinding
+        self.memo90 = memo90
+        self.transferHookAccounts = transferHookAccounts
     }
 
     
@@ -1342,36 +1006,52 @@ public struct FfiEpochPageHeader: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiEpochPageHeader: Sendable {}
+extension FfiDepositSplParams: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiEpochPageHeader: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEpochPageHeader {
+public struct FfiConverterTypeFfiDepositSplParams: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDepositSplParams {
         return
-            try FfiEpochPageHeader(
-                version: FfiConverterUInt8.read(from: &buf), 
-                bump: FfiConverterUInt8.read(from: &buf), 
-                closed: FfiConverterBool.read(from: &buf), 
-                count: FfiConverterUInt8.read(from: &buf), 
+            try FfiDepositSplParams(
+                programId: FfiConverterString.read(from: &buf), 
+                depositor: FfiConverterString.read(from: &buf), 
                 poolId: FfiConverterUInt32.read(from: &buf), 
-                pageId: FfiConverterUInt64.read(from: &buf), 
-                createdSlot: FfiConverterUInt64.read(from: &buf), 
-                closedSlot: FfiConverterUInt64.read(from: &buf)
+                mint: FfiConverterString.read(from: &buf), 
+                depositorAta: FfiConverterString.read(from: &buf), 
+                vaultAta: FfiConverterString.read(from: &buf), 
+                tokenProg: FfiConverterString.read(from: &buf), 
+                laneId: FfiConverterUInt8.read(from: &buf), 
+                subPageSeq: FfiConverterUInt64.read(from: &buf), 
+                rootPageSeq: FfiConverterUInt64.read(from: &buf), 
+                memoPageSeq: FfiConverterUInt64.read(from: &buf), 
+                amount: FfiConverterUInt64.read(from: &buf), 
+                stealthOwner: FfiConverterData.read(from: &buf), 
+                blinding: FfiConverterData.read(from: &buf), 
+                memo90: FfiConverterData.read(from: &buf), 
+                transferHookAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiEpochPageHeader, into buf: inout [UInt8]) {
-        FfiConverterUInt8.write(value.version, into: &buf)
-        FfiConverterUInt8.write(value.bump, into: &buf)
-        FfiConverterBool.write(value.closed, into: &buf)
-        FfiConverterUInt8.write(value.count, into: &buf)
+    public static func write(_ value: FfiDepositSplParams, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.programId, into: &buf)
+        FfiConverterString.write(value.depositor, into: &buf)
         FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.pageId, into: &buf)
-        FfiConverterUInt64.write(value.createdSlot, into: &buf)
-        FfiConverterUInt64.write(value.closedSlot, into: &buf)
+        FfiConverterString.write(value.mint, into: &buf)
+        FfiConverterString.write(value.depositorAta, into: &buf)
+        FfiConverterString.write(value.vaultAta, into: &buf)
+        FfiConverterString.write(value.tokenProg, into: &buf)
+        FfiConverterUInt8.write(value.laneId, into: &buf)
+        FfiConverterUInt64.write(value.subPageSeq, into: &buf)
+        FfiConverterUInt64.write(value.rootPageSeq, into: &buf)
+        FfiConverterUInt64.write(value.memoPageSeq, into: &buf)
+        FfiConverterUInt64.write(value.amount, into: &buf)
+        FfiConverterData.write(value.stealthOwner, into: &buf)
+        FfiConverterData.write(value.blinding, into: &buf)
+        FfiConverterData.write(value.memo90, into: &buf)
+        FfiConverterSequenceTypeFfiAccountMeta.write(value.transferHookAccounts, into: &buf)
     }
 }
 
@@ -1379,15 +1059,277 @@ public struct FfiConverterTypeFfiEpochPageHeader: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiEpochPageHeader_lift(_ buf: RustBuffer) throws -> FfiEpochPageHeader {
-    return try FfiConverterTypeFfiEpochPageHeader.lift(buf)
+public func FfiConverterTypeFfiDepositSplParams_lift(_ buf: RustBuffer) throws -> FfiDepositSplParams {
+    return try FfiConverterTypeFfiDepositSplParams.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiEpochPageHeader_lower(_ value: FfiEpochPageHeader) -> RustBuffer {
-    return FfiConverterTypeFfiEpochPageHeader.lower(value)
+public func FfiConverterTypeFfiDepositSplParams_lower(_ value: FfiDepositSplParams) -> RustBuffer {
+    return FfiConverterTypeFfiDepositSplParams.lower(value)
+}
+
+
+public struct FfiDynamicMemoPrep: Equatable, Hashable {
+    public var tweak: Data
+    public var blinding: Data
+    public var dynHead34: Data
+    public var dynMask56: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(tweak: Data, blinding: Data, dynHead34: Data, dynMask56: Data) {
+        self.tweak = tweak
+        self.blinding = blinding
+        self.dynHead34 = dynHead34
+        self.dynMask56 = dynMask56
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiDynamicMemoPrep: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiDynamicMemoPrep: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDynamicMemoPrep {
+        return
+            try FfiDynamicMemoPrep(
+                tweak: FfiConverterData.read(from: &buf), 
+                blinding: FfiConverterData.read(from: &buf), 
+                dynHead34: FfiConverterData.read(from: &buf), 
+                dynMask56: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiDynamicMemoPrep, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.tweak, into: &buf)
+        FfiConverterData.write(value.blinding, into: &buf)
+        FfiConverterData.write(value.dynHead34, into: &buf)
+        FfiConverterData.write(value.dynMask56, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiDynamicMemoPrep_lift(_ buf: RustBuffer) throws -> FfiDynamicMemoPrep {
+    return try FfiConverterTypeFfiDynamicMemoPrep.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiDynamicMemoPrep_lower(_ value: FfiDynamicMemoPrep) -> RustBuffer {
+    return FfiConverterTypeFfiDynamicMemoPrep.lower(value)
+}
+
+
+public struct FfiEncryptedMemo: Equatable, Hashable {
+    public var tweak: Data
+    public var blinding: Data
+    public var stealthOwner: Data
+    public var commitment: Data
+    public var memo90: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(tweak: Data, blinding: Data, stealthOwner: Data, commitment: Data, memo90: Data) {
+        self.tweak = tweak
+        self.blinding = blinding
+        self.stealthOwner = stealthOwner
+        self.commitment = commitment
+        self.memo90 = memo90
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiEncryptedMemo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiEncryptedMemo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEncryptedMemo {
+        return
+            try FfiEncryptedMemo(
+                tweak: FfiConverterData.read(from: &buf), 
+                blinding: FfiConverterData.read(from: &buf), 
+                stealthOwner: FfiConverterData.read(from: &buf), 
+                commitment: FfiConverterData.read(from: &buf), 
+                memo90: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiEncryptedMemo, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.tweak, into: &buf)
+        FfiConverterData.write(value.blinding, into: &buf)
+        FfiConverterData.write(value.stealthOwner, into: &buf)
+        FfiConverterData.write(value.commitment, into: &buf)
+        FfiConverterData.write(value.memo90, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncryptedMemo_lift(_ buf: RustBuffer) throws -> FfiEncryptedMemo {
+    return try FfiConverterTypeFfiEncryptedMemo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncryptedMemo_lower(_ value: FfiEncryptedMemo) -> RustBuffer {
+    return FfiConverterTypeFfiEncryptedMemo.lower(value)
+}
+
+
+public struct FfiExecCtxHashParams: Equatable, Hashable {
+    public var programId: String
+    public var poolId: UInt32
+    public var outLaneId: UInt8
+    public var escrowShard: UInt8
+    public var changeMask: UInt8
+    public var inKind: UInt8
+    public var outKind: UInt8
+    public var feeOnOutput: Bool
+    public var assetIn: Data
+    public var amountIn: UInt64
+    public var relayerFeeAmount: UInt64
+    public var relayerFeeRecipient: String?
+    public var assetOut: Data
+    public var minAmountOut: UInt64
+    public var routerProg: String
+    public var routerAccounts: [FfiAccountMeta]
+    public var outStealthOwner: Data
+    public var outBlinding: Data
+    public var dynMemoHead: Data
+    public var dynMask56: Data
+    public var routerIxData: Data
+    public var changeMemos: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(programId: String, poolId: UInt32, outLaneId: UInt8, escrowShard: UInt8, changeMask: UInt8, inKind: UInt8, outKind: UInt8, feeOnOutput: Bool, assetIn: Data, amountIn: UInt64, relayerFeeAmount: UInt64, relayerFeeRecipient: String?, assetOut: Data, minAmountOut: UInt64, routerProg: String, routerAccounts: [FfiAccountMeta], outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask56: Data, routerIxData: Data, changeMemos: Data) {
+        self.programId = programId
+        self.poolId = poolId
+        self.outLaneId = outLaneId
+        self.escrowShard = escrowShard
+        self.changeMask = changeMask
+        self.inKind = inKind
+        self.outKind = outKind
+        self.feeOnOutput = feeOnOutput
+        self.assetIn = assetIn
+        self.amountIn = amountIn
+        self.relayerFeeAmount = relayerFeeAmount
+        self.relayerFeeRecipient = relayerFeeRecipient
+        self.assetOut = assetOut
+        self.minAmountOut = minAmountOut
+        self.routerProg = routerProg
+        self.routerAccounts = routerAccounts
+        self.outStealthOwner = outStealthOwner
+        self.outBlinding = outBlinding
+        self.dynMemoHead = dynMemoHead
+        self.dynMask56 = dynMask56
+        self.routerIxData = routerIxData
+        self.changeMemos = changeMemos
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiExecCtxHashParams: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiExecCtxHashParams {
+        return
+            try FfiExecCtxHashParams(
+                programId: FfiConverterString.read(from: &buf), 
+                poolId: FfiConverterUInt32.read(from: &buf), 
+                outLaneId: FfiConverterUInt8.read(from: &buf), 
+                escrowShard: FfiConverterUInt8.read(from: &buf), 
+                changeMask: FfiConverterUInt8.read(from: &buf), 
+                inKind: FfiConverterUInt8.read(from: &buf), 
+                outKind: FfiConverterUInt8.read(from: &buf), 
+                feeOnOutput: FfiConverterBool.read(from: &buf), 
+                assetIn: FfiConverterData.read(from: &buf), 
+                amountIn: FfiConverterUInt64.read(from: &buf), 
+                relayerFeeAmount: FfiConverterUInt64.read(from: &buf), 
+                relayerFeeRecipient: FfiConverterOptionString.read(from: &buf), 
+                assetOut: FfiConverterData.read(from: &buf), 
+                minAmountOut: FfiConverterUInt64.read(from: &buf), 
+                routerProg: FfiConverterString.read(from: &buf), 
+                routerAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf), 
+                outStealthOwner: FfiConverterData.read(from: &buf), 
+                outBlinding: FfiConverterData.read(from: &buf), 
+                dynMemoHead: FfiConverterData.read(from: &buf), 
+                dynMask56: FfiConverterData.read(from: &buf), 
+                routerIxData: FfiConverterData.read(from: &buf), 
+                changeMemos: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiExecCtxHashParams, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.programId, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt8.write(value.outLaneId, into: &buf)
+        FfiConverterUInt8.write(value.escrowShard, into: &buf)
+        FfiConverterUInt8.write(value.changeMask, into: &buf)
+        FfiConverterUInt8.write(value.inKind, into: &buf)
+        FfiConverterUInt8.write(value.outKind, into: &buf)
+        FfiConverterBool.write(value.feeOnOutput, into: &buf)
+        FfiConverterData.write(value.assetIn, into: &buf)
+        FfiConverterUInt64.write(value.amountIn, into: &buf)
+        FfiConverterUInt64.write(value.relayerFeeAmount, into: &buf)
+        FfiConverterOptionString.write(value.relayerFeeRecipient, into: &buf)
+        FfiConverterData.write(value.assetOut, into: &buf)
+        FfiConverterUInt64.write(value.minAmountOut, into: &buf)
+        FfiConverterString.write(value.routerProg, into: &buf)
+        FfiConverterSequenceTypeFfiAccountMeta.write(value.routerAccounts, into: &buf)
+        FfiConverterData.write(value.outStealthOwner, into: &buf)
+        FfiConverterData.write(value.outBlinding, into: &buf)
+        FfiConverterData.write(value.dynMemoHead, into: &buf)
+        FfiConverterData.write(value.dynMask56, into: &buf)
+        FfiConverterData.write(value.routerIxData, into: &buf)
+        FfiConverterData.write(value.changeMemos, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExecCtxHashParams_lift(_ buf: RustBuffer) throws -> FfiExecCtxHashParams {
+    return try FfiConverterTypeFfiExecCtxHashParams.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiExecCtxHashParams_lower(_ value: FfiExecCtxHashParams) -> RustBuffer {
+    return FfiConverterTypeFfiExecCtxHashParams.lower(value)
 }
 
 
@@ -1395,61 +1337,77 @@ public struct FfiExecViaEscrowParams: Equatable, Hashable {
     public var programId: String
     public var payer: String
     public var poolId: UInt32
-    public var outPageId: UInt64
-    public var shardId: UInt8
-    public var inputPageIds: [UInt64]
-    public var inputPagesBytes: [Data]
-    public var inputNote: FfiOwnedNote
-    public var secretIndex: UInt32
-    public var mintOut32: Data
-    public var tokenProgramIn: String
-    public var tokenProgramOut: String
+    public var vkId: UInt8
+    public var ckptSlotIdx: UInt16
+    public var outLaneId: UInt8
+    public var outSubSeq: UInt64
+    public var outRootSeq: UInt64
+    public var outMemoSeq: UInt64
+    public var outNfSeq: UInt64
+    public var escrowShard: UInt8
+    public var changeMask: UInt8
+    public var inKind: UInt8
+    public var outKind: UInt8
+    public var feeOnOutput: Bool
+    public var inSpl: [String]?
+    public var outSpl: [String]?
+    public var relayerFeeAmount: UInt64
+    public var relayerFeeRecipient: String?
+    public var proof192: Data
+    public var nf0: Data
+    public var nf1: Data
+    public var cm0: Data
+    public var cm1: Data
+    public var cm2: Data
     public var amountIn: UInt64
     public var minAmountOut: UInt64
-    public var relayerFee: UInt64
-    public var feeOnOutput: Bool
-    public var feeRecipientAta: String?
-    public var allowPartialRefund: Bool
-    public var recipientAddress: String
-    public var changeAddress: String
-    public var auditorPk32: Data?
-    public var targetProgramId: String
-    public var escrowIdx: UInt8
-    public var escrowInIdx: UInt8
-    public var escrowOutIdx: UInt8
-    public var targetIxData: Data
-    public var actionAccounts: [FfiAccountMeta]
+    public var outStealthOwner: Data
+    public var outBlinding: Data
+    public var dynMemoHead: Data
+    public var dynMask56: Data
+    public var routerProg: String
+    public var routerIxData: Data
+    public var routerAccounts: [FfiAccountMeta]
+    public var changeMemos: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, shardId: UInt8, inputPageIds: [UInt64], inputPagesBytes: [Data], inputNote: FfiOwnedNote, secretIndex: UInt32, mintOut32: Data, tokenProgramIn: String, tokenProgramOut: String, amountIn: UInt64, minAmountOut: UInt64, relayerFee: UInt64, feeOnOutput: Bool, feeRecipientAta: String?, allowPartialRefund: Bool, recipientAddress: String, changeAddress: String, auditorPk32: Data?, targetProgramId: String, escrowIdx: UInt8, escrowInIdx: UInt8, escrowOutIdx: UInt8, targetIxData: Data, actionAccounts: [FfiAccountMeta]) {
+    public init(programId: String, payer: String, poolId: UInt32, vkId: UInt8, ckptSlotIdx: UInt16, outLaneId: UInt8, outSubSeq: UInt64, outRootSeq: UInt64, outMemoSeq: UInt64, outNfSeq: UInt64, escrowShard: UInt8, changeMask: UInt8, inKind: UInt8, outKind: UInt8, feeOnOutput: Bool, inSpl: [String]?, outSpl: [String]?, relayerFeeAmount: UInt64, relayerFeeRecipient: String?, proof192: Data, nf0: Data, nf1: Data, cm0: Data, cm1: Data, cm2: Data, amountIn: UInt64, minAmountOut: UInt64, outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask56: Data, routerProg: String, routerIxData: Data, routerAccounts: [FfiAccountMeta], changeMemos: Data) {
         self.programId = programId
         self.payer = payer
         self.poolId = poolId
-        self.outPageId = outPageId
-        self.shardId = shardId
-        self.inputPageIds = inputPageIds
-        self.inputPagesBytes = inputPagesBytes
-        self.inputNote = inputNote
-        self.secretIndex = secretIndex
-        self.mintOut32 = mintOut32
-        self.tokenProgramIn = tokenProgramIn
-        self.tokenProgramOut = tokenProgramOut
+        self.vkId = vkId
+        self.ckptSlotIdx = ckptSlotIdx
+        self.outLaneId = outLaneId
+        self.outSubSeq = outSubSeq
+        self.outRootSeq = outRootSeq
+        self.outMemoSeq = outMemoSeq
+        self.outNfSeq = outNfSeq
+        self.escrowShard = escrowShard
+        self.changeMask = changeMask
+        self.inKind = inKind
+        self.outKind = outKind
+        self.feeOnOutput = feeOnOutput
+        self.inSpl = inSpl
+        self.outSpl = outSpl
+        self.relayerFeeAmount = relayerFeeAmount
+        self.relayerFeeRecipient = relayerFeeRecipient
+        self.proof192 = proof192
+        self.nf0 = nf0
+        self.nf1 = nf1
+        self.cm0 = cm0
+        self.cm1 = cm1
+        self.cm2 = cm2
         self.amountIn = amountIn
         self.minAmountOut = minAmountOut
-        self.relayerFee = relayerFee
-        self.feeOnOutput = feeOnOutput
-        self.feeRecipientAta = feeRecipientAta
-        self.allowPartialRefund = allowPartialRefund
-        self.recipientAddress = recipientAddress
-        self.changeAddress = changeAddress
-        self.auditorPk32 = auditorPk32
-        self.targetProgramId = targetProgramId
-        self.escrowIdx = escrowIdx
-        self.escrowInIdx = escrowInIdx
-        self.escrowOutIdx = escrowOutIdx
-        self.targetIxData = targetIxData
-        self.actionAccounts = actionAccounts
+        self.outStealthOwner = outStealthOwner
+        self.outBlinding = outBlinding
+        self.dynMemoHead = dynMemoHead
+        self.dynMask56 = dynMask56
+        self.routerProg = routerProg
+        self.routerIxData = routerIxData
+        self.routerAccounts = routerAccounts
+        self.changeMemos = changeMemos
     }
 
     
@@ -1471,30 +1429,38 @@ public struct FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer {
                 programId: FfiConverterString.read(from: &buf), 
                 payer: FfiConverterString.read(from: &buf), 
                 poolId: FfiConverterUInt32.read(from: &buf), 
-                outPageId: FfiConverterUInt64.read(from: &buf), 
-                shardId: FfiConverterUInt8.read(from: &buf), 
-                inputPageIds: FfiConverterSequenceUInt64.read(from: &buf), 
-                inputPagesBytes: FfiConverterSequenceData.read(from: &buf), 
-                inputNote: FfiConverterTypeFfiOwnedNote.read(from: &buf), 
-                secretIndex: FfiConverterUInt32.read(from: &buf), 
-                mintOut32: FfiConverterData.read(from: &buf), 
-                tokenProgramIn: FfiConverterString.read(from: &buf), 
-                tokenProgramOut: FfiConverterString.read(from: &buf), 
+                vkId: FfiConverterUInt8.read(from: &buf), 
+                ckptSlotIdx: FfiConverterUInt16.read(from: &buf), 
+                outLaneId: FfiConverterUInt8.read(from: &buf), 
+                outSubSeq: FfiConverterUInt64.read(from: &buf), 
+                outRootSeq: FfiConverterUInt64.read(from: &buf), 
+                outMemoSeq: FfiConverterUInt64.read(from: &buf), 
+                outNfSeq: FfiConverterUInt64.read(from: &buf), 
+                escrowShard: FfiConverterUInt8.read(from: &buf), 
+                changeMask: FfiConverterUInt8.read(from: &buf), 
+                inKind: FfiConverterUInt8.read(from: &buf), 
+                outKind: FfiConverterUInt8.read(from: &buf), 
+                feeOnOutput: FfiConverterBool.read(from: &buf), 
+                inSpl: FfiConverterOptionSequenceString.read(from: &buf), 
+                outSpl: FfiConverterOptionSequenceString.read(from: &buf), 
+                relayerFeeAmount: FfiConverterUInt64.read(from: &buf), 
+                relayerFeeRecipient: FfiConverterOptionString.read(from: &buf), 
+                proof192: FfiConverterData.read(from: &buf), 
+                nf0: FfiConverterData.read(from: &buf), 
+                nf1: FfiConverterData.read(from: &buf), 
+                cm0: FfiConverterData.read(from: &buf), 
+                cm1: FfiConverterData.read(from: &buf), 
+                cm2: FfiConverterData.read(from: &buf), 
                 amountIn: FfiConverterUInt64.read(from: &buf), 
                 minAmountOut: FfiConverterUInt64.read(from: &buf), 
-                relayerFee: FfiConverterUInt64.read(from: &buf), 
-                feeOnOutput: FfiConverterBool.read(from: &buf), 
-                feeRecipientAta: FfiConverterOptionString.read(from: &buf), 
-                allowPartialRefund: FfiConverterBool.read(from: &buf), 
-                recipientAddress: FfiConverterString.read(from: &buf), 
-                changeAddress: FfiConverterString.read(from: &buf), 
-                auditorPk32: FfiConverterOptionData.read(from: &buf), 
-                targetProgramId: FfiConverterString.read(from: &buf), 
-                escrowIdx: FfiConverterUInt8.read(from: &buf), 
-                escrowInIdx: FfiConverterUInt8.read(from: &buf), 
-                escrowOutIdx: FfiConverterUInt8.read(from: &buf), 
-                targetIxData: FfiConverterData.read(from: &buf), 
-                actionAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf)
+                outStealthOwner: FfiConverterData.read(from: &buf), 
+                outBlinding: FfiConverterData.read(from: &buf), 
+                dynMemoHead: FfiConverterData.read(from: &buf), 
+                dynMask56: FfiConverterData.read(from: &buf), 
+                routerProg: FfiConverterString.read(from: &buf), 
+                routerIxData: FfiConverterData.read(from: &buf), 
+                routerAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf), 
+                changeMemos: FfiConverterData.read(from: &buf)
         )
     }
 
@@ -1502,30 +1468,38 @@ public struct FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer {
         FfiConverterString.write(value.programId, into: &buf)
         FfiConverterString.write(value.payer, into: &buf)
         FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.outPageId, into: &buf)
-        FfiConverterUInt8.write(value.shardId, into: &buf)
-        FfiConverterSequenceUInt64.write(value.inputPageIds, into: &buf)
-        FfiConverterSequenceData.write(value.inputPagesBytes, into: &buf)
-        FfiConverterTypeFfiOwnedNote.write(value.inputNote, into: &buf)
-        FfiConverterUInt32.write(value.secretIndex, into: &buf)
-        FfiConverterData.write(value.mintOut32, into: &buf)
-        FfiConverterString.write(value.tokenProgramIn, into: &buf)
-        FfiConverterString.write(value.tokenProgramOut, into: &buf)
+        FfiConverterUInt8.write(value.vkId, into: &buf)
+        FfiConverterUInt16.write(value.ckptSlotIdx, into: &buf)
+        FfiConverterUInt8.write(value.outLaneId, into: &buf)
+        FfiConverterUInt64.write(value.outSubSeq, into: &buf)
+        FfiConverterUInt64.write(value.outRootSeq, into: &buf)
+        FfiConverterUInt64.write(value.outMemoSeq, into: &buf)
+        FfiConverterUInt64.write(value.outNfSeq, into: &buf)
+        FfiConverterUInt8.write(value.escrowShard, into: &buf)
+        FfiConverterUInt8.write(value.changeMask, into: &buf)
+        FfiConverterUInt8.write(value.inKind, into: &buf)
+        FfiConverterUInt8.write(value.outKind, into: &buf)
+        FfiConverterBool.write(value.feeOnOutput, into: &buf)
+        FfiConverterOptionSequenceString.write(value.inSpl, into: &buf)
+        FfiConverterOptionSequenceString.write(value.outSpl, into: &buf)
+        FfiConverterUInt64.write(value.relayerFeeAmount, into: &buf)
+        FfiConverterOptionString.write(value.relayerFeeRecipient, into: &buf)
+        FfiConverterData.write(value.proof192, into: &buf)
+        FfiConverterData.write(value.nf0, into: &buf)
+        FfiConverterData.write(value.nf1, into: &buf)
+        FfiConverterData.write(value.cm0, into: &buf)
+        FfiConverterData.write(value.cm1, into: &buf)
+        FfiConverterData.write(value.cm2, into: &buf)
         FfiConverterUInt64.write(value.amountIn, into: &buf)
         FfiConverterUInt64.write(value.minAmountOut, into: &buf)
-        FfiConverterUInt64.write(value.relayerFee, into: &buf)
-        FfiConverterBool.write(value.feeOnOutput, into: &buf)
-        FfiConverterOptionString.write(value.feeRecipientAta, into: &buf)
-        FfiConverterBool.write(value.allowPartialRefund, into: &buf)
-        FfiConverterString.write(value.recipientAddress, into: &buf)
-        FfiConverterString.write(value.changeAddress, into: &buf)
-        FfiConverterOptionData.write(value.auditorPk32, into: &buf)
-        FfiConverterString.write(value.targetProgramId, into: &buf)
-        FfiConverterUInt8.write(value.escrowIdx, into: &buf)
-        FfiConverterUInt8.write(value.escrowInIdx, into: &buf)
-        FfiConverterUInt8.write(value.escrowOutIdx, into: &buf)
-        FfiConverterData.write(value.targetIxData, into: &buf)
-        FfiConverterSequenceTypeFfiAccountMeta.write(value.actionAccounts, into: &buf)
+        FfiConverterData.write(value.outStealthOwner, into: &buf)
+        FfiConverterData.write(value.outBlinding, into: &buf)
+        FfiConverterData.write(value.dynMemoHead, into: &buf)
+        FfiConverterData.write(value.dynMask56, into: &buf)
+        FfiConverterString.write(value.routerProg, into: &buf)
+        FfiConverterData.write(value.routerIxData, into: &buf)
+        FfiConverterSequenceTypeFfiAccountMeta.write(value.routerAccounts, into: &buf)
+        FfiConverterData.write(value.changeMemos, into: &buf)
     }
 }
 
@@ -1546,18 +1520,18 @@ public func FfiConverterTypeFfiExecViaEscrowParams_lower(_ value: FfiExecViaEscr
 
 
 public struct FfiFullViewingKey: Equatable, Hashable {
-    public var version: UInt8
-    public var spendPkB58: String
-    public var viewSkB58: String
-    public var viewPkB58: String
+    public var spendPk: Data
+    public var nk: Data
+    public var viewSk: Data
+    public var viewPk: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(version: UInt8, spendPkB58: String, viewSkB58: String, viewPkB58: String) {
-        self.version = version
-        self.spendPkB58 = spendPkB58
-        self.viewSkB58 = viewSkB58
-        self.viewPkB58 = viewPkB58
+    public init(spendPk: Data, nk: Data, viewSk: Data, viewPk: Data) {
+        self.spendPk = spendPk
+        self.nk = nk
+        self.viewSk = viewSk
+        self.viewPk = viewPk
     }
 
     
@@ -1576,18 +1550,18 @@ public struct FfiConverterTypeFfiFullViewingKey: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFullViewingKey {
         return
             try FfiFullViewingKey(
-                version: FfiConverterUInt8.read(from: &buf), 
-                spendPkB58: FfiConverterString.read(from: &buf), 
-                viewSkB58: FfiConverterString.read(from: &buf), 
-                viewPkB58: FfiConverterString.read(from: &buf)
+                spendPk: FfiConverterData.read(from: &buf), 
+                nk: FfiConverterData.read(from: &buf), 
+                viewSk: FfiConverterData.read(from: &buf), 
+                viewPk: FfiConverterData.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiFullViewingKey, into buf: inout [UInt8]) {
-        FfiConverterUInt8.write(value.version, into: &buf)
-        FfiConverterString.write(value.spendPkB58, into: &buf)
-        FfiConverterString.write(value.viewSkB58, into: &buf)
-        FfiConverterString.write(value.viewPkB58, into: &buf)
+        FfiConverterData.write(value.spendPk, into: &buf)
+        FfiConverterData.write(value.nk, into: &buf)
+        FfiConverterData.write(value.viewSk, into: &buf)
+        FfiConverterData.write(value.viewPk, into: &buf)
     }
 }
 
@@ -1607,39 +1581,291 @@ public func FfiConverterTypeFfiFullViewingKey_lower(_ value: FfiFullViewingKey) 
 }
 
 
-public struct FfiMergeParams: Equatable, Hashable {
+public struct FfiGroth16ProofBundle: Equatable, Hashable {
+    public var proof192: Data
+    public var nf0: Data
+    public var nf1: Data
+    public var cm0: Data
+    public var cm1: Data
+    public var cm2: Data
+    public var publicInputHash: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(proof192: Data, nf0: Data, nf1: Data, cm0: Data, cm1: Data, cm2: Data, publicInputHash: Data) {
+        self.proof192 = proof192
+        self.nf0 = nf0
+        self.nf1 = nf1
+        self.cm0 = cm0
+        self.cm1 = cm1
+        self.cm2 = cm2
+        self.publicInputHash = publicInputHash
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiGroth16ProofBundle: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiGroth16ProofBundle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiGroth16ProofBundle {
+        return
+            try FfiGroth16ProofBundle(
+                proof192: FfiConverterData.read(from: &buf), 
+                nf0: FfiConverterData.read(from: &buf), 
+                nf1: FfiConverterData.read(from: &buf), 
+                cm0: FfiConverterData.read(from: &buf), 
+                cm1: FfiConverterData.read(from: &buf), 
+                cm2: FfiConverterData.read(from: &buf), 
+                publicInputHash: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiGroth16ProofBundle, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.proof192, into: &buf)
+        FfiConverterData.write(value.nf0, into: &buf)
+        FfiConverterData.write(value.nf1, into: &buf)
+        FfiConverterData.write(value.cm0, into: &buf)
+        FfiConverterData.write(value.cm1, into: &buf)
+        FfiConverterData.write(value.cm2, into: &buf)
+        FfiConverterData.write(value.publicInputHash, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiGroth16ProofBundle_lift(_ buf: RustBuffer) throws -> FfiGroth16ProofBundle {
+    return try FfiConverterTypeFfiGroth16ProofBundle.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiGroth16ProofBundle_lower(_ value: FfiGroth16ProofBundle) -> RustBuffer {
+    return FfiConverterTypeFfiGroth16ProofBundle.lower(value)
+}
+
+
+public struct FfiInstruction: Equatable, Hashable {
+    public var programIdB58: String
+    public var accounts: [FfiAccountMeta]
+    public var data: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(programIdB58: String, accounts: [FfiAccountMeta], data: Data) {
+        self.programIdB58 = programIdB58
+        self.accounts = accounts
+        self.data = data
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiInstruction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiInstruction: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiInstruction {
+        return
+            try FfiInstruction(
+                programIdB58: FfiConverterString.read(from: &buf), 
+                accounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf), 
+                data: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiInstruction, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.programIdB58, into: &buf)
+        FfiConverterSequenceTypeFfiAccountMeta.write(value.accounts, into: &buf)
+        FfiConverterData.write(value.data, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInstruction_lift(_ buf: RustBuffer) throws -> FfiInstruction {
+    return try FfiConverterTypeFfiInstruction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInstruction_lower(_ value: FfiInstruction) -> RustBuffer {
+    return FfiConverterTypeFfiInstruction.lower(value)
+}
+
+
+public struct FfiJoinSplitCtxHashParams: Equatable, Hashable {
+    public var programId: String
+    public var poolId: UInt32
+    public var outLaneId: UInt8
+    public var outputMask: UInt8
+    public var assetMode: UInt8
+    public var unwrapWsol: Bool
+    public var recipient: String?
+    public var relayerFeeRecipient: String?
+    public var publicAssetId: Data
+    public var publicAmountOut: UInt64
+    public var relayerFeeAmount: UInt64
+    public var memosBytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(programId: String, poolId: UInt32, outLaneId: UInt8, outputMask: UInt8, assetMode: UInt8, unwrapWsol: Bool, recipient: String?, relayerFeeRecipient: String?, publicAssetId: Data, publicAmountOut: UInt64, relayerFeeAmount: UInt64, memosBytes: Data) {
+        self.programId = programId
+        self.poolId = poolId
+        self.outLaneId = outLaneId
+        self.outputMask = outputMask
+        self.assetMode = assetMode
+        self.unwrapWsol = unwrapWsol
+        self.recipient = recipient
+        self.relayerFeeRecipient = relayerFeeRecipient
+        self.publicAssetId = publicAssetId
+        self.publicAmountOut = publicAmountOut
+        self.relayerFeeAmount = relayerFeeAmount
+        self.memosBytes = memosBytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiJoinSplitCtxHashParams: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiJoinSplitCtxHashParams: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiJoinSplitCtxHashParams {
+        return
+            try FfiJoinSplitCtxHashParams(
+                programId: FfiConverterString.read(from: &buf), 
+                poolId: FfiConverterUInt32.read(from: &buf), 
+                outLaneId: FfiConverterUInt8.read(from: &buf), 
+                outputMask: FfiConverterUInt8.read(from: &buf), 
+                assetMode: FfiConverterUInt8.read(from: &buf), 
+                unwrapWsol: FfiConverterBool.read(from: &buf), 
+                recipient: FfiConverterOptionString.read(from: &buf), 
+                relayerFeeRecipient: FfiConverterOptionString.read(from: &buf), 
+                publicAssetId: FfiConverterData.read(from: &buf), 
+                publicAmountOut: FfiConverterUInt64.read(from: &buf), 
+                relayerFeeAmount: FfiConverterUInt64.read(from: &buf), 
+                memosBytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiJoinSplitCtxHashParams, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.programId, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt8.write(value.outLaneId, into: &buf)
+        FfiConverterUInt8.write(value.outputMask, into: &buf)
+        FfiConverterUInt8.write(value.assetMode, into: &buf)
+        FfiConverterBool.write(value.unwrapWsol, into: &buf)
+        FfiConverterOptionString.write(value.recipient, into: &buf)
+        FfiConverterOptionString.write(value.relayerFeeRecipient, into: &buf)
+        FfiConverterData.write(value.publicAssetId, into: &buf)
+        FfiConverterUInt64.write(value.publicAmountOut, into: &buf)
+        FfiConverterUInt64.write(value.relayerFeeAmount, into: &buf)
+        FfiConverterData.write(value.memosBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiJoinSplitCtxHashParams_lift(_ buf: RustBuffer) throws -> FfiJoinSplitCtxHashParams {
+    return try FfiConverterTypeFfiJoinSplitCtxHashParams.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiJoinSplitCtxHashParams_lower(_ value: FfiJoinSplitCtxHashParams) -> RustBuffer {
+    return FfiConverterTypeFfiJoinSplitCtxHashParams.lower(value)
+}
+
+
+public struct FfiJoinSplitParams: Equatable, Hashable {
     public var programId: String
     public var payer: String
     public var poolId: UInt32
-    public var outPageId: UInt64
-    public var input1PageIds: [UInt64]
-    public var input1PagesBytes: [Data]
-    public var note1: FfiOwnedNote
-    public var secretIndex1: UInt32
-    public var input2PageIds: [UInt64]
-    public var input2PagesBytes: [Data]
-    public var note2: FfiOwnedNote
-    public var secretIndex2: UInt32
-    public var ownerAddress: String
-    public var auditorPk32: Data?
+    public var vkId: UInt8
+    public var ckptSlotIdx: UInt16
+    public var outLaneId: UInt8
+    public var outSubSeq: UInt64
+    public var outRootSeq: UInt64
+    public var outMemoSeq: UInt64
+    public var outNfSeq: UInt64
+    public var outputMask: UInt8
+    public var assetMode: UInt8
+    public var unwrapWsol: Bool
+    public var splMint: String?
+    public var splVaultAta: String?
+    public var splTokenProg: String?
+    public var proof192: Data
+    public var nf0: Data
+    public var nf1: Data
+    public var cm0: Data
+    public var cm1: Data
+    public var cm2: Data
+    public var publicAmountOut: UInt64
+    public var relayerFeeAmount: UInt64
+    public var recipient: String
+    public var relayerFeeRecipient: String
+    public var memosBytes: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, input1PageIds: [UInt64], input1PagesBytes: [Data], note1: FfiOwnedNote, secretIndex1: UInt32, input2PageIds: [UInt64], input2PagesBytes: [Data], note2: FfiOwnedNote, secretIndex2: UInt32, ownerAddress: String, auditorPk32: Data?) {
+    public init(programId: String, payer: String, poolId: UInt32, vkId: UInt8, ckptSlotIdx: UInt16, outLaneId: UInt8, outSubSeq: UInt64, outRootSeq: UInt64, outMemoSeq: UInt64, outNfSeq: UInt64, outputMask: UInt8, assetMode: UInt8, unwrapWsol: Bool, splMint: String?, splVaultAta: String?, splTokenProg: String?, proof192: Data, nf0: Data, nf1: Data, cm0: Data, cm1: Data, cm2: Data, publicAmountOut: UInt64, relayerFeeAmount: UInt64, recipient: String, relayerFeeRecipient: String, memosBytes: Data) {
         self.programId = programId
         self.payer = payer
         self.poolId = poolId
-        self.outPageId = outPageId
-        self.input1PageIds = input1PageIds
-        self.input1PagesBytes = input1PagesBytes
-        self.note1 = note1
-        self.secretIndex1 = secretIndex1
-        self.input2PageIds = input2PageIds
-        self.input2PagesBytes = input2PagesBytes
-        self.note2 = note2
-        self.secretIndex2 = secretIndex2
-        self.ownerAddress = ownerAddress
-        self.auditorPk32 = auditorPk32
+        self.vkId = vkId
+        self.ckptSlotIdx = ckptSlotIdx
+        self.outLaneId = outLaneId
+        self.outSubSeq = outSubSeq
+        self.outRootSeq = outRootSeq
+        self.outMemoSeq = outMemoSeq
+        self.outNfSeq = outNfSeq
+        self.outputMask = outputMask
+        self.assetMode = assetMode
+        self.unwrapWsol = unwrapWsol
+        self.splMint = splMint
+        self.splVaultAta = splVaultAta
+        self.splTokenProg = splTokenProg
+        self.proof192 = proof192
+        self.nf0 = nf0
+        self.nf1 = nf1
+        self.cm0 = cm0
+        self.cm1 = cm1
+        self.cm2 = cm2
+        self.publicAmountOut = publicAmountOut
+        self.relayerFeeAmount = relayerFeeAmount
+        self.recipient = recipient
+        self.relayerFeeRecipient = relayerFeeRecipient
+        self.memosBytes = memosBytes
     }
 
     
@@ -1648,48 +1874,74 @@ public struct FfiMergeParams: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiMergeParams: Sendable {}
+extension FfiJoinSplitParams: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiMergeParams: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMergeParams {
+public struct FfiConverterTypeFfiJoinSplitParams: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiJoinSplitParams {
         return
-            try FfiMergeParams(
+            try FfiJoinSplitParams(
                 programId: FfiConverterString.read(from: &buf), 
                 payer: FfiConverterString.read(from: &buf), 
                 poolId: FfiConverterUInt32.read(from: &buf), 
-                outPageId: FfiConverterUInt64.read(from: &buf), 
-                input1PageIds: FfiConverterSequenceUInt64.read(from: &buf), 
-                input1PagesBytes: FfiConverterSequenceData.read(from: &buf), 
-                note1: FfiConverterTypeFfiOwnedNote.read(from: &buf), 
-                secretIndex1: FfiConverterUInt32.read(from: &buf), 
-                input2PageIds: FfiConverterSequenceUInt64.read(from: &buf), 
-                input2PagesBytes: FfiConverterSequenceData.read(from: &buf), 
-                note2: FfiConverterTypeFfiOwnedNote.read(from: &buf), 
-                secretIndex2: FfiConverterUInt32.read(from: &buf), 
-                ownerAddress: FfiConverterString.read(from: &buf), 
-                auditorPk32: FfiConverterOptionData.read(from: &buf)
+                vkId: FfiConverterUInt8.read(from: &buf), 
+                ckptSlotIdx: FfiConverterUInt16.read(from: &buf), 
+                outLaneId: FfiConverterUInt8.read(from: &buf), 
+                outSubSeq: FfiConverterUInt64.read(from: &buf), 
+                outRootSeq: FfiConverterUInt64.read(from: &buf), 
+                outMemoSeq: FfiConverterUInt64.read(from: &buf), 
+                outNfSeq: FfiConverterUInt64.read(from: &buf), 
+                outputMask: FfiConverterUInt8.read(from: &buf), 
+                assetMode: FfiConverterUInt8.read(from: &buf), 
+                unwrapWsol: FfiConverterBool.read(from: &buf), 
+                splMint: FfiConverterOptionString.read(from: &buf), 
+                splVaultAta: FfiConverterOptionString.read(from: &buf), 
+                splTokenProg: FfiConverterOptionString.read(from: &buf), 
+                proof192: FfiConverterData.read(from: &buf), 
+                nf0: FfiConverterData.read(from: &buf), 
+                nf1: FfiConverterData.read(from: &buf), 
+                cm0: FfiConverterData.read(from: &buf), 
+                cm1: FfiConverterData.read(from: &buf), 
+                cm2: FfiConverterData.read(from: &buf), 
+                publicAmountOut: FfiConverterUInt64.read(from: &buf), 
+                relayerFeeAmount: FfiConverterUInt64.read(from: &buf), 
+                recipient: FfiConverterString.read(from: &buf), 
+                relayerFeeRecipient: FfiConverterString.read(from: &buf), 
+                memosBytes: FfiConverterData.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiMergeParams, into buf: inout [UInt8]) {
+    public static func write(_ value: FfiJoinSplitParams, into buf: inout [UInt8]) {
         FfiConverterString.write(value.programId, into: &buf)
         FfiConverterString.write(value.payer, into: &buf)
         FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.outPageId, into: &buf)
-        FfiConverterSequenceUInt64.write(value.input1PageIds, into: &buf)
-        FfiConverterSequenceData.write(value.input1PagesBytes, into: &buf)
-        FfiConverterTypeFfiOwnedNote.write(value.note1, into: &buf)
-        FfiConverterUInt32.write(value.secretIndex1, into: &buf)
-        FfiConverterSequenceUInt64.write(value.input2PageIds, into: &buf)
-        FfiConverterSequenceData.write(value.input2PagesBytes, into: &buf)
-        FfiConverterTypeFfiOwnedNote.write(value.note2, into: &buf)
-        FfiConverterUInt32.write(value.secretIndex2, into: &buf)
-        FfiConverterString.write(value.ownerAddress, into: &buf)
-        FfiConverterOptionData.write(value.auditorPk32, into: &buf)
+        FfiConverterUInt8.write(value.vkId, into: &buf)
+        FfiConverterUInt16.write(value.ckptSlotIdx, into: &buf)
+        FfiConverterUInt8.write(value.outLaneId, into: &buf)
+        FfiConverterUInt64.write(value.outSubSeq, into: &buf)
+        FfiConverterUInt64.write(value.outRootSeq, into: &buf)
+        FfiConverterUInt64.write(value.outMemoSeq, into: &buf)
+        FfiConverterUInt64.write(value.outNfSeq, into: &buf)
+        FfiConverterUInt8.write(value.outputMask, into: &buf)
+        FfiConverterUInt8.write(value.assetMode, into: &buf)
+        FfiConverterBool.write(value.unwrapWsol, into: &buf)
+        FfiConverterOptionString.write(value.splMint, into: &buf)
+        FfiConverterOptionString.write(value.splVaultAta, into: &buf)
+        FfiConverterOptionString.write(value.splTokenProg, into: &buf)
+        FfiConverterData.write(value.proof192, into: &buf)
+        FfiConverterData.write(value.nf0, into: &buf)
+        FfiConverterData.write(value.nf1, into: &buf)
+        FfiConverterData.write(value.cm0, into: &buf)
+        FfiConverterData.write(value.cm1, into: &buf)
+        FfiConverterData.write(value.cm2, into: &buf)
+        FfiConverterUInt64.write(value.publicAmountOut, into: &buf)
+        FfiConverterUInt64.write(value.relayerFeeAmount, into: &buf)
+        FfiConverterString.write(value.recipient, into: &buf)
+        FfiConverterString.write(value.relayerFeeRecipient, into: &buf)
+        FfiConverterData.write(value.memosBytes, into: &buf)
     }
 }
 
@@ -1697,51 +1949,39 @@ public struct FfiConverterTypeFfiMergeParams: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiMergeParams_lift(_ buf: RustBuffer) throws -> FfiMergeParams {
-    return try FfiConverterTypeFfiMergeParams.lift(buf)
+public func FfiConverterTypeFfiJoinSplitParams_lift(_ buf: RustBuffer) throws -> FfiJoinSplitParams {
+    return try FfiConverterTypeFfiJoinSplitParams.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiMergeParams_lower(_ value: FfiMergeParams) -> RustBuffer {
-    return FfiConverterTypeFfiMergeParams.lower(value)
+public func FfiConverterTypeFfiJoinSplitParams_lower(_ value: FfiJoinSplitParams) -> RustBuffer {
+    return FfiConverterTypeFfiJoinSplitParams.lower(value)
 }
 
 
-public struct FfiOwnedNote: Equatable, Hashable {
-    public var pageId: UInt64
-    public var slotIndex: UInt8
-    public var mint: Data
-    public var amount: UInt64
-    public var isDynamicOutput: Bool
-    public var stealthPk: Data
-    public var assetTag: Data
-    public var commitment: Data
-    public var assetBlinding: Data
-    public var valueBlinding: Data
-    public var stealthScalar: Data
-    public var spendX: Data?
-    public var nullifier: Data?
-    public var nullifierPda: String?
+public struct FfiLaneHeader: Equatable, Hashable {
+    public var version: UInt8
+    public var laneId: UInt8
+    public var bump: UInt8
+    public var rentBump: UInt8
+    public var poolId: UInt32
+    public var nextLeaf: UInt64
+    public var nfCount: UInt64
+    public var currentRoot: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(pageId: UInt64, slotIndex: UInt8, mint: Data, amount: UInt64, isDynamicOutput: Bool, stealthPk: Data, assetTag: Data, commitment: Data, assetBlinding: Data, valueBlinding: Data, stealthScalar: Data, spendX: Data?, nullifier: Data?, nullifierPda: String?) {
-        self.pageId = pageId
-        self.slotIndex = slotIndex
-        self.mint = mint
-        self.amount = amount
-        self.isDynamicOutput = isDynamicOutput
-        self.stealthPk = stealthPk
-        self.assetTag = assetTag
-        self.commitment = commitment
-        self.assetBlinding = assetBlinding
-        self.valueBlinding = valueBlinding
-        self.stealthScalar = stealthScalar
-        self.spendX = spendX
-        self.nullifier = nullifier
-        self.nullifierPda = nullifierPda
+    public init(version: UInt8, laneId: UInt8, bump: UInt8, rentBump: UInt8, poolId: UInt32, nextLeaf: UInt64, nfCount: UInt64, currentRoot: Data) {
+        self.version = version
+        self.laneId = laneId
+        self.bump = bump
+        self.rentBump = rentBump
+        self.poolId = poolId
+        self.nextLeaf = nextLeaf
+        self.nfCount = nfCount
+        self.currentRoot = currentRoot
     }
 
     
@@ -1750,48 +1990,36 @@ public struct FfiOwnedNote: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiOwnedNote: Sendable {}
+extension FfiLaneHeader: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiOwnedNote: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOwnedNote {
+public struct FfiConverterTypeFfiLaneHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLaneHeader {
         return
-            try FfiOwnedNote(
-                pageId: FfiConverterUInt64.read(from: &buf), 
-                slotIndex: FfiConverterUInt8.read(from: &buf), 
-                mint: FfiConverterData.read(from: &buf), 
-                amount: FfiConverterUInt64.read(from: &buf), 
-                isDynamicOutput: FfiConverterBool.read(from: &buf), 
-                stealthPk: FfiConverterData.read(from: &buf), 
-                assetTag: FfiConverterData.read(from: &buf), 
-                commitment: FfiConverterData.read(from: &buf), 
-                assetBlinding: FfiConverterData.read(from: &buf), 
-                valueBlinding: FfiConverterData.read(from: &buf), 
-                stealthScalar: FfiConverterData.read(from: &buf), 
-                spendX: FfiConverterOptionData.read(from: &buf), 
-                nullifier: FfiConverterOptionData.read(from: &buf), 
-                nullifierPda: FfiConverterOptionString.read(from: &buf)
+            try FfiLaneHeader(
+                version: FfiConverterUInt8.read(from: &buf), 
+                laneId: FfiConverterUInt8.read(from: &buf), 
+                bump: FfiConverterUInt8.read(from: &buf), 
+                rentBump: FfiConverterUInt8.read(from: &buf), 
+                poolId: FfiConverterUInt32.read(from: &buf), 
+                nextLeaf: FfiConverterUInt64.read(from: &buf), 
+                nfCount: FfiConverterUInt64.read(from: &buf), 
+                currentRoot: FfiConverterData.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiOwnedNote, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.pageId, into: &buf)
-        FfiConverterUInt8.write(value.slotIndex, into: &buf)
-        FfiConverterData.write(value.mint, into: &buf)
-        FfiConverterUInt64.write(value.amount, into: &buf)
-        FfiConverterBool.write(value.isDynamicOutput, into: &buf)
-        FfiConverterData.write(value.stealthPk, into: &buf)
-        FfiConverterData.write(value.assetTag, into: &buf)
-        FfiConverterData.write(value.commitment, into: &buf)
-        FfiConverterData.write(value.assetBlinding, into: &buf)
-        FfiConverterData.write(value.valueBlinding, into: &buf)
-        FfiConverterData.write(value.stealthScalar, into: &buf)
-        FfiConverterOptionData.write(value.spendX, into: &buf)
-        FfiConverterOptionData.write(value.nullifier, into: &buf)
-        FfiConverterOptionString.write(value.nullifierPda, into: &buf)
+    public static func write(_ value: FfiLaneHeader, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.version, into: &buf)
+        FfiConverterUInt8.write(value.laneId, into: &buf)
+        FfiConverterUInt8.write(value.bump, into: &buf)
+        FfiConverterUInt8.write(value.rentBump, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt64.write(value.nextLeaf, into: &buf)
+        FfiConverterUInt64.write(value.nfCount, into: &buf)
+        FfiConverterData.write(value.currentRoot, into: &buf)
     }
 }
 
@@ -1799,19 +2027,19 @@ public struct FfiConverterTypeFfiOwnedNote: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiOwnedNote_lift(_ buf: RustBuffer) throws -> FfiOwnedNote {
-    return try FfiConverterTypeFfiOwnedNote.lift(buf)
+public func FfiConverterTypeFfiLaneHeader_lift(_ buf: RustBuffer) throws -> FfiLaneHeader {
+    return try FfiConverterTypeFfiLaneHeader.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiOwnedNote_lower(_ value: FfiOwnedNote) -> RustBuffer {
-    return FfiConverterTypeFfiOwnedNote.lower(value)
+public func FfiConverterTypeFfiLaneHeader_lower(_ value: FfiLaneHeader) -> RustBuffer {
+    return FfiConverterTypeFfiLaneHeader.lower(value)
 }
 
 
-public struct FfiPda: Equatable, Hashable {
+public struct FfiPdaResult: Equatable, Hashable {
     public var address: String
     public var bump: UInt8
 
@@ -1828,22 +2056,22 @@ public struct FfiPda: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiPda: Sendable {}
+extension FfiPdaResult: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiPda: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPda {
+public struct FfiConverterTypeFfiPdaResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPdaResult {
         return
-            try FfiPda(
+            try FfiPdaResult(
                 address: FfiConverterString.read(from: &buf), 
                 bump: FfiConverterUInt8.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiPda, into buf: inout [UInt8]) {
+    public static func write(_ value: FfiPdaResult, into buf: inout [UInt8]) {
         FfiConverterString.write(value.address, into: &buf)
         FfiConverterUInt8.write(value.bump, into: &buf)
     }
@@ -1853,55 +2081,49 @@ public struct FfiConverterTypeFfiPda: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPda_lift(_ buf: RustBuffer) throws -> FfiPda {
-    return try FfiConverterTypeFfiPda.lift(buf)
+public func FfiConverterTypeFfiPdaResult_lift(_ buf: RustBuffer) throws -> FfiPdaResult {
+    return try FfiConverterTypeFfiPdaResult.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPda_lower(_ value: FfiPda) -> RustBuffer {
-    return FfiConverterTypeFfiPda.lower(value)
+public func FfiConverterTypeFfiPdaResult_lower(_ value: FfiPdaResult) -> RustBuffer {
+    return FfiConverterTypeFfiPdaResult.lower(value)
 }
 
 
 public struct FfiPoolState: Equatable, Hashable {
     public var version: UInt8
     public var bump: UInt8
-    public var mode: UInt8
     public var paused: Bool
-    public var poolId: UInt32
-    public var currentPageId: UInt64
-    public var totalNotes: UInt64
-    public var totalSpends: UInt64
-    public var pageRentFeeLamports: UInt64
-    public var authority: String
-    public var auditorPk: Data
-    public var auditorLocked: Bool
-    public var vaultAuthBump: UInt8
-    public var solVaultBump: UInt8
-    public var pageRentBump: UInt8
     public var activeLanes: UInt8
+    public var poolId: UInt32
+    public var ckptInterval: UInt64
+    public var maxCkptAge: UInt64
+    public var authorityB58: String
+    public var solVaultBump: UInt8
+    public var vaultAuthBump: UInt8
+    public var mode: UInt8
+    public var noteRentFee: UInt64
+    public var nfRentFee: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(version: UInt8, bump: UInt8, mode: UInt8, paused: Bool, poolId: UInt32, currentPageId: UInt64, totalNotes: UInt64, totalSpends: UInt64, pageRentFeeLamports: UInt64, authority: String, auditorPk: Data, auditorLocked: Bool, vaultAuthBump: UInt8, solVaultBump: UInt8, pageRentBump: UInt8, activeLanes: UInt8) {
+    public init(version: UInt8, bump: UInt8, paused: Bool, activeLanes: UInt8, poolId: UInt32, ckptInterval: UInt64, maxCkptAge: UInt64, authorityB58: String, solVaultBump: UInt8, vaultAuthBump: UInt8, mode: UInt8, noteRentFee: UInt64, nfRentFee: UInt64) {
         self.version = version
         self.bump = bump
-        self.mode = mode
         self.paused = paused
-        self.poolId = poolId
-        self.currentPageId = currentPageId
-        self.totalNotes = totalNotes
-        self.totalSpends = totalSpends
-        self.pageRentFeeLamports = pageRentFeeLamports
-        self.authority = authority
-        self.auditorPk = auditorPk
-        self.auditorLocked = auditorLocked
-        self.vaultAuthBump = vaultAuthBump
-        self.solVaultBump = solVaultBump
-        self.pageRentBump = pageRentBump
         self.activeLanes = activeLanes
+        self.poolId = poolId
+        self.ckptInterval = ckptInterval
+        self.maxCkptAge = maxCkptAge
+        self.authorityB58 = authorityB58
+        self.solVaultBump = solVaultBump
+        self.vaultAuthBump = vaultAuthBump
+        self.mode = mode
+        self.noteRentFee = noteRentFee
+        self.nfRentFee = nfRentFee
     }
 
     
@@ -1922,40 +2144,34 @@ public struct FfiConverterTypeFfiPoolState: FfiConverterRustBuffer {
             try FfiPoolState(
                 version: FfiConverterUInt8.read(from: &buf), 
                 bump: FfiConverterUInt8.read(from: &buf), 
-                mode: FfiConverterUInt8.read(from: &buf), 
                 paused: FfiConverterBool.read(from: &buf), 
+                activeLanes: FfiConverterUInt8.read(from: &buf), 
                 poolId: FfiConverterUInt32.read(from: &buf), 
-                currentPageId: FfiConverterUInt64.read(from: &buf), 
-                totalNotes: FfiConverterUInt64.read(from: &buf), 
-                totalSpends: FfiConverterUInt64.read(from: &buf), 
-                pageRentFeeLamports: FfiConverterUInt64.read(from: &buf), 
-                authority: FfiConverterString.read(from: &buf), 
-                auditorPk: FfiConverterData.read(from: &buf), 
-                auditorLocked: FfiConverterBool.read(from: &buf), 
-                vaultAuthBump: FfiConverterUInt8.read(from: &buf), 
+                ckptInterval: FfiConverterUInt64.read(from: &buf), 
+                maxCkptAge: FfiConverterUInt64.read(from: &buf), 
+                authorityB58: FfiConverterString.read(from: &buf), 
                 solVaultBump: FfiConverterUInt8.read(from: &buf), 
-                pageRentBump: FfiConverterUInt8.read(from: &buf), 
-                activeLanes: FfiConverterUInt8.read(from: &buf)
+                vaultAuthBump: FfiConverterUInt8.read(from: &buf), 
+                mode: FfiConverterUInt8.read(from: &buf), 
+                noteRentFee: FfiConverterUInt64.read(from: &buf), 
+                nfRentFee: FfiConverterUInt64.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiPoolState, into buf: inout [UInt8]) {
         FfiConverterUInt8.write(value.version, into: &buf)
         FfiConverterUInt8.write(value.bump, into: &buf)
-        FfiConverterUInt8.write(value.mode, into: &buf)
         FfiConverterBool.write(value.paused, into: &buf)
-        FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.currentPageId, into: &buf)
-        FfiConverterUInt64.write(value.totalNotes, into: &buf)
-        FfiConverterUInt64.write(value.totalSpends, into: &buf)
-        FfiConverterUInt64.write(value.pageRentFeeLamports, into: &buf)
-        FfiConverterString.write(value.authority, into: &buf)
-        FfiConverterData.write(value.auditorPk, into: &buf)
-        FfiConverterBool.write(value.auditorLocked, into: &buf)
-        FfiConverterUInt8.write(value.vaultAuthBump, into: &buf)
-        FfiConverterUInt8.write(value.solVaultBump, into: &buf)
-        FfiConverterUInt8.write(value.pageRentBump, into: &buf)
         FfiConverterUInt8.write(value.activeLanes, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt64.write(value.ckptInterval, into: &buf)
+        FfiConverterUInt64.write(value.maxCkptAge, into: &buf)
+        FfiConverterString.write(value.authorityB58, into: &buf)
+        FfiConverterUInt8.write(value.solVaultBump, into: &buf)
+        FfiConverterUInt8.write(value.vaultAuthBump, into: &buf)
+        FfiConverterUInt8.write(value.mode, into: &buf)
+        FfiConverterUInt64.write(value.noteRentFee, into: &buf)
+        FfiConverterUInt64.write(value.nfRentFee, into: &buf)
     }
 }
 
@@ -1975,25 +2191,29 @@ public func FfiConverterTypeFfiPoolState_lower(_ value: FfiPoolState) -> RustBuf
 }
 
 
-public struct FfiPreparedEscrowAccounts: Equatable, Hashable {
-    public var escrowPda: String
-    public var escrowInAta: String
-    public var escrowOutAta: String
-    public var escrowIdx: UInt8
-    public var escrowInIdx: UInt8
-    public var escrowOutIdx: UInt8
-    public var accounts: [FfiAccountMeta]
+public struct FfiRootCheckpoint: Equatable, Hashable {
+    public var version: UInt8
+    public var bump: UInt8
+    public var slotIdx: UInt16
+    public var poolId: UInt32
+    public var epochId: UInt64
+    public var publishedSlot: UInt64
+    public var superRoot: Data
+    public var laneRoots: [Data]
+    public var laneCounts: [UInt64]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(escrowPda: String, escrowInAta: String, escrowOutAta: String, escrowIdx: UInt8, escrowInIdx: UInt8, escrowOutIdx: UInt8, accounts: [FfiAccountMeta]) {
-        self.escrowPda = escrowPda
-        self.escrowInAta = escrowInAta
-        self.escrowOutAta = escrowOutAta
-        self.escrowIdx = escrowIdx
-        self.escrowInIdx = escrowInIdx
-        self.escrowOutIdx = escrowOutIdx
-        self.accounts = accounts
+    public init(version: UInt8, bump: UInt8, slotIdx: UInt16, poolId: UInt32, epochId: UInt64, publishedSlot: UInt64, superRoot: Data, laneRoots: [Data], laneCounts: [UInt64]) {
+        self.version = version
+        self.bump = bump
+        self.slotIdx = slotIdx
+        self.poolId = poolId
+        self.epochId = epochId
+        self.publishedSlot = publishedSlot
+        self.superRoot = superRoot
+        self.laneRoots = laneRoots
+        self.laneCounts = laneCounts
     }
 
     
@@ -2002,34 +2222,38 @@ public struct FfiPreparedEscrowAccounts: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension FfiPreparedEscrowAccounts: Sendable {}
+extension FfiRootCheckpoint: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiPreparedEscrowAccounts: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPreparedEscrowAccounts {
+public struct FfiConverterTypeFfiRootCheckpoint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiRootCheckpoint {
         return
-            try FfiPreparedEscrowAccounts(
-                escrowPda: FfiConverterString.read(from: &buf), 
-                escrowInAta: FfiConverterString.read(from: &buf), 
-                escrowOutAta: FfiConverterString.read(from: &buf), 
-                escrowIdx: FfiConverterUInt8.read(from: &buf), 
-                escrowInIdx: FfiConverterUInt8.read(from: &buf), 
-                escrowOutIdx: FfiConverterUInt8.read(from: &buf), 
-                accounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf)
+            try FfiRootCheckpoint(
+                version: FfiConverterUInt8.read(from: &buf), 
+                bump: FfiConverterUInt8.read(from: &buf), 
+                slotIdx: FfiConverterUInt16.read(from: &buf), 
+                poolId: FfiConverterUInt32.read(from: &buf), 
+                epochId: FfiConverterUInt64.read(from: &buf), 
+                publishedSlot: FfiConverterUInt64.read(from: &buf), 
+                superRoot: FfiConverterData.read(from: &buf), 
+                laneRoots: FfiConverterSequenceData.read(from: &buf), 
+                laneCounts: FfiConverterSequenceUInt64.read(from: &buf)
         )
     }
 
-    public static func write(_ value: FfiPreparedEscrowAccounts, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.escrowPda, into: &buf)
-        FfiConverterString.write(value.escrowInAta, into: &buf)
-        FfiConverterString.write(value.escrowOutAta, into: &buf)
-        FfiConverterUInt8.write(value.escrowIdx, into: &buf)
-        FfiConverterUInt8.write(value.escrowInIdx, into: &buf)
-        FfiConverterUInt8.write(value.escrowOutIdx, into: &buf)
-        FfiConverterSequenceTypeFfiAccountMeta.write(value.accounts, into: &buf)
+    public static func write(_ value: FfiRootCheckpoint, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.version, into: &buf)
+        FfiConverterUInt8.write(value.bump, into: &buf)
+        FfiConverterUInt16.write(value.slotIdx, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt64.write(value.epochId, into: &buf)
+        FfiConverterUInt64.write(value.publishedSlot, into: &buf)
+        FfiConverterData.write(value.superRoot, into: &buf)
+        FfiConverterSequenceData.write(value.laneRoots, into: &buf)
+        FfiConverterSequenceUInt64.write(value.laneCounts, into: &buf)
     }
 }
 
@@ -2037,43 +2261,39 @@ public struct FfiConverterTypeFfiPreparedEscrowAccounts: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPreparedEscrowAccounts_lift(_ buf: RustBuffer) throws -> FfiPreparedEscrowAccounts {
-    return try FfiConverterTypeFfiPreparedEscrowAccounts.lift(buf)
+public func FfiConverterTypeFfiRootCheckpoint_lift(_ buf: RustBuffer) throws -> FfiRootCheckpoint {
+    return try FfiConverterTypeFfiRootCheckpoint.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiPreparedEscrowAccounts_lower(_ value: FfiPreparedEscrowAccounts) -> RustBuffer {
-    return FfiConverterTypeFfiPreparedEscrowAccounts.lower(value)
+public func FfiConverterTypeFfiRootCheckpoint_lower(_ value: FfiRootCheckpoint) -> RustBuffer {
+    return FfiConverterTypeFfiRootCheckpoint.lower(value)
 }
 
 
 public struct FfiSelectiveDisclosureProof: Equatable, Hashable {
-    public var version: UInt8
-    public var pageId: UInt64
-    public var slotIndex: UInt8
-    public var stealthPkB58: String
-    public var assetTagB58: String
-    public var commitmentB58: String
-    public var mintB58: String
+    public var poolId: UInt32
+    public var laneId: UInt8
+    public var leafIndex: UInt64
+    public var stealthOwner: Data
+    public var mint: Data
     public var amount: UInt64
-    public var assetBlindingB58: String
-    public var valueBlindingB58: String
+    public var blinding: Data
+    public var commitment: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(version: UInt8, pageId: UInt64, slotIndex: UInt8, stealthPkB58: String, assetTagB58: String, commitmentB58: String, mintB58: String, amount: UInt64, assetBlindingB58: String, valueBlindingB58: String) {
-        self.version = version
-        self.pageId = pageId
-        self.slotIndex = slotIndex
-        self.stealthPkB58 = stealthPkB58
-        self.assetTagB58 = assetTagB58
-        self.commitmentB58 = commitmentB58
-        self.mintB58 = mintB58
+    public init(poolId: UInt32, laneId: UInt8, leafIndex: UInt64, stealthOwner: Data, mint: Data, amount: UInt64, blinding: Data, commitment: Data) {
+        self.poolId = poolId
+        self.laneId = laneId
+        self.leafIndex = leafIndex
+        self.stealthOwner = stealthOwner
+        self.mint = mint
         self.amount = amount
-        self.assetBlindingB58 = assetBlindingB58
-        self.valueBlindingB58 = valueBlindingB58
+        self.blinding = blinding
+        self.commitment = commitment
     }
 
     
@@ -2092,30 +2312,26 @@ public struct FfiConverterTypeFfiSelectiveDisclosureProof: FfiConverterRustBuffe
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSelectiveDisclosureProof {
         return
             try FfiSelectiveDisclosureProof(
-                version: FfiConverterUInt8.read(from: &buf), 
-                pageId: FfiConverterUInt64.read(from: &buf), 
-                slotIndex: FfiConverterUInt8.read(from: &buf), 
-                stealthPkB58: FfiConverterString.read(from: &buf), 
-                assetTagB58: FfiConverterString.read(from: &buf), 
-                commitmentB58: FfiConverterString.read(from: &buf), 
-                mintB58: FfiConverterString.read(from: &buf), 
+                poolId: FfiConverterUInt32.read(from: &buf), 
+                laneId: FfiConverterUInt8.read(from: &buf), 
+                leafIndex: FfiConverterUInt64.read(from: &buf), 
+                stealthOwner: FfiConverterData.read(from: &buf), 
+                mint: FfiConverterData.read(from: &buf), 
                 amount: FfiConverterUInt64.read(from: &buf), 
-                assetBlindingB58: FfiConverterString.read(from: &buf), 
-                valueBlindingB58: FfiConverterString.read(from: &buf)
+                blinding: FfiConverterData.read(from: &buf), 
+                commitment: FfiConverterData.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiSelectiveDisclosureProof, into buf: inout [UInt8]) {
-        FfiConverterUInt8.write(value.version, into: &buf)
-        FfiConverterUInt64.write(value.pageId, into: &buf)
-        FfiConverterUInt8.write(value.slotIndex, into: &buf)
-        FfiConverterString.write(value.stealthPkB58, into: &buf)
-        FfiConverterString.write(value.assetTagB58, into: &buf)
-        FfiConverterString.write(value.commitmentB58, into: &buf)
-        FfiConverterString.write(value.mintB58, into: &buf)
+        FfiConverterUInt32.write(value.poolId, into: &buf)
+        FfiConverterUInt8.write(value.laneId, into: &buf)
+        FfiConverterUInt64.write(value.leafIndex, into: &buf)
+        FfiConverterData.write(value.stealthOwner, into: &buf)
+        FfiConverterData.write(value.mint, into: &buf)
         FfiConverterUInt64.write(value.amount, into: &buf)
-        FfiConverterString.write(value.assetBlindingB58, into: &buf)
-        FfiConverterString.write(value.valueBlindingB58, into: &buf)
+        FfiConverterData.write(value.blinding, into: &buf)
+        FfiConverterData.write(value.commitment, into: &buf)
     }
 }
 
@@ -2132,210 +2348,6 @@ public func FfiConverterTypeFfiSelectiveDisclosureProof_lift(_ buf: RustBuffer) 
 #endif
 public func FfiConverterTypeFfiSelectiveDisclosureProof_lower(_ value: FfiSelectiveDisclosureProof) -> RustBuffer {
     return FfiConverterTypeFfiSelectiveDisclosureProof.lower(value)
-}
-
-
-public struct FfiTransferParams: Equatable, Hashable {
-    public var programId: String
-    public var payer: String
-    public var poolId: UInt32
-    public var outPageId: UInt64
-    public var inputPageIds: [UInt64]
-    public var inputPagesBytes: [Data]
-    public var inputNote: FfiOwnedNote
-    public var secretIndex: UInt32
-    public var recipientAddress: String
-    public var changeAddress: String
-    public var payAmount: UInt64
-    public var auditorPk32: Data?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, inputPageIds: [UInt64], inputPagesBytes: [Data], inputNote: FfiOwnedNote, secretIndex: UInt32, recipientAddress: String, changeAddress: String, payAmount: UInt64, auditorPk32: Data?) {
-        self.programId = programId
-        self.payer = payer
-        self.poolId = poolId
-        self.outPageId = outPageId
-        self.inputPageIds = inputPageIds
-        self.inputPagesBytes = inputPagesBytes
-        self.inputNote = inputNote
-        self.secretIndex = secretIndex
-        self.recipientAddress = recipientAddress
-        self.changeAddress = changeAddress
-        self.payAmount = payAmount
-        self.auditorPk32 = auditorPk32
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiTransferParams: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiTransferParams: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferParams {
-        return
-            try FfiTransferParams(
-                programId: FfiConverterString.read(from: &buf), 
-                payer: FfiConverterString.read(from: &buf), 
-                poolId: FfiConverterUInt32.read(from: &buf), 
-                outPageId: FfiConverterUInt64.read(from: &buf), 
-                inputPageIds: FfiConverterSequenceUInt64.read(from: &buf), 
-                inputPagesBytes: FfiConverterSequenceData.read(from: &buf), 
-                inputNote: FfiConverterTypeFfiOwnedNote.read(from: &buf), 
-                secretIndex: FfiConverterUInt32.read(from: &buf), 
-                recipientAddress: FfiConverterString.read(from: &buf), 
-                changeAddress: FfiConverterString.read(from: &buf), 
-                payAmount: FfiConverterUInt64.read(from: &buf), 
-                auditorPk32: FfiConverterOptionData.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiTransferParams, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.programId, into: &buf)
-        FfiConverterString.write(value.payer, into: &buf)
-        FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.outPageId, into: &buf)
-        FfiConverterSequenceUInt64.write(value.inputPageIds, into: &buf)
-        FfiConverterSequenceData.write(value.inputPagesBytes, into: &buf)
-        FfiConverterTypeFfiOwnedNote.write(value.inputNote, into: &buf)
-        FfiConverterUInt32.write(value.secretIndex, into: &buf)
-        FfiConverterString.write(value.recipientAddress, into: &buf)
-        FfiConverterString.write(value.changeAddress, into: &buf)
-        FfiConverterUInt64.write(value.payAmount, into: &buf)
-        FfiConverterOptionData.write(value.auditorPk32, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiTransferParams_lift(_ buf: RustBuffer) throws -> FfiTransferParams {
-    return try FfiConverterTypeFfiTransferParams.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiTransferParams_lower(_ value: FfiTransferParams) -> RustBuffer {
-    return FfiConverterTypeFfiTransferParams.lower(value)
-}
-
-
-public struct FfiWithdrawParams: Equatable, Hashable {
-    public var programId: String
-    public var payer: String
-    public var poolId: UInt32
-    public var outPageId: UInt64
-    public var inputPageIds: [UInt64]
-    public var inputPagesBytes: [Data]
-    public var inputNote: FfiOwnedNote
-    public var secretIndex: UInt32
-    public var recipientAccount: String
-    public var changeAddress: String
-    public var amount: UInt64
-    public var relayerFee: UInt64
-    public var feeRecipient: String?
-    public var unwrapWsol: Bool
-    public var splTokenProgram: String?
-    public var auditorPk32: Data?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(programId: String, payer: String, poolId: UInt32, outPageId: UInt64, inputPageIds: [UInt64], inputPagesBytes: [Data], inputNote: FfiOwnedNote, secretIndex: UInt32, recipientAccount: String, changeAddress: String, amount: UInt64, relayerFee: UInt64, feeRecipient: String?, unwrapWsol: Bool, splTokenProgram: String?, auditorPk32: Data?) {
-        self.programId = programId
-        self.payer = payer
-        self.poolId = poolId
-        self.outPageId = outPageId
-        self.inputPageIds = inputPageIds
-        self.inputPagesBytes = inputPagesBytes
-        self.inputNote = inputNote
-        self.secretIndex = secretIndex
-        self.recipientAccount = recipientAccount
-        self.changeAddress = changeAddress
-        self.amount = amount
-        self.relayerFee = relayerFee
-        self.feeRecipient = feeRecipient
-        self.unwrapWsol = unwrapWsol
-        self.splTokenProgram = splTokenProgram
-        self.auditorPk32 = auditorPk32
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension FfiWithdrawParams: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiWithdrawParams: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiWithdrawParams {
-        return
-            try FfiWithdrawParams(
-                programId: FfiConverterString.read(from: &buf), 
-                payer: FfiConverterString.read(from: &buf), 
-                poolId: FfiConverterUInt32.read(from: &buf), 
-                outPageId: FfiConverterUInt64.read(from: &buf), 
-                inputPageIds: FfiConverterSequenceUInt64.read(from: &buf), 
-                inputPagesBytes: FfiConverterSequenceData.read(from: &buf), 
-                inputNote: FfiConverterTypeFfiOwnedNote.read(from: &buf), 
-                secretIndex: FfiConverterUInt32.read(from: &buf), 
-                recipientAccount: FfiConverterString.read(from: &buf), 
-                changeAddress: FfiConverterString.read(from: &buf), 
-                amount: FfiConverterUInt64.read(from: &buf), 
-                relayerFee: FfiConverterUInt64.read(from: &buf), 
-                feeRecipient: FfiConverterOptionString.read(from: &buf), 
-                unwrapWsol: FfiConverterBool.read(from: &buf), 
-                splTokenProgram: FfiConverterOptionString.read(from: &buf), 
-                auditorPk32: FfiConverterOptionData.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: FfiWithdrawParams, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.programId, into: &buf)
-        FfiConverterString.write(value.payer, into: &buf)
-        FfiConverterUInt32.write(value.poolId, into: &buf)
-        FfiConverterUInt64.write(value.outPageId, into: &buf)
-        FfiConverterSequenceUInt64.write(value.inputPageIds, into: &buf)
-        FfiConverterSequenceData.write(value.inputPagesBytes, into: &buf)
-        FfiConverterTypeFfiOwnedNote.write(value.inputNote, into: &buf)
-        FfiConverterUInt32.write(value.secretIndex, into: &buf)
-        FfiConverterString.write(value.recipientAccount, into: &buf)
-        FfiConverterString.write(value.changeAddress, into: &buf)
-        FfiConverterUInt64.write(value.amount, into: &buf)
-        FfiConverterUInt64.write(value.relayerFee, into: &buf)
-        FfiConverterOptionString.write(value.feeRecipient, into: &buf)
-        FfiConverterBool.write(value.unwrapWsol, into: &buf)
-        FfiConverterOptionString.write(value.splTokenProgram, into: &buf)
-        FfiConverterOptionData.write(value.auditorPk32, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiWithdrawParams_lift(_ buf: RustBuffer) throws -> FfiWithdrawParams {
-    return try FfiConverterTypeFfiWithdrawParams.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiWithdrawParams_lower(_ value: FfiWithdrawParams) -> RustBuffer {
-    return FfiConverterTypeFfiWithdrawParams.lower(value)
 }
 
 
@@ -2450,8 +2462,8 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
-    typealias SwiftType = Data?
+fileprivate struct FfiConverterOptionTypeFfiDecryptedMemo: FfiConverterRustBuffer {
+    typealias SwiftType = FfiDecryptedMemo?
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
@@ -2459,13 +2471,37 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
             return
         }
         writeInt(&buf, Int8(1))
-        FfiConverterData.write(value, into: &buf)
+        FfiConverterTypeFfiDecryptedMemo.write(value, into: &buf)
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
-        case 1: return try FfiConverterData.read(from: &buf)
+        case 1: return try FfiConverterTypeFfiDecryptedMemo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -2570,186 +2606,170 @@ fileprivate struct FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffe
         return seq
     }
 }
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeFfiBuiltInstruction: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiBuiltInstruction]
-
-    public static func write(_ value: [FfiBuiltInstruction], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiBuiltInstruction.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiBuiltInstruction] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiBuiltInstruction]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeFfiBuiltInstruction.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiOwnedNote]
-
-    public static func write(_ value: [FfiOwnedNote], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiOwnedNote.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOwnedNote] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiOwnedNote]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeFfiOwnedNote.read(from: &buf))
-        }
-        return seq
-    }
-}
-public func assetGenerator(mint32: Data)throws  -> Data  {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func buildDepositSolIx(params: FfiDepositSolParams)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_asset_generator(
-        FfiConverterData.lower(mint32),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_build_deposit_sol_ix(
+        FfiConverterTypeFfiDepositSolParams_lower(params),uniffiCallStatus
     )
 })
 }
-public func auditorDecryptNote(auditorSk32: Data, s132: Data, s232: Data, m132: Data, m232: Data)throws  -> FfiAuditorDecryptedNote  {
-    return try  FfiConverterTypeFfiAuditorDecryptedNote_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func buildDepositSplIx(params: FfiDepositSplParams)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_auditor_decrypt_note(
-        FfiConverterData.lower(auditorSk32),
-        FfiConverterData.lower(s132),
-        FfiConverterData.lower(s232),
-        FfiConverterData.lower(m132),
-        FfiConverterData.lower(m232),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_build_deposit_spl_ix(
+        FfiConverterTypeFfiDepositSplParams_lower(params),uniffiCallStatus
     )
 })
 }
-public func buildBufferedExecutionPlan(nonce: UInt64, inner: FfiBuiltInstruction)throws  -> FfiBufferedExecutionPlan  {
-    return try  FfiConverterTypeFfiBufferedExecutionPlan_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func buildExecViaEscrowIx(params: FfiExecViaEscrowParams)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_buffered_execution_plan(
-        FfiConverterUInt64.lower(nonce),
-        FfiConverterTypeFfiBuiltInstruction_lower(inner),uniffiCallStatus
-    )
-})
-}
-public func buildCloseProofBufferInstruction(programId: String, payer: String, nonce: UInt64)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(
-        FfiConverterString.lower(programId),
-        FfiConverterString.lower(payer),
-        FfiConverterUInt64.lower(nonce),uniffiCallStatus
-    )
-})
-}
-public func buildDepositInstruction(params: FfiDepositParams)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_deposit_instruction(
-        FfiConverterTypeFfiDepositParams_lower(params),uniffiCallStatus
-    )
-})
-}
-public func buildExecViaEscrowInstruction(params: FfiExecViaEscrowParams)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_exec_via_escrow_instruction(
+    uniffi_audren_ffi_fn_func_build_exec_via_escrow_ix(
         FfiConverterTypeFfiExecViaEscrowParams_lower(params),uniffiCallStatus
     )
 })
 }
-public func buildMergeInstruction(params: FfiMergeParams)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func buildInitLaneIx(programId: String, authority: String, poolId: UInt32, laneId: UInt8)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_merge_instruction(
-        FfiConverterTypeFfiMergeParams_lower(params),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_build_init_lane_ix(
+        FfiConverterString.lower(programId),
+        FfiConverterString.lower(authority),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt8.lower(laneId),uniffiCallStatus
     )
 })
 }
-public func buildOpenLanePageInstruction(programId: String, payer: String, poolId: UInt32, currentPageId: UInt64)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func buildInitPoolIx(programId: String, payer: String, poolId: UInt32, ckptInterval: UInt64, maxCkptAge: UInt64, noteRentFee: UInt64, nfRentFee: UInt64)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(
+    uniffi_audren_ffi_fn_func_build_init_pool_ix(
         FfiConverterString.lower(programId),
         FfiConverterString.lower(payer),
         FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt64.lower(currentPageId),uniffiCallStatus
+        FfiConverterUInt64.lower(ckptInterval),
+        FfiConverterUInt64.lower(maxCkptAge),
+        FfiConverterUInt64.lower(noteRentFee),
+        FfiConverterUInt64.lower(nfRentFee),uniffiCallStatus
     )
 })
 }
-public func buildOpenPageInstruction(programId: String, payer: String, poolId: UInt32, currentPageId: UInt64)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func buildJoinsplitIx(params: FfiJoinSplitParams)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_open_page_instruction(
+    uniffi_audren_ffi_fn_func_build_joinsplit_ix(
+        FfiConverterTypeFfiJoinSplitParams_lower(params),uniffiCallStatus
+    )
+})
+}
+public func buildOpenPageIx(programId: String, payer: String, pageKind: UInt8, poolId: UInt32, laneId: UInt8, pageSeq: UInt64)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_build_open_page_ix(
+        FfiConverterString.lower(programId),
+        FfiConverterString.lower(payer),
+        FfiConverterUInt8.lower(pageKind),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt8.lower(laneId),
+        FfiConverterUInt64.lower(pageSeq),uniffiCallStatus
+    )
+})
+}
+public func buildPublishCheckpointIx(programId: String, payer: String, poolId: UInt32, slotIdx: UInt16, activeLanes: UInt8)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_build_publish_checkpoint_ix(
         FfiConverterString.lower(programId),
         FfiConverterString.lower(payer),
         FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt64.lower(currentPageId),uniffiCallStatus
+        FfiConverterUInt16.lower(slotIdx),
+        FfiConverterUInt8.lower(activeLanes),uniffiCallStatus
     )
 })
 }
-public func buildTransferInstruction(params: FfiTransferParams)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func buildSetPausedIx(programId: String, authority: String, poolId: UInt32, paused: Bool)throws  -> FfiInstruction  {
+    return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_transfer_instruction(
-        FfiConverterTypeFfiTransferParams_lower(params),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_build_set_paused_ix(
+        FfiConverterString.lower(programId),
+        FfiConverterString.lower(authority),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterBool.lower(paused),uniffiCallStatus
     )
 })
 }
-public func buildWithdrawInstruction(params: FfiWithdrawParams)throws  -> FfiBuiltInstruction  {
-    return try  FfiConverterTypeFfiBuiltInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func canonicalProgramId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_build_withdraw_instruction(
-        FfiConverterTypeFfiWithdrawParams_lower(params),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_canonical_program_id(uniffiCallStatus
     )
 })
 }
-public func createSelectiveDisclosureProof(note: FfiOwnedNote) -> FfiSelectiveDisclosureProof  {
-    return try!  FfiConverterTypeFfiSelectiveDisclosureProof_lift(try! rustCall() {
+public func compactStoreNewJson(poolId: UInt32, birthdaySlot: UInt64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_create_selective_disclosure_proof(
-        FfiConverterTypeFfiOwnedNote_lower(note),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_compact_store_new_json(
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt64.lower(birthdaySlot),uniffiCallStatus
     )
 })
 }
-public func decodeAppendLaneState(data: Data)throws  -> FfiAppendLaneState  {
-    return try  FfiConverterTypeFfiAppendLaneState_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func computeExecCtxHashFfi(params: FfiExecCtxHashParams)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_decode_append_lane_state(
+    uniffi_audren_ffi_fn_func_compute_exec_ctx_hash_ffi(
+        FfiConverterTypeFfiExecCtxHashParams_lower(params),uniffiCallStatus
+    )
+})
+}
+public func computeJoinsplitCtxHashFfi(params: FfiJoinSplitCtxHashParams)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_compute_joinsplit_ctx_hash_ffi(
+        FfiConverterTypeFfiJoinSplitCtxHashParams_lower(params),uniffiCallStatus
+    )
+})
+}
+public func decodeAudrenAddress(encoded: String)throws  -> [Data]  {
+    return try  FfiConverterSequenceData.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_decode_audren_address(
+        FfiConverterString.lower(encoded),uniffiCallStatus
+    )
+})
+}
+public func decodeLaneHeaderAccount(data: Data)throws  -> FfiLaneHeader  {
+    return try  FfiConverterTypeFfiLaneHeader_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_decode_lane_header_account(
         FfiConverterData.lower(data),uniffiCallStatus
     )
 })
 }
-public func decodeEpochPageHeader(data: Data)throws  -> FfiEpochPageHeader  {
-    return try  FfiConverterTypeFfiEpochPageHeader_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_decode_epoch_page_header(
-        FfiConverterData.lower(data),uniffiCallStatus
-    )
-})
-}
-public func decodePoolState(data: Data)throws  -> FfiPoolState  {
+public func decodePoolStateAccount(data: Data)throws  -> FfiPoolState  {
     return try  FfiConverterTypeFfiPoolState_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_decode_pool_state(
+    uniffi_audren_ffi_fn_func_decode_pool_state_account(
         FfiConverterData.lower(data),uniffiCallStatus
+    )
+})
+}
+public func decodeRootCheckpointAccount(data: Data)throws  -> FfiRootCheckpoint  {
+    return try  FfiConverterTypeFfiRootCheckpoint_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_decode_root_checkpoint_account(
+        FfiConverterData.lower(data),uniffiCallStatus
+    )
+})
+}
+public func decryptAndVerifyMemoEntry(fvk: FfiFullViewingKey, memo90: Data, onchainCommitment: Data)throws  -> FfiDecryptedMemo?  {
+    return try  FfiConverterOptionTypeFfiDecryptedMemo.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_decrypt_and_verify_memo_entry(
+        FfiConverterTypeFfiFullViewingKey_lower(fvk),
+        FfiConverterData.lower(memo90),
+        FfiConverterData.lower(onchainCommitment),uniffiCallStatus
     )
 })
 }
@@ -2760,171 +2780,209 @@ public func defaultRelayUrl() -> String  {
     )
 })
 }
-public func deriveAssociatedTokenAddress(ownerB58: String, mintB58: String, tokenProgramB58: String)throws  -> String  {
+public func deriveAssetIdBytes(mintBytes: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_asset_id_bytes(
+        FfiConverterData.lower(mintBytes),uniffiCallStatus
+    )
+})
+}
+public func deriveAta(owner: String, tokenProgram: String, mint: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_derive_associated_token_address(
-        FfiConverterString.lower(ownerB58),
-        FfiConverterString.lower(mintB58),
-        FfiConverterString.lower(tokenProgramB58),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_derive_ata(
+        FfiConverterString.lower(owner),
+        FfiConverterString.lower(tokenProgram),
+        FfiConverterString.lower(mint),uniffiCallStatus
     )
 })
 }
-public func deriveAuditorKeypair(seed32: Data)throws  -> FfiAuditorKeypair  {
-    return try  FfiConverterTypeFfiAuditorKeypair_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveCheckpointPda(programId: String, poolId: UInt32, slotIdx: UInt16)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_derive_auditor_keypair(
-        FfiConverterData.lower(seed32),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_derive_checkpoint_pda(
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt16.lower(slotIdx),uniffiCallStatus
     )
 })
 }
-public func deriveDefiSessionKeypair(masterSeed32: Data, sessionIndex: UInt32)throws  -> FfiDefiSessionKeypair  {
+public func deriveDefiSessionKeypair(seed: Data, sessionIndex: UInt32)throws  -> FfiDefiSessionKeypair  {
     return try  FfiConverterTypeFfiDefiSessionKeypair_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_defi_session_keypair(
-        FfiConverterData.lower(masterSeed32),
+        FfiConverterData.lower(seed),
         FfiConverterUInt32.lower(sessionIndex),uniffiCallStatus
     )
 })
 }
-public func deriveEpochPagePda(poolId: UInt32, pageId: UInt64, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_derive_epoch_page_pda(
-        FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt64.lower(pageId),
-        FfiConverterString.lower(programId),uniffiCallStatus
-    )
-})
-}
-public func deriveEscrowPda(poolId: UInt32, shardId: UInt8, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveEscrowPda(programId: String, poolId: UInt32, shardId: UInt8)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_escrow_pda(
+        FfiConverterString.lower(programId),
         FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt8.lower(shardId),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterUInt8.lower(shardId),uniffiCallStatus
     )
 })
 }
-public func deriveKeysFromSeed(seed32: Data)throws  -> FfiAudrenKeys  {
+public func deriveKeysFromSeed(seed: Data)throws  -> FfiAudrenKeys  {
     return try  FfiConverterTypeFfiAudrenKeys_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_keys_from_seed(
-        FfiConverterData.lower(seed32),uniffiCallStatus
+        FfiConverterData.lower(seed),uniffiCallStatus
     )
 })
 }
-public func deriveLanePda(poolId: UInt32, laneId: UInt8, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveLanePda(programId: String, poolId: UInt32, laneId: UInt8)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_lane_pda(
+        FfiConverterString.lower(programId),
         FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt8.lower(laneId),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterUInt8.lower(laneId),uniffiCallStatus
     )
 })
 }
-public func deriveLaneRentVaultPda(poolId: UInt32, laneId: UInt8, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveLaneRentPda(programId: String, poolId: UInt32, laneId: UInt8)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_derive_lane_rent_vault_pda(
+    uniffi_audren_ffi_fn_func_derive_lane_rent_pda(
+        FfiConverterString.lower(programId),
         FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt8.lower(laneId),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterUInt8.lower(laneId),uniffiCallStatus
     )
 })
 }
-public func deriveNullifierPda(poolId: UInt32, nullifier32: Data, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveMemoPda(programId: String, poolId: UInt32, laneId: UInt8, pageSeq: UInt64)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_memo_pda(
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt8.lower(laneId),
+        FfiConverterUInt64.lower(pageSeq),uniffiCallStatus
+    )
+})
+}
+public func deriveNfPagePda(programId: String, poolId: UInt32, laneId: UInt8, pageSeq: UInt64)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_nf_page_pda(
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt8.lower(laneId),
+        FfiConverterUInt64.lower(pageSeq),uniffiCallStatus
+    )
+})
+}
+public func deriveNullifierPda(programId: String, poolId: UInt32, nullifier: Data)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_nullifier_pda(
+        FfiConverterString.lower(programId),
         FfiConverterUInt32.lower(poolId),
-        FfiConverterData.lower(nullifier32),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterData.lower(nullifier),uniffiCallStatus
     )
 })
 }
-public func derivePageRentVaultPda(poolId: UInt32, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_derive_page_rent_vault_pda(
-        FfiConverterUInt32.lower(poolId),
-        FfiConverterString.lower(programId),uniffiCallStatus
-    )
-})
-}
-public func derivePoolPda(poolId: UInt32, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func derivePoolPda(programId: String, poolId: UInt32)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_pool_pda(
-        FfiConverterUInt32.lower(poolId),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),uniffiCallStatus
     )
 })
 }
-public func deriveProofBufferPda(authorityB58: String, nonce: UInt64, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_derive_proof_buffer_pda(
-        FfiConverterString.lower(authorityB58),
-        FfiConverterUInt64.lower(nonce),
-        FfiConverterString.lower(programId),uniffiCallStatus
-    )
-})
-}
-public func deriveSolVaultPda(poolId: UInt32, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveSolVaultPda(programId: String, poolId: UInt32)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_sol_vault_pda(
-        FfiConverterUInt32.lower(poolId),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),uniffiCallStatus
     )
 })
 }
-public func deriveSubaccountKeys(masterSeed32: Data, accountIndex: UInt32)throws  -> FfiAudrenKeys  {
+public func deriveSubaccountKeys(seed: Data, accountIndex: UInt32)throws  -> FfiAudrenKeys  {
     return try  FfiConverterTypeFfiAudrenKeys_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_subaccount_keys(
-        FfiConverterData.lower(masterSeed32),
+        FfiConverterData.lower(seed),
         FfiConverterUInt32.lower(accountIndex),uniffiCallStatus
     )
 })
 }
-public func deriveUnwrapPda(poolId: UInt32, nullifier32: Data, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveSubrootPda(programId: String, poolId: UInt32, laneId: UInt8, rootPageSeq: UInt64)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_subroot_pda(
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt8.lower(laneId),
+        FfiConverterUInt64.lower(rootPageSeq),uniffiCallStatus
+    )
+})
+}
+public func deriveSubtreePda(programId: String, poolId: UInt32, laneId: UInt8, pageSeq: UInt64)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_derive_subtree_pda(
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),
+        FfiConverterUInt8.lower(laneId),
+        FfiConverterUInt64.lower(pageSeq),uniffiCallStatus
+    )
+})
+}
+public func deriveUnwrapPda(programId: String, poolId: UInt32, nf0: Data)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_unwrap_pda(
+        FfiConverterString.lower(programId),
         FfiConverterUInt32.lower(poolId),
-        FfiConverterData.lower(nullifier32),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterData.lower(nf0),uniffiCallStatus
     )
 })
 }
-public func deriveVaultAuthPda(poolId: UInt32, programId: String)throws  -> FfiPda  {
-    return try  FfiConverterTypeFfiPda_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+public func deriveVaultAuthPda(programId: String, poolId: UInt32)throws  -> FfiPdaResult  {
+    return try  FfiConverterTypeFfiPdaResult_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_derive_vault_auth_pda(
-        FfiConverterUInt32.lower(poolId),
-        FfiConverterString.lower(programId),uniffiCallStatus
+        FfiConverterString.lower(programId),
+        FfiConverterUInt32.lower(poolId),uniffiCallStatus
     )
 })
 }
-public func exportFullViewingKey(seed32: Data, accountIndex: UInt32)throws  -> FfiFullViewingKey  {
+public func deterministicNoteRentFeeFfi(poolNoteRentFeeCap: UInt64, subRent: UInt64, srRent: UInt64, memoRent: UInt64) -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_deterministic_note_rent_fee_ffi(
+        FfiConverterUInt64.lower(poolNoteRentFeeCap),
+        FfiConverterUInt64.lower(subRent),
+        FfiConverterUInt64.lower(srRent),
+        FfiConverterUInt64.lower(memoRent),uniffiCallStatus
+    )
+})
+}
+public func encryptNoteMemo(recipientSpendPk: Data, recipientViewPk: Data, ephSecret: Data, amount: UInt64, mint: Data)throws  -> FfiEncryptedMemo  {
+    return try  FfiConverterTypeFfiEncryptedMemo_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_encrypt_note_memo(
+        FfiConverterData.lower(recipientSpendPk),
+        FfiConverterData.lower(recipientViewPk),
+        FfiConverterData.lower(ephSecret),
+        FfiConverterUInt64.lower(amount),
+        FfiConverterData.lower(mint),uniffiCallStatus
+    )
+})
+}
+public func exportFullViewingKey(seed: Data)throws  -> FfiFullViewingKey  {
     return try  FfiConverterTypeFfiFullViewingKey_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_export_full_viewing_key(
-        FfiConverterData.lower(seed32),
-        FfiConverterUInt32.lower(accountIndex),uniffiCallStatus
-    )
-})
-}
-public func formatAudrenAddress(spendPk32: Data, viewPk32: Data)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_format_audren_address(
-        FfiConverterData.lower(spendPk32),
-        FfiConverterData.lower(viewPk32),uniffiCallStatus
+        FfiConverterData.lower(seed),uniffiCallStatus
     )
 })
 }
@@ -2935,116 +2993,37 @@ public func jupiterCpiExcludedDexes() -> [String]  {
     )
 })
 }
-public func laneOfPageId(pageId: UInt64) -> UInt8  {
+public func prepareDynamicSwapMemo(recipientViewPk: Data, ephSecret: Data)throws  -> FfiDynamicMemoPrep  {
+    return try  FfiConverterTypeFfiDynamicMemoPrep_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_audren_ffi_fn_func_prepare_dynamic_swap_memo(
+        FfiConverterData.lower(recipientViewPk),
+        FfiConverterData.lower(ephSecret),uniffiCallStatus
+    )
+})
+}
+public func protocolVersion() -> UInt8  {
     return try!  FfiConverterUInt8.lift(try! rustCall() {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_lane_of_page_id(
-        FfiConverterUInt64.lower(pageId),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_protocol_version(uniffiCallStatus
     )
 })
 }
-public func netDepositAmount(grossAmount: UInt64, feeBps: UInt16, maxFee: UInt64) -> UInt64  {
-    return try!  FfiConverterUInt64.lift(try! rustCall() {
+public func proveJoinsplitWitnessBytes(witness4611: Data, seed32: Data)throws  -> FfiGroth16ProofBundle  {
+    return try  FfiConverterTypeFfiGroth16ProofBundle_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_net_deposit_amount(
-        FfiConverterUInt64.lower(grossAmount),
-        FfiConverterUInt16.lower(feeBps),
-        FfiConverterUInt64.lower(maxFee),uniffiCallStatus
+    uniffi_audren_ffi_fn_func_prove_joinsplit_witness_bytes(
+        FfiConverterData.lower(witness4611),
+        FfiConverterData.lower(seed32),uniffiCallStatus
     )
 })
 }
-public func pageIdForLane(laneId: UInt8, seq: UInt64)throws  -> UInt64  {
-    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_page_id_for_lane(
-        FfiConverterUInt8.lower(laneId),
-        FfiConverterUInt64.lower(seq),uniffiCallStatus
-    )
-})
-}
-public func pageScanDataSlice() -> FfiDataSlice  {
-    return try!  FfiConverterTypeFfiDataSlice_lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_page_scan_data_slice(uniffiCallStatus
-    )
-})
-}
-public func parseAudrenAddress(encoded: String)throws  -> FfiAudrenAddress  {
-    return try  FfiConverterTypeFfiAudrenAddress_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_parse_audren_address(
-        FfiConverterString.lower(encoded),uniffiCallStatus
-    )
-})
-}
-public func prepareEscrowAccounts(poolId: UInt32, shardId: UInt8, inputMintB58: String, outputMintB58: String, inputTokenProgramB58: String, outputTokenProgramB58: String, actionAccounts: [FfiAccountMeta], programId: String)throws  -> FfiPreparedEscrowAccounts  {
-    return try  FfiConverterTypeFfiPreparedEscrowAccounts_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_prepare_escrow_accounts(
-        FfiConverterUInt32.lower(poolId),
-        FfiConverterUInt8.lower(shardId),
-        FfiConverterString.lower(inputMintB58),
-        FfiConverterString.lower(outputMintB58),
-        FfiConverterString.lower(inputTokenProgramB58),
-        FfiConverterString.lower(outputTokenProgramB58),
-        FfiConverterSequenceTypeFfiAccountMeta.lower(actionAccounts),
-        FfiConverterString.lower(programId),uniffiCallStatus
-    )
-})
-}
-public func programId() -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_program_id(uniffiCallStatus
-    )
-})
-}
-public func scanEpochPage(poolId: UInt32, pageBytes: Data, spendSk32: Data?, spendPk32: Data, viewSk32: Data, programId: String)throws  -> [FfiOwnedNote]  {
-    return try  FfiConverterSequenceTypeFfiOwnedNote.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_scan_epoch_page(
-        FfiConverterUInt32.lower(poolId),
-        FfiConverterData.lower(pageBytes),
-        FfiConverterOptionData.lower(spendSk32),
-        FfiConverterData.lower(spendPk32),
-        FfiConverterData.lower(viewSk32),
-        FfiConverterString.lower(programId),uniffiCallStatus
-    )
-})
-}
-public func scanPageDataslice(pageId: UInt64, slice1056: Data, spendPk32: Data, viewSk32: Data)throws  -> Data  {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_scan_page_dataslice(
-        FfiConverterUInt64.lower(pageId),
-        FfiConverterData.lower(slice1056),
-        FfiConverterData.lower(spendPk32),
-        FfiConverterData.lower(viewSk32),uniffiCallStatus
-    )
-})
-}
-public func seqOfPageId(pageId: UInt64) -> UInt64  {
-    return try!  FfiConverterUInt64.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_seq_of_page_id(
-        FfiConverterUInt64.lower(pageId),uniffiCallStatus
-    )
-})
-}
-public func verifySelectiveDisclosureOnPage(proof: FfiSelectiveDisclosureProof, pageBytes: Data)throws  -> Bool  {
-    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
-        uniffiCallStatus in
-    uniffi_audren_ffi_fn_func_verify_selective_disclosure_on_page(
-        FfiConverterTypeFfiSelectiveDisclosureProof_lower(proof),
-        FfiConverterData.lower(pageBytes),uniffiCallStatus
-    )
-})
-}
-public func verifySelectiveDisclosureProof(proof: FfiSelectiveDisclosureProof)throws  -> Bool  {
+public func verifySelectiveDisclosureProof(proof: FfiSelectiveDisclosureProof, onchainSubtreeLeaf: Data)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_verify_selective_disclosure_proof(
-        FfiConverterTypeFfiSelectiveDisclosureProof_lower(proof),uniffiCallStatus
+        FfiConverterTypeFfiSelectiveDisclosureProof_lower(proof),
+        FfiConverterData.lower(onchainSubtreeLeaf),uniffiCallStatus
     )
 })
 }
@@ -3064,145 +3043,139 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_asset_generator() != 57677) {
+    if (uniffi_audren_ffi_checksum_func_build_deposit_sol_ix() != 48226) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_auditor_decrypt_note() != 55527) {
+    if (uniffi_audren_ffi_checksum_func_build_deposit_spl_ix() != 44876) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_buffered_execution_plan() != 8649) {
+    if (uniffi_audren_ffi_checksum_func_build_exec_via_escrow_ix() != 25974) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_close_proof_buffer_instruction() != 39797) {
+    if (uniffi_audren_ffi_checksum_func_build_init_lane_ix() != 35978) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_deposit_instruction() != 14202) {
+    if (uniffi_audren_ffi_checksum_func_build_init_pool_ix() != 47421) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_exec_via_escrow_instruction() != 47427) {
+    if (uniffi_audren_ffi_checksum_func_build_joinsplit_ix() != 2255) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_merge_instruction() != 53530) {
+    if (uniffi_audren_ffi_checksum_func_build_open_page_ix() != 6216) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction() != 8415) {
+    if (uniffi_audren_ffi_checksum_func_build_publish_checkpoint_ix() != 16790) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_open_page_instruction() != 36337) {
+    if (uniffi_audren_ffi_checksum_func_build_set_paused_ix() != 31548) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_transfer_instruction() != 43105) {
+    if (uniffi_audren_ffi_checksum_func_canonical_program_id() != 62905) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_withdraw_instruction() != 52167) {
+    if (uniffi_audren_ffi_checksum_func_compact_store_new_json() != 22887) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_create_selective_disclosure_proof() != 10976) {
+    if (uniffi_audren_ffi_checksum_func_compute_exec_ctx_hash_ffi() != 53052) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_decode_append_lane_state() != 27838) {
+    if (uniffi_audren_ffi_checksum_func_compute_joinsplit_ctx_hash_ffi() != 19436) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_decode_epoch_page_header() != 29208) {
+    if (uniffi_audren_ffi_checksum_func_decode_audren_address() != 50185) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_decode_pool_state() != 37993) {
+    if (uniffi_audren_ffi_checksum_func_decode_lane_header_account() != 44261) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_decode_pool_state_account() != 4069) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_decode_root_checkpoint_account() != 11058) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_decrypt_and_verify_memo_entry() != 17780) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_default_relay_url() != 15592) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_associated_token_address() != 29979) {
+    if (uniffi_audren_ffi_checksum_func_derive_asset_id_bytes() != 22345) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_auditor_keypair() != 4233) {
+    if (uniffi_audren_ffi_checksum_func_derive_ata() != 3908) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_defi_session_keypair() != 55393) {
+    if (uniffi_audren_ffi_checksum_func_derive_checkpoint_pda() != 58125) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_epoch_page_pda() != 2040) {
+    if (uniffi_audren_ffi_checksum_func_derive_defi_session_keypair() != 61459) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_escrow_pda() != 47615) {
+    if (uniffi_audren_ffi_checksum_func_derive_escrow_pda() != 47295) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_keys_from_seed() != 28631) {
+    if (uniffi_audren_ffi_checksum_func_derive_keys_from_seed() != 16134) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_lane_pda() != 24831) {
+    if (uniffi_audren_ffi_checksum_func_derive_lane_pda() != 15491) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_lane_rent_vault_pda() != 40526) {
+    if (uniffi_audren_ffi_checksum_func_derive_lane_rent_pda() != 22853) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_nullifier_pda() != 56523) {
+    if (uniffi_audren_ffi_checksum_func_derive_memo_pda() != 63583) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_page_rent_vault_pda() != 3361) {
+    if (uniffi_audren_ffi_checksum_func_derive_nf_page_pda() != 22560) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_pool_pda() != 43524) {
+    if (uniffi_audren_ffi_checksum_func_derive_nullifier_pda() != 32376) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_proof_buffer_pda() != 55672) {
+    if (uniffi_audren_ffi_checksum_func_derive_pool_pda() != 18695) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_sol_vault_pda() != 17266) {
+    if (uniffi_audren_ffi_checksum_func_derive_sol_vault_pda() != 28708) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_subaccount_keys() != 20930) {
+    if (uniffi_audren_ffi_checksum_func_derive_subaccount_keys() != 16825) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_unwrap_pda() != 23126) {
+    if (uniffi_audren_ffi_checksum_func_derive_subroot_pda() != 30689) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_derive_vault_auth_pda() != 39818) {
+    if (uniffi_audren_ffi_checksum_func_derive_subtree_pda() != 8370) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_export_full_viewing_key() != 38871) {
+    if (uniffi_audren_ffi_checksum_func_derive_unwrap_pda() != 34492) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_format_audren_address() != 24156) {
+    if (uniffi_audren_ffi_checksum_func_derive_vault_auth_pda() != 37436) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_deterministic_note_rent_fee_ffi() != 64138) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_encrypt_note_memo() != 8764) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_audren_ffi_checksum_func_export_full_viewing_key() != 63114) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes() != 47827) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_lane_of_page_id() != 3031) {
+    if (uniffi_audren_ffi_checksum_func_prepare_dynamic_swap_memo() != 60466) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_net_deposit_amount() != 42006) {
+    if (uniffi_audren_ffi_checksum_func_protocol_version() != 56252) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_page_id_for_lane() != 27348) {
+    if (uniffi_audren_ffi_checksum_func_prove_joinsplit_witness_bytes() != 37274) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_page_scan_data_slice() != 2480) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_parse_audren_address() != 28660) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_prepare_escrow_accounts() != 62178) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_program_id() != 36184) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_scan_epoch_page() != 37328) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_scan_page_dataslice() != 54765) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_seq_of_page_id() != 51006) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_verify_selective_disclosure_on_page() != 38521) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_audren_ffi_checksum_func_verify_selective_disclosure_proof() != 36010) {
+    if (uniffi_audren_ffi_checksum_func_verify_selective_disclosure_proof() != 65119) {
         return InitializationResult.apiChecksumMismatch
     }
 

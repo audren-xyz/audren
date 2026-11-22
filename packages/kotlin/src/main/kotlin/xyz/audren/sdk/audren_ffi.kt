@@ -674,45 +674,51 @@ internal object IntegrityCheckingUniffiLib {
     }
 
     internal fun ensureInitialized() = Unit
-    external fun uniffi_audren_ffi_checksum_func_asset_generator(
+    external fun uniffi_audren_ffi_checksum_func_build_deposit_sol_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_auditor_decrypt_note(
+    external fun uniffi_audren_ffi_checksum_func_build_deposit_spl_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_buffered_execution_plan(
+    external fun uniffi_audren_ffi_checksum_func_build_exec_via_escrow_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_close_proof_buffer_instruction(
+    external fun uniffi_audren_ffi_checksum_func_build_init_lane_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_deposit_instruction(
+    external fun uniffi_audren_ffi_checksum_func_build_init_pool_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_exec_via_escrow_instruction(
+    external fun uniffi_audren_ffi_checksum_func_build_joinsplit_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_merge_instruction(
+    external fun uniffi_audren_ffi_checksum_func_build_open_page_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction(
+    external fun uniffi_audren_ffi_checksum_func_build_publish_checkpoint_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_open_page_instruction(
+    external fun uniffi_audren_ffi_checksum_func_build_set_paused_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_transfer_instruction(
+    external fun uniffi_audren_ffi_checksum_func_canonical_program_id(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_withdraw_instruction(
+    external fun uniffi_audren_ffi_checksum_func_compact_store_new_json(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_create_selective_disclosure_proof(
+    external fun uniffi_audren_ffi_checksum_func_compute_exec_ctx_hash_ffi(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_decode_append_lane_state(
+    external fun uniffi_audren_ffi_checksum_func_compute_joinsplit_ctx_hash_ffi(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_decode_epoch_page_header(
+    external fun uniffi_audren_ffi_checksum_func_decode_audren_address(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_decode_pool_state(
+    external fun uniffi_audren_ffi_checksum_func_decode_lane_header_account(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_decode_pool_state_account(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_decode_root_checkpoint_account(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_decrypt_and_verify_memo_entry(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_default_relay_url(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_associated_token_address(
+    external fun uniffi_audren_ffi_checksum_func_derive_asset_id_bytes(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_auditor_keypair(
+    external fun uniffi_audren_ffi_checksum_func_derive_ata(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_checkpoint_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_defi_session_keypair(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_epoch_page_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_escrow_pda(
     ): Int
@@ -720,51 +726,41 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_lane_pda(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_lane_rent_vault_pda(
+    external fun uniffi_audren_ffi_checksum_func_derive_lane_rent_pda(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_memo_pda(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_nf_page_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_nullifier_pda(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_page_rent_vault_pda(
-    ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_pool_pda(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_proof_buffer_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_sol_vault_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_subaccount_keys(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_subroot_pda(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_subtree_pda(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_unwrap_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_vault_auth_pda(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_export_full_viewing_key(
+    external fun uniffi_audren_ffi_checksum_func_deterministic_note_rent_fee_ffi(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_format_audren_address(
+    external fun uniffi_audren_ffi_checksum_func_encrypt_note_memo(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_export_full_viewing_key(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_lane_of_page_id(
+    external fun uniffi_audren_ffi_checksum_func_prepare_dynamic_swap_memo(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_net_deposit_amount(
+    external fun uniffi_audren_ffi_checksum_func_protocol_version(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_page_id_for_lane(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_page_scan_data_slice(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_parse_audren_address(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_prepare_escrow_accounts(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_program_id(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_scan_epoch_page(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_scan_page_dataslice(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_seq_of_page_id(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_verify_selective_disclosure_on_page(
+    external fun uniffi_audren_ffi_checksum_func_prove_joinsplit_witness_bytes(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_verify_selective_disclosure_proof(
     ): Int
@@ -783,99 +779,95 @@ internal object UniffiLib {
     }
 
     internal fun ensureInitialized() = Unit
-    external fun uniffi_audren_ffi_fn_func_asset_generator(`mint32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_deposit_sol_ix(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_auditor_decrypt_note(`auditorSk32`: RustBuffer.ByValue,`s132`: RustBuffer.ByValue,`s232`: RustBuffer.ByValue,`m132`: RustBuffer.ByValue,`m232`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_deposit_spl_ix(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_buffered_execution_plan(`nonce`: Long,`inner`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_exec_via_escrow_ix(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`nonce`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_init_lane_ix(`programId`: RustBuffer.ByValue,`authority`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_deposit_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_init_pool_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`ckptInterval`: Long,`maxCkptAge`: Long,`noteRentFee`: Long,`nfRentFee`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_exec_via_escrow_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_joinsplit_ix(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_merge_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_open_page_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`pageKind`: Byte,`poolId`: Int,`laneId`: Byte,`pageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`currentPageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_publish_checkpoint_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`slotIdx`: Short,`activeLanes`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_open_page_instruction(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`currentPageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_set_paused_ix(`programId`: RustBuffer.ByValue,`authority`: RustBuffer.ByValue,`poolId`: Int,`paused`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_transfer_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_canonical_program_id(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_withdraw_instruction(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_compact_store_new_json(`poolId`: Int,`birthdaySlot`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_create_selective_disclosure_proof(`note`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_compute_exec_ctx_hash_ffi(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_decode_append_lane_state(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_compute_joinsplit_ctx_hash_ffi(`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_decode_epoch_page_header(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_decode_audren_address(`encoded`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_decode_pool_state(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_decode_lane_header_account(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_decode_pool_state_account(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_decode_root_checkpoint_account(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_decrypt_and_verify_memo_entry(`fvk`: RustBuffer.ByValue,`memo90`: RustBuffer.ByValue,`onchainCommitment`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_default_relay_url(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_associated_token_address(`ownerB58`: RustBuffer.ByValue,`mintB58`: RustBuffer.ByValue,`tokenProgramB58`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_asset_id_bytes(`mintBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_auditor_keypair(`seed32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_ata(`owner`: RustBuffer.ByValue,`tokenProgram`: RustBuffer.ByValue,`mint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_defi_session_keypair(`masterSeed32`: RustBuffer.ByValue,`sessionIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_checkpoint_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`slotIdx`: Short,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_epoch_page_pda(`poolId`: Int,`pageId`: Long,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_defi_session_keypair(`seed`: RustBuffer.ByValue,`sessionIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_escrow_pda(`poolId`: Int,`shardId`: Byte,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_escrow_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`shardId`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_keys_from_seed(`seed32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_keys_from_seed(`seed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_lane_pda(`poolId`: Int,`laneId`: Byte,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_lane_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_lane_rent_vault_pda(`poolId`: Int,`laneId`: Byte,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_lane_rent_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_nullifier_pda(`poolId`: Int,`nullifier32`: RustBuffer.ByValue,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_memo_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,`pageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_page_rent_vault_pda(`poolId`: Int,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_nf_page_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,`pageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_pool_pda(`poolId`: Int,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_nullifier_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`nullifier`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_proof_buffer_pda(`authorityB58`: RustBuffer.ByValue,`nonce`: Long,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_pool_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_sol_vault_pda(`poolId`: Int,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_sol_vault_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_subaccount_keys(`masterSeed32`: RustBuffer.ByValue,`accountIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_subaccount_keys(`seed`: RustBuffer.ByValue,`accountIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_unwrap_pda(`poolId`: Int,`nullifier32`: RustBuffer.ByValue,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_subroot_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,`rootPageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_vault_auth_pda(`poolId`: Int,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_subtree_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,`pageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_export_full_viewing_key(`seed32`: RustBuffer.ByValue,`accountIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_unwrap_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`nf0`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_format_audren_address(`spendPk32`: RustBuffer.ByValue,`viewPk32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_derive_vault_auth_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_deterministic_note_rent_fee_ffi(`poolNoteRentFeeCap`: Long,`subRent`: Long,`srRent`: Long,`memoRent`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_audren_ffi_fn_func_encrypt_note_memo(`recipientSpendPk`: RustBuffer.ByValue,`recipientViewPk`: RustBuffer.ByValue,`ephSecret`: RustBuffer.ByValue,`amount`: Long,`mint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_export_full_viewing_key(`seed`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_jupiter_cpi_excluded_dexes(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_lane_of_page_id(`pageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_prepare_dynamic_swap_memo(`recipientViewPk`: RustBuffer.ByValue,`ephSecret`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_protocol_version(uniffi_out_err: UniffiRustCallStatus, 
     ): Int
-    external fun uniffi_audren_ffi_fn_func_net_deposit_amount(`grossAmount`: Long,`feeBps`: Short,`maxFee`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_audren_ffi_fn_func_page_id_for_lane(`laneId`: Byte,`seq`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_audren_ffi_fn_func_page_scan_data_slice(uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_prove_joinsplit_witness_bytes(`witness4611`: RustBuffer.ByValue,`seed32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_parse_audren_address(`encoded`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_prepare_escrow_accounts(`poolId`: Int,`shardId`: Byte,`inputMintB58`: RustBuffer.ByValue,`outputMintB58`: RustBuffer.ByValue,`inputTokenProgramB58`: RustBuffer.ByValue,`outputTokenProgramB58`: RustBuffer.ByValue,`actionAccounts`: RustBuffer.ByValue,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_program_id(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_scan_epoch_page(`poolId`: Int,`pageBytes`: RustBuffer.ByValue,`spendSk32`: RustBuffer.ByValue,`spendPk32`: RustBuffer.ByValue,`viewSk32`: RustBuffer.ByValue,`programId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_scan_page_dataslice(`pageId`: Long,`slice1056`: RustBuffer.ByValue,`spendPk32`: RustBuffer.ByValue,`viewSk32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_seq_of_page_id(`pageId`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_audren_ffi_fn_func_verify_selective_disclosure_on_page(`proof`: RustBuffer.ByValue,`pageBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    external fun uniffi_audren_ffi_fn_func_verify_selective_disclosure_proof(`proof`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_verify_selective_disclosure_proof(`proof`: RustBuffer.ByValue,`onchainSubtreeLeaf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun ffi_audren_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -996,145 +988,139 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if ((lib.uniffi_audren_ffi_checksum_func_asset_generator() and 0xFFFF) != 57677) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_deposit_sol_ix() and 0xFFFF) != 48226) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_auditor_decrypt_note() and 0xFFFF) != 55527) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_deposit_spl_ix() and 0xFFFF) != 44876) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_buffered_execution_plan() and 0xFFFF) != 8649) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_exec_via_escrow_ix() and 0xFFFF) != 25974) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_close_proof_buffer_instruction() and 0xFFFF) != 39797) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_init_lane_ix() and 0xFFFF) != 35978) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_deposit_instruction() and 0xFFFF) != 14202) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_init_pool_ix() and 0xFFFF) != 47421) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_exec_via_escrow_instruction() and 0xFFFF) != 47427) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_joinsplit_ix() and 0xFFFF) != 2255) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_merge_instruction() and 0xFFFF) != 53530) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_open_page_ix() and 0xFFFF) != 6216) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_open_lane_page_instruction() and 0xFFFF) != 8415) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_publish_checkpoint_ix() and 0xFFFF) != 16790) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_open_page_instruction() and 0xFFFF) != 36337) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_set_paused_ix() and 0xFFFF) != 31548) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_transfer_instruction() and 0xFFFF) != 43105) {
+    if ((lib.uniffi_audren_ffi_checksum_func_canonical_program_id() and 0xFFFF) != 62905) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_withdraw_instruction() and 0xFFFF) != 52167) {
+    if ((lib.uniffi_audren_ffi_checksum_func_compact_store_new_json() and 0xFFFF) != 22887) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_create_selective_disclosure_proof() and 0xFFFF) != 10976) {
+    if ((lib.uniffi_audren_ffi_checksum_func_compute_exec_ctx_hash_ffi() and 0xFFFF) != 53052) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_decode_append_lane_state() and 0xFFFF) != 27838) {
+    if ((lib.uniffi_audren_ffi_checksum_func_compute_joinsplit_ctx_hash_ffi() and 0xFFFF) != 19436) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_decode_epoch_page_header() and 0xFFFF) != 29208) {
+    if ((lib.uniffi_audren_ffi_checksum_func_decode_audren_address() and 0xFFFF) != 50185) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_decode_pool_state() and 0xFFFF) != 37993) {
+    if ((lib.uniffi_audren_ffi_checksum_func_decode_lane_header_account() and 0xFFFF) != 44261) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_decode_pool_state_account() and 0xFFFF) != 4069) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_decode_root_checkpoint_account() and 0xFFFF) != 11058) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_decrypt_and_verify_memo_entry() and 0xFFFF) != 17780) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_default_relay_url() and 0xFFFF) != 15592) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_associated_token_address() and 0xFFFF) != 29979) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_asset_id_bytes() and 0xFFFF) != 22345) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_auditor_keypair() and 0xFFFF) != 4233) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_ata() and 0xFFFF) != 3908) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_defi_session_keypair() and 0xFFFF) != 55393) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_checkpoint_pda() and 0xFFFF) != 58125) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_epoch_page_pda() and 0xFFFF) != 2040) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_defi_session_keypair() and 0xFFFF) != 61459) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_escrow_pda() and 0xFFFF) != 47615) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_escrow_pda() and 0xFFFF) != 47295) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_keys_from_seed() and 0xFFFF) != 28631) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_keys_from_seed() and 0xFFFF) != 16134) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_lane_pda() and 0xFFFF) != 24831) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_lane_pda() and 0xFFFF) != 15491) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_lane_rent_vault_pda() and 0xFFFF) != 40526) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_lane_rent_pda() and 0xFFFF) != 22853) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_nullifier_pda() and 0xFFFF) != 56523) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_memo_pda() and 0xFFFF) != 63583) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_page_rent_vault_pda() and 0xFFFF) != 3361) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_nf_page_pda() and 0xFFFF) != 22560) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_pool_pda() and 0xFFFF) != 43524) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_nullifier_pda() and 0xFFFF) != 32376) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_proof_buffer_pda() and 0xFFFF) != 55672) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_pool_pda() and 0xFFFF) != 18695) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_sol_vault_pda() and 0xFFFF) != 17266) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_sol_vault_pda() and 0xFFFF) != 28708) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_subaccount_keys() and 0xFFFF) != 20930) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_subaccount_keys() and 0xFFFF) != 16825) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_unwrap_pda() and 0xFFFF) != 23126) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_subroot_pda() and 0xFFFF) != 30689) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_vault_auth_pda() and 0xFFFF) != 39818) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_subtree_pda() and 0xFFFF) != 8370) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_export_full_viewing_key() and 0xFFFF) != 38871) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_unwrap_pda() and 0xFFFF) != 34492) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_format_audren_address() and 0xFFFF) != 24156) {
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_vault_auth_pda() and 0xFFFF) != 37436) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_deterministic_note_rent_fee_ffi() and 0xFFFF) != 64138) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_encrypt_note_memo() and 0xFFFF) != 8764) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_export_full_viewing_key() and 0xFFFF) != 63114) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes() and 0xFFFF) != 47827) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_lane_of_page_id() and 0xFFFF) != 3031) {
+    if ((lib.uniffi_audren_ffi_checksum_func_prepare_dynamic_swap_memo() and 0xFFFF) != 60466) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_net_deposit_amount() and 0xFFFF) != 42006) {
+    if ((lib.uniffi_audren_ffi_checksum_func_protocol_version() and 0xFFFF) != 56252) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_page_id_for_lane() and 0xFFFF) != 27348) {
+    if ((lib.uniffi_audren_ffi_checksum_func_prove_joinsplit_witness_bytes() and 0xFFFF) != 37274) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_page_scan_data_slice() and 0xFFFF) != 2480) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_parse_audren_address() and 0xFFFF) != 28660) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_prepare_escrow_accounts() and 0xFFFF) != 62178) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_program_id() and 0xFFFF) != 36184) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_scan_epoch_page() and 0xFFFF) != 37328) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_scan_page_dataslice() and 0xFFFF) != 54765) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_seq_of_page_id() and 0xFFFF) != 51006) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_verify_selective_disclosure_on_page() and 0xFFFF) != 38521) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_verify_selective_disclosure_proof() and 0xFFFF) != 36010) {
+    if ((lib.uniffi_audren_ffi_checksum_func_verify_selective_disclosure_proof() and 0xFFFF) != 65119) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1432,7 +1418,7 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 data class FfiAccountMeta (
-    var `pubkey`: kotlin.String
+    var `pubkeyB58`: kotlin.String
     , 
     var `isSigner`: kotlin.Boolean
     , 
@@ -1460,197 +1446,15 @@ public object FfiConverterTypeFfiAccountMeta: FfiConverterRustBuffer<FfiAccountM
     }
 
     override fun allocationSize(value: FfiAccountMeta) = (
-            FfiConverterString.allocationSize(value.`pubkey`) +
+            FfiConverterString.allocationSize(value.`pubkeyB58`) +
             FfiConverterBoolean.allocationSize(value.`isSigner`) +
             FfiConverterBoolean.allocationSize(value.`isWritable`)
     )
 
     override fun write(value: FfiAccountMeta, buf: ByteBuffer) {
-            FfiConverterString.write(value.`pubkey`, buf)
+            FfiConverterString.write(value.`pubkeyB58`, buf)
             FfiConverterBoolean.write(value.`isSigner`, buf)
             FfiConverterBoolean.write(value.`isWritable`, buf)
-    }
-}
-
-
-
-data class FfiAppendLaneState (
-    var `version`: kotlin.UByte
-    , 
-    var `laneId`: kotlin.UByte
-    , 
-    var `bump`: kotlin.UByte
-    , 
-    var `rentVaultBump`: kotlin.UByte
-    , 
-    var `poolId`: kotlin.UInt
-    , 
-    var `currentPageId`: kotlin.ULong
-    , 
-    var `createdSlot`: kotlin.ULong
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiAppendLaneState: FfiConverterRustBuffer<FfiAppendLaneState> {
-    override fun read(buf: ByteBuffer): FfiAppendLaneState {
-        return FfiAppendLaneState(
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiAppendLaneState) = (
-            FfiConverterUByte.allocationSize(value.`version`) +
-            FfiConverterUByte.allocationSize(value.`laneId`) +
-            FfiConverterUByte.allocationSize(value.`bump`) +
-            FfiConverterUByte.allocationSize(value.`rentVaultBump`) +
-            FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`currentPageId`) +
-            FfiConverterULong.allocationSize(value.`createdSlot`)
-    )
-
-    override fun write(value: FfiAppendLaneState, buf: ByteBuffer) {
-            FfiConverterUByte.write(value.`version`, buf)
-            FfiConverterUByte.write(value.`laneId`, buf)
-            FfiConverterUByte.write(value.`bump`, buf)
-            FfiConverterUByte.write(value.`rentVaultBump`, buf)
-            FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`currentPageId`, buf)
-            FfiConverterULong.write(value.`createdSlot`, buf)
-    }
-}
-
-
-
-data class FfiAuditorDecryptedNote (
-    var `spentStealthPk`: kotlin.ByteArray
-    , 
-    var `assetGenerator`: kotlin.ByteArray
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiAuditorDecryptedNote: FfiConverterRustBuffer<FfiAuditorDecryptedNote> {
-    override fun read(buf: ByteBuffer): FfiAuditorDecryptedNote {
-        return FfiAuditorDecryptedNote(
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiAuditorDecryptedNote) = (
-            FfiConverterByteArray.allocationSize(value.`spentStealthPk`) +
-            FfiConverterByteArray.allocationSize(value.`assetGenerator`)
-    )
-
-    override fun write(value: FfiAuditorDecryptedNote, buf: ByteBuffer) {
-            FfiConverterByteArray.write(value.`spentStealthPk`, buf)
-            FfiConverterByteArray.write(value.`assetGenerator`, buf)
-    }
-}
-
-
-
-data class FfiAuditorKeypair (
-    var `auditorSk`: kotlin.ByteArray
-    , 
-    var `auditorPk`: kotlin.ByteArray
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiAuditorKeypair: FfiConverterRustBuffer<FfiAuditorKeypair> {
-    override fun read(buf: ByteBuffer): FfiAuditorKeypair {
-        return FfiAuditorKeypair(
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiAuditorKeypair) = (
-            FfiConverterByteArray.allocationSize(value.`auditorSk`) +
-            FfiConverterByteArray.allocationSize(value.`auditorPk`)
-    )
-
-    override fun write(value: FfiAuditorKeypair, buf: ByteBuffer) {
-            FfiConverterByteArray.write(value.`auditorSk`, buf)
-            FfiConverterByteArray.write(value.`auditorPk`, buf)
-    }
-}
-
-
-
-data class FfiAudrenAddress (
-    var `spendPk`: kotlin.ByteArray
-    , 
-    var `viewPk`: kotlin.ByteArray
-    , 
-    var `encoded`: kotlin.String
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiAudrenAddress: FfiConverterRustBuffer<FfiAudrenAddress> {
-    override fun read(buf: ByteBuffer): FfiAudrenAddress {
-        return FfiAudrenAddress(
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiAudrenAddress) = (
-            FfiConverterByteArray.allocationSize(value.`spendPk`) +
-            FfiConverterByteArray.allocationSize(value.`viewPk`) +
-            FfiConverterString.allocationSize(value.`encoded`)
-    )
-
-    override fun write(value: FfiAudrenAddress, buf: ByteBuffer) {
-            FfiConverterByteArray.write(value.`spendPk`, buf)
-            FfiConverterByteArray.write(value.`viewPk`, buf)
-            FfiConverterString.write(value.`encoded`, buf)
     }
 }
 
@@ -1660,6 +1464,8 @@ data class FfiAudrenKeys (
     var `spendSk`: kotlin.ByteArray
     , 
     var `spendPk`: kotlin.ByteArray
+    , 
+    var `nk`: kotlin.ByteArray
     , 
     var `viewSk`: kotlin.ByteArray
     , 
@@ -1686,6 +1492,7 @@ public object FfiConverterTypeFfiAudrenKeys: FfiConverterRustBuffer<FfiAudrenKey
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
             FfiConverterString.read(buf),
         )
     }
@@ -1693,6 +1500,7 @@ public object FfiConverterTypeFfiAudrenKeys: FfiConverterRustBuffer<FfiAudrenKey
     override fun allocationSize(value: FfiAudrenKeys) = (
             FfiConverterByteArray.allocationSize(value.`spendSk`) +
             FfiConverterByteArray.allocationSize(value.`spendPk`) +
+            FfiConverterByteArray.allocationSize(value.`nk`) +
             FfiConverterByteArray.allocationSize(value.`viewSk`) +
             FfiConverterByteArray.allocationSize(value.`viewPk`) +
             FfiConverterString.allocationSize(value.`address`)
@@ -1701,6 +1509,7 @@ public object FfiConverterTypeFfiAudrenKeys: FfiConverterRustBuffer<FfiAudrenKey
     override fun write(value: FfiAudrenKeys, buf: ByteBuffer) {
             FfiConverterByteArray.write(value.`spendSk`, buf)
             FfiConverterByteArray.write(value.`spendPk`, buf)
+            FfiConverterByteArray.write(value.`nk`, buf)
             FfiConverterByteArray.write(value.`viewSk`, buf)
             FfiConverterByteArray.write(value.`viewPk`, buf)
             FfiConverterString.write(value.`address`, buf)
@@ -1709,14 +1518,16 @@ public object FfiConverterTypeFfiAudrenKeys: FfiConverterRustBuffer<FfiAudrenKey
 
 
 
-data class FfiBufferedExecutionPlan (
-    var `nonce`: kotlin.ULong
+data class FfiDecryptedMemo (
+    var `tweak`: kotlin.ByteArray
     , 
-    var `proofBufferPda`: kotlin.String
+    var `blinding`: kotlin.ByteArray
     , 
-    var `uploadChunks`: List<FfiBuiltInstruction>
+    var `amount`: kotlin.ULong
     , 
-    var `executeIx`: FfiBuiltInstruction
+    var `mint`: kotlin.ByteArray
+    , 
+    var `isDynamic`: kotlin.Boolean
     
 ){
     
@@ -1730,109 +1541,31 @@ data class FfiBufferedExecutionPlan (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiBufferedExecutionPlan: FfiConverterRustBuffer<FfiBufferedExecutionPlan> {
-    override fun read(buf: ByteBuffer): FfiBufferedExecutionPlan {
-        return FfiBufferedExecutionPlan(
-            FfiConverterULong.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterSequenceTypeFfiBuiltInstruction.read(buf),
-            FfiConverterTypeFfiBuiltInstruction.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiBufferedExecutionPlan) = (
-            FfiConverterULong.allocationSize(value.`nonce`) +
-            FfiConverterString.allocationSize(value.`proofBufferPda`) +
-            FfiConverterSequenceTypeFfiBuiltInstruction.allocationSize(value.`uploadChunks`) +
-            FfiConverterTypeFfiBuiltInstruction.allocationSize(value.`executeIx`)
-    )
-
-    override fun write(value: FfiBufferedExecutionPlan, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`nonce`, buf)
-            FfiConverterString.write(value.`proofBufferPda`, buf)
-            FfiConverterSequenceTypeFfiBuiltInstruction.write(value.`uploadChunks`, buf)
-            FfiConverterTypeFfiBuiltInstruction.write(value.`executeIx`, buf)
-    }
-}
-
-
-
-data class FfiBuiltInstruction (
-    var `programId`: kotlin.String
-    , 
-    var `accounts`: List<FfiAccountMeta>
-    , 
-    var `data`: kotlin.ByteArray
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiBuiltInstruction: FfiConverterRustBuffer<FfiBuiltInstruction> {
-    override fun read(buf: ByteBuffer): FfiBuiltInstruction {
-        return FfiBuiltInstruction(
-            FfiConverterString.read(buf),
-            FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+public object FfiConverterTypeFfiDecryptedMemo: FfiConverterRustBuffer<FfiDecryptedMemo> {
+    override fun read(buf: ByteBuffer): FfiDecryptedMemo {
+        return FfiDecryptedMemo(
             FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiBuiltInstruction) = (
-            FfiConverterString.allocationSize(value.`programId`) +
-            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`accounts`) +
-            FfiConverterByteArray.allocationSize(value.`data`)
+    override fun allocationSize(value: FfiDecryptedMemo) = (
+            FfiConverterByteArray.allocationSize(value.`tweak`) +
+            FfiConverterByteArray.allocationSize(value.`blinding`) +
+            FfiConverterULong.allocationSize(value.`amount`) +
+            FfiConverterByteArray.allocationSize(value.`mint`) +
+            FfiConverterBoolean.allocationSize(value.`isDynamic`)
     )
 
-    override fun write(value: FfiBuiltInstruction, buf: ByteBuffer) {
-            FfiConverterString.write(value.`programId`, buf)
-            FfiConverterSequenceTypeFfiAccountMeta.write(value.`accounts`, buf)
-            FfiConverterByteArray.write(value.`data`, buf)
-    }
-}
-
-
-
-data class FfiDataSlice (
-    var `offset`: kotlin.UInt
-    , 
-    var `length`: kotlin.UInt
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiDataSlice: FfiConverterRustBuffer<FfiDataSlice> {
-    override fun read(buf: ByteBuffer): FfiDataSlice {
-        return FfiDataSlice(
-            FfiConverterUInt.read(buf),
-            FfiConverterUInt.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiDataSlice) = (
-            FfiConverterUInt.allocationSize(value.`offset`) +
-            FfiConverterUInt.allocationSize(value.`length`)
-    )
-
-    override fun write(value: FfiDataSlice, buf: ByteBuffer) {
-            FfiConverterUInt.write(value.`offset`, buf)
-            FfiConverterUInt.write(value.`length`, buf)
+    override fun write(value: FfiDecryptedMemo, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`tweak`, buf)
+            FfiConverterByteArray.write(value.`blinding`, buf)
+            FfiConverterULong.write(value.`amount`, buf)
+            FfiConverterByteArray.write(value.`mint`, buf)
+            FfiConverterBoolean.write(value.`isDynamic`, buf)
     }
 }
 
@@ -1843,11 +1576,7 @@ data class FfiDefiSessionKeypair (
     , 
     var `secretSeed`: kotlin.ByteArray
     , 
-    var `pubkey`: kotlin.ByteArray
-    , 
-    var `keypairBytes`: kotlin.ByteArray
-    , 
-    var `address`: kotlin.String
+    var `pubkeyB58`: kotlin.String
     
 ){
     
@@ -1866,8 +1595,6 @@ public object FfiConverterTypeFfiDefiSessionKeypair: FfiConverterRustBuffer<FfiD
         return FfiDefiSessionKeypair(
             FfiConverterUInt.read(buf),
             FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
             FfiConverterString.read(buf),
         )
     }
@@ -1875,46 +1602,42 @@ public object FfiConverterTypeFfiDefiSessionKeypair: FfiConverterRustBuffer<FfiD
     override fun allocationSize(value: FfiDefiSessionKeypair) = (
             FfiConverterUInt.allocationSize(value.`sessionIndex`) +
             FfiConverterByteArray.allocationSize(value.`secretSeed`) +
-            FfiConverterByteArray.allocationSize(value.`pubkey`) +
-            FfiConverterByteArray.allocationSize(value.`keypairBytes`) +
-            FfiConverterString.allocationSize(value.`address`)
+            FfiConverterString.allocationSize(value.`pubkeyB58`)
     )
 
     override fun write(value: FfiDefiSessionKeypair, buf: ByteBuffer) {
             FfiConverterUInt.write(value.`sessionIndex`, buf)
             FfiConverterByteArray.write(value.`secretSeed`, buf)
-            FfiConverterByteArray.write(value.`pubkey`, buf)
-            FfiConverterByteArray.write(value.`keypairBytes`, buf)
-            FfiConverterString.write(value.`address`, buf)
+            FfiConverterString.write(value.`pubkeyB58`, buf)
     }
 }
 
 
 
-data class FfiDepositParams (
+data class FfiDepositSolParams (
     var `programId`: kotlin.String
     , 
     var `depositor`: kotlin.String
     , 
     var `poolId`: kotlin.UInt
     , 
-    var `activePageId`: kotlin.ULong
+    var `laneId`: kotlin.UByte
     , 
-    var `recipientAddress`: kotlin.String
+    var `subPageSeq`: kotlin.ULong
     , 
-    var `mint32`: kotlin.ByteArray
+    var `rootPageSeq`: kotlin.ULong
     , 
-    var `grossAmount`: kotlin.ULong
-    , 
-    var `netAmount`: kotlin.ULong
+    var `memoPageSeq`: kotlin.ULong
     , 
     var `feeFromAmount`: kotlin.Boolean
     , 
-    var `tokenProgram`: kotlin.String?
+    var `amount`: kotlin.ULong
     , 
-    var `depositorAta`: kotlin.String?
+    var `stealthOwner`: kotlin.ByteArray
     , 
-    var `vaultAta`: kotlin.String?
+    var `blinding`: kotlin.ByteArray
+    , 
+    var `memo90`: kotlin.ByteArray
     
 ){
     
@@ -1928,73 +1651,89 @@ data class FfiDepositParams (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiDepositParams: FfiConverterRustBuffer<FfiDepositParams> {
-    override fun read(buf: ByteBuffer): FfiDepositParams {
-        return FfiDepositParams(
+public object FfiConverterTypeFfiDepositSolParams: FfiConverterRustBuffer<FfiDepositSolParams> {
+    override fun read(buf: ByteBuffer): FfiDepositSolParams {
+        return FfiDepositSolParams(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterByteArray.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterBoolean.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiDepositParams) = (
+    override fun allocationSize(value: FfiDepositSolParams) = (
             FfiConverterString.allocationSize(value.`programId`) +
             FfiConverterString.allocationSize(value.`depositor`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`activePageId`) +
-            FfiConverterString.allocationSize(value.`recipientAddress`) +
-            FfiConverterByteArray.allocationSize(value.`mint32`) +
-            FfiConverterULong.allocationSize(value.`grossAmount`) +
-            FfiConverterULong.allocationSize(value.`netAmount`) +
+            FfiConverterUByte.allocationSize(value.`laneId`) +
+            FfiConverterULong.allocationSize(value.`subPageSeq`) +
+            FfiConverterULong.allocationSize(value.`rootPageSeq`) +
+            FfiConverterULong.allocationSize(value.`memoPageSeq`) +
             FfiConverterBoolean.allocationSize(value.`feeFromAmount`) +
-            FfiConverterOptionalString.allocationSize(value.`tokenProgram`) +
-            FfiConverterOptionalString.allocationSize(value.`depositorAta`) +
-            FfiConverterOptionalString.allocationSize(value.`vaultAta`)
+            FfiConverterULong.allocationSize(value.`amount`) +
+            FfiConverterByteArray.allocationSize(value.`stealthOwner`) +
+            FfiConverterByteArray.allocationSize(value.`blinding`) +
+            FfiConverterByteArray.allocationSize(value.`memo90`)
     )
 
-    override fun write(value: FfiDepositParams, buf: ByteBuffer) {
+    override fun write(value: FfiDepositSolParams, buf: ByteBuffer) {
             FfiConverterString.write(value.`programId`, buf)
             FfiConverterString.write(value.`depositor`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`activePageId`, buf)
-            FfiConverterString.write(value.`recipientAddress`, buf)
-            FfiConverterByteArray.write(value.`mint32`, buf)
-            FfiConverterULong.write(value.`grossAmount`, buf)
-            FfiConverterULong.write(value.`netAmount`, buf)
+            FfiConverterUByte.write(value.`laneId`, buf)
+            FfiConverterULong.write(value.`subPageSeq`, buf)
+            FfiConverterULong.write(value.`rootPageSeq`, buf)
+            FfiConverterULong.write(value.`memoPageSeq`, buf)
             FfiConverterBoolean.write(value.`feeFromAmount`, buf)
-            FfiConverterOptionalString.write(value.`tokenProgram`, buf)
-            FfiConverterOptionalString.write(value.`depositorAta`, buf)
-            FfiConverterOptionalString.write(value.`vaultAta`, buf)
+            FfiConverterULong.write(value.`amount`, buf)
+            FfiConverterByteArray.write(value.`stealthOwner`, buf)
+            FfiConverterByteArray.write(value.`blinding`, buf)
+            FfiConverterByteArray.write(value.`memo90`, buf)
     }
 }
 
 
 
-data class FfiEpochPageHeader (
-    var `version`: kotlin.UByte
+data class FfiDepositSplParams (
+    var `programId`: kotlin.String
     , 
-    var `bump`: kotlin.UByte
-    , 
-    var `closed`: kotlin.Boolean
-    , 
-    var `count`: kotlin.UByte
+    var `depositor`: kotlin.String
     , 
     var `poolId`: kotlin.UInt
     , 
-    var `pageId`: kotlin.ULong
+    var `mint`: kotlin.String
     , 
-    var `createdSlot`: kotlin.ULong
+    var `depositorAta`: kotlin.String
     , 
-    var `closedSlot`: kotlin.ULong
+    var `vaultAta`: kotlin.String
+    , 
+    var `tokenProg`: kotlin.String
+    , 
+    var `laneId`: kotlin.UByte
+    , 
+    var `subPageSeq`: kotlin.ULong
+    , 
+    var `rootPageSeq`: kotlin.ULong
+    , 
+    var `memoPageSeq`: kotlin.ULong
+    , 
+    var `amount`: kotlin.ULong
+    , 
+    var `stealthOwner`: kotlin.ByteArray
+    , 
+    var `blinding`: kotlin.ByteArray
+    , 
+    var `memo90`: kotlin.ByteArray
+    , 
+    var `transferHookAccounts`: List<FfiAccountMeta>
     
 ){
     
@@ -2008,40 +1747,303 @@ data class FfiEpochPageHeader (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiEpochPageHeader: FfiConverterRustBuffer<FfiEpochPageHeader> {
-    override fun read(buf: ByteBuffer): FfiEpochPageHeader {
-        return FfiEpochPageHeader(
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterUByte.read(buf),
+public object FfiConverterTypeFfiDepositSplParams: FfiConverterRustBuffer<FfiDepositSplParams> {
+    override fun read(buf: ByteBuffer): FfiDepositSplParams {
+        return FfiDepositSplParams(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterSequenceTypeFfiAccountMeta.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiEpochPageHeader) = (
-            FfiConverterUByte.allocationSize(value.`version`) +
-            FfiConverterUByte.allocationSize(value.`bump`) +
-            FfiConverterBoolean.allocationSize(value.`closed`) +
-            FfiConverterUByte.allocationSize(value.`count`) +
+    override fun allocationSize(value: FfiDepositSplParams) = (
+            FfiConverterString.allocationSize(value.`programId`) +
+            FfiConverterString.allocationSize(value.`depositor`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`pageId`) +
-            FfiConverterULong.allocationSize(value.`createdSlot`) +
-            FfiConverterULong.allocationSize(value.`closedSlot`)
+            FfiConverterString.allocationSize(value.`mint`) +
+            FfiConverterString.allocationSize(value.`depositorAta`) +
+            FfiConverterString.allocationSize(value.`vaultAta`) +
+            FfiConverterString.allocationSize(value.`tokenProg`) +
+            FfiConverterUByte.allocationSize(value.`laneId`) +
+            FfiConverterULong.allocationSize(value.`subPageSeq`) +
+            FfiConverterULong.allocationSize(value.`rootPageSeq`) +
+            FfiConverterULong.allocationSize(value.`memoPageSeq`) +
+            FfiConverterULong.allocationSize(value.`amount`) +
+            FfiConverterByteArray.allocationSize(value.`stealthOwner`) +
+            FfiConverterByteArray.allocationSize(value.`blinding`) +
+            FfiConverterByteArray.allocationSize(value.`memo90`) +
+            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`transferHookAccounts`)
     )
 
-    override fun write(value: FfiEpochPageHeader, buf: ByteBuffer) {
-            FfiConverterUByte.write(value.`version`, buf)
-            FfiConverterUByte.write(value.`bump`, buf)
-            FfiConverterBoolean.write(value.`closed`, buf)
-            FfiConverterUByte.write(value.`count`, buf)
+    override fun write(value: FfiDepositSplParams, buf: ByteBuffer) {
+            FfiConverterString.write(value.`programId`, buf)
+            FfiConverterString.write(value.`depositor`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`pageId`, buf)
-            FfiConverterULong.write(value.`createdSlot`, buf)
-            FfiConverterULong.write(value.`closedSlot`, buf)
+            FfiConverterString.write(value.`mint`, buf)
+            FfiConverterString.write(value.`depositorAta`, buf)
+            FfiConverterString.write(value.`vaultAta`, buf)
+            FfiConverterString.write(value.`tokenProg`, buf)
+            FfiConverterUByte.write(value.`laneId`, buf)
+            FfiConverterULong.write(value.`subPageSeq`, buf)
+            FfiConverterULong.write(value.`rootPageSeq`, buf)
+            FfiConverterULong.write(value.`memoPageSeq`, buf)
+            FfiConverterULong.write(value.`amount`, buf)
+            FfiConverterByteArray.write(value.`stealthOwner`, buf)
+            FfiConverterByteArray.write(value.`blinding`, buf)
+            FfiConverterByteArray.write(value.`memo90`, buf)
+            FfiConverterSequenceTypeFfiAccountMeta.write(value.`transferHookAccounts`, buf)
+    }
+}
+
+
+
+data class FfiDynamicMemoPrep (
+    var `tweak`: kotlin.ByteArray
+    , 
+    var `blinding`: kotlin.ByteArray
+    , 
+    var `dynHead34`: kotlin.ByteArray
+    , 
+    var `dynMask56`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiDynamicMemoPrep: FfiConverterRustBuffer<FfiDynamicMemoPrep> {
+    override fun read(buf: ByteBuffer): FfiDynamicMemoPrep {
+        return FfiDynamicMemoPrep(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiDynamicMemoPrep) = (
+            FfiConverterByteArray.allocationSize(value.`tweak`) +
+            FfiConverterByteArray.allocationSize(value.`blinding`) +
+            FfiConverterByteArray.allocationSize(value.`dynHead34`) +
+            FfiConverterByteArray.allocationSize(value.`dynMask56`)
+    )
+
+    override fun write(value: FfiDynamicMemoPrep, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`tweak`, buf)
+            FfiConverterByteArray.write(value.`blinding`, buf)
+            FfiConverterByteArray.write(value.`dynHead34`, buf)
+            FfiConverterByteArray.write(value.`dynMask56`, buf)
+    }
+}
+
+
+
+data class FfiEncryptedMemo (
+    var `tweak`: kotlin.ByteArray
+    , 
+    var `blinding`: kotlin.ByteArray
+    , 
+    var `stealthOwner`: kotlin.ByteArray
+    , 
+    var `commitment`: kotlin.ByteArray
+    , 
+    var `memo90`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiEncryptedMemo: FfiConverterRustBuffer<FfiEncryptedMemo> {
+    override fun read(buf: ByteBuffer): FfiEncryptedMemo {
+        return FfiEncryptedMemo(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiEncryptedMemo) = (
+            FfiConverterByteArray.allocationSize(value.`tweak`) +
+            FfiConverterByteArray.allocationSize(value.`blinding`) +
+            FfiConverterByteArray.allocationSize(value.`stealthOwner`) +
+            FfiConverterByteArray.allocationSize(value.`commitment`) +
+            FfiConverterByteArray.allocationSize(value.`memo90`)
+    )
+
+    override fun write(value: FfiEncryptedMemo, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`tweak`, buf)
+            FfiConverterByteArray.write(value.`blinding`, buf)
+            FfiConverterByteArray.write(value.`stealthOwner`, buf)
+            FfiConverterByteArray.write(value.`commitment`, buf)
+            FfiConverterByteArray.write(value.`memo90`, buf)
+    }
+}
+
+
+
+data class FfiExecCtxHashParams (
+    var `programId`: kotlin.String
+    , 
+    var `poolId`: kotlin.UInt
+    , 
+    var `outLaneId`: kotlin.UByte
+    , 
+    var `escrowShard`: kotlin.UByte
+    , 
+    var `changeMask`: kotlin.UByte
+    , 
+    var `inKind`: kotlin.UByte
+    , 
+    var `outKind`: kotlin.UByte
+    , 
+    var `feeOnOutput`: kotlin.Boolean
+    , 
+    var `assetIn`: kotlin.ByteArray
+    , 
+    var `amountIn`: kotlin.ULong
+    , 
+    var `relayerFeeAmount`: kotlin.ULong
+    , 
+    var `relayerFeeRecipient`: kotlin.String?
+    , 
+    var `assetOut`: kotlin.ByteArray
+    , 
+    var `minAmountOut`: kotlin.ULong
+    , 
+    var `routerProg`: kotlin.String
+    , 
+    var `routerAccounts`: List<FfiAccountMeta>
+    , 
+    var `outStealthOwner`: kotlin.ByteArray
+    , 
+    var `outBlinding`: kotlin.ByteArray
+    , 
+    var `dynMemoHead`: kotlin.ByteArray
+    , 
+    var `dynMask56`: kotlin.ByteArray
+    , 
+    var `routerIxData`: kotlin.ByteArray
+    , 
+    var `changeMemos`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer<FfiExecCtxHashParams> {
+    override fun read(buf: ByteBuffer): FfiExecCtxHashParams {
+        return FfiExecCtxHashParams(
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiExecCtxHashParams) = (
+            FfiConverterString.allocationSize(value.`programId`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterUByte.allocationSize(value.`outLaneId`) +
+            FfiConverterUByte.allocationSize(value.`escrowShard`) +
+            FfiConverterUByte.allocationSize(value.`changeMask`) +
+            FfiConverterUByte.allocationSize(value.`inKind`) +
+            FfiConverterUByte.allocationSize(value.`outKind`) +
+            FfiConverterBoolean.allocationSize(value.`feeOnOutput`) +
+            FfiConverterByteArray.allocationSize(value.`assetIn`) +
+            FfiConverterULong.allocationSize(value.`amountIn`) +
+            FfiConverterULong.allocationSize(value.`relayerFeeAmount`) +
+            FfiConverterOptionalString.allocationSize(value.`relayerFeeRecipient`) +
+            FfiConverterByteArray.allocationSize(value.`assetOut`) +
+            FfiConverterULong.allocationSize(value.`minAmountOut`) +
+            FfiConverterString.allocationSize(value.`routerProg`) +
+            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`routerAccounts`) +
+            FfiConverterByteArray.allocationSize(value.`outStealthOwner`) +
+            FfiConverterByteArray.allocationSize(value.`outBlinding`) +
+            FfiConverterByteArray.allocationSize(value.`dynMemoHead`) +
+            FfiConverterByteArray.allocationSize(value.`dynMask56`) +
+            FfiConverterByteArray.allocationSize(value.`routerIxData`) +
+            FfiConverterByteArray.allocationSize(value.`changeMemos`)
+    )
+
+    override fun write(value: FfiExecCtxHashParams, buf: ByteBuffer) {
+            FfiConverterString.write(value.`programId`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterUByte.write(value.`outLaneId`, buf)
+            FfiConverterUByte.write(value.`escrowShard`, buf)
+            FfiConverterUByte.write(value.`changeMask`, buf)
+            FfiConverterUByte.write(value.`inKind`, buf)
+            FfiConverterUByte.write(value.`outKind`, buf)
+            FfiConverterBoolean.write(value.`feeOnOutput`, buf)
+            FfiConverterByteArray.write(value.`assetIn`, buf)
+            FfiConverterULong.write(value.`amountIn`, buf)
+            FfiConverterULong.write(value.`relayerFeeAmount`, buf)
+            FfiConverterOptionalString.write(value.`relayerFeeRecipient`, buf)
+            FfiConverterByteArray.write(value.`assetOut`, buf)
+            FfiConverterULong.write(value.`minAmountOut`, buf)
+            FfiConverterString.write(value.`routerProg`, buf)
+            FfiConverterSequenceTypeFfiAccountMeta.write(value.`routerAccounts`, buf)
+            FfiConverterByteArray.write(value.`outStealthOwner`, buf)
+            FfiConverterByteArray.write(value.`outBlinding`, buf)
+            FfiConverterByteArray.write(value.`dynMemoHead`, buf)
+            FfiConverterByteArray.write(value.`dynMask56`, buf)
+            FfiConverterByteArray.write(value.`routerIxData`, buf)
+            FfiConverterByteArray.write(value.`changeMemos`, buf)
     }
 }
 
@@ -2054,53 +2056,69 @@ data class FfiExecViaEscrowParams (
     , 
     var `poolId`: kotlin.UInt
     , 
-    var `outPageId`: kotlin.ULong
+    var `vkId`: kotlin.UByte
     , 
-    var `shardId`: kotlin.UByte
+    var `ckptSlotIdx`: kotlin.UShort
     , 
-    var `inputPageIds`: List<kotlin.ULong>
+    var `outLaneId`: kotlin.UByte
     , 
-    var `inputPagesBytes`: List<kotlin.ByteArray>
+    var `outSubSeq`: kotlin.ULong
     , 
-    var `inputNote`: FfiOwnedNote
+    var `outRootSeq`: kotlin.ULong
     , 
-    var `secretIndex`: kotlin.UInt
+    var `outMemoSeq`: kotlin.ULong
     , 
-    var `mintOut32`: kotlin.ByteArray
+    var `outNfSeq`: kotlin.ULong
     , 
-    var `tokenProgramIn`: kotlin.String
+    var `escrowShard`: kotlin.UByte
     , 
-    var `tokenProgramOut`: kotlin.String
+    var `changeMask`: kotlin.UByte
+    , 
+    var `inKind`: kotlin.UByte
+    , 
+    var `outKind`: kotlin.UByte
+    , 
+    var `feeOnOutput`: kotlin.Boolean
+    , 
+    var `inSpl`: List<kotlin.String>?
+    , 
+    var `outSpl`: List<kotlin.String>?
+    , 
+    var `relayerFeeAmount`: kotlin.ULong
+    , 
+    var `relayerFeeRecipient`: kotlin.String?
+    , 
+    var `proof192`: kotlin.ByteArray
+    , 
+    var `nf0`: kotlin.ByteArray
+    , 
+    var `nf1`: kotlin.ByteArray
+    , 
+    var `cm0`: kotlin.ByteArray
+    , 
+    var `cm1`: kotlin.ByteArray
+    , 
+    var `cm2`: kotlin.ByteArray
     , 
     var `amountIn`: kotlin.ULong
     , 
     var `minAmountOut`: kotlin.ULong
     , 
-    var `relayerFee`: kotlin.ULong
+    var `outStealthOwner`: kotlin.ByteArray
     , 
-    var `feeOnOutput`: kotlin.Boolean
+    var `outBlinding`: kotlin.ByteArray
     , 
-    var `feeRecipientAta`: kotlin.String?
+    var `dynMemoHead`: kotlin.ByteArray
     , 
-    var `allowPartialRefund`: kotlin.Boolean
+    var `dynMask56`: kotlin.ByteArray
     , 
-    var `recipientAddress`: kotlin.String
+    var `routerProg`: kotlin.String
     , 
-    var `changeAddress`: kotlin.String
+    var `routerIxData`: kotlin.ByteArray
     , 
-    var `auditorPk32`: kotlin.ByteArray?
+    var `routerAccounts`: List<FfiAccountMeta>
     , 
-    var `targetProgramId`: kotlin.String
-    , 
-    var `escrowIdx`: kotlin.UByte
-    , 
-    var `escrowInIdx`: kotlin.UByte
-    , 
-    var `escrowOutIdx`: kotlin.UByte
-    , 
-    var `targetIxData`: kotlin.ByteArray
-    , 
-    var `actionAccounts`: List<FfiAccountMeta>
+    var `changeMemos`: kotlin.ByteArray
     
 ){
     
@@ -2120,30 +2138,38 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterUByte.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterSequenceByteArray.read(buf),
-            FfiConverterTypeFfiOwnedNote.read(buf),
-            FfiConverterUInt.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalSequenceString.read(buf),
+            FfiConverterOptionalSequenceString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterOptionalByteArray.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+            FfiConverterByteArray.read(buf),
         )
     }
 
@@ -2151,73 +2177,89 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.allocationSize(value.`programId`) +
             FfiConverterString.allocationSize(value.`payer`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`outPageId`) +
-            FfiConverterUByte.allocationSize(value.`shardId`) +
-            FfiConverterSequenceULong.allocationSize(value.`inputPageIds`) +
-            FfiConverterSequenceByteArray.allocationSize(value.`inputPagesBytes`) +
-            FfiConverterTypeFfiOwnedNote.allocationSize(value.`inputNote`) +
-            FfiConverterUInt.allocationSize(value.`secretIndex`) +
-            FfiConverterByteArray.allocationSize(value.`mintOut32`) +
-            FfiConverterString.allocationSize(value.`tokenProgramIn`) +
-            FfiConverterString.allocationSize(value.`tokenProgramOut`) +
+            FfiConverterUByte.allocationSize(value.`vkId`) +
+            FfiConverterUShort.allocationSize(value.`ckptSlotIdx`) +
+            FfiConverterUByte.allocationSize(value.`outLaneId`) +
+            FfiConverterULong.allocationSize(value.`outSubSeq`) +
+            FfiConverterULong.allocationSize(value.`outRootSeq`) +
+            FfiConverterULong.allocationSize(value.`outMemoSeq`) +
+            FfiConverterULong.allocationSize(value.`outNfSeq`) +
+            FfiConverterUByte.allocationSize(value.`escrowShard`) +
+            FfiConverterUByte.allocationSize(value.`changeMask`) +
+            FfiConverterUByte.allocationSize(value.`inKind`) +
+            FfiConverterUByte.allocationSize(value.`outKind`) +
+            FfiConverterBoolean.allocationSize(value.`feeOnOutput`) +
+            FfiConverterOptionalSequenceString.allocationSize(value.`inSpl`) +
+            FfiConverterOptionalSequenceString.allocationSize(value.`outSpl`) +
+            FfiConverterULong.allocationSize(value.`relayerFeeAmount`) +
+            FfiConverterOptionalString.allocationSize(value.`relayerFeeRecipient`) +
+            FfiConverterByteArray.allocationSize(value.`proof192`) +
+            FfiConverterByteArray.allocationSize(value.`nf0`) +
+            FfiConverterByteArray.allocationSize(value.`nf1`) +
+            FfiConverterByteArray.allocationSize(value.`cm0`) +
+            FfiConverterByteArray.allocationSize(value.`cm1`) +
+            FfiConverterByteArray.allocationSize(value.`cm2`) +
             FfiConverterULong.allocationSize(value.`amountIn`) +
             FfiConverterULong.allocationSize(value.`minAmountOut`) +
-            FfiConverterULong.allocationSize(value.`relayerFee`) +
-            FfiConverterBoolean.allocationSize(value.`feeOnOutput`) +
-            FfiConverterOptionalString.allocationSize(value.`feeRecipientAta`) +
-            FfiConverterBoolean.allocationSize(value.`allowPartialRefund`) +
-            FfiConverterString.allocationSize(value.`recipientAddress`) +
-            FfiConverterString.allocationSize(value.`changeAddress`) +
-            FfiConverterOptionalByteArray.allocationSize(value.`auditorPk32`) +
-            FfiConverterString.allocationSize(value.`targetProgramId`) +
-            FfiConverterUByte.allocationSize(value.`escrowIdx`) +
-            FfiConverterUByte.allocationSize(value.`escrowInIdx`) +
-            FfiConverterUByte.allocationSize(value.`escrowOutIdx`) +
-            FfiConverterByteArray.allocationSize(value.`targetIxData`) +
-            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`actionAccounts`)
+            FfiConverterByteArray.allocationSize(value.`outStealthOwner`) +
+            FfiConverterByteArray.allocationSize(value.`outBlinding`) +
+            FfiConverterByteArray.allocationSize(value.`dynMemoHead`) +
+            FfiConverterByteArray.allocationSize(value.`dynMask56`) +
+            FfiConverterString.allocationSize(value.`routerProg`) +
+            FfiConverterByteArray.allocationSize(value.`routerIxData`) +
+            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`routerAccounts`) +
+            FfiConverterByteArray.allocationSize(value.`changeMemos`)
     )
 
     override fun write(value: FfiExecViaEscrowParams, buf: ByteBuffer) {
             FfiConverterString.write(value.`programId`, buf)
             FfiConverterString.write(value.`payer`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`outPageId`, buf)
-            FfiConverterUByte.write(value.`shardId`, buf)
-            FfiConverterSequenceULong.write(value.`inputPageIds`, buf)
-            FfiConverterSequenceByteArray.write(value.`inputPagesBytes`, buf)
-            FfiConverterTypeFfiOwnedNote.write(value.`inputNote`, buf)
-            FfiConverterUInt.write(value.`secretIndex`, buf)
-            FfiConverterByteArray.write(value.`mintOut32`, buf)
-            FfiConverterString.write(value.`tokenProgramIn`, buf)
-            FfiConverterString.write(value.`tokenProgramOut`, buf)
+            FfiConverterUByte.write(value.`vkId`, buf)
+            FfiConverterUShort.write(value.`ckptSlotIdx`, buf)
+            FfiConverterUByte.write(value.`outLaneId`, buf)
+            FfiConverterULong.write(value.`outSubSeq`, buf)
+            FfiConverterULong.write(value.`outRootSeq`, buf)
+            FfiConverterULong.write(value.`outMemoSeq`, buf)
+            FfiConverterULong.write(value.`outNfSeq`, buf)
+            FfiConverterUByte.write(value.`escrowShard`, buf)
+            FfiConverterUByte.write(value.`changeMask`, buf)
+            FfiConverterUByte.write(value.`inKind`, buf)
+            FfiConverterUByte.write(value.`outKind`, buf)
+            FfiConverterBoolean.write(value.`feeOnOutput`, buf)
+            FfiConverterOptionalSequenceString.write(value.`inSpl`, buf)
+            FfiConverterOptionalSequenceString.write(value.`outSpl`, buf)
+            FfiConverterULong.write(value.`relayerFeeAmount`, buf)
+            FfiConverterOptionalString.write(value.`relayerFeeRecipient`, buf)
+            FfiConverterByteArray.write(value.`proof192`, buf)
+            FfiConverterByteArray.write(value.`nf0`, buf)
+            FfiConverterByteArray.write(value.`nf1`, buf)
+            FfiConverterByteArray.write(value.`cm0`, buf)
+            FfiConverterByteArray.write(value.`cm1`, buf)
+            FfiConverterByteArray.write(value.`cm2`, buf)
             FfiConverterULong.write(value.`amountIn`, buf)
             FfiConverterULong.write(value.`minAmountOut`, buf)
-            FfiConverterULong.write(value.`relayerFee`, buf)
-            FfiConverterBoolean.write(value.`feeOnOutput`, buf)
-            FfiConverterOptionalString.write(value.`feeRecipientAta`, buf)
-            FfiConverterBoolean.write(value.`allowPartialRefund`, buf)
-            FfiConverterString.write(value.`recipientAddress`, buf)
-            FfiConverterString.write(value.`changeAddress`, buf)
-            FfiConverterOptionalByteArray.write(value.`auditorPk32`, buf)
-            FfiConverterString.write(value.`targetProgramId`, buf)
-            FfiConverterUByte.write(value.`escrowIdx`, buf)
-            FfiConverterUByte.write(value.`escrowInIdx`, buf)
-            FfiConverterUByte.write(value.`escrowOutIdx`, buf)
-            FfiConverterByteArray.write(value.`targetIxData`, buf)
-            FfiConverterSequenceTypeFfiAccountMeta.write(value.`actionAccounts`, buf)
+            FfiConverterByteArray.write(value.`outStealthOwner`, buf)
+            FfiConverterByteArray.write(value.`outBlinding`, buf)
+            FfiConverterByteArray.write(value.`dynMemoHead`, buf)
+            FfiConverterByteArray.write(value.`dynMask56`, buf)
+            FfiConverterString.write(value.`routerProg`, buf)
+            FfiConverterByteArray.write(value.`routerIxData`, buf)
+            FfiConverterSequenceTypeFfiAccountMeta.write(value.`routerAccounts`, buf)
+            FfiConverterByteArray.write(value.`changeMemos`, buf)
     }
 }
 
 
 
 data class FfiFullViewingKey (
-    var `version`: kotlin.UByte
+    var `spendPk`: kotlin.ByteArray
     , 
-    var `spendPkB58`: kotlin.String
+    var `nk`: kotlin.ByteArray
     , 
-    var `viewSkB58`: kotlin.String
+    var `viewSk`: kotlin.ByteArray
     , 
-    var `viewPkB58`: kotlin.String
+    var `viewPk`: kotlin.ByteArray
     
 ){
     
@@ -2234,58 +2276,278 @@ data class FfiFullViewingKey (
 public object FfiConverterTypeFfiFullViewingKey: FfiConverterRustBuffer<FfiFullViewingKey> {
     override fun read(buf: ByteBuffer): FfiFullViewingKey {
         return FfiFullViewingKey(
-            FfiConverterUByte.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
         )
     }
 
     override fun allocationSize(value: FfiFullViewingKey) = (
-            FfiConverterUByte.allocationSize(value.`version`) +
-            FfiConverterString.allocationSize(value.`spendPkB58`) +
-            FfiConverterString.allocationSize(value.`viewSkB58`) +
-            FfiConverterString.allocationSize(value.`viewPkB58`)
+            FfiConverterByteArray.allocationSize(value.`spendPk`) +
+            FfiConverterByteArray.allocationSize(value.`nk`) +
+            FfiConverterByteArray.allocationSize(value.`viewSk`) +
+            FfiConverterByteArray.allocationSize(value.`viewPk`)
     )
 
     override fun write(value: FfiFullViewingKey, buf: ByteBuffer) {
-            FfiConverterUByte.write(value.`version`, buf)
-            FfiConverterString.write(value.`spendPkB58`, buf)
-            FfiConverterString.write(value.`viewSkB58`, buf)
-            FfiConverterString.write(value.`viewPkB58`, buf)
+            FfiConverterByteArray.write(value.`spendPk`, buf)
+            FfiConverterByteArray.write(value.`nk`, buf)
+            FfiConverterByteArray.write(value.`viewSk`, buf)
+            FfiConverterByteArray.write(value.`viewPk`, buf)
     }
 }
 
 
 
-data class FfiMergeParams (
+data class FfiGroth16ProofBundle (
+    var `proof192`: kotlin.ByteArray
+    , 
+    var `nf0`: kotlin.ByteArray
+    , 
+    var `nf1`: kotlin.ByteArray
+    , 
+    var `cm0`: kotlin.ByteArray
+    , 
+    var `cm1`: kotlin.ByteArray
+    , 
+    var `cm2`: kotlin.ByteArray
+    , 
+    var `publicInputHash`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiGroth16ProofBundle: FfiConverterRustBuffer<FfiGroth16ProofBundle> {
+    override fun read(buf: ByteBuffer): FfiGroth16ProofBundle {
+        return FfiGroth16ProofBundle(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiGroth16ProofBundle) = (
+            FfiConverterByteArray.allocationSize(value.`proof192`) +
+            FfiConverterByteArray.allocationSize(value.`nf0`) +
+            FfiConverterByteArray.allocationSize(value.`nf1`) +
+            FfiConverterByteArray.allocationSize(value.`cm0`) +
+            FfiConverterByteArray.allocationSize(value.`cm1`) +
+            FfiConverterByteArray.allocationSize(value.`cm2`) +
+            FfiConverterByteArray.allocationSize(value.`publicInputHash`)
+    )
+
+    override fun write(value: FfiGroth16ProofBundle, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`proof192`, buf)
+            FfiConverterByteArray.write(value.`nf0`, buf)
+            FfiConverterByteArray.write(value.`nf1`, buf)
+            FfiConverterByteArray.write(value.`cm0`, buf)
+            FfiConverterByteArray.write(value.`cm1`, buf)
+            FfiConverterByteArray.write(value.`cm2`, buf)
+            FfiConverterByteArray.write(value.`publicInputHash`, buf)
+    }
+}
+
+
+
+data class FfiInstruction (
+    var `programIdB58`: kotlin.String
+    , 
+    var `accounts`: List<FfiAccountMeta>
+    , 
+    var `data`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiInstruction: FfiConverterRustBuffer<FfiInstruction> {
+    override fun read(buf: ByteBuffer): FfiInstruction {
+        return FfiInstruction(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiInstruction) = (
+            FfiConverterString.allocationSize(value.`programIdB58`) +
+            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`accounts`) +
+            FfiConverterByteArray.allocationSize(value.`data`)
+    )
+
+    override fun write(value: FfiInstruction, buf: ByteBuffer) {
+            FfiConverterString.write(value.`programIdB58`, buf)
+            FfiConverterSequenceTypeFfiAccountMeta.write(value.`accounts`, buf)
+            FfiConverterByteArray.write(value.`data`, buf)
+    }
+}
+
+
+
+data class FfiJoinSplitCtxHashParams (
+    var `programId`: kotlin.String
+    , 
+    var `poolId`: kotlin.UInt
+    , 
+    var `outLaneId`: kotlin.UByte
+    , 
+    var `outputMask`: kotlin.UByte
+    , 
+    var `assetMode`: kotlin.UByte
+    , 
+    var `unwrapWsol`: kotlin.Boolean
+    , 
+    var `recipient`: kotlin.String?
+    , 
+    var `relayerFeeRecipient`: kotlin.String?
+    , 
+    var `publicAssetId`: kotlin.ByteArray
+    , 
+    var `publicAmountOut`: kotlin.ULong
+    , 
+    var `relayerFeeAmount`: kotlin.ULong
+    , 
+    var `memosBytes`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiJoinSplitCtxHashParams: FfiConverterRustBuffer<FfiJoinSplitCtxHashParams> {
+    override fun read(buf: ByteBuffer): FfiJoinSplitCtxHashParams {
+        return FfiJoinSplitCtxHashParams(
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiJoinSplitCtxHashParams) = (
+            FfiConverterString.allocationSize(value.`programId`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterUByte.allocationSize(value.`outLaneId`) +
+            FfiConverterUByte.allocationSize(value.`outputMask`) +
+            FfiConverterUByte.allocationSize(value.`assetMode`) +
+            FfiConverterBoolean.allocationSize(value.`unwrapWsol`) +
+            FfiConverterOptionalString.allocationSize(value.`recipient`) +
+            FfiConverterOptionalString.allocationSize(value.`relayerFeeRecipient`) +
+            FfiConverterByteArray.allocationSize(value.`publicAssetId`) +
+            FfiConverterULong.allocationSize(value.`publicAmountOut`) +
+            FfiConverterULong.allocationSize(value.`relayerFeeAmount`) +
+            FfiConverterByteArray.allocationSize(value.`memosBytes`)
+    )
+
+    override fun write(value: FfiJoinSplitCtxHashParams, buf: ByteBuffer) {
+            FfiConverterString.write(value.`programId`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterUByte.write(value.`outLaneId`, buf)
+            FfiConverterUByte.write(value.`outputMask`, buf)
+            FfiConverterUByte.write(value.`assetMode`, buf)
+            FfiConverterBoolean.write(value.`unwrapWsol`, buf)
+            FfiConverterOptionalString.write(value.`recipient`, buf)
+            FfiConverterOptionalString.write(value.`relayerFeeRecipient`, buf)
+            FfiConverterByteArray.write(value.`publicAssetId`, buf)
+            FfiConverterULong.write(value.`publicAmountOut`, buf)
+            FfiConverterULong.write(value.`relayerFeeAmount`, buf)
+            FfiConverterByteArray.write(value.`memosBytes`, buf)
+    }
+}
+
+
+
+data class FfiJoinSplitParams (
     var `programId`: kotlin.String
     , 
     var `payer`: kotlin.String
     , 
     var `poolId`: kotlin.UInt
     , 
-    var `outPageId`: kotlin.ULong
+    var `vkId`: kotlin.UByte
     , 
-    var `input1PageIds`: List<kotlin.ULong>
+    var `ckptSlotIdx`: kotlin.UShort
     , 
-    var `input1PagesBytes`: List<kotlin.ByteArray>
+    var `outLaneId`: kotlin.UByte
     , 
-    var `note1`: FfiOwnedNote
+    var `outSubSeq`: kotlin.ULong
     , 
-    var `secretIndex1`: kotlin.UInt
+    var `outRootSeq`: kotlin.ULong
     , 
-    var `input2PageIds`: List<kotlin.ULong>
+    var `outMemoSeq`: kotlin.ULong
     , 
-    var `input2PagesBytes`: List<kotlin.ByteArray>
+    var `outNfSeq`: kotlin.ULong
     , 
-    var `note2`: FfiOwnedNote
+    var `outputMask`: kotlin.UByte
     , 
-    var `secretIndex2`: kotlin.UInt
+    var `assetMode`: kotlin.UByte
     , 
-    var `ownerAddress`: kotlin.String
+    var `unwrapWsol`: kotlin.Boolean
     , 
-    var `auditorPk32`: kotlin.ByteArray?
+    var `splMint`: kotlin.String?
+    , 
+    var `splVaultAta`: kotlin.String?
+    , 
+    var `splTokenProg`: kotlin.String?
+    , 
+    var `proof192`: kotlin.ByteArray
+    , 
+    var `nf0`: kotlin.ByteArray
+    , 
+    var `nf1`: kotlin.ByteArray
+    , 
+    var `cm0`: kotlin.ByteArray
+    , 
+    var `cm1`: kotlin.ByteArray
+    , 
+    var `cm2`: kotlin.ByteArray
+    , 
+    var `publicAmountOut`: kotlin.ULong
+    , 
+    var `relayerFeeAmount`: kotlin.ULong
+    , 
+    var `recipient`: kotlin.String
+    , 
+    var `relayerFeeRecipient`: kotlin.String
+    , 
+    var `memosBytes`: kotlin.ByteArray
     
 ){
     
@@ -2299,91 +2561,118 @@ data class FfiMergeParams (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiMergeParams: FfiConverterRustBuffer<FfiMergeParams> {
-    override fun read(buf: ByteBuffer): FfiMergeParams {
-        return FfiMergeParams(
+public object FfiConverterTypeFfiJoinSplitParams: FfiConverterRustBuffer<FfiJoinSplitParams> {
+    override fun read(buf: ByteBuffer): FfiJoinSplitParams {
+        return FfiJoinSplitParams(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterSequenceByteArray.read(buf),
-            FfiConverterTypeFfiOwnedNote.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterSequenceByteArray.read(buf),
-            FfiConverterTypeFfiOwnedNote.read(buf),
-            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterOptionalByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiMergeParams) = (
+    override fun allocationSize(value: FfiJoinSplitParams) = (
             FfiConverterString.allocationSize(value.`programId`) +
             FfiConverterString.allocationSize(value.`payer`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`outPageId`) +
-            FfiConverterSequenceULong.allocationSize(value.`input1PageIds`) +
-            FfiConverterSequenceByteArray.allocationSize(value.`input1PagesBytes`) +
-            FfiConverterTypeFfiOwnedNote.allocationSize(value.`note1`) +
-            FfiConverterUInt.allocationSize(value.`secretIndex1`) +
-            FfiConverterSequenceULong.allocationSize(value.`input2PageIds`) +
-            FfiConverterSequenceByteArray.allocationSize(value.`input2PagesBytes`) +
-            FfiConverterTypeFfiOwnedNote.allocationSize(value.`note2`) +
-            FfiConverterUInt.allocationSize(value.`secretIndex2`) +
-            FfiConverterString.allocationSize(value.`ownerAddress`) +
-            FfiConverterOptionalByteArray.allocationSize(value.`auditorPk32`)
+            FfiConverterUByte.allocationSize(value.`vkId`) +
+            FfiConverterUShort.allocationSize(value.`ckptSlotIdx`) +
+            FfiConverterUByte.allocationSize(value.`outLaneId`) +
+            FfiConverterULong.allocationSize(value.`outSubSeq`) +
+            FfiConverterULong.allocationSize(value.`outRootSeq`) +
+            FfiConverterULong.allocationSize(value.`outMemoSeq`) +
+            FfiConverterULong.allocationSize(value.`outNfSeq`) +
+            FfiConverterUByte.allocationSize(value.`outputMask`) +
+            FfiConverterUByte.allocationSize(value.`assetMode`) +
+            FfiConverterBoolean.allocationSize(value.`unwrapWsol`) +
+            FfiConverterOptionalString.allocationSize(value.`splMint`) +
+            FfiConverterOptionalString.allocationSize(value.`splVaultAta`) +
+            FfiConverterOptionalString.allocationSize(value.`splTokenProg`) +
+            FfiConverterByteArray.allocationSize(value.`proof192`) +
+            FfiConverterByteArray.allocationSize(value.`nf0`) +
+            FfiConverterByteArray.allocationSize(value.`nf1`) +
+            FfiConverterByteArray.allocationSize(value.`cm0`) +
+            FfiConverterByteArray.allocationSize(value.`cm1`) +
+            FfiConverterByteArray.allocationSize(value.`cm2`) +
+            FfiConverterULong.allocationSize(value.`publicAmountOut`) +
+            FfiConverterULong.allocationSize(value.`relayerFeeAmount`) +
+            FfiConverterString.allocationSize(value.`recipient`) +
+            FfiConverterString.allocationSize(value.`relayerFeeRecipient`) +
+            FfiConverterByteArray.allocationSize(value.`memosBytes`)
     )
 
-    override fun write(value: FfiMergeParams, buf: ByteBuffer) {
+    override fun write(value: FfiJoinSplitParams, buf: ByteBuffer) {
             FfiConverterString.write(value.`programId`, buf)
             FfiConverterString.write(value.`payer`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`outPageId`, buf)
-            FfiConverterSequenceULong.write(value.`input1PageIds`, buf)
-            FfiConverterSequenceByteArray.write(value.`input1PagesBytes`, buf)
-            FfiConverterTypeFfiOwnedNote.write(value.`note1`, buf)
-            FfiConverterUInt.write(value.`secretIndex1`, buf)
-            FfiConverterSequenceULong.write(value.`input2PageIds`, buf)
-            FfiConverterSequenceByteArray.write(value.`input2PagesBytes`, buf)
-            FfiConverterTypeFfiOwnedNote.write(value.`note2`, buf)
-            FfiConverterUInt.write(value.`secretIndex2`, buf)
-            FfiConverterString.write(value.`ownerAddress`, buf)
-            FfiConverterOptionalByteArray.write(value.`auditorPk32`, buf)
+            FfiConverterUByte.write(value.`vkId`, buf)
+            FfiConverterUShort.write(value.`ckptSlotIdx`, buf)
+            FfiConverterUByte.write(value.`outLaneId`, buf)
+            FfiConverterULong.write(value.`outSubSeq`, buf)
+            FfiConverterULong.write(value.`outRootSeq`, buf)
+            FfiConverterULong.write(value.`outMemoSeq`, buf)
+            FfiConverterULong.write(value.`outNfSeq`, buf)
+            FfiConverterUByte.write(value.`outputMask`, buf)
+            FfiConverterUByte.write(value.`assetMode`, buf)
+            FfiConverterBoolean.write(value.`unwrapWsol`, buf)
+            FfiConverterOptionalString.write(value.`splMint`, buf)
+            FfiConverterOptionalString.write(value.`splVaultAta`, buf)
+            FfiConverterOptionalString.write(value.`splTokenProg`, buf)
+            FfiConverterByteArray.write(value.`proof192`, buf)
+            FfiConverterByteArray.write(value.`nf0`, buf)
+            FfiConverterByteArray.write(value.`nf1`, buf)
+            FfiConverterByteArray.write(value.`cm0`, buf)
+            FfiConverterByteArray.write(value.`cm1`, buf)
+            FfiConverterByteArray.write(value.`cm2`, buf)
+            FfiConverterULong.write(value.`publicAmountOut`, buf)
+            FfiConverterULong.write(value.`relayerFeeAmount`, buf)
+            FfiConverterString.write(value.`recipient`, buf)
+            FfiConverterString.write(value.`relayerFeeRecipient`, buf)
+            FfiConverterByteArray.write(value.`memosBytes`, buf)
     }
 }
 
 
 
-data class FfiOwnedNote (
-    var `pageId`: kotlin.ULong
+data class FfiLaneHeader (
+    var `version`: kotlin.UByte
     , 
-    var `slotIndex`: kotlin.UByte
+    var `laneId`: kotlin.UByte
     , 
-    var `mint`: kotlin.ByteArray
+    var `bump`: kotlin.UByte
     , 
-    var `amount`: kotlin.ULong
+    var `rentBump`: kotlin.UByte
     , 
-    var `isDynamicOutput`: kotlin.Boolean
+    var `poolId`: kotlin.UInt
     , 
-    var `stealthPk`: kotlin.ByteArray
+    var `nextLeaf`: kotlin.ULong
     , 
-    var `assetTag`: kotlin.ByteArray
+    var `nfCount`: kotlin.ULong
     , 
-    var `commitment`: kotlin.ByteArray
-    , 
-    var `assetBlinding`: kotlin.ByteArray
-    , 
-    var `valueBlinding`: kotlin.ByteArray
-    , 
-    var `stealthScalar`: kotlin.ByteArray
-    , 
-    var `spendX`: kotlin.ByteArray?
-    , 
-    var `nullifier`: kotlin.ByteArray?
-    , 
-    var `nullifierPda`: kotlin.String?
+    var `currentRoot`: kotlin.ByteArray
     
 ){
     
@@ -2397,64 +2686,46 @@ data class FfiOwnedNote (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiOwnedNote: FfiConverterRustBuffer<FfiOwnedNote> {
-    override fun read(buf: ByteBuffer): FfiOwnedNote {
-        return FfiOwnedNote(
-            FfiConverterULong.read(buf),
+public object FfiConverterTypeFfiLaneHeader: FfiConverterRustBuffer<FfiLaneHeader> {
+    override fun read(buf: ByteBuffer): FfiLaneHeader {
+        return FfiLaneHeader(
             FfiConverterUByte.read(buf),
-            FfiConverterByteArray.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUInt.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
             FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterOptionalByteArray.read(buf),
-            FfiConverterOptionalByteArray.read(buf),
-            FfiConverterOptionalString.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiOwnedNote) = (
-            FfiConverterULong.allocationSize(value.`pageId`) +
-            FfiConverterUByte.allocationSize(value.`slotIndex`) +
-            FfiConverterByteArray.allocationSize(value.`mint`) +
-            FfiConverterULong.allocationSize(value.`amount`) +
-            FfiConverterBoolean.allocationSize(value.`isDynamicOutput`) +
-            FfiConverterByteArray.allocationSize(value.`stealthPk`) +
-            FfiConverterByteArray.allocationSize(value.`assetTag`) +
-            FfiConverterByteArray.allocationSize(value.`commitment`) +
-            FfiConverterByteArray.allocationSize(value.`assetBlinding`) +
-            FfiConverterByteArray.allocationSize(value.`valueBlinding`) +
-            FfiConverterByteArray.allocationSize(value.`stealthScalar`) +
-            FfiConverterOptionalByteArray.allocationSize(value.`spendX`) +
-            FfiConverterOptionalByteArray.allocationSize(value.`nullifier`) +
-            FfiConverterOptionalString.allocationSize(value.`nullifierPda`)
+    override fun allocationSize(value: FfiLaneHeader) = (
+            FfiConverterUByte.allocationSize(value.`version`) +
+            FfiConverterUByte.allocationSize(value.`laneId`) +
+            FfiConverterUByte.allocationSize(value.`bump`) +
+            FfiConverterUByte.allocationSize(value.`rentBump`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterULong.allocationSize(value.`nextLeaf`) +
+            FfiConverterULong.allocationSize(value.`nfCount`) +
+            FfiConverterByteArray.allocationSize(value.`currentRoot`)
     )
 
-    override fun write(value: FfiOwnedNote, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`pageId`, buf)
-            FfiConverterUByte.write(value.`slotIndex`, buf)
-            FfiConverterByteArray.write(value.`mint`, buf)
-            FfiConverterULong.write(value.`amount`, buf)
-            FfiConverterBoolean.write(value.`isDynamicOutput`, buf)
-            FfiConverterByteArray.write(value.`stealthPk`, buf)
-            FfiConverterByteArray.write(value.`assetTag`, buf)
-            FfiConverterByteArray.write(value.`commitment`, buf)
-            FfiConverterByteArray.write(value.`assetBlinding`, buf)
-            FfiConverterByteArray.write(value.`valueBlinding`, buf)
-            FfiConverterByteArray.write(value.`stealthScalar`, buf)
-            FfiConverterOptionalByteArray.write(value.`spendX`, buf)
-            FfiConverterOptionalByteArray.write(value.`nullifier`, buf)
-            FfiConverterOptionalString.write(value.`nullifierPda`, buf)
+    override fun write(value: FfiLaneHeader, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`version`, buf)
+            FfiConverterUByte.write(value.`laneId`, buf)
+            FfiConverterUByte.write(value.`bump`, buf)
+            FfiConverterUByte.write(value.`rentBump`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterULong.write(value.`nextLeaf`, buf)
+            FfiConverterULong.write(value.`nfCount`, buf)
+            FfiConverterByteArray.write(value.`currentRoot`, buf)
     }
 }
 
 
 
-data class FfiPda (
+data class FfiPdaResult (
     var `address`: kotlin.String
     , 
     var `bump`: kotlin.UByte
@@ -2471,20 +2742,20 @@ data class FfiPda (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiPda: FfiConverterRustBuffer<FfiPda> {
-    override fun read(buf: ByteBuffer): FfiPda {
-        return FfiPda(
+public object FfiConverterTypeFfiPdaResult: FfiConverterRustBuffer<FfiPdaResult> {
+    override fun read(buf: ByteBuffer): FfiPdaResult {
+        return FfiPdaResult(
             FfiConverterString.read(buf),
             FfiConverterUByte.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiPda) = (
+    override fun allocationSize(value: FfiPdaResult) = (
             FfiConverterString.allocationSize(value.`address`) +
             FfiConverterUByte.allocationSize(value.`bump`)
     )
 
-    override fun write(value: FfiPda, buf: ByteBuffer) {
+    override fun write(value: FfiPdaResult, buf: ByteBuffer) {
             FfiConverterString.write(value.`address`, buf)
             FfiConverterUByte.write(value.`bump`, buf)
     }
@@ -2497,33 +2768,27 @@ data class FfiPoolState (
     , 
     var `bump`: kotlin.UByte
     , 
-    var `mode`: kotlin.UByte
-    , 
     var `paused`: kotlin.Boolean
+    , 
+    var `activeLanes`: kotlin.UByte
     , 
     var `poolId`: kotlin.UInt
     , 
-    var `currentPageId`: kotlin.ULong
+    var `ckptInterval`: kotlin.ULong
     , 
-    var `totalNotes`: kotlin.ULong
+    var `maxCkptAge`: kotlin.ULong
     , 
-    var `totalSpends`: kotlin.ULong
-    , 
-    var `pageRentFeeLamports`: kotlin.ULong
-    , 
-    var `authority`: kotlin.String
-    , 
-    var `auditorPk`: kotlin.ByteArray
-    , 
-    var `auditorLocked`: kotlin.Boolean
-    , 
-    var `vaultAuthBump`: kotlin.UByte
+    var `authorityB58`: kotlin.String
     , 
     var `solVaultBump`: kotlin.UByte
     , 
-    var `pageRentBump`: kotlin.UByte
+    var `vaultAuthBump`: kotlin.UByte
     , 
-    var `activeLanes`: kotlin.UByte
+    var `mode`: kotlin.UByte
+    , 
+    var `noteRentFee`: kotlin.ULong
+    , 
+    var `nfRentFee`: kotlin.ULong
     
 ){
     
@@ -2542,78 +2807,73 @@ public object FfiConverterTypeFfiPoolState: FfiConverterRustBuffer<FfiPoolState>
         return FfiPoolState(
             FfiConverterUByte.read(buf),
             FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterUByte.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterByteArray.read(buf),
-            FfiConverterBoolean.read(buf),
             FfiConverterUByte.read(buf),
             FfiConverterUByte.read(buf),
             FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
         )
     }
 
     override fun allocationSize(value: FfiPoolState) = (
             FfiConverterUByte.allocationSize(value.`version`) +
             FfiConverterUByte.allocationSize(value.`bump`) +
-            FfiConverterUByte.allocationSize(value.`mode`) +
             FfiConverterBoolean.allocationSize(value.`paused`) +
+            FfiConverterUByte.allocationSize(value.`activeLanes`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`currentPageId`) +
-            FfiConverterULong.allocationSize(value.`totalNotes`) +
-            FfiConverterULong.allocationSize(value.`totalSpends`) +
-            FfiConverterULong.allocationSize(value.`pageRentFeeLamports`) +
-            FfiConverterString.allocationSize(value.`authority`) +
-            FfiConverterByteArray.allocationSize(value.`auditorPk`) +
-            FfiConverterBoolean.allocationSize(value.`auditorLocked`) +
-            FfiConverterUByte.allocationSize(value.`vaultAuthBump`) +
+            FfiConverterULong.allocationSize(value.`ckptInterval`) +
+            FfiConverterULong.allocationSize(value.`maxCkptAge`) +
+            FfiConverterString.allocationSize(value.`authorityB58`) +
             FfiConverterUByte.allocationSize(value.`solVaultBump`) +
-            FfiConverterUByte.allocationSize(value.`pageRentBump`) +
-            FfiConverterUByte.allocationSize(value.`activeLanes`)
+            FfiConverterUByte.allocationSize(value.`vaultAuthBump`) +
+            FfiConverterUByte.allocationSize(value.`mode`) +
+            FfiConverterULong.allocationSize(value.`noteRentFee`) +
+            FfiConverterULong.allocationSize(value.`nfRentFee`)
     )
 
     override fun write(value: FfiPoolState, buf: ByteBuffer) {
             FfiConverterUByte.write(value.`version`, buf)
             FfiConverterUByte.write(value.`bump`, buf)
-            FfiConverterUByte.write(value.`mode`, buf)
             FfiConverterBoolean.write(value.`paused`, buf)
-            FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`currentPageId`, buf)
-            FfiConverterULong.write(value.`totalNotes`, buf)
-            FfiConverterULong.write(value.`totalSpends`, buf)
-            FfiConverterULong.write(value.`pageRentFeeLamports`, buf)
-            FfiConverterString.write(value.`authority`, buf)
-            FfiConverterByteArray.write(value.`auditorPk`, buf)
-            FfiConverterBoolean.write(value.`auditorLocked`, buf)
-            FfiConverterUByte.write(value.`vaultAuthBump`, buf)
-            FfiConverterUByte.write(value.`solVaultBump`, buf)
-            FfiConverterUByte.write(value.`pageRentBump`, buf)
             FfiConverterUByte.write(value.`activeLanes`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterULong.write(value.`ckptInterval`, buf)
+            FfiConverterULong.write(value.`maxCkptAge`, buf)
+            FfiConverterString.write(value.`authorityB58`, buf)
+            FfiConverterUByte.write(value.`solVaultBump`, buf)
+            FfiConverterUByte.write(value.`vaultAuthBump`, buf)
+            FfiConverterUByte.write(value.`mode`, buf)
+            FfiConverterULong.write(value.`noteRentFee`, buf)
+            FfiConverterULong.write(value.`nfRentFee`, buf)
     }
 }
 
 
 
-data class FfiPreparedEscrowAccounts (
-    var `escrowPda`: kotlin.String
+data class FfiRootCheckpoint (
+    var `version`: kotlin.UByte
     , 
-    var `escrowInAta`: kotlin.String
+    var `bump`: kotlin.UByte
     , 
-    var `escrowOutAta`: kotlin.String
+    var `slotIdx`: kotlin.UShort
     , 
-    var `escrowIdx`: kotlin.UByte
+    var `poolId`: kotlin.UInt
     , 
-    var `escrowInIdx`: kotlin.UByte
+    var `epochId`: kotlin.ULong
     , 
-    var `escrowOutIdx`: kotlin.UByte
+    var `publishedSlot`: kotlin.ULong
     , 
-    var `accounts`: List<FfiAccountMeta>
+    var `superRoot`: kotlin.ByteArray
+    , 
+    var `laneRoots`: List<kotlin.ByteArray>
+    , 
+    var `laneCounts`: List<kotlin.ULong>
     
 ){
     
@@ -2627,62 +2887,64 @@ data class FfiPreparedEscrowAccounts (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiPreparedEscrowAccounts: FfiConverterRustBuffer<FfiPreparedEscrowAccounts> {
-    override fun read(buf: ByteBuffer): FfiPreparedEscrowAccounts {
-        return FfiPreparedEscrowAccounts(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+public object FfiConverterTypeFfiRootCheckpoint: FfiConverterRustBuffer<FfiRootCheckpoint> {
+    override fun read(buf: ByteBuffer): FfiRootCheckpoint {
+        return FfiRootCheckpoint(
             FfiConverterUByte.read(buf),
             FfiConverterUByte.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterSequenceByteArray.read(buf),
+            FfiConverterSequenceULong.read(buf),
         )
     }
 
-    override fun allocationSize(value: FfiPreparedEscrowAccounts) = (
-            FfiConverterString.allocationSize(value.`escrowPda`) +
-            FfiConverterString.allocationSize(value.`escrowInAta`) +
-            FfiConverterString.allocationSize(value.`escrowOutAta`) +
-            FfiConverterUByte.allocationSize(value.`escrowIdx`) +
-            FfiConverterUByte.allocationSize(value.`escrowInIdx`) +
-            FfiConverterUByte.allocationSize(value.`escrowOutIdx`) +
-            FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`accounts`)
+    override fun allocationSize(value: FfiRootCheckpoint) = (
+            FfiConverterUByte.allocationSize(value.`version`) +
+            FfiConverterUByte.allocationSize(value.`bump`) +
+            FfiConverterUShort.allocationSize(value.`slotIdx`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterULong.allocationSize(value.`epochId`) +
+            FfiConverterULong.allocationSize(value.`publishedSlot`) +
+            FfiConverterByteArray.allocationSize(value.`superRoot`) +
+            FfiConverterSequenceByteArray.allocationSize(value.`laneRoots`) +
+            FfiConverterSequenceULong.allocationSize(value.`laneCounts`)
     )
 
-    override fun write(value: FfiPreparedEscrowAccounts, buf: ByteBuffer) {
-            FfiConverterString.write(value.`escrowPda`, buf)
-            FfiConverterString.write(value.`escrowInAta`, buf)
-            FfiConverterString.write(value.`escrowOutAta`, buf)
-            FfiConverterUByte.write(value.`escrowIdx`, buf)
-            FfiConverterUByte.write(value.`escrowInIdx`, buf)
-            FfiConverterUByte.write(value.`escrowOutIdx`, buf)
-            FfiConverterSequenceTypeFfiAccountMeta.write(value.`accounts`, buf)
+    override fun write(value: FfiRootCheckpoint, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`version`, buf)
+            FfiConverterUByte.write(value.`bump`, buf)
+            FfiConverterUShort.write(value.`slotIdx`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterULong.write(value.`epochId`, buf)
+            FfiConverterULong.write(value.`publishedSlot`, buf)
+            FfiConverterByteArray.write(value.`superRoot`, buf)
+            FfiConverterSequenceByteArray.write(value.`laneRoots`, buf)
+            FfiConverterSequenceULong.write(value.`laneCounts`, buf)
     }
 }
 
 
 
 data class FfiSelectiveDisclosureProof (
-    var `version`: kotlin.UByte
+    var `poolId`: kotlin.UInt
     , 
-    var `pageId`: kotlin.ULong
+    var `laneId`: kotlin.UByte
     , 
-    var `slotIndex`: kotlin.UByte
+    var `leafIndex`: kotlin.ULong
     , 
-    var `stealthPkB58`: kotlin.String
+    var `stealthOwner`: kotlin.ByteArray
     , 
-    var `assetTagB58`: kotlin.String
-    , 
-    var `commitmentB58`: kotlin.String
-    , 
-    var `mintB58`: kotlin.String
+    var `mint`: kotlin.ByteArray
     , 
     var `amount`: kotlin.ULong
     , 
-    var `assetBlindingB58`: kotlin.String
+    var `blinding`: kotlin.ByteArray
     , 
-    var `valueBlindingB58`: kotlin.String
+    var `commitment`: kotlin.ByteArray
     
 ){
     
@@ -2699,239 +2961,37 @@ data class FfiSelectiveDisclosureProof (
 public object FfiConverterTypeFfiSelectiveDisclosureProof: FfiConverterRustBuffer<FfiSelectiveDisclosureProof> {
     override fun read(buf: ByteBuffer): FfiSelectiveDisclosureProof {
         return FfiSelectiveDisclosureProof(
+            FfiConverterUInt.read(buf),
             FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterUByte.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
         )
     }
 
     override fun allocationSize(value: FfiSelectiveDisclosureProof) = (
-            FfiConverterUByte.allocationSize(value.`version`) +
-            FfiConverterULong.allocationSize(value.`pageId`) +
-            FfiConverterUByte.allocationSize(value.`slotIndex`) +
-            FfiConverterString.allocationSize(value.`stealthPkB58`) +
-            FfiConverterString.allocationSize(value.`assetTagB58`) +
-            FfiConverterString.allocationSize(value.`commitmentB58`) +
-            FfiConverterString.allocationSize(value.`mintB58`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterUByte.allocationSize(value.`laneId`) +
+            FfiConverterULong.allocationSize(value.`leafIndex`) +
+            FfiConverterByteArray.allocationSize(value.`stealthOwner`) +
+            FfiConverterByteArray.allocationSize(value.`mint`) +
             FfiConverterULong.allocationSize(value.`amount`) +
-            FfiConverterString.allocationSize(value.`assetBlindingB58`) +
-            FfiConverterString.allocationSize(value.`valueBlindingB58`)
+            FfiConverterByteArray.allocationSize(value.`blinding`) +
+            FfiConverterByteArray.allocationSize(value.`commitment`)
     )
 
     override fun write(value: FfiSelectiveDisclosureProof, buf: ByteBuffer) {
-            FfiConverterUByte.write(value.`version`, buf)
-            FfiConverterULong.write(value.`pageId`, buf)
-            FfiConverterUByte.write(value.`slotIndex`, buf)
-            FfiConverterString.write(value.`stealthPkB58`, buf)
-            FfiConverterString.write(value.`assetTagB58`, buf)
-            FfiConverterString.write(value.`commitmentB58`, buf)
-            FfiConverterString.write(value.`mintB58`, buf)
-            FfiConverterULong.write(value.`amount`, buf)
-            FfiConverterString.write(value.`assetBlindingB58`, buf)
-            FfiConverterString.write(value.`valueBlindingB58`, buf)
-    }
-}
-
-
-
-data class FfiTransferParams (
-    var `programId`: kotlin.String
-    , 
-    var `payer`: kotlin.String
-    , 
-    var `poolId`: kotlin.UInt
-    , 
-    var `outPageId`: kotlin.ULong
-    , 
-    var `inputPageIds`: List<kotlin.ULong>
-    , 
-    var `inputPagesBytes`: List<kotlin.ByteArray>
-    , 
-    var `inputNote`: FfiOwnedNote
-    , 
-    var `secretIndex`: kotlin.UInt
-    , 
-    var `recipientAddress`: kotlin.String
-    , 
-    var `changeAddress`: kotlin.String
-    , 
-    var `payAmount`: kotlin.ULong
-    , 
-    var `auditorPk32`: kotlin.ByteArray?
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiTransferParams: FfiConverterRustBuffer<FfiTransferParams> {
-    override fun read(buf: ByteBuffer): FfiTransferParams {
-        return FfiTransferParams(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterSequenceByteArray.read(buf),
-            FfiConverterTypeFfiOwnedNote.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterOptionalByteArray.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiTransferParams) = (
-            FfiConverterString.allocationSize(value.`programId`) +
-            FfiConverterString.allocationSize(value.`payer`) +
-            FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`outPageId`) +
-            FfiConverterSequenceULong.allocationSize(value.`inputPageIds`) +
-            FfiConverterSequenceByteArray.allocationSize(value.`inputPagesBytes`) +
-            FfiConverterTypeFfiOwnedNote.allocationSize(value.`inputNote`) +
-            FfiConverterUInt.allocationSize(value.`secretIndex`) +
-            FfiConverterString.allocationSize(value.`recipientAddress`) +
-            FfiConverterString.allocationSize(value.`changeAddress`) +
-            FfiConverterULong.allocationSize(value.`payAmount`) +
-            FfiConverterOptionalByteArray.allocationSize(value.`auditorPk32`)
-    )
-
-    override fun write(value: FfiTransferParams, buf: ByteBuffer) {
-            FfiConverterString.write(value.`programId`, buf)
-            FfiConverterString.write(value.`payer`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`outPageId`, buf)
-            FfiConverterSequenceULong.write(value.`inputPageIds`, buf)
-            FfiConverterSequenceByteArray.write(value.`inputPagesBytes`, buf)
-            FfiConverterTypeFfiOwnedNote.write(value.`inputNote`, buf)
-            FfiConverterUInt.write(value.`secretIndex`, buf)
-            FfiConverterString.write(value.`recipientAddress`, buf)
-            FfiConverterString.write(value.`changeAddress`, buf)
-            FfiConverterULong.write(value.`payAmount`, buf)
-            FfiConverterOptionalByteArray.write(value.`auditorPk32`, buf)
-    }
-}
-
-
-
-data class FfiWithdrawParams (
-    var `programId`: kotlin.String
-    , 
-    var `payer`: kotlin.String
-    , 
-    var `poolId`: kotlin.UInt
-    , 
-    var `outPageId`: kotlin.ULong
-    , 
-    var `inputPageIds`: List<kotlin.ULong>
-    , 
-    var `inputPagesBytes`: List<kotlin.ByteArray>
-    , 
-    var `inputNote`: FfiOwnedNote
-    , 
-    var `secretIndex`: kotlin.UInt
-    , 
-    var `recipientAccount`: kotlin.String
-    , 
-    var `changeAddress`: kotlin.String
-    , 
-    var `amount`: kotlin.ULong
-    , 
-    var `relayerFee`: kotlin.ULong
-    , 
-    var `feeRecipient`: kotlin.String?
-    , 
-    var `unwrapWsol`: kotlin.Boolean
-    , 
-    var `splTokenProgram`: kotlin.String?
-    , 
-    var `auditorPk32`: kotlin.ByteArray?
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFfiWithdrawParams: FfiConverterRustBuffer<FfiWithdrawParams> {
-    override fun read(buf: ByteBuffer): FfiWithdrawParams {
-        return FfiWithdrawParams(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterSequenceByteArray.read(buf),
-            FfiConverterTypeFfiOwnedNote.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalByteArray.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FfiWithdrawParams) = (
-            FfiConverterString.allocationSize(value.`programId`) +
-            FfiConverterString.allocationSize(value.`payer`) +
-            FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`outPageId`) +
-            FfiConverterSequenceULong.allocationSize(value.`inputPageIds`) +
-            FfiConverterSequenceByteArray.allocationSize(value.`inputPagesBytes`) +
-            FfiConverterTypeFfiOwnedNote.allocationSize(value.`inputNote`) +
-            FfiConverterUInt.allocationSize(value.`secretIndex`) +
-            FfiConverterString.allocationSize(value.`recipientAccount`) +
-            FfiConverterString.allocationSize(value.`changeAddress`) +
-            FfiConverterULong.allocationSize(value.`amount`) +
-            FfiConverterULong.allocationSize(value.`relayerFee`) +
-            FfiConverterOptionalString.allocationSize(value.`feeRecipient`) +
-            FfiConverterBoolean.allocationSize(value.`unwrapWsol`) +
-            FfiConverterOptionalString.allocationSize(value.`splTokenProgram`) +
-            FfiConverterOptionalByteArray.allocationSize(value.`auditorPk32`)
-    )
-
-    override fun write(value: FfiWithdrawParams, buf: ByteBuffer) {
-            FfiConverterString.write(value.`programId`, buf)
-            FfiConverterString.write(value.`payer`, buf)
-            FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`outPageId`, buf)
-            FfiConverterSequenceULong.write(value.`inputPageIds`, buf)
-            FfiConverterSequenceByteArray.write(value.`inputPagesBytes`, buf)
-            FfiConverterTypeFfiOwnedNote.write(value.`inputNote`, buf)
-            FfiConverterUInt.write(value.`secretIndex`, buf)
-            FfiConverterString.write(value.`recipientAccount`, buf)
-            FfiConverterString.write(value.`changeAddress`, buf)
+            FfiConverterUByte.write(value.`laneId`, buf)
+            FfiConverterULong.write(value.`leafIndex`, buf)
+            FfiConverterByteArray.write(value.`stealthOwner`, buf)
+            FfiConverterByteArray.write(value.`mint`, buf)
             FfiConverterULong.write(value.`amount`, buf)
-            FfiConverterULong.write(value.`relayerFee`, buf)
-            FfiConverterOptionalString.write(value.`feeRecipient`, buf)
-            FfiConverterBoolean.write(value.`unwrapWsol`, buf)
-            FfiConverterOptionalString.write(value.`splTokenProgram`, buf)
-            FfiConverterOptionalByteArray.write(value.`auditorPk32`, buf)
+            FfiConverterByteArray.write(value.`blinding`, buf)
+            FfiConverterByteArray.write(value.`commitment`, buf)
     }
 }
 
@@ -3056,28 +3116,60 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
-public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
-    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+public object FfiConverterOptionalTypeFfiDecryptedMemo: FfiConverterRustBuffer<FfiDecryptedMemo?> {
+    override fun read(buf: ByteBuffer): FfiDecryptedMemo? {
         if (buf.get().toInt() == 0) {
             return null
         }
-        return FfiConverterByteArray.read(buf)
+        return FfiConverterTypeFfiDecryptedMemo.read(buf)
     }
 
-    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+    override fun allocationSize(value: FfiDecryptedMemo?): ULong {
         if (value == null) {
             return 1UL
         } else {
-            return 1UL + FfiConverterByteArray.allocationSize(value)
+            return 1UL + FfiConverterTypeFfiDecryptedMemo.allocationSize(value)
         }
     }
 
-    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+    override fun write(value: FfiDecryptedMemo?, buf: ByteBuffer) {
         if (value == null) {
             buf.put(0)
         } else {
             buf.put(1)
-            FfiConverterByteArray.write(value, buf)
+            FfiConverterTypeFfiDecryptedMemo.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalSequenceString: FfiConverterRustBuffer<List<kotlin.String>?> {
+    override fun read(buf: ByteBuffer): List<kotlin.String>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceString.read(buf)
+    }
+
+    override fun allocationSize(value: List<kotlin.String>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<kotlin.String>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceString.write(value, buf)
         }
     }
 }
@@ -3193,133 +3285,34 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
         }
     }
 }
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeFfiBuiltInstruction: FfiConverterRustBuffer<List<FfiBuiltInstruction>> {
-    override fun read(buf: ByteBuffer): List<FfiBuiltInstruction> {
-        val len = buf.getInt()
-        return List<FfiBuiltInstruction>(len) {
-            FfiConverterTypeFfiBuiltInstruction.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<FfiBuiltInstruction>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeFfiBuiltInstruction.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<FfiBuiltInstruction>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeFfiBuiltInstruction.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<FfiOwnedNote>> {
-    override fun read(buf: ByteBuffer): List<FfiOwnedNote> {
-        val len = buf.getInt()
-        return List<FfiOwnedNote>(len) {
-            FfiConverterTypeFfiOwnedNote.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<FfiOwnedNote>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeFfiOwnedNote.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<FfiOwnedNote>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeFfiOwnedNote.write(it, buf)
-        }
-    }
-}
-    @Throws(AudrenFfiException::class) fun `assetGenerator`(`mint32`: kotlin.ByteArray): kotlin.ByteArray {
-            return FfiConverterByteArray.lift(
+    @Throws(AudrenFfiException::class) fun `buildDepositSolIx`(`params`: FfiDepositSolParams): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_asset_generator(
+    UniffiLib.uniffi_audren_ffi_fn_func_build_deposit_sol_ix(
     
         
-        FfiConverterByteArray.lower(`mint32`),_status)
+        FfiConverterTypeFfiDepositSolParams.lower(`params`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `auditorDecryptNote`(`auditorSk32`: kotlin.ByteArray, `s132`: kotlin.ByteArray, `s232`: kotlin.ByteArray, `m132`: kotlin.ByteArray, `m232`: kotlin.ByteArray): FfiAuditorDecryptedNote {
-            return FfiConverterTypeFfiAuditorDecryptedNote.lift(
+    @Throws(AudrenFfiException::class) fun `buildDepositSplIx`(`params`: FfiDepositSplParams): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_auditor_decrypt_note(
+    UniffiLib.uniffi_audren_ffi_fn_func_build_deposit_spl_ix(
     
         
-        FfiConverterByteArray.lower(`auditorSk32`),
-        FfiConverterByteArray.lower(`s132`),
-        FfiConverterByteArray.lower(`s232`),
-        FfiConverterByteArray.lower(`m132`),
-        FfiConverterByteArray.lower(`m232`),_status)
+        FfiConverterTypeFfiDepositSplParams.lower(`params`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `buildBufferedExecutionPlan`(`nonce`: kotlin.ULong, `inner`: FfiBuiltInstruction): FfiBufferedExecutionPlan {
-            return FfiConverterTypeFfiBufferedExecutionPlan.lift(
+    @Throws(AudrenFfiException::class) fun `buildExecViaEscrowIx`(`params`: FfiExecViaEscrowParams): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_buffered_execution_plan(
-    
-        
-        FfiConverterULong.lower(`nonce`),
-        FfiConverterTypeFfiBuiltInstruction.lower(`inner`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `buildCloseProofBufferInstruction`(`programId`: kotlin.String, `payer`: kotlin.String, `nonce`: kotlin.ULong): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_close_proof_buffer_instruction(
-    
-        
-        FfiConverterString.lower(`programId`),
-        FfiConverterString.lower(`payer`),
-        FfiConverterULong.lower(`nonce`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `buildDepositInstruction`(`params`: FfiDepositParams): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_deposit_instruction(
-    
-        
-        FfiConverterTypeFfiDepositParams.lower(`params`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `buildExecViaEscrowInstruction`(`params`: FfiExecViaEscrowParams): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_exec_via_escrow_instruction(
+    UniffiLib.uniffi_audren_ffi_fn_func_build_exec_via_escrow_ix(
     
         
         FfiConverterTypeFfiExecViaEscrowParams.lower(`params`),_status)
@@ -3328,87 +3321,162 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
-    @Throws(AudrenFfiException::class) fun `buildMergeInstruction`(`params`: FfiMergeParams): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
+    @Throws(AudrenFfiException::class) fun `buildInitLaneIx`(`programId`: kotlin.String, `authority`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_merge_instruction(
+    UniffiLib.uniffi_audren_ffi_fn_func_build_init_lane_ix(
     
         
-        FfiConverterTypeFfiMergeParams.lower(`params`),_status)
+        FfiConverterString.lower(`programId`),
+        FfiConverterString.lower(`authority`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`laneId`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `buildOpenLanePageInstruction`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `currentPageId`: kotlin.ULong): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
+    @Throws(AudrenFfiException::class) fun `buildInitPoolIx`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `ckptInterval`: kotlin.ULong, `maxCkptAge`: kotlin.ULong, `noteRentFee`: kotlin.ULong, `nfRentFee`: kotlin.ULong): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_open_lane_page_instruction(
+    UniffiLib.uniffi_audren_ffi_fn_func_build_init_pool_ix(
     
         
         FfiConverterString.lower(`programId`),
         FfiConverterString.lower(`payer`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterULong.lower(`currentPageId`),_status)
+        FfiConverterULong.lower(`ckptInterval`),
+        FfiConverterULong.lower(`maxCkptAge`),
+        FfiConverterULong.lower(`noteRentFee`),
+        FfiConverterULong.lower(`nfRentFee`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `buildOpenPageInstruction`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `currentPageId`: kotlin.ULong): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
+    @Throws(AudrenFfiException::class) fun `buildJoinsplitIx`(`params`: FfiJoinSplitParams): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_open_page_instruction(
+    UniffiLib.uniffi_audren_ffi_fn_func_build_joinsplit_ix(
+    
+        
+        FfiConverterTypeFfiJoinSplitParams.lower(`params`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `buildOpenPageIx`(`programId`: kotlin.String, `payer`: kotlin.String, `pageKind`: kotlin.UByte, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `pageSeq`: kotlin.ULong): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_build_open_page_ix(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterString.lower(`payer`),
+        FfiConverterUByte.lower(`pageKind`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`laneId`),
+        FfiConverterULong.lower(`pageSeq`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `buildPublishCheckpointIx`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `slotIdx`: kotlin.UShort, `activeLanes`: kotlin.UByte): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_build_publish_checkpoint_ix(
     
         
         FfiConverterString.lower(`programId`),
         FfiConverterString.lower(`payer`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterULong.lower(`currentPageId`),_status)
+        FfiConverterUShort.lower(`slotIdx`),
+        FfiConverterUByte.lower(`activeLanes`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `buildTransferInstruction`(`params`: FfiTransferParams): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
+    @Throws(AudrenFfiException::class) fun `buildSetPausedIx`(`programId`: kotlin.String, `authority`: kotlin.String, `poolId`: kotlin.UInt, `paused`: kotlin.Boolean): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_transfer_instruction(
+    UniffiLib.uniffi_audren_ffi_fn_func_build_set_paused_ix(
     
         
-        FfiConverterTypeFfiTransferParams.lower(`params`),_status)
+        FfiConverterString.lower(`programId`),
+        FfiConverterString.lower(`authority`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterBoolean.lower(`paused`),_status)
 }
     )
     }
     
-
-    @Throws(AudrenFfiException::class) fun `buildWithdrawInstruction`(`params`: FfiWithdrawParams): FfiBuiltInstruction {
-            return FfiConverterTypeFfiBuiltInstruction.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_withdraw_instruction(
-    
-        
-        FfiConverterTypeFfiWithdrawParams.lower(`params`),_status)
-}
-    )
-    }
-    
- fun `createSelectiveDisclosureProof`(`note`: FfiOwnedNote): FfiSelectiveDisclosureProof {
-            return FfiConverterTypeFfiSelectiveDisclosureProof.lift(
+ fun `canonicalProgramId`(): kotlin.String {
+            return FfiConverterString.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_create_selective_disclosure_proof(
+    UniffiLib.uniffi_audren_ffi_fn_func_canonical_program_id(
     
-        
-        FfiConverterTypeFfiOwnedNote.lower(`note`),_status)
+        _status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `decodeAppendLaneState`(`data`: kotlin.ByteArray): FfiAppendLaneState {
-            return FfiConverterTypeFfiAppendLaneState.lift(
+    @Throws(AudrenFfiException::class) fun `compactStoreNewJson`(`poolId`: kotlin.UInt, `birthdaySlot`: kotlin.ULong): kotlin.String {
+            return FfiConverterString.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_decode_append_lane_state(
+    UniffiLib.uniffi_audren_ffi_fn_func_compact_store_new_json(
+    
+        
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterULong.lower(`birthdaySlot`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `computeExecCtxHashFfi`(`params`: FfiExecCtxHashParams): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_compute_exec_ctx_hash_ffi(
+    
+        
+        FfiConverterTypeFfiExecCtxHashParams.lower(`params`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `computeJoinsplitCtxHashFfi`(`params`: FfiJoinSplitCtxHashParams): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_compute_joinsplit_ctx_hash_ffi(
+    
+        
+        FfiConverterTypeFfiJoinSplitCtxHashParams.lower(`params`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `decodeAudrenAddress`(`encoded`: kotlin.String): List<kotlin.ByteArray> {
+            return FfiConverterSequenceByteArray.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_decode_audren_address(
+    
+        
+        FfiConverterString.lower(`encoded`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `decodeLaneHeaderAccount`(`data`: kotlin.ByteArray): FfiLaneHeader {
+            return FfiConverterTypeFfiLaneHeader.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_decode_lane_header_account(
     
         
         FfiConverterByteArray.lower(`data`),_status)
@@ -3417,25 +3485,39 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
-    @Throws(AudrenFfiException::class) fun `decodeEpochPageHeader`(`data`: kotlin.ByteArray): FfiEpochPageHeader {
-            return FfiConverterTypeFfiEpochPageHeader.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_decode_epoch_page_header(
-    
-        
-        FfiConverterByteArray.lower(`data`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `decodePoolState`(`data`: kotlin.ByteArray): FfiPoolState {
+    @Throws(AudrenFfiException::class) fun `decodePoolStateAccount`(`data`: kotlin.ByteArray): FfiPoolState {
             return FfiConverterTypeFfiPoolState.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_decode_pool_state(
+    UniffiLib.uniffi_audren_ffi_fn_func_decode_pool_state_account(
     
         
         FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `decodeRootCheckpointAccount`(`data`: kotlin.ByteArray): FfiRootCheckpoint {
+            return FfiConverterTypeFfiRootCheckpoint.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_decode_root_checkpoint_account(
+    
+        
+        FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `decryptAndVerifyMemoEntry`(`fvk`: FfiFullViewingKey, `memo90`: kotlin.ByteArray, `onchainCommitment`: kotlin.ByteArray): FfiDecryptedMemo? {
+            return FfiConverterOptionalTypeFfiDecryptedMemo.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_decrypt_and_verify_memo_entry(
+    
+        
+        FfiConverterTypeFfiFullViewingKey.lower(`fvk`),
+        FfiConverterByteArray.lower(`memo90`),
+        FfiConverterByteArray.lower(`onchainCommitment`),_status)
 }
     )
     }
@@ -3451,241 +3533,290 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveAssociatedTokenAddress`(`ownerB58`: kotlin.String, `mintB58`: kotlin.String, `tokenProgramB58`: kotlin.String): kotlin.String {
+    @Throws(AudrenFfiException::class) fun `deriveAssetIdBytes`(`mintBytes`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_asset_id_bytes(
+    
+        
+        FfiConverterByteArray.lower(`mintBytes`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveAta`(`owner`: kotlin.String, `tokenProgram`: kotlin.String, `mint`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_associated_token_address(
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_ata(
     
         
-        FfiConverterString.lower(`ownerB58`),
-        FfiConverterString.lower(`mintB58`),
-        FfiConverterString.lower(`tokenProgramB58`),_status)
+        FfiConverterString.lower(`owner`),
+        FfiConverterString.lower(`tokenProgram`),
+        FfiConverterString.lower(`mint`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveAuditorKeypair`(`seed32`: kotlin.ByteArray): FfiAuditorKeypair {
-            return FfiConverterTypeFfiAuditorKeypair.lift(
+    @Throws(AudrenFfiException::class) fun `deriveCheckpointPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `slotIdx`: kotlin.UShort): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_auditor_keypair(
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_checkpoint_pda(
     
         
-        FfiConverterByteArray.lower(`seed32`),_status)
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUShort.lower(`slotIdx`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveDefiSessionKeypair`(`masterSeed32`: kotlin.ByteArray, `sessionIndex`: kotlin.UInt): FfiDefiSessionKeypair {
+    @Throws(AudrenFfiException::class) fun `deriveDefiSessionKeypair`(`seed`: kotlin.ByteArray, `sessionIndex`: kotlin.UInt): FfiDefiSessionKeypair {
             return FfiConverterTypeFfiDefiSessionKeypair.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_defi_session_keypair(
     
         
-        FfiConverterByteArray.lower(`masterSeed32`),
+        FfiConverterByteArray.lower(`seed`),
         FfiConverterUInt.lower(`sessionIndex`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveEpochPagePda`(`poolId`: kotlin.UInt, `pageId`: kotlin.ULong, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_epoch_page_pda(
-    
-        
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterULong.lower(`pageId`),
-        FfiConverterString.lower(`programId`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `deriveEscrowPda`(`poolId`: kotlin.UInt, `shardId`: kotlin.UByte, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `deriveEscrowPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `shardId`: kotlin.UByte): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_escrow_pda(
     
         
+        FfiConverterString.lower(`programId`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterUByte.lower(`shardId`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterUByte.lower(`shardId`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveKeysFromSeed`(`seed32`: kotlin.ByteArray): FfiAudrenKeys {
+    @Throws(AudrenFfiException::class) fun `deriveKeysFromSeed`(`seed`: kotlin.ByteArray): FfiAudrenKeys {
             return FfiConverterTypeFfiAudrenKeys.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_keys_from_seed(
     
         
-        FfiConverterByteArray.lower(`seed32`),_status)
+        FfiConverterByteArray.lower(`seed`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveLanePda`(`poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `deriveLanePda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_lane_pda(
     
         
+        FfiConverterString.lower(`programId`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterUByte.lower(`laneId`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterUByte.lower(`laneId`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveLaneRentVaultPda`(`poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `deriveLaneRentPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_lane_rent_vault_pda(
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_lane_rent_pda(
     
         
+        FfiConverterString.lower(`programId`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterUByte.lower(`laneId`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterUByte.lower(`laneId`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveNullifierPda`(`poolId`: kotlin.UInt, `nullifier32`: kotlin.ByteArray, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `deriveMemoPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `pageSeq`: kotlin.ULong): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_memo_pda(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`laneId`),
+        FfiConverterULong.lower(`pageSeq`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveNfPagePda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `pageSeq`: kotlin.ULong): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_nf_page_pda(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`laneId`),
+        FfiConverterULong.lower(`pageSeq`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveNullifierPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `nullifier`: kotlin.ByteArray): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_nullifier_pda(
     
         
+        FfiConverterString.lower(`programId`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterByteArray.lower(`nullifier32`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterByteArray.lower(`nullifier`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `derivePageRentVaultPda`(`poolId`: kotlin.UInt, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_page_rent_vault_pda(
-    
-        
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterString.lower(`programId`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `derivePoolPda`(`poolId`: kotlin.UInt, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `derivePoolPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_pool_pda(
     
         
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveProofBufferPda`(`authorityB58`: kotlin.String, `nonce`: kotlin.ULong, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_proof_buffer_pda(
-    
-        
-        FfiConverterString.lower(`authorityB58`),
-        FfiConverterULong.lower(`nonce`),
-        FfiConverterString.lower(`programId`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `deriveSolVaultPda`(`poolId`: kotlin.UInt, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `deriveSolVaultPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_sol_vault_pda(
     
         
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveSubaccountKeys`(`masterSeed32`: kotlin.ByteArray, `accountIndex`: kotlin.UInt): FfiAudrenKeys {
+    @Throws(AudrenFfiException::class) fun `deriveSubaccountKeys`(`seed`: kotlin.ByteArray, `accountIndex`: kotlin.UInt): FfiAudrenKeys {
             return FfiConverterTypeFfiAudrenKeys.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_subaccount_keys(
     
         
-        FfiConverterByteArray.lower(`masterSeed32`),
+        FfiConverterByteArray.lower(`seed`),
         FfiConverterUInt.lower(`accountIndex`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveUnwrapPda`(`poolId`: kotlin.UInt, `nullifier32`: kotlin.ByteArray, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `deriveSubrootPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `rootPageSeq`: kotlin.ULong): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_subroot_pda(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`laneId`),
+        FfiConverterULong.lower(`rootPageSeq`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveSubtreePda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `pageSeq`: kotlin.ULong): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_subtree_pda(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`laneId`),
+        FfiConverterULong.lower(`pageSeq`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveUnwrapPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `nf0`: kotlin.ByteArray): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_unwrap_pda(
     
         
+        FfiConverterString.lower(`programId`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterByteArray.lower(`nullifier32`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterByteArray.lower(`nf0`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `deriveVaultAuthPda`(`poolId`: kotlin.UInt, `programId`: kotlin.String): FfiPda {
-            return FfiConverterTypeFfiPda.lift(
+    @Throws(AudrenFfiException::class) fun `deriveVaultAuthPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_vault_auth_pda(
     
         
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterString.lower(`programId`),_status)
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),_status)
+}
+    )
+    }
+    
+ fun `deterministicNoteRentFeeFfi`(`poolNoteRentFeeCap`: kotlin.ULong, `subRent`: kotlin.ULong, `srRent`: kotlin.ULong, `memoRent`: kotlin.ULong): kotlin.ULong {
+            return FfiConverterULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_deterministic_note_rent_fee_ffi(
+    
+        
+        FfiConverterULong.lower(`poolNoteRentFeeCap`),
+        FfiConverterULong.lower(`subRent`),
+        FfiConverterULong.lower(`srRent`),
+        FfiConverterULong.lower(`memoRent`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `exportFullViewingKey`(`seed32`: kotlin.ByteArray, `accountIndex`: kotlin.UInt): FfiFullViewingKey {
+    @Throws(AudrenFfiException::class) fun `encryptNoteMemo`(`recipientSpendPk`: kotlin.ByteArray, `recipientViewPk`: kotlin.ByteArray, `ephSecret`: kotlin.ByteArray, `amount`: kotlin.ULong, `mint`: kotlin.ByteArray): FfiEncryptedMemo {
+            return FfiConverterTypeFfiEncryptedMemo.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_encrypt_note_memo(
+    
+        
+        FfiConverterByteArray.lower(`recipientSpendPk`),
+        FfiConverterByteArray.lower(`recipientViewPk`),
+        FfiConverterByteArray.lower(`ephSecret`),
+        FfiConverterULong.lower(`amount`),
+        FfiConverterByteArray.lower(`mint`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `exportFullViewingKey`(`seed`: kotlin.ByteArray): FfiFullViewingKey {
             return FfiConverterTypeFfiFullViewingKey.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_export_full_viewing_key(
     
         
-        FfiConverterByteArray.lower(`seed32`),
-        FfiConverterUInt.lower(`accountIndex`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `formatAudrenAddress`(`spendPk32`: kotlin.ByteArray, `viewPk32`: kotlin.ByteArray): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_format_audren_address(
-    
-        
-        FfiConverterByteArray.lower(`spendPk32`),
-        FfiConverterByteArray.lower(`viewPk32`),_status)
+        FfiConverterByteArray.lower(`seed`),_status)
 }
     )
     }
@@ -3700,47 +3831,23 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     )
     }
     
- fun `laneOfPageId`(`pageId`: kotlin.ULong): kotlin.UByte {
+
+    @Throws(AudrenFfiException::class) fun `prepareDynamicSwapMemo`(`recipientViewPk`: kotlin.ByteArray, `ephSecret`: kotlin.ByteArray): FfiDynamicMemoPrep {
+            return FfiConverterTypeFfiDynamicMemoPrep.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_prepare_dynamic_swap_memo(
+    
+        
+        FfiConverterByteArray.lower(`recipientViewPk`),
+        FfiConverterByteArray.lower(`ephSecret`),_status)
+}
+    )
+    }
+    
+ fun `protocolVersion`(): kotlin.UByte {
             return FfiConverterUByte.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_lane_of_page_id(
-    
-        
-        FfiConverterULong.lower(`pageId`),_status)
-}
-    )
-    }
-    
- fun `netDepositAmount`(`grossAmount`: kotlin.ULong, `feeBps`: kotlin.UShort, `maxFee`: kotlin.ULong): kotlin.ULong {
-            return FfiConverterULong.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_net_deposit_amount(
-    
-        
-        FfiConverterULong.lower(`grossAmount`),
-        FfiConverterUShort.lower(`feeBps`),
-        FfiConverterULong.lower(`maxFee`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `pageIdForLane`(`laneId`: kotlin.UByte, `seq`: kotlin.ULong): kotlin.ULong {
-            return FfiConverterULong.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_page_id_for_lane(
-    
-        
-        FfiConverterUByte.lower(`laneId`),
-        FfiConverterULong.lower(`seq`),_status)
-}
-    )
-    }
-    
- fun `pageScanDataSlice`(): FfiDataSlice {
-            return FfiConverterTypeFfiDataSlice.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_page_scan_data_slice(
+    UniffiLib.uniffi_audren_ffi_fn_func_protocol_version(
     
         _status)
 }
@@ -3748,110 +3855,27 @@ public object FfiConverterSequenceTypeFfiOwnedNote: FfiConverterRustBuffer<List<
     }
     
 
-    @Throws(AudrenFfiException::class) fun `parseAudrenAddress`(`encoded`: kotlin.String): FfiAudrenAddress {
-            return FfiConverterTypeFfiAudrenAddress.lift(
+    @Throws(AudrenFfiException::class) fun `proveJoinsplitWitnessBytes`(`witness4611`: kotlin.ByteArray, `seed32`: kotlin.ByteArray): FfiGroth16ProofBundle {
+            return FfiConverterTypeFfiGroth16ProofBundle.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_parse_audren_address(
+    UniffiLib.uniffi_audren_ffi_fn_func_prove_joinsplit_witness_bytes(
     
         
-        FfiConverterString.lower(`encoded`),_status)
+        FfiConverterByteArray.lower(`witness4611`),
+        FfiConverterByteArray.lower(`seed32`),_status)
 }
     )
     }
     
 
-    @Throws(AudrenFfiException::class) fun `prepareEscrowAccounts`(`poolId`: kotlin.UInt, `shardId`: kotlin.UByte, `inputMintB58`: kotlin.String, `outputMintB58`: kotlin.String, `inputTokenProgramB58`: kotlin.String, `outputTokenProgramB58`: kotlin.String, `actionAccounts`: List<FfiAccountMeta>, `programId`: kotlin.String): FfiPreparedEscrowAccounts {
-            return FfiConverterTypeFfiPreparedEscrowAccounts.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_prepare_escrow_accounts(
-    
-        
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterUByte.lower(`shardId`),
-        FfiConverterString.lower(`inputMintB58`),
-        FfiConverterString.lower(`outputMintB58`),
-        FfiConverterString.lower(`inputTokenProgramB58`),
-        FfiConverterString.lower(`outputTokenProgramB58`),
-        FfiConverterSequenceTypeFfiAccountMeta.lower(`actionAccounts`),
-        FfiConverterString.lower(`programId`),_status)
-}
-    )
-    }
-    
- fun `programId`(): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_program_id(
-    
-        _status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `scanEpochPage`(`poolId`: kotlin.UInt, `pageBytes`: kotlin.ByteArray, `spendSk32`: kotlin.ByteArray?, `spendPk32`: kotlin.ByteArray, `viewSk32`: kotlin.ByteArray, `programId`: kotlin.String): List<FfiOwnedNote> {
-            return FfiConverterSequenceTypeFfiOwnedNote.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_scan_epoch_page(
-    
-        
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterByteArray.lower(`pageBytes`),
-        FfiConverterOptionalByteArray.lower(`spendSk32`),
-        FfiConverterByteArray.lower(`spendPk32`),
-        FfiConverterByteArray.lower(`viewSk32`),
-        FfiConverterString.lower(`programId`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `scanPageDataslice`(`pageId`: kotlin.ULong, `slice1056`: kotlin.ByteArray, `spendPk32`: kotlin.ByteArray, `viewSk32`: kotlin.ByteArray): kotlin.ByteArray {
-            return FfiConverterByteArray.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_scan_page_dataslice(
-    
-        
-        FfiConverterULong.lower(`pageId`),
-        FfiConverterByteArray.lower(`slice1056`),
-        FfiConverterByteArray.lower(`spendPk32`),
-        FfiConverterByteArray.lower(`viewSk32`),_status)
-}
-    )
-    }
-    
- fun `seqOfPageId`(`pageId`: kotlin.ULong): kotlin.ULong {
-            return FfiConverterULong.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_seq_of_page_id(
-    
-        
-        FfiConverterULong.lower(`pageId`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `verifySelectiveDisclosureOnPage`(`proof`: FfiSelectiveDisclosureProof, `pageBytes`: kotlin.ByteArray): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_verify_selective_disclosure_on_page(
-    
-        
-        FfiConverterTypeFfiSelectiveDisclosureProof.lower(`proof`),
-        FfiConverterByteArray.lower(`pageBytes`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `verifySelectiveDisclosureProof`(`proof`: FfiSelectiveDisclosureProof): kotlin.Boolean {
+    @Throws(AudrenFfiException::class) fun `verifySelectiveDisclosureProof`(`proof`: FfiSelectiveDisclosureProof, `onchainSubtreeLeaf`: kotlin.ByteArray): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_verify_selective_disclosure_proof(
     
         
-        FfiConverterTypeFfiSelectiveDisclosureProof.lower(`proof`),_status)
+        FfiConverterTypeFfiSelectiveDisclosureProof.lower(`proof`),
+        FfiConverterByteArray.lower(`onchainSubtreeLeaf`),_status)
 }
     )
     }

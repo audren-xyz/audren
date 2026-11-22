@@ -1,8 +1,10 @@
 /**
- * Zero-dependency HTTP client for any Audren-compatible Privacy Relayer
- * (such as `https://relay.audren.xyz` or a self-hosted `audren-relay` instance).
+ * HTTP client for any Audren Privacy Relayer (`https://relay.audren.xyz` or self-hosted).
  *
- * Types match `audren-relay/src/types.ts` and `audren-relay/src/index.ts` exactly.
+ * Supports all three V2 fee settlement modes:
+ * 1. `transfer` (`ASSET_MODE_PRIVATE`): shielded `cm2` fee note verified via relayer read-only FVK.
+ * 2. `withdraw` (`ASSET_MODE_SOL` / `ASSET_MODE_SPL` / `WITHDRAW_FLAG_UNWRAP_WSOL`): public fee deduction.
+ * 3. `exec_escrow` (`ExecViaEscrow` Tag 7): input-leg fee or `EXEC_FLAG_FEE_ON_OUTPUT`.
  */
 
 import type { RouterAccountMeta, RouterSwapInstruction } from './swap.ts';
@@ -10,18 +12,21 @@ import type { RouterAccountMeta, RouterSwapInstruction } from './swap.ts';
 export type RelayCluster = 'mainnet' | 'devnet';
 export type RelayAggregatorId = 'jupiter' | 'bedrock' | 'dflow' | 'titan' | 'okx';
 export type RelayAggregatorProvider = 'auto' | RelayAggregatorId;
-export type RelayFeeSide = 'in' | 'out';
+export type RelayOperation = 'transfer' | 'withdraw' | 'exec_escrow';
 
 export interface RelayRentSchedule {
   nullifierRentLamports: string;
-  pageRentPerNoteLamports: string;
+  noteRentPerLeafLamports: string;
   ataRentLamports: string;
   swapBaselineLamports: string;
 }
 
 export interface RelayInfoResponse {
+  protocolVersion: number;
   cluster: RelayCluster;
   relayerPubkey: string | null;
+  relayerPubkeys?: string[];
+  relayerShieldedAddress?: string | null;
   balanceSol: number | null;
   rentSchedule: RelayRentSchedule | null;
   aggregators?: unknown;
@@ -31,25 +36,25 @@ export interface RelayInfoResponse {
 
 export interface RelayFeeQuoteRequest {
   cluster?: RelayCluster;
-  /** Canonical operation parameter (`withdraw` or `exec_escrow`). */
-  op?: 'withdraw' | 'exec_escrow';
-  /** @deprecated Use `op`. Mapped transparently to `op` when provided. */
-  action?: 'withdraw' | 'exec_escrow';
+  op: RelayOperation;
   mint: string;
   amount: string;
   unwrapWsol?: boolean;
-  hasChange?: boolean;
+  feeOnOutput?: boolean;
+  outputCount?: number;
   missingAtaCount?: number;
 }
 
 export interface RelayFeeQuoteResponse {
   ok: boolean;
   cluster: RelayCluster;
-  op: 'withdraw' | 'exec_escrow';
+  op: RelayOperation;
   billingMode: 'self_paying' | 'sponsored';
+  feeSide: 'in' | 'out' | 'shielded_cm2';
   feeMint: string;
   feeTokenProgram: string | null;
   feeRecipient: string | null;
+  feeShieldedAddress: string | null;
   feeRecipientExists: boolean;
   needsFeeAtaSetup: boolean;
   relayerFee: string;
@@ -122,12 +127,10 @@ export interface RelaySubmitRequest {
   instructionDataB64: string;
   accounts: RouterAccountMeta[];
   setupAtas?: RelaySetupAta[];
-  /** Optional zero-signer crank pre-instructions allowlisted strictly for `ExecViaEscrow` (Tag 5). */
+  /** Optional zero-signer crank pre-instructions allowlisted strictly for `ExecViaEscrow` (Tag 7). */
   preInstructions?: RouterSwapInstruction[];
   computeUnitLimit?: number;
   priorityFeeLamports?: string;
-  vaultOutAta?: string;
-  rolloverFromPageId?: string;
   provider?: RelayAggregatorId;
 }
 
@@ -155,7 +158,7 @@ export class AudrenRelayClient {
     try {
       parsed = text ? JSON.parse(text) : null;
     } catch {
-      // fall through to HTTP status error below
+      // fall through
     }
     if (!res.ok) {
       const msg =
@@ -180,23 +183,19 @@ export class AudrenRelayClient {
   }
 
   async getFeeQuote(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
-    const op = params.op ?? params.action ?? 'withdraw';
     const qs = new URLSearchParams({
-      op,
+      op: params.op,
       mint: params.mint,
       amount: params.amount,
       ...(params.cluster ? { cluster: params.cluster } : {}),
       ...(params.unwrapWsol !== undefined ? { unwrapWsol: String(params.unwrapWsol) } : {}),
-      ...(params.hasChange !== undefined ? { hasChange: String(params.hasChange) } : {}),
+      ...(params.feeOnOutput !== undefined ? { feeOnOutput: String(params.feeOnOutput) } : {}),
+      ...(params.outputCount !== undefined ? { outputCount: String(params.outputCount) } : {}),
       ...(params.missingAtaCount !== undefined
         ? { missingAtaCount: String(params.missingAtaCount) }
         : {}),
     });
     return this.requestJson<RelayFeeQuoteResponse>(`/v1/fee-quote?${qs.toString()}`);
-  }
-
-  async quoteFee(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
-    return this.getFeeQuote(params);
   }
 
   async quoteSwap(params: RelaySwapQuoteRequest): Promise<Record<string, unknown>> {

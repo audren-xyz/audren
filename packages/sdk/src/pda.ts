@@ -1,31 +1,32 @@
 /**
- * Zero-dependency Solana Base58 codec, `aud1…` stealth address parser (with canonical
- * Ristretto255 point validation per RFC 9496 §4.3.1), and canonical PDA derivation helpers
- * matching `crates/client/src/pda.rs` byte-for-byte.
- *
- * Uses native Web Crypto (`SHA-256`) and pure `BigInt` curve arithmetic
- * (`curve25519-dalek` `CompressedEdwardsY::decompress` semantics matching Solana's
- * `Pubkey::find_program_address`) with zero npm dependencies.
+ * Solana Base58 codec, `aud1...` V2 stealth address codec (version `0x02`, 65 bytes),
+ * and canonical Audren PDA derivations (`audren_v2_*`) matching `crates/client/src/pda.rs`
+ * byte-for-byte.
  */
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   AUDREN_PROGRAM_ID,
+  CHECKPOINT_RING_SLOTS,
+  CKPT_SEED,
   CLASSIC_TOKEN_PROGRAM_ID,
   ESCROW_SEED,
   LANE_RENT_SEED,
   LANE_SEED,
-  MAX_APPEND_LANES,
-  MAX_ESCROW_SHARDS,
+  MEMO_SEED,
+  NF_PAGE_SEED,
   NULLIFIER_SEED,
-  PAGE_RENT_SEED,
-  PAGE_SEED,
+  NUM_ESCROW_SHARDS,
+  NUM_LANES,
   POOL_SEED,
-  PROOF_BUFFER_SEED,
   SOL_VAULT_SEED,
+  SUBROOT_SEED,
+  SUBTREE_SEED,
   UNWRAP_SEED,
   VAULT_AUTH_SEED,
 } from './constants.ts';
+import { isCanonicalFr } from './poseidon.ts';
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const BASE58_MAP = new Int16Array(128).fill(-1);
@@ -35,11 +36,12 @@ for (let i = 0; i < BASE58_ALPHABET.length; i++) {
 
 const utf8Encoder = new TextEncoder();
 const PDA_MARKER = utf8Encoder.encode('ProgramDerivedAddress');
+const ADDR_VERSION_V2 = 0x02;
 
-// Ed25519 prime field constants: p = 2^255 - 19, d = -121665/121666 mod p, sqrt(-1) = 2^((p-1)/4) mod p
 const ED25519_P = (1n << 255n) - 19n;
 const ED25519_D = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
-const ED25519_SQRT_M1 = 19681161376707505956807079304988542015446066515923890162744021073123829784752n;
+const ED25519_SQRT_M1 =
+  19681161376707505956807079304988542015446066515923890162744021073123829784752n;
 const ED25519_EXP = (ED25519_P - 5n) >> 3n;
 
 export interface DerivedPda {
@@ -50,17 +52,15 @@ export interface DerivedPda {
 
 export interface ParsedAudrenAddress {
   encoded: string;
-  spendPk: Uint8Array; // 32 bytes (valid non-identity Ristretto255 point)
-  viewPk: Uint8Array; // 32 bytes (valid non-identity Ristretto255 point)
+  spendPk: Uint8Array; // 32 bytes canonical BN254 Fr BE
+  viewPk: Uint8Array; // 32 bytes X25519 public key
 }
 
 export function base58Encode(bytes: Uint8Array): string {
   if (bytes.byteLength === 0) return '';
   let zeros = 0;
   while (zeros < bytes.byteLength && bytes[zeros] === 0) zeros++;
-  if (zeros === bytes.byteLength) {
-    return '1'.repeat(zeros);
-  }
+  if (zeros === bytes.byteLength) return '1'.repeat(zeros);
   const digits: number[] = [0];
   for (let i = zeros; i < bytes.byteLength; i++) {
     let carry = bytes[i]!;
@@ -89,9 +89,7 @@ export function base58Decode(input: string): Uint8Array {
   for (let i = zeros; i < input.length; i++) {
     const code = input.charCodeAt(i);
     const val = code < 128 ? BASE58_MAP[code]! : -1;
-    if (val < 0) {
-      throw new Error(`Invalid base58 character at index ${i}`);
-    }
+    if (val < 0) throw new Error(`Invalid base58 character at index ${i}`);
     let carry = val;
     for (let j = 0; j < bytes.length; j++) {
       carry += bytes[j]! * 58;
@@ -111,7 +109,6 @@ export function base58Decode(input: string): Uint8Array {
   return out;
 }
 
-/** Decode a base58 Solana public key or validate a 32-byte `Uint8Array`. */
 export function toPubkeyBytes(pubkey: string | Uint8Array): Uint8Array {
   const bytes = typeof pubkey === 'string' ? base58Decode(pubkey) : pubkey;
   if (bytes.byteLength !== 32) {
@@ -119,6 +116,41 @@ export function toPubkeyBytes(pubkey: string | Uint8Array): Uint8Array {
   }
   return bytes;
 }
+
+export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): string {
+  if (spendPk.byteLength !== 32 || viewPk.byteLength !== 32) {
+    throw new RangeError('spendPk and viewPk must each be 32 bytes');
+  }
+  if (!isCanonicalFr(spendPk)) {
+    throw new Error('spendPk must be a canonical BN254 Fr scalar (< r)');
+  }
+  const raw = new Uint8Array(65);
+  raw[0] = ADDR_VERSION_V2;
+  raw.set(spendPk, 1);
+  raw.set(viewPk, 33);
+  return `aud1${base58Encode(raw)}`;
+}
+
+export const encodeAudrenAddress = formatAudrenAddress;
+
+export function parseAudrenAddress(encoded: string): ParsedAudrenAddress {
+  const trimmed = encoded.trim();
+  if (!trimmed.startsWith('aud1')) {
+    throw new Error('Audren stealth address must start with aud1');
+  }
+  const raw = base58Decode(trimmed.slice(4));
+  if (raw.byteLength !== 65 || raw[0] !== ADDR_VERSION_V2) {
+    throw new Error(`Invalid Audren address length or version (got ${raw.byteLength} bytes, v=${raw[0]})`);
+  }
+  const spendPk = raw.slice(1, 33);
+  const viewPk = raw.slice(33, 65);
+  if (!isCanonicalFr(spendPk)) {
+    throw new Error('Audren address spendPk is not a canonical BN254 Fr scalar');
+  }
+  return { encoded: `aud1${base58Encode(raw)}`, spendPk, viewPk };
+}
+
+export const decodeAudrenAddress = parseAudrenAddress;
 
 function modP(n: bigint): bigint {
   const r = n % ED25519_P;
@@ -137,95 +169,6 @@ function modPowP(base: bigint, exp: bigint): bigint {
   return result;
 }
 
-/**
- * Validate whether 32 bytes are a canonical Ristretto255 encoding per RFC 9496 §4.3.1.
- * Note: the all-zero encoding is the valid Ristretto255 identity point; callers requiring
- * a non-identity public key should also reject all-zero bytes.
- */
-export function isValidRistretto255Point(bytes: Uint8Array): boolean {
-  if (bytes.byteLength !== 32) return false;
-  let s = 0n;
-  for (let i = 31; i >= 0; i--) {
-    s = (s << 8n) | BigInt(bytes[i]!);
-  }
-  if (s >= ED25519_P || (s & 1n) === 1n) return false;
-
-  const ss = (s * s) % ED25519_P;
-  const u1 = modP(1n - ss);
-  const u2 = modP(1n + ss);
-  const u2Sqr = (u2 * u2) % ED25519_P;
-  const v = modP(-((ED25519_D * ((u1 * u1) % ED25519_P)) % ED25519_P) - u2Sqr);
-
-  // invsqrt(v * u2^2) via SQRT_RATIO_M1(1, w)
-  const w = (v * u2Sqr) % ED25519_P;
-  const w2 = (w * w) % ED25519_P;
-  const w3 = (w2 * w) % ED25519_P;
-  const w7 = (((w3 * w3) % ED25519_P) * w) % ED25519_P;
-  let invsqrt = (w3 * modPowP(w7, ED25519_EXP)) % ED25519_P;
-  const check = (w * ((invsqrt * invsqrt) % ED25519_P)) % ED25519_P;
-
-  if (check === modP(-1n)) {
-    invsqrt = (invsqrt * ED25519_SQRT_M1) % ED25519_P;
-  } else if (check !== 1n) {
-    return false;
-  }
-
-  const denX = (invsqrt * u2) % ED25519_P;
-  const denY = (((invsqrt * denX) % ED25519_P) * v) % ED25519_P;
-  let x = (2n * s * denX) % ED25519_P;
-  if ((x & 1n) === 1n) x = modP(-x);
-  const y = (u1 * denY) % ED25519_P;
-  const t = (x * y) % ED25519_P;
-
-  return (t & 1n) === 0n && y !== 0n;
-}
-
-/**
- * Format 32-byte non-identity Ristretto255 `(spendPk, viewPk)` into a shareable `aud1…` address.
- */
-export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): string {
-  if (spendPk.byteLength !== 32 || viewPk.byteLength !== 32) {
-    throw new RangeError('spendPk and viewPk must each be 32 bytes');
-  }
-  if (spendPk.every((b) => b === 0) || viewPk.every((b) => b === 0)) {
-    throw new Error('Audren stealth address keys cannot be zero');
-  }
-  if (!isValidRistretto255Point(spendPk) || !isValidRistretto255Point(viewPk)) {
-    throw new Error('Audren stealth address keys must be canonical Ristretto255 points');
-  }
-  const raw = new Uint8Array(64);
-  raw.set(spendPk, 0);
-  raw.set(viewPk, 32);
-  return `aud1${base58Encode(raw)}`;
-}
-
-/**
- * Parse and cryptographically validate an `aud1…` stealth meta-address (or raw 64-byte base58
- * body) into its canonical non-identity Ristretto255 `(spendPk, viewPk)` pair.
- */
-export function parseAudrenAddress(encoded: string): ParsedAudrenAddress {
-  const trimmed = encoded.trim();
-  const body = trimmed.startsWith('aud1') ? trimmed.slice(4) : trimmed;
-  const raw = base58Decode(body);
-  if (raw.byteLength !== 64) {
-    throw new Error(`Audren stealth address payload must be 64 bytes, got ${raw.byteLength}`);
-  }
-  const spendPk = raw.slice(0, 32);
-  const viewPk = raw.slice(32, 64);
-  if (spendPk.every((b) => b === 0) || viewPk.every((b) => b === 0)) {
-    throw new Error('Audren stealth address keys cannot be zero');
-  }
-  if (!isValidRistretto255Point(spendPk) || !isValidRistretto255Point(viewPk)) {
-    throw new Error('Audren stealth address contains an invalid Ristretto255 point');
-  }
-  return { encoded: `aud1${base58Encode(raw)}`, spendPk, viewPk };
-}
-
-/**
- * Check whether 32 bytes decode to a point on the Ed25519 twisted Edwards curve using
- * `curve25519-dalek` `CompressedEdwardsY::decompress` semantics, matching Solana's
- * `Pubkey::find_program_address` byte-for-byte.
- */
 export function isOnEd25519Curve(bytes: Uint8Array): boolean {
   if (bytes.byteLength !== 32) return false;
   let y = 0n;
@@ -241,9 +184,9 @@ export function isOnEd25519Curve(bytes: Uint8Array): boolean {
 
   const v2 = (v * v) % ED25519_P;
   const v3 = (v2 * v) % ED25519_P;
-  const v7 = (v3 * v3 % ED25519_P * v) % ED25519_P;
+  const v7 = (((v3 * v3) % ED25519_P) * v) % ED25519_P;
   const uv7 = (u * v7) % ED25519_P;
-  let x = (u * v3 % ED25519_P * modPowP(uv7, ED25519_EXP)) % ED25519_P;
+  let x = (((u * v3) % ED25519_P) * modPowP(uv7, ED25519_EXP)) % ED25519_P;
 
   const vx2 = (v * ((x * x) % ED25519_P)) % ED25519_P;
   if (vx2 === u) return true;
@@ -254,25 +197,25 @@ export function isOnEd25519Curve(bytes: Uint8Array): boolean {
   return false;
 }
 
+function u16le(n: number): Uint8Array {
+  const out = new Uint8Array(2);
+  new DataView(out.buffer).setUint16(0, n, true);
+  return out;
+}
+
 function u32le(n: number): Uint8Array {
-  if (!Number.isInteger(n) || n < 0 || n > 0xffff_ffff) {
-    throw new RangeError(`Expected u32 integer, got ${n}`);
-  }
   const out = new Uint8Array(4);
   new DataView(out.buffer).setUint32(0, n, true);
   return out;
 }
 
 function u64le(n: bigint): Uint8Array {
-  if (n < 0n || n > 0xffff_ffff_ffff_ffffn) {
-    throw new RangeError(`Expected u64 bigint, got ${n.toString()}`);
-  }
   const out = new Uint8Array(8);
   new DataView(out.buffer).setBigUint64(0, n, true);
   return out;
 }
 
-async function sha256Concat(parts: readonly Uint8Array[]): Promise<Uint8Array> {
+function sha256ConcatSync(parts: readonly Uint8Array[]): Uint8Array {
   let total = 0;
   for (const p of parts) total += p.byteLength;
   const buf = new Uint8Array(total);
@@ -281,31 +224,22 @@ async function sha256Concat(parts: readonly Uint8Array[]): Promise<Uint8Array> {
     buf.set(p, off);
     off += p.byteLength;
   }
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', buf);
-  return new Uint8Array(digest);
+  return sha256(buf);
 }
 
-/**
- * Derive a deterministic Solana Program Derived Address (`find_program_address`).
- * Solana enforces at most 16 total seeds including the 1-byte bump (`<= 15` caller seeds).
- */
-export async function findProgramAddress(
+/** Synchronous Solana `Pubkey::find_program_address`. */
+export function findProgramAddressSync(
   seeds: readonly Uint8Array[],
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
+): DerivedPda {
   if (seeds.length >= 16) {
-    throw new RangeError(`Solana findProgramAddress supports at most 15 caller seeds (16 with bump), got ${seeds.length}`);
-  }
-  for (const seed of seeds) {
-    if (seed.byteLength > 32) {
-      throw new RangeError(`Solana PDA seed exceeds 32 bytes (got ${seed.byteLength})`);
-    }
+    throw new RangeError(`Solana PDA supports at most 15 caller seeds, got ${seeds.length}`);
   }
   const programBytes = toPubkeyBytes(programId);
   const bumpBuf = new Uint8Array(1);
   for (let bump = 255; bump >= 0; bump--) {
     bumpBuf[0] = bump;
-    const candidate = await sha256Concat([...seeds, bumpBuf, programBytes, PDA_MARKER]);
+    const candidate = sha256ConcatSync([...seeds, bumpBuf, programBytes, PDA_MARKER]);
     if (!isOnEd25519Curve(candidate)) {
       return {
         address: base58Encode(candidate),
@@ -314,97 +248,68 @@ export async function findProgramAddress(
       };
     }
   }
-  throw new Error('Unable to find viable Program Derived Address bump');
+  throw new Error('Unable to find viable PDA bump');
+}
+
+export async function findProgramAddress(
+  seeds: readonly Uint8Array[],
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return findProgramAddressSync(seeds, programId);
+}
+
+export function derivePoolPdaSync(
+  poolId = 0,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  return findProgramAddressSync([utf8Encoder.encode(POOL_SEED), u32le(poolId)], programId);
 }
 
 export async function derivePoolPda(
   poolId = 0,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): Promise<DerivedPda> {
-  return findProgramAddress([utf8Encoder.encode(POOL_SEED), u32le(poolId)], programId);
+  return derivePoolPdaSync(poolId, programId);
 }
 
-export async function deriveVaultAuthPda(
+export function deriveSolVaultPdaSync(
   poolId = 0,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
-  return findProgramAddress([utf8Encoder.encode(VAULT_AUTH_SEED), u32le(poolId)], programId);
+): DerivedPda {
+  return findProgramAddressSync([utf8Encoder.encode(SOL_VAULT_SEED), u32le(poolId)], programId);
 }
 
 export async function deriveSolVaultPda(
   poolId = 0,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): Promise<DerivedPda> {
-  return findProgramAddress([utf8Encoder.encode(SOL_VAULT_SEED), u32le(poolId)], programId);
+  return deriveSolVaultPdaSync(poolId, programId);
 }
 
-export async function derivePageRentVaultPda(
+export function deriveVaultAuthPdaSync(
+  poolId = 0,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  return findProgramAddressSync([utf8Encoder.encode(VAULT_AUTH_SEED), u32le(poolId)], programId);
+}
+
+export async function deriveVaultAuthPda(
   poolId = 0,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): Promise<DerivedPda> {
-  return findProgramAddress([utf8Encoder.encode(PAGE_RENT_SEED), u32le(poolId)], programId);
+  return deriveVaultAuthPdaSync(poolId, programId);
 }
 
-export async function deriveEpochPagePda(
+export function deriveLanePdaSync(
   poolId: number,
-  pageId: bigint,
+  laneId: number,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
-  return findProgramAddress(
-    [utf8Encoder.encode(PAGE_SEED), u32le(poolId), u64le(pageId)],
-    programId,
-  );
-}
-
-export async function deriveNullifierPda(
-  poolId: number,
-  nullifier: Uint8Array,
-  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
-  if (nullifier.byteLength !== 32) {
-    throw new RangeError(`Nullifier must be 32 bytes, got ${nullifier.byteLength}`);
+): DerivedPda {
+  if (!Number.isInteger(laneId) || laneId < 0 || laneId >= NUM_LANES) {
+    throw new RangeError(`laneId must be 0..${NUM_LANES - 1}, got ${laneId}`);
   }
-  return findProgramAddress(
-    [utf8Encoder.encode(NULLIFIER_SEED), u32le(poolId), nullifier],
-    programId,
-  );
-}
-
-export async function deriveEscrowPda(
-  poolId = 0,
-  shardId = 0,
-  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
-  if (!Number.isInteger(shardId) || shardId < 0 || shardId >= MAX_ESCROW_SHARDS) {
-    throw new RangeError(`shardId must be an integer in 0..${MAX_ESCROW_SHARDS - 1}, got ${shardId}`);
-  }
-  return findProgramAddress(
-    [utf8Encoder.encode(ESCROW_SEED), u32le(poolId), new Uint8Array([shardId])],
-    programId,
-  );
-}
-
-export async function deriveUnwrapPda(
-  poolId: number,
-  nullifier: Uint8Array,
-  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
-  if (nullifier.byteLength !== 32) {
-    throw new RangeError(`Nullifier must be 32 bytes, got ${nullifier.byteLength}`);
-  }
-  return findProgramAddress(
-    [utf8Encoder.encode(UNWRAP_SEED), u32le(poolId), nullifier],
-    programId,
-  );
-}
-
-export async function deriveProofBufferPda(
-  authority: string | Uint8Array,
-  nonce: bigint,
-  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
-  return findProgramAddress(
-    [utf8Encoder.encode(PROOF_BUFFER_SEED), toPubkeyBytes(authority), u64le(nonce)],
+  return findProgramAddressSync(
+    [utf8Encoder.encode(LANE_SEED), u32le(poolId), new Uint8Array([laneId])],
     programId,
   );
 }
@@ -414,11 +319,19 @@ export async function deriveLanePda(
   laneId: number,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): Promise<DerivedPda> {
-  if (!Number.isInteger(laneId) || laneId < 1 || laneId >= MAX_APPEND_LANES) {
-    throw new RangeError(`Parallel laneId must be an integer in 1..${MAX_APPEND_LANES - 1}, got ${laneId}`);
+  return deriveLanePdaSync(poolId, laneId, programId);
+}
+
+export function deriveLaneRentVaultPdaSync(
+  poolId: number,
+  laneId: number,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  if (!Number.isInteger(laneId) || laneId < 0 || laneId >= NUM_LANES) {
+    throw new RangeError(`laneId must be 0..${NUM_LANES - 1}, got ${laneId}`);
   }
-  return findProgramAddress(
-    [utf8Encoder.encode(LANE_SEED), u32le(poolId), new Uint8Array([laneId])],
+  return findProgramAddressSync(
+    [utf8Encoder.encode(LANE_RENT_SEED), u32le(poolId), new Uint8Array([laneId])],
     programId,
   );
 }
@@ -428,23 +341,196 @@ export async function deriveLaneRentVaultPda(
   laneId: number,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): Promise<DerivedPda> {
-  if (!Number.isInteger(laneId) || laneId < 1 || laneId >= MAX_APPEND_LANES) {
-    throw new RangeError(`Parallel laneId must be an integer in 1..${MAX_APPEND_LANES - 1}, got ${laneId}`);
-  }
-  return findProgramAddress(
-    [utf8Encoder.encode(LANE_RENT_SEED), u32le(poolId), new Uint8Array([laneId])],
+  return deriveLaneRentVaultPdaSync(poolId, laneId, programId);
+}
+
+export function deriveSubtreePdaSync(
+  poolId: number,
+  laneId: number,
+  pageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  return findProgramAddressSync(
+    [utf8Encoder.encode(SUBTREE_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(pageSeq)],
     programId,
   );
 }
 
-/** Derive the canonical Associated Token Account address for `(owner, mint, tokenProgramId)`. */
+export async function deriveSubtreePda(
+  poolId: number,
+  laneId: number,
+  pageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveSubtreePdaSync(poolId, laneId, pageSeq, programId);
+}
+
+export function deriveSubrootPdaSync(
+  poolId: number,
+  laneId: number,
+  rootPageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  return findProgramAddressSync(
+    [utf8Encoder.encode(SUBROOT_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(rootPageSeq)],
+    programId,
+  );
+}
+
+export async function deriveSubrootPda(
+  poolId: number,
+  laneId: number,
+  rootPageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveSubrootPdaSync(poolId, laneId, rootPageSeq, programId);
+}
+
+export function deriveMemoPdaSync(
+  poolId: number,
+  laneId: number,
+  pageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  return findProgramAddressSync(
+    [utf8Encoder.encode(MEMO_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(pageSeq)],
+    programId,
+  );
+}
+
+export async function deriveMemoPda(
+  poolId: number,
+  laneId: number,
+  pageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveMemoPdaSync(poolId, laneId, pageSeq, programId);
+}
+
+export function deriveNfPagePdaSync(
+  poolId: number,
+  laneId: number,
+  pageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  return findProgramAddressSync(
+    [utf8Encoder.encode(NF_PAGE_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(pageSeq)],
+    programId,
+  );
+}
+
+export async function deriveNfPagePda(
+  poolId: number,
+  laneId: number,
+  pageSeq: bigint,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveNfPagePdaSync(poolId, laneId, pageSeq, programId);
+}
+
+export function deriveCheckpointPdaSync(
+  poolId: number,
+  slotIdx: number,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  if (!Number.isInteger(slotIdx) || slotIdx < 0 || slotIdx >= CHECKPOINT_RING_SLOTS) {
+    throw new RangeError(`slotIdx must be 0..${CHECKPOINT_RING_SLOTS - 1}, got ${slotIdx}`);
+  }
+  return findProgramAddressSync(
+    [utf8Encoder.encode(CKPT_SEED), u32le(poolId), u16le(slotIdx)],
+    programId,
+  );
+}
+
+export async function deriveCheckpointPda(
+  poolId: number,
+  slotIdx: number,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveCheckpointPdaSync(poolId, slotIdx, programId);
+}
+
+export function deriveNullifierPdaSync(
+  poolId: number,
+  nullifier: Uint8Array,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  if (nullifier.byteLength !== 32) {
+    throw new RangeError(`nullifier must be 32 bytes, got ${nullifier.byteLength}`);
+  }
+  return findProgramAddressSync(
+    [utf8Encoder.encode(NULLIFIER_SEED), u32le(poolId), nullifier],
+    programId,
+  );
+}
+
+export async function deriveNullifierPda(
+  poolId: number,
+  nullifier: Uint8Array,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveNullifierPdaSync(poolId, nullifier, programId);
+}
+
+export function deriveEscrowPdaSync(
+  poolId = 0,
+  shardId = 0,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  if (!Number.isInteger(shardId) || shardId < 0 || shardId >= NUM_ESCROW_SHARDS) {
+    throw new RangeError(`shardId must be 0..${NUM_ESCROW_SHARDS - 1}, got ${shardId}`);
+  }
+  return findProgramAddressSync(
+    [utf8Encoder.encode(ESCROW_SEED), u32le(poolId), new Uint8Array([shardId])],
+    programId,
+  );
+}
+
+export async function deriveEscrowPda(
+  poolId = 0,
+  shardId = 0,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveEscrowPdaSync(poolId, shardId, programId);
+}
+
+export function deriveUnwrapPdaSync(
+  poolId: number,
+  nf0: Uint8Array,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): DerivedPda {
+  if (nf0.byteLength !== 32) {
+    throw new RangeError(`nf0 must be 32 bytes, got ${nf0.byteLength}`);
+  }
+  return findProgramAddressSync(
+    [utf8Encoder.encode(UNWRAP_SEED), u32le(poolId), nf0],
+    programId,
+  );
+}
+
+export async function deriveUnwrapPda(
+  poolId: number,
+  nf0: Uint8Array,
+  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
+): Promise<DerivedPda> {
+  return deriveUnwrapPdaSync(poolId, nf0, programId);
+}
+
+export function deriveAssociatedTokenAddressSync(
+  owner: string | Uint8Array,
+  mint: string | Uint8Array,
+  tokenProgramId: string | Uint8Array = CLASSIC_TOKEN_PROGRAM_ID,
+): DerivedPda {
+  return findProgramAddressSync(
+    [toPubkeyBytes(owner), toPubkeyBytes(tokenProgramId), toPubkeyBytes(mint)],
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+  );
+}
+
 export async function deriveAssociatedTokenAddress(
   owner: string | Uint8Array,
   mint: string | Uint8Array,
   tokenProgramId: string | Uint8Array = CLASSIC_TOKEN_PROGRAM_ID,
 ): Promise<DerivedPda> {
-  return findProgramAddress(
-    [toPubkeyBytes(owner), toPubkeyBytes(tokenProgramId), toPubkeyBytes(mint)],
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-  );
+  return deriveAssociatedTokenAddressSync(owner, mint, tokenProgramId);
 }

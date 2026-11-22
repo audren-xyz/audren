@@ -1,55 +1,45 @@
 # `@audren/sdk` — Audren TypeScript SDK
 
-Unified TypeScript ESM SDK for **Audren v1** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting Node.js 22+ and modern browsers.
+Unified TypeScript ESM SDK for **Audren** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
 
-Every constant, PDA, account decoder, key derivation, scanner, local zero-knowledge prover, selective disclosure verifier, institutional auditor decryptor, and router helper is verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) alongside the Rust, Swift, and Kotlin SDKs.
+- **`@audren/sdk`** (root entrypoint): Zero-WASM core for Node.js, Browsers, and Cloudflare Workers — pure-TS Circom BN254 Poseidon, RFC 8439 ChaCha20-Poly1305 memos, all 13 canonical PDAs (`audren_v2_*`), zero-copy account decoders, zero-indexer `CompactWalletStore` + ordinary Solana RPC `getMultipleAccounts` scanner, all 9 instruction builders, Solana Transaction v1 (`0x81`) compiler, Privacy Relayer client, and Codama/Anchor IDLs.
+- **`@audren/sdk/prover`**: Exact Rust-compiled WASM BN254 Groth16 prover (`audren_circuits.wasm`, `17,861` R1CS, 4-ary Depth-20 global MASP, `192 B` proof) running natively in Node.js and Browser Web Workers.
 
-## Entrypoints
-
-| Import | Dependencies | What It Provides |
-|---|---|---|
-| `@audren/sdk` | **Zero** runtime deps | Constants, all 11 PDAs (incl. `deriveEscrowPda`, `deriveUnwrapPda`), `aud1…` address parser/formatter, binary decoders (`PoolState`, `AppendLaneState`, `EpochPage`), `dataSlice` RPC/WS scanner payloads, escrow/relayer clients, Solana v1 (`0x81`) serializer, Codama 1.8.0 & Anchor IDLs |
-| `@audren/sdk/prover` | `@noble/curves`, `@noble/hashes` | Full pure-TypeScript Ristretto255 key hierarchy (`deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `exportFullViewingKey`, `assetGenerator`), local `dataSlice` note scanner & decryptor, Multi-Base Binary Triptych (`m=5/6/7`), CrossBase 1/2, Batched Bulletproofs (`U64`/`U128`), `Deposit` (incl. `feeFromAmount`) / `Transfer` / `Merge` / `ExecViaEscrow` (incl. native `relayerFee`) / `Withdraw` (incl. native `relayerFee` & atomic `unwrapWsol`) / `ProofBuffer` builders, Mode 1 Selective Disclosure, and Institutional Auditor ElGamal decryption |
-
-## The 6 Standardized Building Blocks
-
-1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveEscrowPda`, `deriveUnwrapPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `decodePoolState`, `decodePageHeader`, `decodeAppendLaneState`
-3. **Scanner** — `PAGE_SCAN_OFFSET` (`64`), `PAGE_SCAN_LEN` (`1056`), `PAGE_SCAN_DATA_SLICE`, `scanPageScanSlice`, `scanEpochPage` (read-only FVK or spendable), `scanEpochPageSpendable`, `buildPageSubscribeWsPayload`, `checkNullifiersSpent`
-4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildExecViaEscrowInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`
-5. **Disclosure & Audit** — `createSelectiveDisclosureProof`, `verifySelectiveDisclosureReceipt`, `verifySelectiveDisclosureOnPage`, `deriveAuditorKeypair`, `auditorDecryptNote`
-6. **Relayer & IDLs** — `AudrenRelayClient`, `AUDREN_DEFAULT_RELAY_URL`, `JUPITER_CPI_EXCLUDED_DEXES`, `prepareEscrowAccounts`, `prepareEscrowAccountsForAudren`, `compileV1Message`, `serializeV1Transaction`, `AUDREN_CODAMA_IDL`, `AUDREN_ANCHOR_IDL`
-
-## Build, Test & Consume from Source
+## Install
 
 ```bash
-pnpm --dir packages/sdk install --frozen-lockfile
-pnpm --dir packages/sdk typecheck
-pnpm --dir packages/sdk test
-```
-
-Consuming directly from a local clone or packed tarball (no npm publication required):
-
-```bash
-pnpm --dir packages/sdk pack --out /tmp/audren-sdk.tgz
-# In your project:
-pnpm add /tmp/audren-sdk.tgz
+pnpm add @audren/sdk
 ```
 
 ## Quick Example
 
 ```ts
-import { AUDREN_PROGRAM_ID, PAGE_SCAN_DATA_SLICE, derivePoolPda } from '@audren/sdk';
-import { deriveKeysFromSeed, deriveSubaccountKeys, exportFullViewingKey } from '@audren/sdk/prover';
+import {
+  CompactWalletStore,
+  deriveKeysFromSeed,
+  derivePoolPdaSync,
+  exportFullViewingKey,
+  createSolanaRpcBatchFetcher,
+  syncCompactStoreWithRpc,
+} from '@audren/sdk';
+import { AudrenWasmProver } from '@audren/sdk/prover';
 
 const seed = crypto.getRandomValues(new Uint8Array(32));
-const alice = await deriveKeysFromSeed(seed);
-const tradingSubaccount = await deriveSubaccountKeys(seed, 1);
-const fvk = exportFullViewingKey(tradingSubaccount);
-const { address: poolPda } = await derivePoolPda(0, AUDREN_PROGRAM_ID);
-console.log({ address: alice.address, poolPda, fvk: fvk.spendPkB58, slice: PAGE_SCAN_DATA_SLICE });
+const keys = deriveKeysFromSeed(seed);
+const fvk = exportFullViewingKey(keys);
+const pool = derivePoolPdaSync(0);
+
+// Ordinary Solana RPC sync — zero indexer required
+const store = new CompactWalletStore(0);
+const fetchBatch = createSolanaRpcBatchFetcher(process.env.SOLANA_RPC_URL!);
+await syncCompactStoreWithRpc({ store, fvk, fetchBatch });
+
+// Local BN254 Groth16 WASM prover (Node.js or Browser Web Worker)
+const prover = await AudrenWasmProver.init();
 ```
 
-## Privacy Responsibilities
+## Verify Locally
 
-Deposits, withdrawals, and external DEX execution have public account, asset, and amount boundaries by design. Relayers are optional and permissionless; they never receive spending keys. See [`ARCHITECTURE.md`](../../ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity).
+```bash
+pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
+```

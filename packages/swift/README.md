@@ -1,17 +1,16 @@
 # `AudrenSDK` — Audren Swift SDK (iOS & macOS)
 
-Native Swift Package for **Audren v1** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting **iOS 15+** and **macOS 13+**.
+Native Swift Package for **Audren** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting **iOS 15+** and **macOS 13+**.
 
-Backed by the single canonical Rust core (`crates/client` via `crates/audren-ffi` + UniFFI) so mobile apps get native ~50 ms local zero-knowledge proving (Multi-Base Binary Triptych + Batched Bulletproofs) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
+Backed by the canonical Rust core (`crates/client` + `crates/audren-circuits` via `crates/audren-ffi` + UniFFI) so mobile apps run native local BN254 Groth16 proving (`17,861` R1CS, 4-ary Depth-20 global MASP, 16-lane-capable architecture) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
 
-## The 6 Standardized Building Blocks
+## Core Building Blocks
 
-1. **Keys** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `deriveDefiSessionKeypair`, `parseAudrenAddress`, `formatAudrenAddress`, `exportFullViewingKey`, `assetGenerator`
-2. **PDAs & Layouts** — `derivePoolPda`, `deriveEpochPagePda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `derivePageRentVaultPda`, `deriveEscrowPda`, `deriveUnwrapPda`, `deriveLanePda`, `deriveLaneRentVaultPda`, `deriveNullifierPda`, `deriveProofBufferPda`, `deriveAssociatedTokenAddress`, `decodePoolState`, `decodeEpochPageHeader`, `decodeAppendLaneState`, `pageIdForLane`, `laneOfPageId`, `seqOfPageId`, `netDepositAmount`
-3. **Scanner** — `pageScanDataSlice` (`offset: 64, length: 1056`), `scanPageDataslice`, `scanEpochPage` (read-only FVK or spendable)
-4. **Prover** — `buildDepositInstruction`, `buildTransferInstruction`, `buildMergeInstruction`, `buildExecViaEscrowInstruction`, `buildWithdrawInstruction`, `buildBufferedExecutionPlan`, `buildCloseProofBufferInstruction`, `buildOpenPageInstruction`, `buildOpenLanePageInstruction`
-5. **Disclosure & Audit** — `createSelectiveDisclosureProof`, `verifySelectiveDisclosureProof`, `verifySelectiveDisclosureOnPage`, `deriveAuditorKeypair`, `auditorDecryptNote`
-6. **Relayer & Escrow CPI** — `jupiterCpiExcludedDexes`, `defaultRelayUrl`, `prepareEscrowAccounts`
+1. **Keys & Compliance** — `deriveKeysFromSeed`, `deriveSubaccountKeys`, `exportFullViewingKey`, `deriveDefiSessionKeypair` (pseudonymous session keypair for stateful public DeFi), `decodeAudrenAddress`, `deriveAssetIdBytes`
+2. **PDAs & Zero-Copy Decoders** — `derivePoolPda`, `deriveSolVaultPda`, `deriveVaultAuthPda`, `deriveLanePda`, `deriveLaneRentPda`, `deriveSubtreePda`, `deriveSubrootPda`, `deriveMemoPda`, `deriveNfPagePda`, `deriveCheckpointPda`, `deriveNullifierPda`, `deriveEscrowPda`, `deriveUnwrapPda`, `deriveAta`, `decodePoolStateAccount`, `decodeLaneHeaderAccount`, `decodeRootCheckpointAccount`
+3. **Zero-Indexer Wallet Store & Memos** — `encryptNoteMemo`, `prepareDynamicSwapMemo`, `decryptAndVerifyMemoEntry`, `verifySelectiveDisclosureProof`, `compactStoreNewJson` (ordinary Solana RPC `getMultipleAccounts` sync, freezes sealed subtree siblings and discards raw pages)
+4. **Local BN254 Groth16 Prover & Builders** — `proveJoinsplitWitnessBytes`, `computeJoinsplitCtxHashFfi`, `computeExecCtxHashFfi`, `deterministicNoteRentFeeFfi`, `buildInitPoolIx`, `buildInitLaneIx`, `buildOpenPageIx`, `buildDepositSolIx`, `buildDepositSplIx`, `buildPublishCheckpointIx`, `buildJoinsplitIx`, `buildExecViaEscrowIx`, `buildSetPausedIx`
+5. **Relayer & Escrow CPI** — `canonicalProgramId`, `protocolVersion`, `defaultRelayUrl`, `jupiterCpiExcludedDexes`
 
 ## Build & Run Conformance Tests Locally
 
@@ -19,7 +18,7 @@ Backed by the single canonical Rust core (`crates/client` via `crates/audren-ffi
 # 1. Build native Rust FFI library & refresh Swift bindings (from repo root)
 ./scripts/build-mobile-sdks.sh bindings
 
-# 2. Run full 6-building-block Swift conformance & ZK prover suite
+# 2. Run full Swift conformance & Groth16 prover suite
 cd packages/swift && swift test
 ```
 
@@ -38,8 +37,9 @@ import AudrenSDK
 import Foundation
 
 let seed = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
-let alice = try deriveKeysFromSeed(seed32: seed)
-let sub1 = try deriveSubaccountKeys(masterSeed32: seed, accountIndex: 1)
-let pool = try derivePoolPda(poolId: 0, programId: programId())
-let slice = pageScanDataSlice() // offset: 64, length: 1056
+let alice = try deriveKeysFromSeed(seed: seed)
+let sub1 = try deriveSubaccountKeys(seed: seed, accountIndex: 1)
+let fvk = try exportFullViewingKey(seed: seed)
+let pool = try derivePoolPda(programId: canonicalProgramId(), poolId: 0)
+let storeJson = try compactStoreNewJson(poolId: 0, birthdaySlot: 0)
 ```

@@ -1,17 +1,20 @@
 {
   "name": "@audren/sdk",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "type": "module",
-  "description": "TypeScript SDK for Audren — zero-dependency core (PDAs, codecs, RPC scanner, relayer, IDLs) plus pure-TS Ristretto255/Triptych/Bulletproof prover (@audren/sdk/prover)",
+  "description": "TypeScript SDK for Audren — zero-indexer BN254 Groth16 global MASP core (PDAs, Poseidon, layouts, CompactWalletStore, relayer, tx v1, IDLs) plus WASM Groth16 prover (@audren/sdk/prover)",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./prover": {
       "types": "./dist/prover-entry.d.ts",
-      "import": "./dist/prover-entry.js"
+      "import": "./dist/prover-entry.js",
+      "default": "./dist/prover-entry.js"
     },
+    "./wasm/audren_circuits.wasm": "./wasm/audren_circuits.wasm",
     "./idl/codama.json": "./idl/audren.codama.json",
     "./idl/anchor.json": "./idl/audren.anchor.json"
   },
@@ -30,6 +33,7 @@
   "files": [
     "dist",
     "idl",
+    "wasm",
     "README.md",
     "LICENSE"
   ],

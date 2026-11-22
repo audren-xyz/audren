@@ -13,124 +13,125 @@ type SnippetId = 'ts' | 'rust' | 'swift' | 'kotlin'
 const SNIPPETS: Record<SnippetId, { tab: string; file: string; code: string }> = {
   ts: {
     tab: 'TypeScript (Web / Node)',
-    file: 'packages/sdk · @audren/sdk (zero deps) + @audren/sdk/prover (pure TS)',
+    file: 'packages/sdk · @audren/sdk (zero-WASM core) + @audren/sdk/prover (BN254 Groth16 WASM)',
     code: `import {
   AUDREN_PROGRAM_ID,
-  PAGE_SCAN_DATA_SLICE,
-  derivePoolPda,
-  deriveEscrowPda,
-  deriveUnwrapPda,
+  CompactWalletStore,
   AudrenRelayClient,
   AUDREN_DEFAULT_RELAY_URL,
-} from '@audren/sdk';
-import {
+  createSolanaRpcBatchFetcher,
   deriveKeysFromSeed,
   deriveSubaccountKeys,
   deriveDefiSessionKeypair,
-  scanEpochPageSpendable,
-  createSelectiveDisclosureProof,
-  verifySelectiveDisclosureOnPage,
-} from '@audren/sdk/prover';
+  exportFullViewingKey,
+  derivePoolPdaSync,
+  deriveEscrowPdaSync,
+  deriveUnwrapPdaSync,
+  exportSelectiveDisclosureProof,
+  verifySelectiveDisclosureProof,
+  syncCompactStoreWithRpc,
+} from '@audren/sdk';
+import { AudrenWasmProver } from '@audren/sdk/prover';
 
-// 1. Keys, sub-accounts & deterministic Private DeFi Sessions (B_0, B_1…)
-const alice   = await deriveKeysFromSeed(seed32);
-const trading = await deriveSubaccountKeys(seed32, 1);
-const session = await deriveDefiSessionKeypair(seed32, 0); // Ed25519 B_0
+// 1. Keys, sub-accounts, read-only FVK & pseudonymous DeFi Session (B_0)
+const alice   = deriveKeysFromSeed(seed32);
+const trading = deriveSubaccountKeys(seed32, 1);
+const fvk     = exportFullViewingKey(alice);
+const session = deriveDefiSessionKeypair(seed32, 0); // Ed25519 B_0 (public on external DeFi)
 
-// 2. Canonical PDAs (Pool, 16 sharded Escrows, ephemeral WSOL unwrap PDA)
-const { address: poolPda }   = await derivePoolPda(0, AUDREN_PROGRAM_ID);
-const { address: escrowPda } = await deriveEscrowPda(0, 0, AUDREN_PROGRAM_ID);
-const { address: unwrapPda } = await deriveUnwrapPda(0, nullifier32, AUDREN_PROGRAM_ID);
-const { offset, length }     = PAGE_SCAN_DATA_SLICE;
+// 2. Canonical PDAs (audren_v2_*)
+const poolPda   = derivePoolPdaSync(0, AUDREN_PROGRAM_ID).address;
+const escrowPda = deriveEscrowPdaSync(0, 0, AUDREN_PROGRAM_ID).address;
+const unwrapPda = deriveUnwrapPdaSync(0, nf0Bytes, AUDREN_PROGRAM_ID).address;
 
-// 3. Decrypt notes, verify Mode 1 receipt, and quote native relay fees
-const notes = await scanEpochPageSpendable(alice, pageBytes, 0);
-const proof = createSelectiveDisclosureProof(notes[0]);
-const check = await verifySelectiveDisclosureOnPage(proof, pageBytes);
-const relay = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);`,
+// 3. Zero-indexer ordinary RPC sync -> offline witness -> local WASM Groth16 prover
+const store = new CompactWalletStore(0);
+const fetchBatch = createSolanaRpcBatchFetcher(rpcUrl);
+await syncCompactStoreWithRpc({ store, fvk, fetchBatch });
+const receipt = exportSelectiveDisclosureProof(store.notes[0]!);
+const ok = verifySelectiveDisclosureProof(receipt, store.notes[0]!.commitment);
+const prover = await AudrenWasmProver.init(); // loads audren_circuits.wasm
+const relay  = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);`,
   },
   rust: {
     tab: 'Rust (Cargo)',
-    file: 'crates/client · native ~50 ms local proving & RPC/WS scanner',
+    file: 'crates/client · native BN254 Groth16 prover, CompactWalletStore & LiteSVM suite',
     code: `use audren_client::{
-    keys::{AudrenKeys, SelectiveDisclosureProof},
+    keys::AudrenKeys,
     pda::{derive_escrow_pda, derive_pool_pda, derive_unwrap_pda},
+    prover::AudrenProver,
     router::DEFAULT_RELAY_URL,
-    scanner::{decrypt_owned_note, scan_page_dataslice},
+    store::CompactWalletStore,
 };
 use audren_core::AUDREN_PROGRAM_ID;
 use solana_address::Address;
 
-// 1. Master spend/view keys, sub-accounts & deterministic DeFi Session B_0
+// 1. Master spend/view keys, sub-accounts, read-only FVK & DeFi Session B_0
 let alice   = AudrenKeys::from_seed(&seed_32);
 let trading = AudrenKeys::from_seed_subaccount(&seed_32, 1);
+let fvk     = alice.full_viewing_key();
 let session = AudrenKeys::derive_defi_session_keypair(&seed_32, 0);
-let fvk     = trading.full_viewing_key();
 
-// 2. Canonical PDAs (Pool, ExecViaEscrow shard, atomic WSOL unwrap PDA)
+// 2. Canonical PDAs (audren_v2_*)
 let pid = Address::new_from_array(AUDREN_PROGRAM_ID);
 let (pool_pda, _)   = derive_pool_pda(&pid, 0);
 let (escrow_pda, _) = derive_escrow_pda(&pid, 0, 0);
-let (unwrap_pda, _) = derive_unwrap_pda(&pid, 0, &nullifier_32);
-let hits = scan_page_dataslice(&fvk, 0, &slice_1056)?;
+let (unwrap_pda, _) = derive_unwrap_pda(&pid, 0, &nf0_32);
 
-// 3. Decrypt owned notes, verify Mode 1 receipt & submit via optional relay
-let note    = decrypt_owned_note(&fvk, Some(&trading), &pid, 0, &page_bytes, hits[0].slot_index, None)?.unwrap();
-let receipt = SelectiveDisclosureProof::from_owned_note(&note);
-assert!(receipt.verify_against_page(&page_bytes)?);
-println!("Session B_0: {} · Relay: {DEFAULT_RELAY_URL}", session.address);`,
+// 3. Zero-indexer CompactWalletStore, Mode 1 receipt & local BN254 Groth16 prover
+let mut store = CompactWalletStore::new(0, 0);
+store.ingest_lane_pages(&fvk, 0, &[(0, &sub_raw)], &[(0, &memo_raw)], &[])?;
+let note = store.unspent_notes(None)[0];
+assert!(note.selective_disclosure_proof().verify_against_leaf(&note.commitment));
+let prover = AudrenProver::from_dev_setup();
+println!("Pool: {pool_pda} · Escrow: {escrow_pda} · Relay: {DEFAULT_RELAY_URL}");`,
   },
   swift: {
     tab: 'Swift (iOS / macOS)',
-    file: 'packages/swift · AudrenSDK via UniFFI over audren-client (~50 ms native)',
+    file: 'packages/swift · AudrenSDK via UniFFI over crates/audren-ffi',
     code: `import AudrenSDK
 import Foundation
 
-// 1. Master keys, sub-accounts & deterministic DeFi Session keypair B_0
-let alice   = try deriveKeysFromSeed(seed32: seed32)
-let trading = try deriveSubaccountKeys(masterSeed32: seed32, accountIndex: 1)
-let session = try deriveDefiSessionKeypair(masterSeed32: seed32, sessionIndex: 0)
-let fvk     = try exportFullViewingKey(seed32: seed32, accountIndex: 1)
+// 1. Master keys, sub-accounts, read-only FVK & DeFi Session keypair B_0
+let alice   = try deriveKeysFromSeed(seed: seed32)
+let trading = try deriveSubaccountKeys(seed: seed32, accountIndex: 1)
+let fvk     = try exportFullViewingKey(seed: seed32)
+let session = try deriveDefiSessionKeypair(seed: seed32, sessionIndex: 0)
 
-// 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scan
-let pid    = programId()
-let pool   = try derivePoolPda(poolId: 0, programId: pid)
-let escrow = try deriveEscrowPda(poolId: 0, shardId: 0, programId: pid)
-let unwrap = try deriveUnwrapPda(poolId: 0, nullifier32: nullifier, programId: pid)
-let hits   = try scanPageDataslice(
-    pageId: 0, slice1056: sliceBytes, spendPk32: alice.spendPk, viewSk32: alice.viewSk
-)
+// 2. Canonical PDAs (audren_v2_*)
+let pid    = canonicalProgramId()
+let pool   = try derivePoolPda(programId: pid, poolId: 0)
+let escrow = try deriveEscrowPda(programId: pid, poolId: 0, shardId: 0)
+let unwrap = try deriveUnwrapPda(programId: pid, poolId: 0, nf0: nf0Data)
 
-// 3. Decrypt notes & verify single-note Mode 1 receipt locally
-let notes = try scanEpochPage(
-    poolId: 0, pageBytes: pageBytes,
-    spendSk32: alice.spendSk, spendPk32: alice.spendPk, viewSk32: alice.viewSk, programId: pid
-)
-let receipt = createSelectiveDisclosureProof(note: notes[0])
-let valid   = try verifySelectiveDisclosureOnPage(proof: receipt, pageBytes: pageBytes)`,
+// 3. Decrypt & verify 90 B note memo + Mode 1 SelectiveDisclosureProof + Groth16 proof
+let dec   = try decryptAndVerifyMemoEntry(fvk: fvk, memo90: memo90, onchainCommitment: leafCm)
+let valid = try verifySelectiveDisclosureProof(proof: receipt, onchainSubtreeLeaf: leafCm)
+let storeJson = try compactStoreNewJson(poolId: 0, birthdaySlot: 0)
+let proof = try proveJoinsplitWitnessBytes(witness4611: witnessData, seed32: rngSeed32)`,
   },
   kotlin: {
     tab: 'Kotlin (Android / JVM)',
-    file: 'packages/kotlin · xyz.audren.sdk via UniFFI + JNA (~50 ms native)',
+    file: 'packages/kotlin · xyz.audren.sdk via UniFFI + JNA over crates/audren-ffi',
     code: `import xyz.audren.sdk.*
 
-// 1. Master keys, sub-accounts & deterministic DeFi Session keypair B_0
+// 1. Master keys, sub-accounts, read-only FVK & DeFi Session keypair B_0
 val alice   = deriveKeysFromSeed(seed32)
 val trading = deriveSubaccountKeys(seed32, 1u)
+val fvk     = exportFullViewingKey(seed32)
 val session = deriveDefiSessionKeypair(seed32, 0u)
-val fvk     = exportFullViewingKey(seed32, 1u)
 
-// 2. Canonical PDAs & 1,056-byte EpochPage dataSlice scan
-val pid    = programId()
-val pool   = derivePoolPda(0u, pid)
-val escrow = deriveEscrowPda(0u, 0u, pid)
-val unwrap = deriveUnwrapPda(0u, nullifier, pid)
-val hits   = scanPageDataslice(0uL, sliceBytes, alice.spendPk, alice.viewSk)
+// 2. Canonical PDAs (audren_v2_*)
+val pid    = canonicalProgramId()
+val pool   = derivePoolPda(pid, 0u)
+val escrow = deriveEscrowPda(pid, 0u, 0u)
+val unwrap = deriveUnwrapPda(pid, 0u, nf0Bytes)
 
-// 3. Decrypt notes & verify single-note Mode 1 receipt locally
-val notes = scanEpochPage(0u, pageBytes, alice.spendSk, alice.spendPk, alice.viewSk, pid)
-val receipt = createSelectiveDisclosureProof(notes[0])
-val valid   = verifySelectiveDisclosureOnPage(receipt, pageBytes)`,
+// 3. Decrypt & verify 90 B note memo + Mode 1 SelectiveDisclosureProof + Groth16 proof
+val dec       = decryptAndVerifyMemoEntry(fvk, memo90, leafCm)
+val valid     = verifySelectiveDisclosureProof(receipt, leafCm)
+val storeJson = compactStoreNewJson(0u, 0uL)
+val proof     = proveJoinsplitWitnessBytes(witness4611, rngSeed32)`,
   },
 }
 
@@ -158,9 +159,9 @@ export function DevelopersExperience() {
           <div className={styles.heroSingle}>
             <h1>Build your own way in.</h1>
             <p className={styles.heroLead}>
-              No Audren account, API gate, or integration approval. Four standardized SDKs —
-              Rust, TypeScript, Swift (iOS), and Kotlin (Android) — sharing six identical
-              building blocks and one cross-language conformance test suite.
+              No Audren account, API gate, or mandatory indexer. Four Apache-2.0 SDKs — Rust,
+              TypeScript (+ WASM Groth16 prover), Swift (iOS), and Kotlin (Android) — verified
+              byte-for-byte against <code>spec/test-vectors.json</code> on every CI run.
             </p>
           </div>
 
@@ -205,25 +206,25 @@ export function DevelopersExperience() {
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>A small integration, with explicit responsibilities.</h2>
+              <h2>Zero-indexer integration, with explicit responsibilities.</h2>
             </div>
             <p>
-              Permissionless integration keeps the protocol surface minimal, but does not remove
-              engineering work. Wallet recovery, provider failures, confirmation handling, and
-              privacy disclosures belong in your application design.
+              Ordinary Solana RPC keeps infrastructure minimal, while wallet recovery, encrypted
+              local persistence, confirmation handling, and privacy disclosures remain core
+              application responsibilities.
             </p>
           </div>
 
           <div className={styles.diagramStage}>
             <div className={styles.stageHead}>
               <strong>End-to-end client integration pipeline</strong>
-              <span>Standard Solana RPC · Local proving · Optional relay</span>
+              <span>Ordinary Solana RPC · Local Groth16 proving · Optional relay</span>
             </div>
             <svg
               className={styles.stageSvg}
               viewBox="0 0 920 176"
               role="img"
-              aria-label="Audren client integration pipeline: Discover EpochPage dataSlices via RPC, Authorize and prove locally on device, Submit via Direct RPC or optional relayer, Confirm settlement and handle ProofBuffer recovery"
+              aria-label="Audren client integration pipeline: Sync CompactWalletStore via ordinary getMultipleAccounts, Generate 192 B BN254 Groth16 proof locally, Submit single Solana Transaction v1 directly or via pluggable relayer, Confirm settlement and freeze sealed siblings"
             >
               <defs>
                 <filter id="dev-pulse-glow" x="-60%" y="-60%" width="220%" height="220%">
@@ -269,35 +270,35 @@ export function DevelopersExperience() {
               {[
                 {
                   x: 12,
-                  tag: 'DISCOVER',
-                  title: 'Scan records',
-                  line1: 'getMultipleAccounts',
-                  line2: 'dataSlice: 64..1120 (1,056 B)',
-                  foot: 'Local view-key scan',
+                  tag: 'SYNC',
+                  title: 'CompactWalletStore',
+                  line1: 'getMultipleAccounts RPC',
+                  line2: 'Freeze sealed siblings, drop pages',
+                  foot: '1.28 MB @ 10M notes',
                 },
                 {
                   x: 247,
                   tag: 'PROVE',
-                  title: 'Authorize locally',
-                  line1: 'Triptych + Bulletproof',
-                  line2: 'Bind recipient, mint & router',
-                  foot: 'Spend keys stay on device',
+                  title: 'BN254 Groth16 locally',
+                  line1: '17,861 R1CS · 192 B proof',
+                  line2: 'Bind ctx_hash & router accounts',
+                  foot: 'spend_sk stays on device',
                 },
                 {
                   x: 482,
                   tag: 'SUBMIT',
-                  title: 'Submit Solana v1',
+                  title: '1 Solana v1 tx (0x81)',
                   line1: 'Direct wallet fee payer',
                   line2: 'or pluggable privacy relay',
-                  foot: '1 tx <= 4,096 B (or buffer)',
+                  foot: '~103k–158k CU · 1 Tx v1',
                 },
                 {
                   x: 717,
                   tag: 'SETTLE',
-                  title: 'Confirm & recover',
-                  line1: 'Scan new EpochPage slots',
-                  line2: 'CloseProofBuffer on retry',
-                  foot: 'Back up encrypted seed',
+                  title: 'Confirm & verify',
+                  line1: 'NullifierPage marks spends',
+                  line2: 'Mode 1 receipt / Mode 2 FVK',
+                  foot: 'Encrypted seed backup',
                 },
               ].map((step) => (
                 <g key={step.tag}>
@@ -339,14 +340,12 @@ export function DevelopersExperience() {
           <div className="container">
             <div className={styles.sectionIntro}>
               <div>
-                <h2>Four languages. Six identical building blocks.</h2>
+                <h2>Four languages. Zero cryptographic drift.</h2>
               </div>
               <p>
-                Every Audren SDK exposes the same primitives — <strong>keys</strong>,{' '}
-                <strong>PDAs &amp; layouts</strong>, <strong>dataSlice scanner</strong>,{' '}
-                <strong>local ZK prover</strong>, <strong>disclosure &amp; audit</strong>, and{' '}
-                <strong>relayer &amp; router helpers</strong> — consumed directly from Apache-2.0
-                source and verified byte-for-byte in CI against{' '}
+                Rust, TypeScript (+ WASM), Swift, and Kotlin share the exact same Circom BN254
+                Poseidon parameters, 17,861-R1CS Groth16 circuit, 90 B ChaCha20-Poly1305 memos, and{' '}
+                <code>audren_v2_*</code> PDAs — verified byte-for-byte in CI against{' '}
                 <code>spec/test-vectors.json</code>.
               </p>
             </div>
@@ -354,16 +353,16 @@ export function DevelopersExperience() {
             <div className={styles.ledger2}>
               <article className={`${styles.ledgerCell} ${styles.ledgerCellHighlight}`}>
                 <span className={styles.cellIndex}>RUST · SERVICES &amp; CLIs</span>
-                <h3><code>crates/client</code></h3>
+                <h3><code>crates/client</code> &amp; <code>crates/audren-circuits</code></h3>
                 <p className={styles.cellLead}>
-                  Canonical native proving client and cryptographic source of truth. Pin a git
-                  revision directly in <code>Cargo.toml</code> (no crates.io lock-in).
+                  Canonical native proving client, frozen R1CS circuit, and zero-indexer{' '}
+                  <code>CompactWalletStore</code>. Pin directly via git in <code>Cargo.toml</code>.
                 </p>
                 <ul className={styles.dashList}>
-                  <li>Ristretto255 spend/view hierarchy + HKDF sub-accounts (<code>from_seed_subaccount</code>)</li>
-                  <li>~50 ms Multi-Base Triptych (m=5/6/7), CrossBase 1/2 &amp; Agave Bulletproofs</li>
-                  <li>RPC/WebSocket <code>EpochPage</code> scanner, Mode 1/2 disclosure &amp; auditor decrypt</li>
-                  <li>LiteSVM &amp; Devnet integration test harness included</li>
+                  <li>BN254 Poseidon spend/view hierarchy + HKDF sub-accounts &amp; read-only FVK</li>
+                  <li>Native BN254 Groth16 proving (~150 ms) over 4-ary Depth-20 global MASP</li>
+                  <li>All 9 instruction builders + exact <code>ctx_hash</code> transcripts</li>
+                  <li>Full LiteSVM &amp; adversarial DeFi regression test suite included</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a
@@ -378,18 +377,16 @@ export function DevelopersExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>TYPESCRIPT · WEB &amp; NODE 22+</span>
+                <span className={styles.cellIndex}>TYPESCRIPT · WEB, NODE 22+ &amp; WORKERS</span>
                 <h3><code>@audren/sdk</code> + <code>@audren/sdk/prover</code></h3>
                 <p className={styles.cellLead}>
-                  Built from source via <code>packages/sdk</code>: zero-dependency core entrypoint
-                  for PDAs, layouts, scanner, relayer &amp; IDLs, plus a full pure-TS prover
-                  powering <code>audren.xyz</code> directly.
+                  Zero-WASM pure-TS root entrypoint (runs natively in Cloudflare Workers) paired
+                  with the exact Rust-compiled <code>audren_circuits.wasm</code> Groth16 prover.
                 </p>
                 <ul className={styles.dashList}>
-                  <li><code>@audren/sdk</code>: zero runtime deps — PDAs, codecs, Solana v1 (<code>0x81</code>), Codama &amp; Anchor IDLs, <code>AudrenRelayClient</code></li>
-                  <li><code>@audren/sdk/prover</code>: full pure-TS Ristretto255, Triptych (m=5/6/7) &amp; Bulletproofs (<code>@noble/curves</code>)</li>
-                  <li>Matches Rust byte-for-byte on keys, sub-accounts, note decryption &amp; Mode 1 receipts</li>
-                  <li>Runs natively in browsers, Node 22+, and Cloudflare Workers</li>
+                  <li><code>@audren/sdk</code>: pure-TS BN254 Poseidon, ChaCha20-Poly1305, 13 PDAs, <code>CompactWalletStore</code>, Transaction v1, IDLs &amp; <code>AudrenRelayClient</code></li>
+                  <li><code>@audren/sdk/prover</code>: exact Rust <code>audren_circuits.wasm</code> (2.1 MB) proving byte-for-byte identical 192 B Groth16 proofs</li>
+                  <li>Cross-SDK LiteSVM tests verify TS WASM proofs directly on sBPFv3 <code>audren.so</code></li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a
@@ -398,7 +395,7 @@ export function DevelopersExperience() {
                     rel="noreferrer"
                     className={styles.textLink}
                   >
-                    Build packages/sdk from source <ArrowUpRight size={13} />
+                    Inspect packages/sdk on GitHub <ArrowUpRight size={13} />
                   </a>
                 </div>
               </article>
@@ -408,14 +405,14 @@ export function DevelopersExperience() {
                 <h3><code>packages/swift</code> (<code>AudrenSDK</code>)</h3>
                 <p className={styles.cellLead}>
                   Native Swift Package generated via UniFFI directly over{' '}
-                  <code>crates/audren-ffi</code> so iOS wallets inherit the exact canonical Rust core
-                  with zero re-implementation drift.
+                  <code>crates/audren-ffi</code> so iOS wallets inherit the exact Rust Groth16
+                  prover with zero re-implementation drift.
                 </p>
                 <ul className={styles.dashList}>
-                  <li>~50 ms native local proving on Apple Silicon &amp; iPhone ARM64</li>
-                  <li>Complete 6-building-block API with native Swift <code>Data</code> &amp; throwing errors</li>
+                  <li>Native local BN254 Groth16 proving on Apple Silicon &amp; iPhone ARM64</li>
+                  <li>Keys, FVK, 13 PDAs, 90 B memo verification, Mode 1 receipts &amp; 9 ix builders</li>
                   <li>One-command iOS <code>XCFramework</code> script (<code>scripts/build-mobile-sdks.sh ios</code>)</li>
-                  <li>Proven in CI on <code>macos-latest</code> via <code>swift test</code></li>
+                  <li>Verified in CI via <code>swift test</code> against <code>spec/test-vectors.json</code></li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a
@@ -430,17 +427,17 @@ export function DevelopersExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>KOTLIN · ANDROID API 24+ &amp; JVM</span>
+                <span className={styles.cellIndex}>KOTLIN · ANDROID API 24+ &amp; JVM 21+</span>
                 <h3><code>packages/kotlin</code> (<code>xyz.audren.sdk</code>)</h3>
                 <p className={styles.cellLead}>
                   Native Kotlin SDK generated via UniFFI + JNA over{' '}
-                  <code>crates/audren-ffi</code> for Android wallets and JVM services.
+                  <code>crates/audren-ffi</code> for Android wallets and JVM backend services.
                 </p>
                 <ul className={styles.dashList}>
-                  <li>~50 ms native local proving on Android ARM64 / x86_64 &amp; JVM 21+</li>
-                  <li>Complete 6-building-block API identical to Rust, TypeScript &amp; Swift</li>
+                  <li>Native local BN254 Groth16 proving on Android ARM64 / x86_64 &amp; JVM 21+</li>
+                  <li>Complete SDK API matching Rust, TypeScript &amp; Swift byte-for-byte</li>
                   <li>One-command Android <code>jniLibs</code> build (<code>scripts/build-mobile-sdks.sh android</code>)</li>
-                  <li>Proven in CI via <code>gradle test</code> against <code>spec/test-vectors.json</code></li>
+                  <li>Verified in CI via <code>gradle test</code> against <code>spec/test-vectors.json</code></li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a
@@ -464,8 +461,9 @@ export function DevelopersExperience() {
               <h2>Same primitives in every language.</h2>
             </div>
             <p>
-              Compare the exact same keys → PDAs → <code>dataSlice</code> scan → local prover →
-              selective disclosure flow across TypeScript, Rust, Swift, and Kotlin.
+              Compare the exact keys → PDAs → ordinary-RPC <code>CompactWalletStore</code> →
+              local BN254 Groth16 prover → selective disclosure flow across TypeScript, Rust,
+              Swift, and Kotlin.
             </p>
           </div>
 
@@ -504,7 +502,7 @@ export function DevelopersExperience() {
           </div>
         </section>
 
-        {/* SECTION 04: SWAPS & BEFORE INTEGRATING */}
+        {/* EXAMPLES & CHECKLIST */}
         <section className={styles.sectionAlt}>
           <div className="container">
             <div className={styles.ledger2}>
@@ -512,16 +510,16 @@ export function DevelopersExperience() {
                 <span className={styles.cellIndex}>EXAMPLES &amp; ESCROW DEFI CPI</span>
                 <h3>Runnable examples across all 4 languages.</h3>
                 <p className={styles.cellLead}>
-                  <code>audren-xyz/examples</code> mirrors the same canonical flows — keys,
-                  sub-accounts, deterministic DeFi Sessions (<code>B₀, B₁…</code>),{' '}
-                  <code>dataSlice</code> scanning, local proving, selective disclosure, and{' '}
-                  <code>ExecViaEscrow</code> account planning — in Rust, TypeScript, Swift, and
-                  Kotlin.
+                  <code>audren-xyz/examples</code> mirrors the canonical Audren flows — keys,
+                  sub-accounts, pseudonymous DeFi Sessions (<code>B₀, B₁…</code>), ordinary-RPC{' '}
+                  <code>CompactWalletStore</code> sync, local WASM/native Groth16 proving,
+                  selective disclosure, and <code>ExecViaEscrow</code> planning — in Rust,
+                  TypeScript, Swift, and Kotlin.
                 </p>
                 <ul className={styles.dashList}>
-                  <li><code>ExecViaEscrow</code> (Tag 5) accepts any compatible PDA-signing Token A → Token B CPI (DEX routers, lending supply, yield vaults, LSTs, RWAs) with native input/output <code>relayer_fee</code>, enforcing escrow ownership, zero delegates, lamport invariants, and exact vault deltas.</li>
-                  <li>Self-paying <code>Withdraw</code> (Tag 6) supports atomic <code>unwrap_wsol</code> via <code>audren_unwrap</code> PDA to fund 0-SOL wallets or session keypairs, paired with zero-dust <code>Deposit(fee_from_amount)</code> sweeps.</li>
-                  <li>All four example folders consume the official Audren SDKs directly — zero hand-rolled constants or byte offsets.</li>
+                  <li><code>ExecViaEscrow</code> (Tag 7) supports any compatible PDA-signing Token A → Token B CPI with input or output relayer fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>) and hardened pre/post escrow checks.</li>
+                  <li>Self-paying <code>JoinSplit</code> (Tag 6) supports atomic <code>WITHDRAW_FLAG_UNWRAP_WSOL</code> to fund 0-SOL wallets or session keypairs, paired with zero-dust <code>DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code> sweeps.</li>
+                  <li>All four example suites import the official SDKs directly — zero duplicated cryptography.</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a href={AUDREN.githubExamples} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -537,14 +535,14 @@ export function DevelopersExperience() {
                 <span className={styles.cellIndex}>CHECKLIST</span>
                 <h3>Read before integrating.</h3>
                 <p className={styles.cellLead}>
-                  Audren is pre-audit and its Solana BPF program remains upgradeable. Validate the
-                  deployed ProgramData hash you interact with and surface public-boundary
-                  disclosures in your product UX.
+                  Audren is pre-audit with <code>DEV_DETERMINISTIC_VK</code> for testing and
+                  Devnet. Mainnet requires replacing the verifying key with a public Phase-2 MPC
+                  ceremony artifact and completing an independent audit.
                 </p>
                 <ul className={styles.dashList}>
-                  <li>Handle interrupted <code>ProofBuffer</code> uploads cleanly via <code>CloseProofBuffer</code> (100% rent refund).</li>
-                  <li>Design encrypted seed / viewing-key backups; lost spend keys cannot be recovered by any operator.</li>
-                  <li>Communicate clearly that deposits, withdrawals, DEX legs, fee payers, and candidate pages remain public.</li>
+                  <li>Persist <code>CompactWalletStore</code> locally (IndexedDB / mobile disk) with optional birthday slot so sealed pages are discarded immediately.</li>
+                  <li>Back up the encrypted 32-byte master seed; lost spend keys cannot be recovered by any operator.</li>
+                  <li>Surface clear UX notices that deposits, withdrawals, DeFi CPI legs, and session wallet positions remain public on Solana.</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <Link href="/architecture" className={styles.textLink}>
@@ -568,7 +566,7 @@ export function DevelopersExperience() {
             <div>
               <h2>Inspect the on-chain specification.</h2>
               <p>
-                Exact Structure-of-Arrays byte offsets, Multi-Base Binary Triptych equations, and
+                Exact fixed &lt;10 KiB account layouts, 17,861-R1CS BN254 Groth16 constraints, and
                 measured sBPFv3 Compute Units.
               </p>
             </div>

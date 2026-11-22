@@ -33,15 +33,15 @@ export default function HowItWorksPage() {
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
               <span>Receiving address</span>
-              <strong>1 reusable <code>aud1…</code> → 1-time keys</strong>
+              <strong>1 reusable <code>aud1…</code> → 1-time stealth owners</strong>
             </div>
             <div className={styles.heroMetaCell}>
               <span>Spend proof</span>
-              <strong>32 / 64 / 128-slot ring + Bulletproofs</strong>
+              <strong>192 B BN254 Groth16 · 4<sup>20</sup> Global MASP</strong>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Trusted setup</span>
-              <strong>None (transparent Ristretto255)</strong>
+              <span>Wallet discovery</span>
+              <strong>Ordinary Solana RPC · Zero indexer</strong>
             </div>
             <div className={styles.heroMetaCell}>
               <span>Public boundaries</span>

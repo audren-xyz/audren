@@ -1,435 +1,310 @@
-//! Fixed-offset, zero-copy account layouts for Audren.
-//!
-//! `EpochPage` uses a Structure-of-Arrays (SoA) layout sized at `6,240 bytes` (`32` notes/page) —
-//! below Solana's `10,240 B` (`10 KiB`) per-instruction CPI allocation limit and compatible with
-//! Agave Account Data Direct Mapping (`SIMD-0460`).
-//!
-//! Wallets scan up to 100 pages (`3,200` notes) per standard Solana `getMultipleAccounts` call
-//! (or Agave `programSubscribe` WebSocket) using `dataSlice: { offset: PAGE_SCAN_OFFSET, length: PAGE_SCAN_LEN }` (`1,056 B`/page).
+//! Fixed-size, zero-copy account layouts for Audren (all `< 10,240 B` CPI allocation cap,
+//! zero `realloc`, SIMD-0460 compliant).
 
-use crate::{AudrenError, Bytes32, PoolMode};
+use crate::{Bytes32, LANE_DEPTH_4ARY, NUM_LANES, ZERO_HASHES_4ARY};
 
-/// Account magics (8 ASCII bytes).
-pub const POOL_MAGIC: [u8; 8] = *b"AUDRNPL1";
-pub const PAGE_MAGIC: [u8; 8] = *b"AUDRNPG1";
-pub const SOL_VAULT_MAGIC: [u8; 8] = *b"AUDRNSL1";
-pub const PAGE_RENT_MAGIC: [u8; 8] = *b"AUDRNRN1";
-pub const PROOF_BUFFER_MAGIC: [u8; 8] = *b"AUDRNBF1";
-pub const LANE_MAGIC: [u8; 8] = *b"AUDRNLN1";
+/// Solana maximum CPI account creation size (`10 KiB`).
+pub const MAX_CPI_ACCOUNT_ALLOC: usize = 10_240;
 
-// ---------------------------------------------------------------------------
-// Ephemeral ProofBuffer PDA (48 B header + up to 9,984 B payload <= 10 KiB CPI cap)
-// ---------------------------------------------------------------------------
+/// 4^4 = 256 note commitments per `SubtreePage`.
+pub const SUBTREE_LEAVES: usize = 256;
 
-pub const PROOF_BUFFER_HEADER_LEN: usize = 48;
-/// Fixed per-chunk payload slice (`768 B`) for oversized payloads exceeding Solana Transaction v1's `4,096 B` limit.
-pub const PROOF_BUFFER_CHUNK_SIZE: usize = 768;
-/// Maximum chunks tracked by the `u16` `written_mask` (`13 * 768 + 48 = 10,032 B <= 10,240 B`).
-pub const PROOF_BUFFER_MAX_CHUNKS: usize = 13;
-pub const PROOF_BUFFER_MAX_PAYLOAD: usize = PROOF_BUFFER_CHUNK_SIZE * PROOF_BUFFER_MAX_CHUNKS;
+/// 300 finalized 256-leaf subtree roots per `SubtreeRootPage`.
+pub const SUBROOTS_PER_PAGE: usize = 300;
 
-pub const BUF_OFF_MAGIC: usize = 0; // [u8; 8]
-pub const BUF_OFF_AUTHORITY: usize = 8; // [u8; 32]
-pub const BUF_OFF_EXPECTED_LEN: usize = 40; // u32 LE
-pub const BUF_OFF_WRITTEN_MASK: usize = 44; // u16 LE
-                                            // [46..48]: reserved zero bytes
+/// 112 compact `90 B` SoA note memos per `MemoPage` (`64 + 112 * 90 = 10,144 B < 10,240 B`).
+pub const MEMO_NOTES_PER_PAGE: usize = 112;
+pub const MEMO_CT_LEN: usize = 56;
+pub const MEMO_ENTRY_WIRE_LEN: usize = 2 + 32 + MEMO_CT_LEN; // 90 B
+pub const DYN_MEMO_HEAD_LEN: usize = 2 + 32; // 34 B
 
-// ---------------------------------------------------------------------------
-// PoolState (192 bytes)
-// ---------------------------------------------------------------------------
+/// 600 x 16-byte (128-bit) nullifier prefixes per `NullifierPage` (`64 + 600 * 16 = 9,664 B`).
+pub const NF_PREFIX_LEN: usize = 16;
+pub const NF_PER_PAGE: usize = 600;
 
-pub const POOL_STATE_LEN: usize = 192;
+/// 8-byte ASCII account magic headers.
+pub const POOL_MAGIC: [u8; 8] = *b"AUD2PL02";
+pub const LANE_RENT_MAGIC: [u8; 8] = *b"AUD2RV01";
+pub const LANE_MAGIC: [u8; 8] = *b"AUD2LN01";
+pub const SUBTREE_MAGIC: [u8; 8] = *b"AUD2SB01";
+pub const SUBROOT_MAGIC: [u8; 8] = *b"AUD2SR01";
+pub const MEMO_MAGIC: [u8; 8] = *b"AUD2MM03";
+pub const NF_PAGE_MAGIC: [u8; 8] = *b"AUD2NF01";
+pub const CKPT_MAGIC: [u8; 8] = *b"AUD2CK01";
+pub const DYN_MEMO_MAGIC: [u8; 8] = *b"AUD2DYN2";
 
-pub const POOL_OFF_MAGIC: usize = 0; // [u8; 8]
-pub const POOL_OFF_VERSION: usize = 8; // u8
-pub const POOL_OFF_BUMP: usize = 9; // u8
-pub const POOL_OFF_MODE: usize = 10; // u8 (PoolMode)
-pub const POOL_OFF_PAUSED: usize = 11; // u8
-pub const POOL_OFF_POOL_ID: usize = 12; // u32 LE
-pub const POOL_OFF_CURRENT_PAGE: usize = 16; // u64 LE
-pub const POOL_OFF_TOTAL_NOTES: usize = 24; // u64 LE
-pub const POOL_OFF_TOTAL_SPENDS: usize = 32; // u64 LE
-pub const POOL_OFF_PAGE_RENT_FEE: usize = 40; // u64 LE (lamports collected per note into PageRentVault)
-pub const POOL_OFF_AUTHORITY: usize = 48; // [u8; 32] (governance / pause / future v2 upgrade)
-pub const POOL_OFF_AUDITOR_PK: usize = 80; // [u8; 32] (Ristretto255 point K_aud when InstitutionalAudited, else 0)
-pub const POOL_OFF_AUDITOR_LOCKED: usize = 112; // u8 (1 = auditor_pk permanently locked)
-pub const POOL_OFF_VAULT_AUTH_BUMP: usize = 113; // u8
-pub const POOL_OFF_SOL_VAULT_BUMP: usize = 114; // u8
-pub const POOL_OFF_PAGE_RENT_BUMP: usize = 115; // u8
-pub const POOL_OFF_ACTIVE_LANES: usize = 116; // u8 (0 or 1 = Lane 0 only; 2..=16 = Lanes 0..N-1 active)
-                                              // [117..192]: 75 bytes reserved zero padding for forward-compatible PQ metadata
+/// Fixed account byte lengths (all `<= 10,240 B`, zero `realloc`).
+pub const POOL_STATE_LEN: usize = 128;
+pub const SENTINEL_LEN: usize = 16;
+pub const LANE_STATE_LEN: usize = 64 + 32 + (LANE_DEPTH_4ARY * 3 * 32); // 1,824 B
+pub const SUBTREE_PAGE_LEN: usize = 64 + (SUBTREE_LEAVES * 32); // 8,256 B
+pub const SUBROOT_PAGE_LEN: usize = 64 + (SUBROOTS_PER_PAGE * 32); // 9,664 B
+pub const MEMO_PAGE_LEN: usize = 64 + (MEMO_NOTES_PER_PAGE * MEMO_ENTRY_WIRE_LEN); // 10,144 B
+pub const NF_PAGE_LEN: usize = 64 + (NF_PER_PAGE * NF_PREFIX_LEN); // 9,664 B
+pub const CKPT_LEN: usize = 64 + (NUM_LANES * 32) + (NUM_LANES * 8); // 704 B
 
+const _: () = assert!(POOL_STATE_LEN == 128);
+const _: () = assert!(LANE_STATE_LEN == 1_824);
+const _: () = assert!(SUBTREE_PAGE_LEN == 8_256 && SUBTREE_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
+const _: () = assert!(SUBROOT_PAGE_LEN == 9_664 && SUBROOT_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
+const _: () = assert!(MEMO_PAGE_LEN == 10_144 && MEMO_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
+const _: () = assert!(NF_PAGE_LEN == 9_664 && NF_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
+const _: () = assert!(CKPT_LEN == 704);
+
+// --- PoolState offsets (128 B) ---
+pub const PL_OFF_MAGIC: usize = 0; // 8
+pub const PL_OFF_VERSION: usize = 8; // 1
+pub const PL_OFF_BUMP: usize = 9; // 1
+pub const PL_OFF_PAUSED: usize = 10; // 1
+pub const PL_OFF_ACTIVE_LANES: usize = 11; // 1
+pub const PL_OFF_POOL_ID: usize = 12; // 4 (u32)
+pub const PL_OFF_CKPT_INTERVAL: usize = 16; // 8 (u64)
+pub const PL_OFF_MAX_CKPT_AGE: usize = 24; // 8 (u64)
+pub const PL_OFF_AUTHORITY: usize = 32; // 32
+pub const PL_OFF_SOL_VAULT_BUMP: usize = 64; // 1
+pub const PL_OFF_VAULT_AUTH_BUMP: usize = 65; // 1
+pub const PL_OFF_MODE: usize = 66; // 1 (PoolMode)
+pub const PL_OFF_NOTE_RENT_FEE: usize = 72; // 8 (u64)
+pub const PL_OFF_NF_RENT_FEE: usize = 80; // 8 (u64)
+pub const PL_OFF_AUDITOR_PK: usize = 88; // 32 (reserved for opt-in InstitutionalAudited)
+
+// --- LaneRentVault sentinel offsets (16 B) ---
+pub const SN_OFF_MAGIC: usize = 0; // 8
+pub const SN_OFF_POOL_ID: usize = 8; // 4
+pub const SN_OFF_LANE_ID: usize = 12; // 1
+pub const SN_OFF_BUMP: usize = 13; // 1
+
+// --- LaneTreeState offsets (1,824 B) ---
+pub const LN_OFF_MAGIC: usize = 0; // 8
+pub const LN_OFF_VERSION: usize = 8; // 1
+pub const LN_OFF_LANE_ID: usize = 9; // 1
+pub const LN_OFF_BUMP: usize = 10; // 1
+pub const LN_OFF_RENT_BUMP: usize = 11; // 1
+pub const LN_OFF_POOL_ID: usize = 12; // 4 (u32)
+pub const LN_OFF_NEXT_LEAF: usize = 16; // 8 (u64)
+pub const LN_OFF_NF_COUNT: usize = 24; // 8 (u64)
+pub const LN_OFF_CURRENT_ROOT: usize = 64; // 32
+pub const LN_OFF_FRONTIER: usize = 96; // 18 * 3 * 32 = 1,728 B
+
+// --- SubtreePage offsets (8,256 B) ---
+pub const SB_OFF_MAGIC: usize = 0; // 8
+pub const SB_OFF_LANE_ID: usize = 8; // 1
+pub const SB_OFF_BUMP: usize = 9; // 1
+pub const SB_OFF_COUNT: usize = 10; // 2 (u16: 0..=256)
+pub const SB_OFF_POOL_ID: usize = 12; // 4 (u32)
+pub const SB_OFF_PAGE_SEQ: usize = 16; // 8 (u64)
+pub const SB_OFF_LEAVES: usize = 64; // 256 * 32 = 8,192 B
+
+// --- SubtreeRootPage offsets (9,664 B) ---
+pub const SR_OFF_MAGIC: usize = 0; // 8
+pub const SR_OFF_LANE_ID: usize = 8; // 1
+pub const SR_OFF_BUMP: usize = 9; // 1
+pub const SR_OFF_COUNT: usize = 10; // 2 (u16: 0..=300)
+pub const SR_OFF_POOL_ID: usize = 12; // 4 (u32)
+pub const SR_OFF_ROOT_PAGE_SEQ: usize = 16; // 8 (u64)
+pub const SR_OFF_ROOTS: usize = 64; // 300 * 32 = 9,600 B
+
+// --- MemoPage offsets (10,144 B; Structure-of-Arrays) ---
+pub const MM_OFF_MAGIC: usize = 0; // 8
+pub const MM_OFF_LANE_ID: usize = 8; // 1
+pub const MM_OFF_BUMP: usize = 9; // 1
+pub const MM_OFF_COUNT: usize = 10; // 2 (u16: 0..=112)
+pub const MM_OFF_POOL_ID: usize = 12; // 4 (u32)
+pub const MM_OFF_PAGE_SEQ: usize = 16; // 8 (u64)
+pub const MM_OFF_CREATED_SLOT: usize = 24; // 8 (u64)
+pub const MM_OFF_CLOSED_SLOT: usize = 32; // 8 (u64)
+pub const MM_OFF_VIEW_TAGS: usize = 64; // 112 * 2 = 224 B
+pub const MM_OFF_EPHEMERAL_PKS: usize = 64 + MEMO_NOTES_PER_PAGE * 2; // 288; 112 * 32 = 3,584 B
+pub const MM_OFF_CIPHERTEXTS: usize = MM_OFF_EPHEMERAL_PKS + MEMO_NOTES_PER_PAGE * 32; // 3,872; 112 * 56 = 6,272 B
+
+// --- NullifierPage offsets (9,664 B) ---
+pub const NF_OFF_MAGIC: usize = 0; // 8
+pub const NF_OFF_LANE_ID: usize = 8; // 1
+pub const NF_OFF_BUMP: usize = 9; // 1
+pub const NF_OFF_COUNT: usize = 10; // 2 (u16: 0..=600)
+pub const NF_OFF_POOL_ID: usize = 12; // 4 (u32)
+pub const NF_OFF_PAGE_SEQ: usize = 16; // 8 (u64)
+pub const NF_OFF_CREATED_SLOT: usize = 24; // 8 (u64)
+pub const NF_OFF_CLOSED_SLOT: usize = 32; // 8 (u64)
+pub const NF_OFF_PREFIXES: usize = 64; // 600 * 16 = 9,600 B
+
+// --- RootCheckpoint offsets (704 B) ---
+pub const CK_OFF_MAGIC: usize = 0; // 8
+pub const CK_OFF_VERSION: usize = 8; // 1
+pub const CK_OFF_BUMP: usize = 9; // 1
+pub const CK_OFF_SLOT_IDX: usize = 10; // 2 (u16: 0..256)
+pub const CK_OFF_POOL_ID: usize = 12; // 4 (u32)
+pub const CK_OFF_EPOCH_ID: usize = 16; // 8 (u64)
+pub const CK_OFF_PUBLISHED_SLOT: usize = 24; // 8 (u64)
+pub const CK_OFF_SUPER_ROOT: usize = 32; // 32
+pub const CK_OFF_LANE_ROOTS: usize = 64; // 16 * 32 = 512 B
+pub const CK_OFF_LANE_COUNTS: usize = 576; // 16 * 8 = 128 B
+
+/// Little-endian integer readers (zero-copy, `no_std`).
+#[inline(always)]
+pub fn read_u16(b: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([b[off], b[off + 1]])
+}
+
+#[inline(always)]
+pub fn read_u32(b: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+#[inline(always)]
+pub fn read_u64(b: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes([
+        b[off],
+        b[off + 1],
+        b[off + 2],
+        b[off + 3],
+        b[off + 4],
+        b[off + 5],
+        b[off + 6],
+        b[off + 7],
+    ])
+}
+
+#[inline(always)]
+pub fn read_32(b: &[u8], off: usize) -> Bytes32 {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&b[off..off + 32]);
+    out
+}
+
+/// Decoded `PoolState` (`128 B`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolState {
     pub version: u8,
     pub bump: u8,
-    pub mode: PoolMode,
     pub paused: bool,
-    pub pool_id: u32,
-    pub current_page_id: u64,
-    pub total_notes: u64,
-    pub total_spends: u64,
-    pub page_rent_fee_lamports: u64,
-    pub authority: Bytes32,
-    pub auditor_pk: Bytes32,
-    pub auditor_locked: bool,
-    pub vault_auth_bump: u8,
-    pub sol_vault_bump: u8,
-    pub page_rent_bump: u8,
     pub active_lanes: u8,
+    pub pool_id: u32,
+    pub ckpt_interval: u64,
+    pub max_ckpt_age: u64,
+    pub authority: Bytes32,
+    pub sol_vault_bump: u8,
+    pub vault_auth_bump: u8,
+    pub mode: u8,
+    pub note_rent_fee: u64,
+    pub nf_rent_fee: u64,
+    pub auditor_pk: Bytes32,
 }
 
 impl PoolState {
-    pub fn decode(data: &[u8]) -> Result<Self, AudrenError> {
-        if data.len() != POOL_STATE_LEN {
-            return Err(AudrenError::InvalidAccount);
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.len() != POOL_STATE_LEN || data[PL_OFF_MAGIC..PL_OFF_MAGIC + 8] != POOL_MAGIC {
+            return None;
         }
-        if data[POOL_OFF_MAGIC..POOL_OFF_MAGIC + 8] != POOL_MAGIC {
-            return Err(AudrenError::InvalidMagic);
-        }
-        let mode = PoolMode::from_u8(data[POOL_OFF_MODE]).ok_or(AudrenError::InvalidAccount)?;
-        Ok(Self {
-            version: data[POOL_OFF_VERSION],
-            bump: data[POOL_OFF_BUMP],
-            mode,
-            paused: data[POOL_OFF_PAUSED] != 0,
-            pool_id: read_u32(data, POOL_OFF_POOL_ID)?,
-            current_page_id: read_u64(data, POOL_OFF_CURRENT_PAGE)?,
-            total_notes: read_u64(data, POOL_OFF_TOTAL_NOTES)?,
-            total_spends: read_u64(data, POOL_OFF_TOTAL_SPENDS)?,
-            page_rent_fee_lamports: read_u64(data, POOL_OFF_PAGE_RENT_FEE)?,
-            authority: read_32(data, POOL_OFF_AUTHORITY)?,
-            auditor_pk: read_32(data, POOL_OFF_AUDITOR_PK)?,
-            auditor_locked: data[POOL_OFF_AUDITOR_LOCKED] != 0,
-            vault_auth_bump: data[POOL_OFF_VAULT_AUTH_BUMP],
-            sol_vault_bump: data[POOL_OFF_SOL_VAULT_BUMP],
-            page_rent_bump: data[POOL_OFF_PAGE_RENT_BUMP],
-            active_lanes: data[POOL_OFF_ACTIVE_LANES],
+        Some(Self {
+            version: data[PL_OFF_VERSION],
+            bump: data[PL_OFF_BUMP],
+            paused: data[PL_OFF_PAUSED] != 0,
+            active_lanes: data[PL_OFF_ACTIVE_LANES],
+            pool_id: read_u32(data, PL_OFF_POOL_ID),
+            ckpt_interval: read_u64(data, PL_OFF_CKPT_INTERVAL),
+            max_ckpt_age: read_u64(data, PL_OFF_MAX_CKPT_AGE),
+            authority: read_32(data, PL_OFF_AUTHORITY),
+            sol_vault_bump: data[PL_OFF_SOL_VAULT_BUMP],
+            vault_auth_bump: data[PL_OFF_VAULT_AUTH_BUMP],
+            mode: data[PL_OFF_MODE],
+            note_rent_fee: read_u64(data, PL_OFF_NOTE_RENT_FEE),
+            nf_rent_fee: read_u64(data, PL_OFF_NF_RENT_FEE),
+            auditor_pk: read_32(data, PL_OFF_AUDITOR_PK),
         })
-    }
-
-    pub fn encode(&self, out: &mut [u8]) -> Result<(), AudrenError> {
-        if out.len() != POOL_STATE_LEN {
-            return Err(AudrenError::InvalidAccount);
-        }
-        out.fill(0);
-        out[POOL_OFF_MAGIC..POOL_OFF_MAGIC + 8].copy_from_slice(&POOL_MAGIC);
-        out[POOL_OFF_VERSION] = self.version;
-        out[POOL_OFF_BUMP] = self.bump;
-        out[POOL_OFF_MODE] = self.mode as u8;
-        out[POOL_OFF_PAUSED] = u8::from(self.paused);
-        out[POOL_OFF_POOL_ID..POOL_OFF_POOL_ID + 4].copy_from_slice(&self.pool_id.to_le_bytes());
-        out[POOL_OFF_CURRENT_PAGE..POOL_OFF_CURRENT_PAGE + 8]
-            .copy_from_slice(&self.current_page_id.to_le_bytes());
-        out[POOL_OFF_TOTAL_NOTES..POOL_OFF_TOTAL_NOTES + 8]
-            .copy_from_slice(&self.total_notes.to_le_bytes());
-        out[POOL_OFF_TOTAL_SPENDS..POOL_OFF_TOTAL_SPENDS + 8]
-            .copy_from_slice(&self.total_spends.to_le_bytes());
-        out[POOL_OFF_PAGE_RENT_FEE..POOL_OFF_PAGE_RENT_FEE + 8]
-            .copy_from_slice(&self.page_rent_fee_lamports.to_le_bytes());
-        out[POOL_OFF_AUTHORITY..POOL_OFF_AUTHORITY + 32].copy_from_slice(&self.authority);
-        out[POOL_OFF_AUDITOR_PK..POOL_OFF_AUDITOR_PK + 32].copy_from_slice(&self.auditor_pk);
-        out[POOL_OFF_AUDITOR_LOCKED] = u8::from(self.auditor_locked);
-        out[POOL_OFF_VAULT_AUTH_BUMP] = self.vault_auth_bump;
-        out[POOL_OFF_SOL_VAULT_BUMP] = self.sol_vault_bump;
-        out[POOL_OFF_PAGE_RENT_BUMP] = self.page_rent_bump;
-        out[POOL_OFF_ACTIVE_LANES] = self.active_lanes;
-        Ok(())
-    }
-
-    #[inline]
-    pub fn has_auditor(&self) -> bool {
-        self.mode == PoolMode::InstitutionalAudited && self.auditor_pk != [0u8; 32]
-    }
-
-    /// Effective number of active append lanes (`>= 1`; `0` or `1` means Lane 0 only).
-    #[inline]
-    pub fn effective_lane_count(&self) -> u8 {
-        if self.active_lanes == 0 {
-            1
-        } else {
-            self.active_lanes
-        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// AppendLaneState (64 bytes, one PDA per parallel append lane 1..15)
-// ---------------------------------------------------------------------------
-
-pub const LANE_STATE_LEN: usize = 64;
-
-pub const LANE_OFF_MAGIC: usize = 0; // [u8; 8]
-pub const LANE_OFF_VERSION: usize = 8; // u8
-pub const LANE_OFF_LANE_ID: usize = 9; // u8 (1..16)
-pub const LANE_OFF_BUMP: usize = 10; // u8
-pub const LANE_OFF_RENT_BUMP: usize = 11; // u8
-pub const LANE_OFF_POOL_ID: usize = 12; // u32 LE
-pub const LANE_OFF_CURRENT_PAGE: usize = 16; // u64 LE ((lane_id << 56) | seq)
-pub const LANE_OFF_CREATED_SLOT: usize = 24; // u64 LE
-                                             // [32..64]: 32 bytes reserved
-
+/// Decoded `LaneTreeState` header (`64 B` + `32 B` current_root; frontier stays zero-copy on-chain).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AppendLaneState {
+pub struct LaneTreeHeader {
     pub version: u8,
     pub lane_id: u8,
     pub bump: u8,
-    pub rent_vault_bump: u8,
+    pub rent_bump: u8,
     pub pool_id: u32,
-    pub current_page_id: u64,
-    pub created_slot: u64,
+    pub next_leaf: u64,
+    pub nf_count: u64,
+    pub current_root: Bytes32,
 }
 
-impl AppendLaneState {
-    pub fn decode(data: &[u8]) -> Result<Self, AudrenError> {
-        if data.len() != LANE_STATE_LEN {
-            return Err(AudrenError::InvalidAccount);
+impl LaneTreeHeader {
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.len() != LANE_STATE_LEN || data[LN_OFF_MAGIC..LN_OFF_MAGIC + 8] != LANE_MAGIC {
+            return None;
         }
-        if data[LANE_OFF_MAGIC..LANE_OFF_MAGIC + 8] != LANE_MAGIC {
-            return Err(AudrenError::InvalidMagic);
-        }
-        Ok(Self {
-            version: data[LANE_OFF_VERSION],
-            lane_id: data[LANE_OFF_LANE_ID],
-            bump: data[LANE_OFF_BUMP],
-            rent_vault_bump: data[LANE_OFF_RENT_BUMP],
-            pool_id: read_u32(data, LANE_OFF_POOL_ID)?,
-            current_page_id: read_u64(data, LANE_OFF_CURRENT_PAGE)?,
-            created_slot: read_u64(data, LANE_OFF_CREATED_SLOT)?,
+        Some(Self {
+            version: data[LN_OFF_VERSION],
+            lane_id: data[LN_OFF_LANE_ID],
+            bump: data[LN_OFF_BUMP],
+            rent_bump: data[LN_OFF_RENT_BUMP],
+            pool_id: read_u32(data, LN_OFF_POOL_ID),
+            next_leaf: read_u64(data, LN_OFF_NEXT_LEAF),
+            nf_count: read_u64(data, LN_OFF_NF_COUNT),
+            current_root: read_32(data, LN_OFF_CURRENT_ROOT),
         })
     }
-
-    pub fn encode(&self, out: &mut [u8]) -> Result<(), AudrenError> {
-        if out.len() != LANE_STATE_LEN {
-            return Err(AudrenError::InvalidAccount);
-        }
-        out.fill(0);
-        out[LANE_OFF_MAGIC..LANE_OFF_MAGIC + 8].copy_from_slice(&LANE_MAGIC);
-        out[LANE_OFF_VERSION] = self.version;
-        out[LANE_OFF_LANE_ID] = self.lane_id;
-        out[LANE_OFF_BUMP] = self.bump;
-        out[LANE_OFF_RENT_BUMP] = self.rent_vault_bump;
-        out[LANE_OFF_POOL_ID..LANE_OFF_POOL_ID + 4].copy_from_slice(&self.pool_id.to_le_bytes());
-        out[LANE_OFF_CURRENT_PAGE..LANE_OFF_CURRENT_PAGE + 8]
-            .copy_from_slice(&self.current_page_id.to_le_bytes());
-        out[LANE_OFF_CREATED_SLOT..LANE_OFF_CREATED_SLOT + 8]
-            .copy_from_slice(&self.created_slot.to_le_bytes());
-        Ok(())
-    }
 }
 
-// ---------------------------------------------------------------------------
-// EpochPage (6,240 bytes, Structure-of-Arrays for pure-RPC dataSlice scanning)
-// ---------------------------------------------------------------------------
-
-/// Solana runtime per-CPI / per-instruction account allocation cap (`10 KiB`).
-/// Enforced both pre- and post-Account Data Direct Mapping (`SIMD-0460`).
-pub const MAX_CPI_ACCOUNT_ALLOC: usize = 10_240;
-
-/// Notes per fixed-size `EpochPage` PDA (`2^5 = 32`).
-/// - `m = 5` (1 page): `32`-note anonymity set (`<= 135` MSM points)
-/// - `m = 6` (2 pages): `64`-note anonymity set (`<= 243` MSM points)
-/// - `m = 7` (4 pages): `128`-note anonymity set (`<= 439` MSM points < Agave's `512` cap)
-pub const PAGE_CAPACITY: usize = 32;
-
-/// Encrypted note payload stored inline per note (48 B AES-256-GCM ciphertext + 16 B tag
-/// or compact P2P envelope; full 1,088 B NIST ML-KEM-768 P2P encapsulations live in tx data).
-pub const NOTE_CT_LEN: usize = 64;
-
-pub const PAGE_HEADER_LEN: usize = 64;
-pub const PAGE_OFF_MAGIC: usize = 0; // [u8; 8]
-pub const PAGE_OFF_VERSION: usize = 8; // u8
-pub const PAGE_OFF_BUMP: usize = 9; // u8
-pub const PAGE_OFF_CLOSED: usize = 10; // u8
-pub const PAGE_OFF_COUNT: usize = 11; // u8 (0..=32)
-pub const PAGE_OFF_POOL_ID: usize = 12; // u32 LE
-pub const PAGE_OFF_PAGE_ID: usize = 16; // u64 LE
-pub const PAGE_OFF_CREATED_SLOT: usize = 24; // u64 LE
-pub const PAGE_OFF_CLOSED_SLOT: usize = 32; // u64 LE
-                                            // [40..64]: 24 bytes reserved
-
-/// Contiguous pure-RPC scan slice: `view_tags[32]` + `ephemeral_pks[32]`.
-pub const PAGE_OFF_VIEW_TAGS: usize = PAGE_HEADER_LEN; // 64..96 (32 B)
-pub const PAGE_OFF_EPHEMERAL_PKS: usize = PAGE_OFF_VIEW_TAGS + PAGE_CAPACITY; // 96..1,120 (1,024 B)
-pub const PAGE_SCAN_OFFSET: usize = PAGE_OFF_VIEW_TAGS;
-pub const PAGE_SCAN_LEN: usize = PAGE_CAPACITY + PAGE_CAPACITY * 32; // 1,056 B
-
-/// Contiguous witness arrays read during Triptych verification.
-pub const PAGE_OFF_STEALTH_PKS: usize = PAGE_OFF_EPHEMERAL_PKS + PAGE_CAPACITY * 32; // 1,120..2,144 (1,024 B)
-pub const PAGE_OFF_ASSET_TAGS: usize = PAGE_OFF_STEALTH_PKS + PAGE_CAPACITY * 32; // 2,144..3,168 (1,024 B)
-pub const PAGE_OFF_COMMITMENTS: usize = PAGE_OFF_ASSET_TAGS + PAGE_CAPACITY * 32; // 3,168..4,192 (1,024 B)
-
-/// Contiguous encrypted note metadata.
-pub const PAGE_OFF_CIPHERTEXTS: usize = PAGE_OFF_COMMITMENTS + PAGE_CAPACITY * 32; // 4,192..6,240 (2,048 B)
-
-/// Exact total byte length of an `EpochPage` PDA (`6,240 B < 10,240 B` CPI cap).
-pub const PAGE_LEN: usize = PAGE_OFF_CIPHERTEXTS + PAGE_CAPACITY * NOTE_CT_LEN; // 6,240 B
-
-const _: () = assert!(PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
-
-/// Minimum remaining slots below which `OpenPage` is allowed to pre-open `page_id + 1`.
-pub const PAGE_ROLLOVER_HEADROOM: usize = 4;
-
-/// Tiny sentinel accounts (`SOL_VAULT`, `PAGE_RENT_VAULT`) storing an 8-byte magic + bump.
-pub const SENTINEL_ACCOUNT_LEN: usize = 16;
-
+/// Decoded `RootCheckpoint` (`704 B`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PageHeader {
+pub struct RootCheckpoint {
     pub version: u8,
     pub bump: u8,
-    pub closed: bool,
-    pub count: u8,
+    pub slot_idx: u16,
     pub pool_id: u32,
-    pub page_id: u64,
-    pub created_slot: u64,
-    pub closed_slot: u64,
+    pub epoch_id: u64,
+    pub published_slot: u64,
+    pub super_root: Bytes32,
+    pub lane_roots: [Bytes32; NUM_LANES],
+    pub lane_counts: [u64; NUM_LANES],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NoteEntry {
-    pub view_tag: u8,
-    pub ephemeral_pk: Bytes32,
-    pub stealth_pk: Bytes32,
-    pub asset_tag: Bytes32,
-    pub commitment: Bytes32,
-    pub ciphertext: [u8; NOTE_CT_LEN],
-}
-
-impl PageHeader {
-    pub fn decode(data: &[u8]) -> Result<Self, AudrenError> {
-        if data.len() != PAGE_LEN {
-            return Err(AudrenError::InvalidAccount);
+impl RootCheckpoint {
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.len() != CKPT_LEN || data[CK_OFF_MAGIC..CK_OFF_MAGIC + 8] != CKPT_MAGIC {
+            return None;
         }
-        if data[PAGE_OFF_MAGIC..PAGE_OFF_MAGIC + 8] != PAGE_MAGIC {
-            return Err(AudrenError::InvalidMagic);
+        let mut lane_roots = [ZERO_HASHES_4ARY[18]; NUM_LANES];
+        let mut lane_counts = [0u64; NUM_LANES];
+        let mut i = 0;
+        while i < NUM_LANES {
+            lane_roots[i] = read_32(data, CK_OFF_LANE_ROOTS + i * 32);
+            lane_counts[i] = read_u64(data, CK_OFF_LANE_COUNTS + i * 8);
+            i += 1;
         }
-        let count = data[PAGE_OFF_COUNT];
-        if (count as usize) > PAGE_CAPACITY {
-            return Err(AudrenError::InvalidAccount);
-        }
-        Ok(Self {
-            version: data[PAGE_OFF_VERSION],
-            bump: data[PAGE_OFF_BUMP],
-            closed: data[PAGE_OFF_CLOSED] != 0,
-            count,
-            pool_id: read_u32(data, PAGE_OFF_POOL_ID)?,
-            page_id: read_u64(data, PAGE_OFF_PAGE_ID)?,
-            created_slot: read_u64(data, PAGE_OFF_CREATED_SLOT)?,
-            closed_slot: read_u64(data, PAGE_OFF_CLOSED_SLOT)?,
+        Some(Self {
+            version: data[CK_OFF_VERSION],
+            bump: data[CK_OFF_BUMP],
+            slot_idx: read_u16(data, CK_OFF_SLOT_IDX),
+            pool_id: read_u32(data, CK_OFF_POOL_ID),
+            epoch_id: read_u64(data, CK_OFF_EPOCH_ID),
+            published_slot: read_u64(data, CK_OFF_PUBLISHED_SLOT),
+            super_root: read_32(data, CK_OFF_SUPER_ROOT),
+            lane_roots,
+            lane_counts,
         })
     }
+}
 
-    pub fn encode(&self, out: &mut [u8]) -> Result<(), AudrenError> {
-        if out.len() < PAGE_HEADER_LEN {
-            return Err(AudrenError::InvalidAccount);
-        }
-        out[PAGE_OFF_MAGIC..PAGE_OFF_MAGIC + 8].copy_from_slice(&PAGE_MAGIC);
-        out[PAGE_OFF_VERSION] = self.version;
-        out[PAGE_OFF_BUMP] = self.bump;
-        out[PAGE_OFF_CLOSED] = u8::from(self.closed);
-        out[PAGE_OFF_COUNT] = self.count;
-        out[PAGE_OFF_POOL_ID..PAGE_OFF_POOL_ID + 4].copy_from_slice(&self.pool_id.to_le_bytes());
-        out[PAGE_OFF_PAGE_ID..PAGE_OFF_PAGE_ID + 8].copy_from_slice(&self.page_id.to_le_bytes());
-        out[PAGE_OFF_CREATED_SLOT..PAGE_OFF_CREATED_SLOT + 8]
-            .copy_from_slice(&self.created_slot.to_le_bytes());
-        out[PAGE_OFF_CLOSED_SLOT..PAGE_OFF_CLOSED_SLOT + 8]
-            .copy_from_slice(&self.closed_slot.to_le_bytes());
-        Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{is_canonical_fr, mask_to_fr_be, pack_u64_pair_be32, u64_to_be32, BN254_FR_MODULUS_BE};
+
+    #[test]
+    fn layout_invariants_hold() {
+        assert_eq!(MM_OFF_VIEW_TAGS, 64);
+        assert_eq!(MM_OFF_EPHEMERAL_PKS, 288);
+        assert_eq!(MM_OFF_CIPHERTEXTS, 3_872);
+        assert_eq!(MM_OFF_CIPHERTEXTS + MEMO_NOTES_PER_PAGE * MEMO_CT_LEN, MEMO_PAGE_LEN);
+        assert_eq!(CK_OFF_LANE_COUNTS + NUM_LANES * 8, CKPT_LEN);
+        assert!(is_canonical_fr(&[0u8; 32]));
+        assert!(!is_canonical_fr(&BN254_FR_MODULUS_BE));
+        assert!(is_canonical_fr(&mask_to_fr_be([0xFFu8; 32])));
+        assert_eq!(u64_to_be32(42)[31], 42);
+        let packed = pack_u64_pair_be32(100, 7);
+        assert_eq!(&packed[16..24], &7u64.to_be_bytes());
+        assert_eq!(&packed[24..32], &100u64.to_be_bytes());
     }
-}
-
-/// Zero-copy read of `(stealth_pk, asset_tag, commitment)` at slot `idx` in a validated `EpochPage`.
-#[inline]
-pub fn read_page_witness(
-    data: &[u8],
-    idx: usize,
-) -> Result<(Bytes32, Bytes32, Bytes32), AudrenError> {
-    if data.len() != PAGE_LEN || idx >= PAGE_CAPACITY {
-        return Err(AudrenError::InvalidAccount);
-    }
-    let off = idx * 32;
-    Ok((
-        read_32(data, PAGE_OFF_STEALTH_PKS + off)?,
-        read_32(data, PAGE_OFF_ASSET_TAGS + off)?,
-        read_32(data, PAGE_OFF_COMMITMENTS + off)?,
-    ))
-}
-
-/// Write a single `NoteEntry` into slot `idx` of a validated `EpochPage` buffer.
-#[inline]
-pub fn write_page_note(data: &mut [u8], idx: usize, note: &NoteEntry) -> Result<(), AudrenError> {
-    if data.len() != PAGE_LEN || idx >= PAGE_CAPACITY {
-        return Err(AudrenError::InvalidAccount);
-    }
-    let off32 = idx * 32;
-    let off_ct = idx * NOTE_CT_LEN;
-    data[PAGE_OFF_VIEW_TAGS + idx] = note.view_tag;
-    data[PAGE_OFF_EPHEMERAL_PKS + off32..PAGE_OFF_EPHEMERAL_PKS + off32 + 32]
-        .copy_from_slice(&note.ephemeral_pk);
-    data[PAGE_OFF_STEALTH_PKS + off32..PAGE_OFF_STEALTH_PKS + off32 + 32]
-        .copy_from_slice(&note.stealth_pk);
-    data[PAGE_OFF_ASSET_TAGS + off32..PAGE_OFF_ASSET_TAGS + off32 + 32]
-        .copy_from_slice(&note.asset_tag);
-    data[PAGE_OFF_COMMITMENTS + off32..PAGE_OFF_COMMITMENTS + off32 + 32]
-        .copy_from_slice(&note.commitment);
-    data[PAGE_OFF_CIPHERTEXTS + off_ct..PAGE_OFF_CIPHERTEXTS + off_ct + NOTE_CT_LEN]
-        .copy_from_slice(&note.ciphertext);
-    Ok(())
-}
-
-/// Read a full `NoteEntry` at slot `idx`.
-pub fn read_page_note(data: &[u8], idx: usize) -> Result<NoteEntry, AudrenError> {
-    if data.len() != PAGE_LEN || idx >= PAGE_CAPACITY {
-        return Err(AudrenError::InvalidAccount);
-    }
-    let off32 = idx * 32;
-    let off_ct = idx * NOTE_CT_LEN;
-    let mut ciphertext = [0u8; NOTE_CT_LEN];
-    ciphertext.copy_from_slice(
-        &data[PAGE_OFF_CIPHERTEXTS + off_ct..PAGE_OFF_CIPHERTEXTS + off_ct + NOTE_CT_LEN],
-    );
-    Ok(NoteEntry {
-        view_tag: data[PAGE_OFF_VIEW_TAGS + idx],
-        ephemeral_pk: read_32(data, PAGE_OFF_EPHEMERAL_PKS + off32)?,
-        stealth_pk: read_32(data, PAGE_OFF_STEALTH_PKS + off32)?,
-        asset_tag: read_32(data, PAGE_OFF_ASSET_TAGS + off32)?,
-        commitment: read_32(data, PAGE_OFF_COMMITMENTS + off32)?,
-        ciphertext,
-    })
-}
-
-#[inline]
-pub fn read_u16(data: &[u8], off: usize) -> Result<u16, AudrenError> {
-    let slice = data
-        .get(off..off + 2)
-        .ok_or(AudrenError::InvalidInstruction)?;
-    Ok(u16::from_le_bytes([slice[0], slice[1]]))
-}
-
-#[inline]
-pub fn read_u32(data: &[u8], off: usize) -> Result<u32, AudrenError> {
-    let slice = data
-        .get(off..off + 4)
-        .ok_or(AudrenError::InvalidInstruction)?;
-    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
-}
-
-#[inline]
-pub fn read_u64(data: &[u8], off: usize) -> Result<u64, AudrenError> {
-    let slice = data
-        .get(off..off + 8)
-        .ok_or(AudrenError::InvalidInstruction)?;
-    Ok(u64::from_le_bytes([
-        slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
-    ]))
-}
-
-#[inline]
-pub fn read_32(data: &[u8], off: usize) -> Result<Bytes32, AudrenError> {
-    let slice = data
-        .get(off..off + 32)
-        .ok_or(AudrenError::InvalidInstruction)?;
-    let mut out = [0u8; 32];
-    out.copy_from_slice(slice);
-    Ok(out)
 }

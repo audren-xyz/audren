@@ -1,406 +1,349 @@
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
-import * as core from '../dist/index.js';
-import * as prover from '../dist/prover-entry.js';
+import {
+  ASSET_MODE_PRIVATE,
+  ASSET_MODE_SPL,
+  AUDREN_PROGRAM_ID,
+  NATIVE_SOL_MINT_BYTES,
+  NUM_LANES,
+  PROTOCOL_VERSION,
+  WSOL_MINT,
+  ZERO_HASHES_4ARY,
+  base58Decode,
+  base58Encode,
+  buildHistoricalWitness4Ary,
+  computeExecCtxHash,
+  computeJoinsplitCtxHash,
+  computeMerkleRoot4Ary,
+  computeNoteCommitment,
+  computePublicInputHash,
+  computeRealNullifier,
+  computeSubtree256Root,
+  computeSuperRoot4Ary,
+  decodeAudrenAddress,
+  decodePoolState,
+  decodeRootCheckpoint,
+  deriveAssetId,
+  deriveAssetIdBytes,
+  deriveCheckpointPdaSync,
+  deriveDefiSessionKeypair,
+  deriveEscrowPdaSync,
+  deriveKeysFromSeed,
+  deriveLanePdaSync,
+  deriveLaneRentVaultPdaSync,
+  deriveMemoPdaSync,
+  deriveNfPagePdaSync,
+  deriveNullifierPdaSync,
+  derivePoolPdaSync,
+  deriveSolVaultPdaSync,
+  deriveStealthOwner,
+  deriveSubaccountKeys,
+  deriveSubrootPdaSync,
+  deriveSubtreePdaSync,
+  deriveUnwrapPdaSync,
+  deriveVaultAuthPdaSync,
+  encryptNoteMemo,
+  exportFullViewingKey,
+  frToBeBytes,
+  poseidon2,
+  poseidon4,
+  prepareDynamicSwapMemo,
+  tryDecryptAndVerifyMemo90,
+  verifySelectiveDisclosureProof,
+} from '../dist/index.js';
+import {
+  AudrenWasmProver,
+  dummyInputWitness,
+  dummyOutputWitness,
+} from '../dist/prover-entry.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const vectors = JSON.parse(
-  readFileSync(resolve(__dirname, '../../../spec/test-vectors.json'), 'utf8'),
+  readFileSync(path.resolve(__dirname, '../../../spec/test-vectors.json'), 'utf8'),
 );
 
-function hexToBytes(hex) {
-  return prover.fromHex(hex);
-}
+const toHex = (bytes) => Buffer.from(bytes).toString('hex');
+const fromHex = (hex) => new Uint8Array(Buffer.from(hex, 'hex'));
 
-function bytesToHex(bytes) {
-  return prover.toHex(bytes);
-}
+test('TypeScript @audren/sdk & @audren/sdk/prover WASM match spec/test-vectors.json byte-for-byte', async () => {
+  assert.equal(PROTOCOL_VERSION, vectors.protocol_version);
+  assert.equal(AUDREN_PROGRAM_ID, vectors.program_id);
 
-test('1. keys: master keys, sub-accounts, FVK, addresses & asset generators match Rust byte-for-byte', async () => {
-  assert.equal(core.AUDREN_PROGRAM_ID, vectors.program_id);
-  assert.equal(prover.AUDREN_PROGRAM_ID_STR, vectors.program_id);
+  // 1. Keys, subaccounts, aud1... address, DefiSessionKeypair
+  const aliceSeed = fromHex(vectors.alice.seed_hex);
+  const bobSeed = fromHex(vectors.bob.seed_hex);
+  const alice = deriveKeysFromSeed(aliceSeed);
+  const aliceSub1 = deriveSubaccountKeys(aliceSeed, 1);
+  const bob = deriveKeysFromSeed(bobSeed);
 
-  const aliceSeed = hexToBytes(vectors.alice.seed_hex);
-  const alice = await prover.deriveKeysFromSeed(aliceSeed);
-  assert.equal(bytesToHex(prover.scalarToBytes32LE(alice.spendSk)), vectors.alice.spend_sk_hex);
-  assert.equal(bytesToHex(alice.spendPk), vectors.alice.spend_pk_hex);
-  assert.equal(bytesToHex(prover.scalarToBytes32LE(alice.viewSk)), vectors.alice.view_sk_hex);
-  assert.equal(bytesToHex(alice.viewPk), vectors.alice.view_pk_hex);
-  assert.equal(alice.address, vectors.alice.address);
-
-  const parsed = core.parseAudrenAddress(alice.address);
-  assert.equal(bytesToHex(parsed.spendPk), vectors.alice.spend_pk_hex);
-  assert.equal(bytesToHex(parsed.viewPk), vectors.alice.view_pk_hex);
-  assert.equal(core.formatAudrenAddress(parsed.spendPk, parsed.viewPk), vectors.alice.address);
-
-  const fvk = prover.exportFullViewingKey(alice);
-  const expectedFvk = JSON.parse(vectors.alice.full_viewing_key_json);
-  assert.equal(fvk.version, expectedFvk.version);
-  assert.equal(fvk.spendPkB58, expectedFvk.spend_pk_b58);
-  assert.equal(fvk.viewSkB58, expectedFvk.view_sk_b58);
-  assert.equal(fvk.viewPkB58, expectedFvk.view_pk_b58);
-
-  for (const sub of vectors.alice_subaccounts) {
-    const derived = await prover.deriveSubaccountKeys(aliceSeed, sub.account_index);
-    assert.equal(bytesToHex(prover.scalarToBytes32LE(derived.spendSk)), sub.spend_sk_hex);
-    assert.equal(bytesToHex(derived.spendPk), sub.spend_pk_hex);
-    assert.equal(bytesToHex(prover.scalarToBytes32LE(derived.viewSk)), sub.view_sk_hex);
-    assert.equal(bytesToHex(derived.viewPk), sub.view_pk_hex);
-    assert.equal(derived.address, sub.address);
+  for (const [k, exp] of [
+    [alice, vectors.alice],
+    [aliceSub1, vectors.alice_sub1],
+    [bob, vectors.bob],
+  ]) {
+    assert.equal(toHex(k.spendSkBytes), exp.spend_sk_hex);
+    assert.equal(toHex(k.spendPkBytes), exp.spend_pk_hex);
+    assert.equal(toHex(k.nkBytes), exp.nk_hex);
+    assert.equal(toHex(k.viewSk), exp.view_sk_hex);
+    assert.equal(toHex(k.viewPk), exp.view_pk_hex);
+    assert.equal(k.address, exp.address);
+    const parsed = decodeAudrenAddress(k.address);
+    assert.equal(toHex(parsed.spendPk), exp.spend_pk_hex);
+    assert.equal(toHex(parsed.viewPk), exp.view_pk_hex);
   }
 
-  for (const sess of vectors.alice_defi_sessions) {
-    const seedOnly = await core.deriveDefiSessionSeed(aliceSeed, sess.session_index);
-    assert.equal(bytesToHex(seedOnly), sess.secret_seed_hex);
-    const derived = await prover.deriveDefiSessionKeypair(aliceSeed, sess.session_index);
-    assert.equal(bytesToHex(derived.secretSeed), sess.secret_seed_hex);
-    assert.equal(bytesToHex(derived.pubkey), sess.pubkey_hex);
-    assert.equal(derived.address, sess.address);
-  }
+  const sess0 = deriveDefiSessionKeypair(aliceSeed, 0);
+  const sess3 = deriveDefiSessionKeypair(aliceSeed, 3);
+  assert.equal(toHex(sess0.secretSeed), vectors.defi_session_0.secret_seed_hex);
+  assert.equal(sess0.pubkeyBase58, vectors.defi_session_0.pubkey_b58);
+  assert.equal(toHex(sess3.secretSeed), vectors.defi_session_3.secret_seed_hex);
+  assert.equal(sess3.pubkeyBase58, vectors.defi_session_3.pubkey_b58);
 
-  const solGen = await prover.assetGenerator(prover.NATIVE_SOL_MINT);
-  assert.equal(bytesToHex(solGen), vectors.asset_generators.native_sol_gen_hex);
+  // 2. Pure-TS Circom BN254 Poseidon & ZERO_HASHES_4ARY
+  assert.equal(toHex(frToBeBytes(poseidon2(1n, 2n))), vectors.poseidon.poseidon2_1_2_hex);
+  assert.equal(toHex(frToBeBytes(poseidon4(0n, 0n, 0n, 0n))), vectors.poseidon.poseidon4_zeros_hex);
+  assert.equal(toHex(frToBeBytes(ZERO_HASHES_4ARY[18])), vectors.poseidon.zero_hash_level18_hex);
+  assert.equal(toHex(frToBeBytes(ZERO_HASHES_4ARY[19])), vectors.poseidon.zero_hash_level19_hex);
+  assert.equal(toHex(frToBeBytes(ZERO_HASHES_4ARY[20])), vectors.poseidon.zero_hash_level20_hex);
 
-  const wsolGen = await prover.assetGenerator(prover.WSOL_MINT);
-  assert.equal(bytesToHex(wsolGen), vectors.asset_generators.wsol_gen_hex);
+  // 3. Asset IDs
+  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(base58Decode(WSOL_MINT));
+  const usdcAsset = deriveAssetId(base58Decode(vectors.asset_ids.usdc_mint_b58));
+  assert.equal(toHex(frToBeBytes(solAsset)), vectors.asset_ids.native_sol_asset_id_hex);
+  assert.equal(toHex(frToBeBytes(wsolAsset)), vectors.asset_ids.wsol_asset_id_hex);
+  assert.equal(toHex(frToBeBytes(usdcAsset)), vectors.asset_ids.usdc_asset_id_hex);
+  assert.equal(toHex(deriveAssetIdBytes(NATIVE_SOL_MINT_BYTES)), vectors.asset_ids.native_sol_asset_id_hex);
 
-  const usdcGen = await prover.assetGenerator(
-    core.base58Decode(vectors.asset_generators.usdc_mint_b58),
-  );
-  assert.equal(bytesToHex(usdcGen), vectors.asset_generators.usdc_gen_hex);
-});
+  // 4. Memo encryption, FVK decryption + commitment check, forged-memo rejection & dynamic swap memo
+  const ephSec = fromHex(vectors.memo.eph_secret_hex);
+  const amount = BigInt(vectors.memo.amount);
+  const mint = fromHex(vectors.memo.mint_hex);
+  const { tweak, blinding, memo90 } = encryptNoteMemo(alice.viewPk, ephSec, amount, mint);
+  const stealth = deriveStealthOwner(alice.spendPk, tweak);
+  const cm = computeNoteCommitment(stealth, solAsset, amount, blinding);
+  const cmBe = frToBeBytes(cm);
 
-test('2. pdas & layouts: all 11 Pool #0 PDAs, PoolState and EpochPageHeader match Rust byte-for-byte', async () => {
-  const p = vectors.pdas;
-  const pool = await core.derivePoolPda(p.pool_id);
-  assert.equal(pool.address, p.pool.address);
-  assert.equal(pool.bump, p.pool.bump);
+  assert.equal(toHex(frToBeBytes(tweak)), vectors.memo.tweak_hex);
+  assert.equal(toHex(frToBeBytes(blinding)), vectors.memo.blinding_hex);
+  assert.equal(toHex(frToBeBytes(stealth)), vectors.memo.stealth_owner_hex);
+  assert.equal(toHex(cmBe), vectors.memo.commitment_hex);
+  assert.equal(toHex(cmBe), vectors.poseidon.poseidon5_note_hex);
+  assert.equal(toHex(memo90), vectors.memo.memo_90_hex);
 
-  const page0 = await core.deriveEpochPagePda(p.pool_id, 0n);
-  assert.equal(page0.address, p.epoch_page_0.address);
-  assert.equal(page0.bump, p.epoch_page_0.bump);
+  const fvk = exportFullViewingKey(alice);
+  const dec = tryDecryptAndVerifyMemo90(fvk, memo90, cmBe);
+  assert.ok(dec);
+  assert.equal(dec.amount, amount);
+  assert.equal(dec.isDynamic, false);
+  // Forged commitment MUST be rejected
+  const badCm = new Uint8Array(cmBe);
+  badCm[31] ^= 1;
+  assert.equal(tryDecryptAndVerifyMemo90(fvk, memo90, badCm), null);
 
-  const pageL1 = await core.deriveEpochPagePda(p.pool_id, core.pageIdForLane(1, 0n));
-  assert.equal(pageL1.address, p.epoch_page_lane1_seq0.address);
-  assert.equal(pageL1.bump, p.epoch_page_lane1_seq0.bump);
+  const dyn = prepareDynamicSwapMemo(bob.viewPk, new Uint8Array(32).fill(0x44));
+  assert.equal(toHex(dyn.dynHead34), vectors.memo.dyn_head_34_hex);
+  assert.equal(toHex(dyn.dynMask56), vectors.memo.dyn_mask_56_hex);
 
-  const solVault = await core.deriveSolVaultPda(p.pool_id);
-  assert.equal(solVault.address, p.sol_vault.address);
-  assert.equal(solVault.bump, p.sol_vault.bump);
+  // 5. Mode 1 Selective Disclosure
+  const sd = {
+    poolId: vectors.selective_disclosure.pool_id,
+    laneId: vectors.selective_disclosure.lane_id,
+    leafIndex: BigInt(vectors.selective_disclosure.leaf_index),
+    stealthOwner: new Uint8Array(vectors.selective_disclosure.stealth_owner),
+    mint: new Uint8Array(vectors.selective_disclosure.mint),
+    amount: BigInt(vectors.selective_disclosure.amount),
+    blinding: new Uint8Array(vectors.selective_disclosure.blinding),
+    commitment: new Uint8Array(vectors.selective_disclosure.commitment),
+  };
+  assert.equal(verifySelectiveDisclosureProof(sd, cmBe), true);
+  assert.equal(verifySelectiveDisclosureProof(sd, badCm), false);
 
-  const vaultAuth = await core.deriveVaultAuthPda(p.pool_id);
-  assert.equal(vaultAuth.address, p.vault_auth.address);
-  assert.equal(vaultAuth.bump, p.vault_auth.bump);
+  // 6. All 13 V2 PDAs
+  const nfSample = frToBeBytes(computeRealNullifier(alice.nk, cm, (2n << 36n) | 5n));
+  assert.equal(toHex(nfSample), vectors.pdas.nullifier_hex);
+  const checkPda = (got, exp) => {
+    assert.equal(got.address, exp.address);
+    assert.equal(got.bump, exp.bump);
+  };
+  checkPda(derivePoolPdaSync(0), vectors.pdas.pool);
+  checkPda(deriveSolVaultPdaSync(0), vectors.pdas.sol_vault);
+  checkPda(deriveVaultAuthPdaSync(0), vectors.pdas.vault_auth);
+  checkPda(deriveLanePdaSync(0, 2), vectors.pdas.lane);
+  checkPda(deriveLaneRentVaultPdaSync(0, 2), vectors.pdas.lane_rent);
+  checkPda(deriveSubtreePdaSync(0, 2, 7n), vectors.pdas.subtree);
+  checkPda(deriveSubrootPdaSync(0, 2, 7n), vectors.pdas.subroot);
+  checkPda(deriveMemoPdaSync(0, 2, 7n), vectors.pdas.memo);
+  checkPda(deriveNfPagePdaSync(0, 2, 7n), vectors.pdas.nf_page);
+  checkPda(deriveCheckpointPdaSync(0, 13), vectors.pdas.checkpoint);
+  checkPda(deriveNullifierPdaSync(0, nfSample), vectors.pdas.nullifier);
+  checkPda(deriveEscrowPdaSync(0, 5), vectors.pdas.escrow);
+  checkPda(deriveUnwrapPdaSync(0, nfSample), vectors.pdas.unwrap);
 
-  const rentVault = await core.derivePageRentVaultPda(p.pool_id);
-  assert.equal(rentVault.address, p.page_rent_vault.address);
-  assert.equal(rentVault.bump, p.page_rent_vault.bump);
-
-  const escrow0 = await core.deriveEscrowPda(p.pool_id, 0);
-  assert.equal(escrow0.address, p.escrow_0.address);
-  assert.equal(escrow0.bump, p.escrow_0.bump);
-
-  const unwrapPda = await core.deriveUnwrapPda(
-    p.pool_id,
-    hexToBytes(vectors.epoch_page.alice_note.nullifier_hex),
-  );
-  assert.equal(unwrapPda.address, p.unwrap_pda.address);
-  assert.equal(unwrapPda.bump, p.unwrap_pda.bump);
-
-  const lane1 = await core.deriveLanePda(p.pool_id, 1);
-  assert.equal(lane1.address, p.lane_1.address);
-  assert.equal(lane1.bump, p.lane_1.bump);
-
-  const lane1Rent = await core.deriveLaneRentVaultPda(p.pool_id, 1);
-  assert.equal(lane1Rent.address, p.lane_rent_vault_1.address);
-  assert.equal(lane1Rent.bump, p.lane_rent_vault_1.bump);
-
-  const proofBuf = await core.deriveProofBufferPda(
-    p.proof_buffer_authority,
-    BigInt(p.proof_buffer_nonce),
-  );
-  assert.equal(proofBuf.address, p.proof_buffer.address);
-  assert.equal(proofBuf.bump, p.proof_buffer.bump);
-
-  const nullifierPda = await core.deriveNullifierPda(
-    p.pool_id,
-    hexToBytes(vectors.epoch_page.alice_note.nullifier_hex),
-  );
-  assert.equal(nullifierPda.address, p.nullifier_pda.address);
-  assert.equal(nullifierPda.bump, p.nullifier_pda.bump);
-
-  // PoolState binary decoding
-  const ps = core.decodePoolState(hexToBytes(vectors.pool_state.raw_hex));
-  assert.equal(ps.version, vectors.pool_state.version);
-  assert.equal(ps.bump, vectors.pool_state.bump);
-  assert.equal(ps.mode, vectors.pool_state.mode);
-  assert.equal(ps.paused, vectors.pool_state.paused);
-  assert.equal(ps.poolId, vectors.pool_state.pool_id);
-  assert.equal(ps.currentPageId, BigInt(vectors.pool_state.current_page_id));
-  assert.equal(ps.totalNotes, BigInt(vectors.pool_state.total_notes));
-  assert.equal(ps.totalSpends, BigInt(vectors.pool_state.total_spends));
-  assert.equal(ps.pageRentFeeLamports, BigInt(vectors.pool_state.page_rent_fee_lamports));
-  assert.equal(core.base58Encode(ps.authority), vectors.pool_state.authority);
-  assert.equal(ps.activeLanes, vectors.pool_state.active_lanes);
-});
-
-test('3. scanner: dataSlice view-tag filter & note decryption match Rust byte-for-byte', async () => {
-  assert.equal(core.PAGE_SCAN_OFFSET, vectors.epoch_page.scan_offset);
-  assert.equal(core.PAGE_SCAN_LEN, vectors.epoch_page.scan_length);
-
-  const alice = await prover.deriveKeysFromSeed(hexToBytes(vectors.alice.seed_hex));
-  const pageBytes = hexToBytes(vectors.epoch_page.page_hex);
-  const sliceBytes = hexToBytes(vectors.epoch_page.scan_slice_hex);
-
-  const hdr = core.decodePageHeader(pageBytes);
-  assert.equal(hdr.version, vectors.epoch_page.version);
-  assert.equal(hdr.bump, vectors.epoch_page.bump);
-  assert.equal(hdr.closed, vectors.epoch_page.closed);
-  assert.equal(hdr.count, vectors.epoch_page.count);
-  assert.equal(hdr.poolId, vectors.epoch_page.pool_id);
-  assert.equal(hdr.pageId, BigInt(vectors.epoch_page.page_id));
-  assert.equal(hdr.createdSlot, BigInt(vectors.epoch_page.created_slot));
-  assert.equal(hdr.closedSlot, BigInt(vectors.epoch_page.closed_slot));
-
-  const hits = await prover.scanPageScanSlice(alice, sliceBytes);
-  assert.deepEqual(hits, vectors.epoch_page.matched_slots);
-
-  // Read-only FullViewingKeyExport works directly in BOTH scanPageScanSlice AND scanEpochPage,
-  // AND corrupted decoy slots never blind subsequent slots!
-  const fvk = prover.exportFullViewingKey(alice);
-  assert.deepEqual(await prover.scanPageScanSlice(fvk, sliceBytes), vectors.epoch_page.matched_slots);
-  const poisonedPage = new Uint8Array(pageBytes);
-  poisonedPage.fill(0xff, 96, 128);
-  const fvkOwned = await prover.scanEpochPage(fvk, poisonedPage, vectors.epoch_page.pool_id);
-  assert.equal(fvkOwned.length, 1);
-  assert.equal(fvkOwned[0].slotIndex, vectors.epoch_page.alice_note.slot_index);
-  assert.equal(fvkOwned[0].amount, BigInt(vectors.epoch_page.alice_note.amount));
-  assert.equal(fvkOwned[0].nullifier, undefined);
-
-  const owned = await prover.scanEpochPageSpendable(alice, pageBytes, vectors.epoch_page.pool_id);
-  assert.equal(owned.length, 1);
-  const note = owned[0];
-  const exp = vectors.epoch_page.alice_note;
-  assert.equal(note.slotIndex, exp.slot_index);
-  assert.equal(note.amount, BigInt(exp.amount));
-  assert.equal(bytesToHex(note.mint), exp.mint_hex);
-  assert.equal(bytesToHex(note.stealthPk), exp.stealth_pk_hex);
-  assert.equal(bytesToHex(note.assetTag), exp.asset_tag_hex);
-  assert.equal(bytesToHex(note.commitment), exp.commitment_hex);
-  assert.equal(bytesToHex(prover.scalarToBytes32LE(note.assetBlinding)), exp.asset_blinding_hex);
-  assert.equal(bytesToHex(prover.scalarToBytes32LE(note.valueBlinding)), exp.value_blinding_hex);
-  assert.equal(bytesToHex(prover.scalarToBytes32LE(note.stealthScalar)), exp.stealth_scalar_hex);
-  assert.equal(bytesToHex(prover.scalarToBytes32LE(note.spendX)), exp.spend_x_hex);
-  assert.equal(bytesToHex(note.nullifier), exp.nullifier_hex);
-  assert.equal(note.nullifierPdaB58, exp.nullifier_pda);
-});
-
-test('4. prover: exact wire lengths & accounts for Deposit, Transfer, Merge, ProofBuffer, Close & Withdraw', async () => {
-  const alice = await prover.deriveKeysFromSeed(hexToBytes(vectors.alice.seed_hex));
-  const payer = core.base58Decode(vectors.pdas.proof_buffer_authority);
-  const pageBytes = hexToBytes(vectors.epoch_page.page_hex);
-
-  // Token-2022 ceiling fee parity (including maxFee=0 guard)
-  assert.equal(prover.netDepositAmount(1_000_000n, 250, 10_000n), 990_000n);
-  assert.equal(prover.netDepositAmount(1_000_000n, 250, 0n), 1_000_000n);
-
-  // Builders accept aud1... strings directly without separate parseAudrenAddress aliasing!
-  const { instructions: depIxs, note: depNote } = await prover.buildDepositInstruction({
-    depositor: payer,
+  // 7. All 3 ctx_hash transcripts
+  const ctxPriv = computeJoinsplitCtxHash({
     poolId: 0,
-    activePageId: 1n,
-    recipient: vectors.bob.address,
-    mint: prover.NATIVE_SOL_MINT,
-    amount: 500_000n,
+    outLaneId: 2,
+    outputMask: 0b111,
+    assetMode: ASSET_MODE_PRIVATE,
+    unwrapWsol: false,
+    publicAssetId: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: memo90,
   });
-  assert.equal(depIxs.length, 1);
-  assert.equal(depIxs[0].data[0], core.TAG_DEPOSIT);
-  assert.equal(depIxs[0].data.length, 139);
-  assert.equal(depIxs[0].accounts.length, 6);
-  assert.equal(depNote.amount, 500_000n);
+  assert.equal(toHex(frToBeBytes(ctxPriv)), vectors.ctx_hashes.joinsplit_private_ctx_hash_hex);
 
-  const [ownedNote] = await prover.scanEpochPageSpendable(alice, pageBytes, 0);
-  const ring = prover.extractRingFromPage(pageBytes);
-  assert.equal(ring.length, 32);
-
-  const { instruction: xferIx, payNote, changeNote, nullifier } =
-    await prover.buildTransferInstruction({
-      payer,
-      poolId: 0,
-      outPageId: 1n,
-      inputPageIds: [0n],
-      ring,
-      inputNote: ownedNote,
-      secretIndex: vectors.epoch_page.alice_note.slot_index,
-      recipient: vectors.bob.address,
-      changeAddr: vectors.alice.address,
-      payAmount: 900_000n,
-    });
-  assert.equal(xferIx.data[0], core.TAG_TRANSFER);
-  assert.equal(xferIx.data.length, 2_373);
-  assert.equal(xferIx.accounts.length, 8);
-  assert.equal(payNote.amount, 900_000n);
-  assert.equal(changeNote.amount, 600_000n);
-  assert.equal(bytesToHex(nullifier), vectors.epoch_page.alice_note.nullifier_hex);
-
-  // Merge two distinct Bob SOL notes + assert self-merge rejection!
-  const bob = await prover.deriveKeysFromSeed(hexToBytes(vectors.bob.seed_hex));
-  const bobSolNotes = (await prover.scanEpochPageSpendable(bob, pageBytes, 0)).filter(
-    (n) => n.isNativeSol,
-  );
-  assert.ok(bobSolNotes.length >= 2);
-  await assert.rejects(
-    prover.buildMergeInstruction({
-      payer,
-      poolId: 0,
-      outPageId: 1n,
-      input1PageIds: [0n],
-      ring1: ring,
-      note1: ownedNote,
-      secretIndex1: vectors.epoch_page.alice_note.slot_index,
-      input2PageIds: [0n],
-      ring2: ring,
-      note2: ownedNote,
-      secretIndex2: vectors.epoch_page.alice_note.slot_index,
-      ownerAddr: vectors.alice.address,
-    }),
-  );
-  const { instruction: mergeIx } = await prover.buildMergeInstruction({
-    payer,
+  const ctxWsol = computeJoinsplitCtxHash({
     poolId: 0,
-    outPageId: 1n,
-    input1PageIds: [0n],
-    ring1: ring,
-    note1: bobSolNotes[0],
-    secretIndex1: bobSolNotes[0].slotIndex,
-    input2PageIds: [0n],
-    ring2: ring,
-    note2: bobSolNotes[1],
-    secretIndex2: bobSolNotes[1].slotIndex,
-    ownerAddr: vectors.bob.address,
+    outLaneId: 2,
+    outputMask: 0,
+    assetMode: ASSET_MODE_SPL,
+    unwrapWsol: true,
+    recipient: sess0.pubkeyBase58,
+    relayerFeeRecipient: sess3.pubkeyBase58,
+    publicAssetId: frToBeBytes(wsolAsset),
+    publicAmountOut: 1_000_000_000n,
+    relayerFeeAmount: 5_000_000n,
+    memosBytes: new Uint8Array(0),
   });
-  assert.equal(mergeIx.data[0], core.TAG_MERGE);
-  assert.equal(mergeIx.data.length, 2_950);
-  assert.equal(mergeIx.accounts.length, 10);
+  assert.equal(toHex(frToBeBytes(ctxWsol)), vectors.ctx_hashes.joinsplit_wsol_unwrap_ctx_hash_hex);
 
-  const bufPlan = await prover.buildBufferedExecutionPlan(xferIx, 42n);
-  assert.equal(bufPlan.uploadChunks.length, 4);
-  assert.deepEqual(Array.from(bufPlan.executeIx.data), [core.TAG_EXEC_BUFFERED, core.TAG_TRANSFER]);
-  assert.equal(core.base58Encode(bufPlan.proofBufferPda), vectors.pdas.proof_buffer.address);
-
-  const closeIx = prover.buildCloseProofBufferInstruction({
-    payer,
-    proofBufferPda: bufPlan.proofBufferPda,
-  });
-  assert.deepEqual(Array.from(closeIx.data), [core.TAG_CLOSE_PROOF_BUFFER]);
-  assert.equal(closeIx.accounts.length, 2);
-
-  const { instruction: wdIx, changeNote: wdChg } = await prover.buildWithdrawInstruction({
-    payer,
+  const ctxExec = computeExecCtxHash({
     poolId: 0,
-    outPageId: 1n,
-    inputPageIds: [0n],
-    ring,
-    inputNote: ownedNote,
-    secretIndex: vectors.epoch_page.alice_note.slot_index,
-    recipientAccount: payer,
-    changeAddr: vectors.alice.address,
-    amount: 1_000_000n,
-  });
-  assert.equal(wdIx.data[0], core.TAG_WITHDRAW);
-  assert.equal(wdIx.data.length, 1_973);
-  assert.equal(wdIx.accounts.length, 11);
-  assert.equal(wdChg.amount, 500_000n);
-
-  const { instruction: wdFullIx } = await prover.buildWithdrawInstruction({
-    payer,
-    poolId: 0,
-    outPageId: 1n,
-    inputPageIds: [0n],
-    ring,
-    inputNote: ownedNote,
-    secretIndex: vectors.epoch_page.alice_note.slot_index,
-    recipientAccount: payer,
-    changeAddr: vectors.alice.address,
-    amount: ownedNote.amount,
-  });
-  assert.equal(wdFullIx.data[0], core.TAG_WITHDRAW);
-  assert.equal(wdFullIx.data.length, 948);
-  assert.equal(wdFullIx.accounts[1].isWritable, false);
-});
-
-test('5. disclosure & auditor: Rust-generated SelectiveDisclosure, odd Lane 1 page_id & Auditor ElGamal verify in TS', async () => {
-  const alice = await prover.deriveKeysFromSeed(hexToBytes(vectors.alice.seed_hex));
-  const pageBytes = hexToBytes(vectors.epoch_page.page_hex);
-  const receipt = JSON.parse(vectors.selective_disclosure_json);
-
-  // TS-generated canonical SelectiveDisclosureProof matches Rust byte-for-byte!
-  const [note] = await prover.scanEpochPageSpendable(alice, pageBytes, vectors.epoch_page.pool_id);
-  const tsProof = prover.createSelectiveDisclosureProof(note);
-  assert.deepEqual(tsProof, receipt);
-
-  // Parallel append lane 1 odd page_id (> Number.MAX_SAFE_INTEGER) stays lossless!
-  const oddLane1PageId = core.pageIdForLane(1, 1n); // 72057594037927937n
-  const oddProof = prover.createSelectiveDisclosureProof({ ...note, pageId: oddLane1PageId });
-  assert.equal(oddProof.page_id, oddLane1PageId.toString());
-  assert.equal((await prover.verifySelectiveDisclosureReceipt(oddProof)).valid, true);
-
-  // Rust-generated SelectiveDisclosureProof verifies standalone AND on-page in pure TS!
-  assert.equal((await prover.verifySelectiveDisclosureReceipt(receipt)).valid, true);
-  assert.equal((await prover.verifySelectiveDisclosureOnPage(receipt, pageBytes)).valid, true);
-
-  // Tampered receipt MUST fail verification
-  const tampered = { ...receipt, amount: receipt.amount + 1 };
-  assert.equal((await prover.verifySelectiveDisclosureReceipt(tampered)).valid, false);
-  assert.equal((await prover.verifySelectiveDisclosureOnPage(tampered, pageBytes)).valid, false);
-
-  // Institutional auditor ElGamal decryption matches Rust byte-for-byte
-  const aud = await prover.deriveAuditorKeypair(hexToBytes(vectors.auditor.auditor_seed_hex));
-  assert.equal(bytesToHex(aud.auditorSkBytes), vectors.auditor.auditor_sk_hex);
-  assert.equal(bytesToHex(aud.auditorPk), vectors.auditor.auditor_pk_hex);
-
-  const decrypted = prover.auditorDecryptNote({
-    auditorSk: aud.auditorSk,
-    s1: hexToBytes(vectors.auditor.elgamal_s1_hex),
-    s2: hexToBytes(vectors.auditor.elgamal_s2_hex),
-    m1: hexToBytes(vectors.auditor.elgamal_m1_hex),
-    m2: hexToBytes(vectors.auditor.elgamal_m2_hex),
-  });
-  assert.equal(bytesToHex(decrypted.spentStealthPk), vectors.auditor.expected_spent_pk_hex);
-  assert.equal(bytesToHex(decrypted.assetGenerator), vectors.auditor.expected_asset_gen_hex);
-});
-
-test('6. escrow & relayer: Jupiter CPI excluded DEXes, default relay URL, dataSlice & prepareEscrowAccounts', async () => {
-  assert.equal(core.JUPITER_CPI_EXCLUDED_DEXES.join(','), vectors.jupiter_cpi_excluded_dexes);
-  assert.equal(core.AUDREN_DEFAULT_RELAY_URL, 'https://relay.audren.xyz');
-  assert.deepEqual(core.PAGE_SCAN_DATA_SLICE, {
-    offset: vectors.epoch_page.scan_offset,
-    length: vectors.epoch_page.scan_length,
-  });
-
-  const escrow0 = vectors.pdas.escrow_0.address;
-  const wsol = vectors.asset_generators.wsol_mint_b58;
-  const usdc = vectors.asset_generators.usdc_mint_b58;
-  const { address: escrowInAta } = await core.deriveAssociatedTokenAddress(escrow0, wsol);
-  const { address: escrowOutAta } = await core.deriveAssociatedTokenAddress(escrow0, usdc);
-  const prep = await core.prepareEscrowAccounts({
-    poolId: 0,
-    shardId: 0,
-    inputMint: wsol,
-    outputMint: usdc,
-    actionAccounts: [
-      { pubkey: escrowInAta, isSigner: false, isWritable: true },
-      { pubkey: escrow0, isSigner: true, isWritable: true },
-      { pubkey: escrowOutAta, isSigner: false, isWritable: true },
+    outLaneId: 1,
+    escrowShard: 3,
+    changeMask: 0b01,
+    inKind: 1,
+    outKind: 0,
+    feeOnOutput: true,
+    assetIn: frToBeBytes(usdcAsset),
+    amountIn: 50_000_000n,
+    relayerFeeAmount: 2_000_000n,
+    relayerFeeRecipient: sess3.pubkeyBase58,
+    assetOut: frToBeBytes(solAsset),
+    minAmountOut: 400_000_000n,
+    routerProg: base58Encode(new Uint8Array(32).fill(0x77)),
+    routerAccounts: [
+      { pubkey: base58Encode(new Uint8Array(32).fill(0x88)), isSigner: false, isWritable: true },
+      { pubkey: base58Encode(new Uint8Array(32).fill(0x99)), isSigner: false, isWritable: false },
     ],
+    outStealthOwner: frToBeBytes(stealth),
+    outBlinding: frToBeBytes(blinding),
+    dynMemoHead: dyn.dynHead34,
+    dynMask56: dyn.dynMask56,
+    routerIxData: new Uint8Array([1, 2, 3, 4]),
+    changeMemos: memo90,
   });
-  assert.equal(prep.escrowPda, escrow0);
-  assert.equal(prep.escrowInAta, escrowInAta);
-  assert.equal(prep.escrowOutAta, escrowOutAta);
-  assert.deepEqual([prep.escrowIdx, prep.escrowInIdx, prep.escrowOutIdx], [1, 0, 2]);
-  assert.equal(prep.accounts[1].isSigner, false);
+  assert.equal(toHex(frToBeBytes(ctxExec)), vectors.ctx_hashes.exec_fee_on_output_ctx_hash_hex);
+
+  // 8. PoolState & RootCheckpoint decoding
+  const decodedPool = decodePoolState(fromHex(vectors.pool_state.raw_hex));
+  assert.equal(decodedPool.poolId, vectors.pool_state.pool_id);
+  assert.equal(decodedPool.activeLanes, vectors.pool_state.active_lanes);
+  assert.equal(decodedPool.ckptInterval, BigInt(vectors.pool_state.ckpt_interval));
+  assert.equal(decodedPool.maxCkptAge, BigInt(vectors.pool_state.max_ckpt_age));
+  assert.equal(decodedPool.noteRentFee, BigInt(vectors.pool_state.note_rent_fee));
+  assert.equal(decodedPool.nfRentFee, BigInt(vectors.pool_state.nf_rent_fee));
+  assert.equal(decodedPool.paused, vectors.pool_state.paused);
+
+  const decodedCkpt = decodeRootCheckpoint(fromHex(vectors.checkpoint_raw_hex));
+  assert.equal(toHex(decodedCkpt.superRoot), vectors.groth16.super_root_hex);
+  assert.equal(decodedCkpt.laneCounts[2], 6n);
+
+  // 9. Historical Merkle witness + LIVE WASM BN254 Groth16 proving byte-for-byte parity!
+  const leaves = [0n, 0n, 0n, 0n, 0n, cm];
+  const sub0 = computeSubtree256Root(leaves, 6);
+  let lroot = sub0;
+  for (let h = 4; h < 18; h++) {
+    lroot = poseidon4(lroot, ZERO_HASHES_4ARY[h], ZERO_HASHES_4ARY[h], ZERO_HASHES_4ARY[h]);
+  }
+  const laneRoots = new Array(NUM_LANES).fill(ZERO_HASHES_4ARY[18]);
+  laneRoots[2] = lroot;
+  const superRoot = computeSuperRoot4Ary(laneRoots);
+  assert.equal(toHex(frToBeBytes(superRoot)), vectors.groth16.super_root_hex);
+
+  const path5 = buildHistoricalWitness4Ary({
+    laneId: 2,
+    targetLeafIdx: 5n,
+    ckptLaneRoots: laneRoots,
+    ckptLaneLeafCount: 6n,
+    finalizedSubtreeRoots: [],
+    targetPageLeaves: leaves,
+    frontierPageLeaves: leaves,
+  });
+  assert.equal(computeMerkleRoot4Ary(path5, cm), superRoot);
+
+  const prover = await AudrenWasmProver.init();
+  const wasmPoseidon2 = prover.poseidonHashWasm([frToBeBytes(1n), frToBeBytes(2n)]);
+  assert.equal(toHex(wasmPoseidon2), vectors.poseidon.poseidon2_1_2_hex);
+
+  const t0 = performance.now();
+  const proofRes = prover.proveJoinsplit(
+    {
+      superRoot,
+      txAssetId: solAsset,
+      publicAssetId: 0n,
+      publicAmountOut: 0n,
+      relayerFeeAmount: 0n,
+      ctxHash: ctxPriv,
+      omitNf1: true,
+      inputs: [
+        {
+          spendSk: alice.spendSk,
+          tweak,
+          assetId: solAsset,
+          amount,
+          blinding,
+          isDummy: false,
+          merklePath: path5,
+        },
+        dummyInputWitness(alice.spendSk, solAsset, 0x5555n),
+      ],
+      outputs: [
+        {
+          stealthOwner: deriveStealthOwner(bob.spendPk, 0x101n),
+          assetId: solAsset,
+          amount: 1_000_000n,
+          blinding: 0x201n,
+        },
+        {
+          stealthOwner: deriveStealthOwner(alice.spendPk, 0x102n),
+          assetId: solAsset,
+          amount: 500_000n,
+          blinding: 0x202n,
+        },
+        dummyOutputWitness(solAsset, 0x203n),
+      ],
+    },
+    new Uint8Array(32).fill(0x99),
+  );
+  const proveMs = Math.round(performance.now() - t0);
+
+  assert.equal(toHex(proofRes.nf0), vectors.groth16.nf0_hex);
+  assert.equal(toHex(proofRes.nf1), vectors.groth16.nf1_hex);
+  assert.equal(toHex(proofRes.cm0), vectors.groth16.cm0_hex);
+  assert.equal(toHex(proofRes.cm1), vectors.groth16.cm1_hex);
+  assert.equal(toHex(proofRes.cm2), vectors.groth16.cm2_hex);
+  assert.equal(toHex(proofRes.publicInputHash), vectors.groth16.public_input_hash_hex);
+  assert.equal(toHex(proofRes.proof192), vectors.groth16.proof_192_hex);
+
+  const localPubHash = computePublicInputHash({
+    superRoot,
+    nf0: BigInt(`0x${vectors.groth16.nf0_hex}`),
+    nf1: 0n,
+    cm0: BigInt(`0x${vectors.groth16.cm0_hex}`),
+    cm1: BigInt(`0x${vectors.groth16.cm1_hex}`),
+    cm2: BigInt(`0x${vectors.groth16.cm2_hex}`),
+    publicAssetId: 0n,
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    ctxHash: ctxPriv,
+  });
+  assert.equal(toHex(frToBeBytes(localPubHash)), vectors.groth16.public_input_hash_hex);
+  console.log(`WASM Groth16 proveJoinsplit verified byte-for-byte in ${proveMs} ms`);
 });

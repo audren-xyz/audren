@@ -1,10 +1,10 @@
 [package]
 name = "audren"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
-description = "Audren — Institutional Confidential & Full-Private Settlement and Shielded DeFi Execution Program on Solana (Pinocchio + sBPFv3)."
+description = "Audren — Multi-Asset Global Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3)."
 
 [lib]
 name = "audren"
@@ -15,13 +15,14 @@ no-entrypoint = []
 
 [dependencies]
 audren-core = { path = "../crates/audren-core" }
+groth16-solana = { version = "=0.3.1", default-features = false }
 pinocchio = { version = "=0.11.1", default-features = false, features = ["copy", "cpi", "sha2"] }
 pinocchio-system = "=0.6.1"
-solana-curve25519 = "=4.0.1"
-solana-sha256-hasher = { version = "3.1.0", features = ["sha2"] }
+solana-poseidon = { version = "=5.0.1", default-features = false }
 
 [target.'cfg(not(any(target_os = "solana", target_arch = "bpf")))'.dependencies]
-solana-address = { version = "~2.7.0", features = ["curve25519"] }
+solana-address = { version = "2", features = ["curve25519"] }
+solana-sha256-hasher = { version = "3.1.0", features = ["sha2"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))', 'cfg(target_arch, values("bpf"))', 'cfg(feature, values("custom-heap", "custom-panic"))'] }

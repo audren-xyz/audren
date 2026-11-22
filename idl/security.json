@@ -1,7 +1,7 @@
 {
   "name": "Audren",
   "logo": "https://audren.xyz/icon.svg",
-  "description": "Zero-setup multi-asset shielded pool, protocol-agnostic shielded DeFi execution (ExecViaEscrow), and verifiable compliance protocol on Solana.",
+  "description": "Global multi-asset shielded pool (BN254 Groth16, 4-ary Depth-20 MASP), protocol-agnostic shielded DeFi execution (ExecViaEscrow), and indexer-free ordinary-RPC wallet sync on Solana.",
   "sdk": "https://github.com/audren-xyz/audren/tree/main/packages/sdk",
   "project_url": "https://audren.xyz",
   "contacts": [
@@ -12,6 +12,6 @@
     "en"
   ],
   "source_code": "https://github.com/audren-xyz/audren",
-  "source_release": "v0.3.0",
-  "version": "0.3.0"
+  "source_release": "v1.0.0",
+  "version": "1.0.0"
 }

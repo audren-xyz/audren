@@ -66,11 +66,12 @@ export default function TermsPage() {
               <span className={styles.cellIndex}>PRE-AUDIT STATUS</span>
               <h3>Independent verification</h3>
               <p className={styles.cellLead}>
-                Audren is in active pre-audit release with a mutable Solana BPF upgrade authority
-                until external cryptographic and program audits conclude.
+                Audren is in active pre-audit release using a deterministic development verifying
+                key (<code>DEV_DETERMINISTIC_VK</code>) and a mutable Solana BPF upgrade authority until
+                external cryptographic audits and the public Phase-2 Groth16 MPC ceremony conclude.
               </p>
               <ul className={styles.dashList}>
-                <li>Before committing capital, review the sBPFv3 source code in <code>audren-xyz/audren</code> and verify deployed ProgramData hashes on-chain.</li>
+                <li>Before committing capital, review the sBPFv3 source code and Groth16 circuit in <code>audren-xyz/audren</code> and verify deployed ProgramData hashes on-chain.</li>
                 <li>Test full deposit-to-withdrawal flows on Solana Devnet or LiteSVM before Mainnet use.</li>
               </ul>
             </article>

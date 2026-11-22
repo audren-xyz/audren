@@ -128,6 +128,20 @@ export function u64le(v: bigint): Uint8Array {
   return b
 }
 
+export function readU16le(buf: Uint8Array, offset: number): number {
+  return buf[offset]! | (buf[offset + 1]! << 8)
+}
+
+export function readU32le(buf: Uint8Array, offset: number): number {
+  return (
+    (buf[offset]! |
+      (buf[offset + 1]! << 8) |
+      (buf[offset + 2]! << 16) |
+      (buf[offset + 3]! << 24)) >>>
+    0
+  )
+}
+
 export function readU64le(buf: Uint8Array, offset: number): bigint {
   let v = 0n
   for (let i = 7; i >= 0; i--) {

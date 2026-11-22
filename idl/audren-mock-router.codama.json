@@ -6,24 +6,26 @@
     "kind": "programNode",
     "name": "audrenMockRouter",
     "publicKey": "11111111111111111111111111111111",
-    "version": "0.3.0",
+    "version": "1.0.0",
     "origin": "shank",
     "docs": [
-      "Minimal zero-alloc Pinocchio sBPFv3 mock target program used by Audren ExecViaEscrow integration tests.",
-      "Not deployed to Mainnet; tests assign an ephemeral LiteSVM program ID."
+      "Minimal Pinocchio sBPFv3 mock AMM, yield vault, and adversarial CPI harness for Audren ExecViaEscrow integration tests."
     ],
     "accounts": [],
     "definedTypes": [],
     "pdas": [
       {
         "kind": "pdaNode",
-        "name": "mockPoolAuthority",
+        "name": "dexPool",
+        "docs": [
+          "Mock router liquidity & authority PDA."
+        ],
         "seeds": [
           {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 9,
+              "size": 8,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -31,12 +33,9 @@
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "mock_pool"
+              "data": "dex_pool"
             }
           }
-        ],
-        "docs": [
-          "PDA signing pool_out -> escrow_out token transfers."
         ]
       }
     ],
@@ -44,127 +43,47 @@
     "instructions": [
       {
         "kind": "instructionNode",
-        "name": "executeMockSwap",
+        "name": "initDex",
         "docs": [
-          "Execute honest swap (mode=0) or adversarial custody attack simulation (mode=1 delegate, mode=2 set_authority, mode=3 lamport drain, mode=4 new escrow ATA hijack, mode=5 Token-2022 MemoTransfer brick)."
+          "Initialize mock DEX pool PDA with rate_bps and initial SOL liquidity."
+        ],
+        "discriminators": [
+          {
+            "kind": "constantDiscriminatorNode",
+            "offset": 0,
+            "constant": {
+              "kind": "constantValueNode",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u8",
+                "endian": "le"
+              },
+              "value": {
+                "kind": "numberValueNode",
+                "number": 0
+              }
+            }
+          }
         ],
         "accounts": [
           {
             "kind": "instructionAccountNode",
-            "name": "poolAuthority",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "PDA ['mock_pool'] (writable in modes 4 and 5)."
-            ],
-            "defaultValue": {
-              "kind": "pdaValueNode",
-              "pda": {
-                "kind": "pdaLinkNode",
-                "name": "mockPoolAuthority"
-              },
-              "seeds": []
-            }
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "escrowIn",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Audren escrow input ATA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "poolIn",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Mock pool input liquidity ATA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "escrow",
+            "name": "payer",
             "isWritable": true,
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Audren escrow PDA signer."
+              "Funder."
             ]
           },
           {
             "kind": "instructionAccountNode",
-            "name": "escrowOut",
+            "name": "dexPool",
             "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Audren escrow output ATA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "poolOut",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Mock pool output liquidity ATA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "tokenProgramIn",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "SPL / Token-2022 program for input mint."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "tokenProgramOut",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "SPL / Token-2022 program for output mint."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "mintIn",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Input mint."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "mintOut",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Output mint."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "attacker",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": true,
-            "docs": [
-              "Adversarial target account (modes 1, 2, 3, 4) or System Program (mode 5)."
+              "Mock DEX pool PDA."
             ]
           },
           {
@@ -172,28 +91,30 @@
             "name": "systemProgram",
             "isWritable": false,
             "isSigner": false,
-            "isOptional": true,
+            "isOptional": false,
             "docs": [
-              "System Program (modes 3, 4)."
+              "System Program."
             ]
           }
         ],
         "arguments": [
           {
             "kind": "instructionArgumentNode",
-            "name": "mode",
+            "name": "tag",
             "type": {
               "kind": "numberTypeNode",
               "format": "u8",
               "endian": "le"
             },
-            "docs": [
-              "0=honest, 1=approve_delegate, 2=hijack_owner, 3=drain_lamports, 4=new_ata_hijack, 5=memo_transfer_brick."
-            ]
+            "defaultValue": {
+              "kind": "numberValueNode",
+              "number": 0
+            },
+            "defaultValueStrategy": "omitted"
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "spendIn",
+            "name": "rateBps",
             "type": {
               "kind": "numberTypeNode",
               "format": "u64",
@@ -202,28 +123,10 @@
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "payOut",
+            "name": "liquidityLamports",
             "type": {
               "kind": "numberTypeNode",
               "format": "u64",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "decIn",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u8",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "decOut",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u8",
               "endian": "le"
             }
           }
