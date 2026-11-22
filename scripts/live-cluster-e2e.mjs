@@ -20,7 +20,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ed25519 } from '@noble/curves/ed25519.js';
+import { ed25519 } from '../packages/sdk/node_modules/@noble/curves/ed25519.js';
 import {
   ASSET_MODE_PRIVATE,
   ASSET_MODE_SOL,
@@ -65,19 +65,18 @@ import {
   exportFullViewingKey,
   frFromBeBytesStrict,
   frToBeBytes,
-  fromBase64,
   reconstructWitness,
   serializeV1Transaction,
   syncCompactStoreWithRpc,
-  toBase64,
 } from '../packages/sdk/dist/index.js';
 import {
+  AudrenWasmProver,
   dummyInputWitness,
   dummyOutputWitness,
-  loadWasmProver,
-  proveJoinsplit,
 } from '../packages/sdk/dist/prover-entry.js';
 
+const fromBase64 = (s) => new Uint8Array(Buffer.from(s, 'base64'));
+const toBase64 = (b) => Buffer.from(b).toString('base64');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function loadOperatorEnv() {
@@ -160,15 +159,14 @@ function toV1Ix(ix) {
 
 async function sendV1(ixs, computeUnitLimit = 300_000, priorityFeeLamports = 25_000n) {
   const bh = await rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-  const msg = compileV1Message({
-    payer: payerPubkey,
+  const compiled = compileV1Message({
+    feePayer: payerPubkey,
     recentBlockhash: base58Decode(bh.value.blockhash),
     instructions: ixs.map(toV1Ix),
-    computeUnitLimit,
-    priorityFeeLamports,
+    config: { computeUnitLimit, priorityFeeLamports },
   });
-  const sigBytes = ed25519.sign(msg, secret32);
-  const wire = serializeV1Transaction(msg, [sigBytes]);
+  const sigBytes = ed25519.sign(compiled.messageBytes, secret32);
+  const wire = serializeV1Transaction(compiled, [sigBytes]);
   const sig = await rpc('sendTransaction', [
     toBase64(wire),
     { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 4 },
@@ -311,7 +309,7 @@ async function main() {
 
   // Load WASM Groth16 prover
   const wasmPath = path.join(ROOT, 'packages', 'sdk', 'wasm', 'audren_circuits.wasm');
-  const prover = await loadWasmProver(readFileSync(wasmPath));
+  const prover = await AudrenWasmProver.init({ wasmBytes: readFileSync(wasmPath) });
 
   // Fresh ephemeral test wallets for this empirical run
   const alice = deriveKeysFromSeed(new Uint8Array(randomBytes(32)));
@@ -403,7 +401,7 @@ async function main() {
   });
 
   const t0 = performance.now();
-  const trProof = proveJoinsplit(prover, {
+  const trProof = prover.proveJoinsplit({
     superRoot: w1.superRoot,
     txAssetId: assetSol,
     publicAssetId: 0n,
@@ -504,7 +502,7 @@ async function main() {
     memosBytes: new Uint8Array(0),
   });
   const t1 = performance.now();
-  const wdProof = proveJoinsplit(prover, {
+  const wdProof = prover.proveJoinsplit({
     superRoot: w2.superRoot,
     txAssetId: assetSol,
     publicAssetId: assetSol,
@@ -559,7 +557,7 @@ async function main() {
   results.txs.withdraw = wdRes;
 
   console.log('\n=== SUMMARY JSON ===');
-  console.log(JSON.stringify(results, null, 2));
+  console.log(JSON.stringify(results, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
 }
 
 main().catch((err) => {
