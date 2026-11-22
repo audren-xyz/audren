@@ -451,6 +451,13 @@ ${raw_sha}  audren.so
 # program_id: ${PROGRAM_ID}
 EOF
 
+  local pk_path="$ROOT/crates/audren-circuits/params/audren_joinsplit.pk"
+  local transcript_path="$ROOT/ceremony/transcript.json"
+  local pk_sha
+  pk_sha="$(shasum -a 256 "$pk_path" | awk '{print $1}')"
+  local pk_bytes
+  pk_bytes="$(wc -c < "$pk_path" | tr -d '[:space:]')"
+
   cat >"$notes_file" <<EOF
 # Audren ${tag}
 
@@ -464,6 +471,7 @@ Deterministic, verifiable Solana \`sBPFv3\` release for **Audren** (\`${PROGRAM_
 | **Verified Source Commit** | \`${commit}\` |
 | **On-Chain & Executable Hash** | \`${exec_hash}\` |
 | **Deployed ELF Size / Raw SHA-256** | \`${elf_bytes} B\` · \`${raw_sha}\` |
+| **Groth16 Ceremony Proving Key** | \`audren_joinsplit.pk\` (\`${pk_bytes} B\`) · SHA-256 \`${pk_sha}\` |
 | **Mainnet Verified Build** | [Solana Explorer Verified Build](https://explorer.solana.com/address/${PROGRAM_ID}/verified-build) · [OtterSec Status](https://verify.osec.io/status/${PROGRAM_ID}) |
 | **Canonical Program IDL (Codama 1.8.0)** | \`5QoLwK1C3NpUXjsHEV14RsQE65MaaiT9WxGvoTyxBPsn\` · [Solana Explorer IDL](https://explorer.solana.com/address/${PROGRAM_ID}/idl) |
 | **Canonical Security Metadata** | \`GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj\` · [Solana Explorer Security](https://explorer.solana.com/address/${PROGRAM_ID}/security) |
@@ -487,6 +495,8 @@ solana-verify verify-from-repo -um \\
 
 - \`audren.so\` — deterministic \`sBPFv3\` binary (\`${elf_bytes} B\`, embedded \`.security.txt\`)
 - \`audren.so.sha256\` — raw SHA-256 and \`solana-verify\` executable hash manifest
+- \`audren_joinsplit.pk\` — compressed BN254 Groth16 ceremony proving key (\`${pk_bytes} B\`, Perpetual Powers of Tau 71+ contributors + BGM17 Phase-2 ceremony)
+- \`transcript.json\` — pairing-verifiable Groth16 ceremony transcript (Schnorr PoKs, G1/G2 deltas, live drand Quicknet & Solana Mainnet finalized beacon)
 - \`audren.codama.json\` — canonical Codama v1.8.0 IDL
 - \`audren.anchor.json\` — Anchor v0.30+ compatible IDL
 - \`security.json\` — canonical Solana Program Metadata security manifest (\`security@audren.xyz\`)
@@ -503,6 +513,8 @@ EOF
       --clobber \
       "$VERIFIABLE_SO_PATH" \
       "$sha_file" \
+      "$pk_path" \
+      "$transcript_path" \
       "$IDL_PATH" \
       "$ROOT/idl/audren.anchor.json" \
       "$SECURITY_PATH"
@@ -515,6 +527,8 @@ EOF
       --notes-file "$notes_file" \
       "$VERIFIABLE_SO_PATH" \
       "$sha_file" \
+      "$pk_path" \
+      "$transcript_path" \
       "$IDL_PATH" \
       "$ROOT/idl/audren.anchor.json" \
       "$SECURITY_PATH"

@@ -53,10 +53,10 @@ use solana_address::Address;
 
 uniffi::setup_scaffolding!();
 
-static DEV_PROVER: OnceLock<AudrenProver> = OnceLock::new();
+static CANONICAL_PROVER: OnceLock<AudrenProver> = OnceLock::new();
 
-fn dev_prover() -> &'static AudrenProver {
-    DEV_PROVER.get_or_init(AudrenProver::from_dev_setup)
+fn canonical_prover() -> &'static AudrenProver {
+    CANONICAL_PROVER.get_or_init(AudrenProver::from_canonical_pk)
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -679,7 +679,7 @@ pub fn prove_joinsplit_witness_bytes(
             reason: format!("invalid binary witness (code {c})"),
         }
     })?;
-    let b = dev_prover().prove_with_seed(circuit, seed);
+    let b = canonical_prover().prove_with_seed(circuit, seed);
     Ok(FfiGroth16ProofBundle {
         proof_192: b.proof_192.to_vec(),
         nf0: b.nf0.to_vec(),

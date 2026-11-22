@@ -25,12 +25,15 @@ export * from './vault-storage'
 let cachedProverPromise: Promise<AudrenWasmProver> | null = null
 
 /**
- * Lazily load and cache the warm `/wasm/audren_circuits.wasm` BN254 Groth16 prover in the browser.
- * Keeping one warm instance avoids re-initializing the 3.75 MB proving key across subsequent spends.
+ * Lazily load and cache the warm `/wasm/audren_circuits.wasm` BN254 Groth16 prover +
+ * verified ceremony proving key (`/wasm/audren_joinsplit.pk`, SHA-256 pinned in `@audren/sdk`).
  */
-export function getBrowserWasmProver(wasmUrl = '/wasm/audren_circuits.wasm'): Promise<AudrenWasmProver> {
+export function getBrowserWasmProver(
+  wasmUrl = '/wasm/audren_circuits.wasm?v=1.1.0',
+  pkUrl = '/wasm/audren_joinsplit.pk?v=2b22603e',
+): Promise<AudrenWasmProver> {
   if (!cachedProverPromise) {
-    cachedProverPromise = AudrenWasmProver.init({ wasmUrl, useDevPk: true }).catch((err) => {
+    cachedProverPromise = AudrenWasmProver.init({ wasmUrl, pkUrl }).catch((err) => {
       cachedProverPromise = null
       throw err
     })

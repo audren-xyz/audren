@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/audren-xyz/audren/actions/workflows/ci.yml"><img src="https://github.com/audren-xyz/audren/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/audren-xyz/audren/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/release-v1.0.0-121210" alt="Release v1.0.0" /></a>
+  <a href="https://github.com/audren-xyz/audren/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/release-v1.1.0-121210" alt="Release v1.1.0" /></a>
   <a href="https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build"><img src="https://img.shields.io/badge/Solana%20Verified%20Build-sBPFv3-184433" alt="Solana Verified Build" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-434039" alt="Apache-2.0 License" /></a>
   <a href="https://audren.xyz"><img src="https://img.shields.io/badge/app-audren.xyz-C83E2B" alt="audren.xyz" /></a>
@@ -22,7 +22,7 @@ Audren is an open-source, self-custodial privacy protocol on Solana (`sBPFv3`, `
 
 ## Privacy, ceremony, and accounting boundaries
 
-- **Pre-audit & Groth16 MPC ceremony status:** Audren is pre-audit and currently compiles a deterministic development verifying key (`DEV_DETERMINISTIC_VK`, `vk_id = 0`). A public Phase-2 Groth16 MPC ceremony and independent audit are planned prior to production custody, and the program remains upgradeable until audits and ceremony verification conclude.
+- **Groth16 Ceremony & Pre-audit Status:** Audren's `vk_id = 0` parameters are derived from the official Hermez/PSE Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`, **71+ independent public contributors**) plus Audren's verifiable BGM17 Phase-2 ceremony (`ceremony/transcript.json`, zeroized OS CSPRNG + live drand Quicknet `#34194203` & Solana Mainnet finalized blockhash `#472705896` beacon, SHA-256 `2b22603e...7ee4`). Additional independent community Phase-2 contributions remain open via [`ceremony/README.md`](ceremony/README.md), and an independent third-party security audit is pending before freezing BPF upgrade authority.
 - **Public boundaries:** Deposits (`Tag 3`/`Tag 4`), withdrawals (`Tag 6`), external DeFi CPI calls (`Tag 7 ExecViaEscrow`), and stateful positions opened by deterministic session wallets (`DefiSessionKeypair`) are public boundaries on Solana. Cryptographic proofs enforce global pool unlinkability within the active note set; timing, amount matching, asset choice, and network metadata remain operational factors.
 - **Permissionless optional relayers:** Relayers hold no user spend or viewing keys, accept only `JoinSplit` (`Tag 6`) and `ExecViaEscrow` (`Tag 7`), and can observe IP/request metadata. Direct submission exposes its fee payer. See [`ARCHITECTURE.md`](ARCHITECTURE.md#privacy-boundaries-and-effective-anonymity).
 

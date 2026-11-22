@@ -445,7 +445,7 @@ fn bootstrap_pool(svm: &mut LiteSVM, program_id: Address, payer: &Keypair, initi
 fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
     let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
     let mut svm = new_svm(program_id, None, None);
-    let prover = AudrenProver::from_dev_setup();
+    let prover = AudrenProver::from_canonical_pk();
     let payer = Keypair::new();
     let non_auth = Keypair::new();
     svm.airdrop(&payer.pubkey(), 200_000_000_000).unwrap();
@@ -913,7 +913,7 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
 fn test_zero_dust_sweep_wsol_unwrap_and_pause_escape() {
     let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
     let mut svm = new_svm(program_id, None, None);
-    let prover = AudrenProver::from_dev_setup();
+    let prover = AudrenProver::from_canonical_pk();
     let payer = Keypair::new();
     let relayer = Keypair::new();
     svm.airdrop(&payer.pubkey(), 200_000_000_000).unwrap();
@@ -1299,7 +1299,7 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
     let router_id = Keypair::new().pubkey();
     let hook_id = Keypair::new().pubkey();
     let mut svm = new_svm(program_id, Some(router_id), Some(hook_id));
-    let prover = AudrenProver::from_dev_setup();
+    let prover = AudrenProver::from_canonical_pk();
 
     let payer = Keypair::new();
     let relayer = Keypair::new();

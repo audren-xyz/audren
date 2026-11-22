@@ -4,8 +4,9 @@ use ark_bn254::Fr;
 use audren_circuits::{
     compressed_pk_size, count_constraints,
     joinsplit::JoinSplit4AryCircuit,
+    load_canonical_joinsplit_keys,
     poseidon::fr_to_be_bytes,
-    serialize_pk_compressed, setup_joinsplit_dev,
+    serialize_pk_compressed,
     solana_export::render_solana_vk_const,
 };
 use light_poseidon::parameters::bn254_x5::get_poseidon_parameters;
@@ -82,18 +83,18 @@ fn main() {
     let (c, w, i) = count_constraints(JoinSplit4AryCircuit::empty_for_setup());
     println!("JoinSplit4AryCircuit: {c} constraints | {w} witnesses | {i} instance vars");
 
-    let (pk, vk) = setup_joinsplit_dev();
+    let (pk, vk) = load_canonical_joinsplit_keys();
     let pk_bytes = serialize_pk_compressed(&pk);
     let pk_sha: [u8; 32] = Sha256::digest(&pk_bytes).into();
     let pk_sha_hex: String = pk_sha.iter().map(|b| format!("{b:02x}")).collect();
 
     let mut src = String::new();
     src.push_str("//! Auto-generated VerifyingKey for Audren `JoinSplit4AryCircuit` (`vk_id = 0`).\n");
-    src.push_str("//! Provenance: DEV_DETERMINISTIC_VK (replace with public Phase-2 MPC ceremony artifact before Mainnet).\n\n");
+    src.push_str("//! Provenance: Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand Quicknet #34194203 & Solana Mainnet slot 472705896)\n\n");
     src.push_str("#[allow(dead_code)]\n");
-    src.push_str(&format!(
-        "pub const VK_PROVENANCE: &str = \"DEV_DETERMINISTIC_VK\";\n"
-    ));
+    src.push_str(
+        "pub const VK_PROVENANCE: &str = \"Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand Quicknet #34194203 & Solana Mainnet slot 472705896)\";\n",
+    );
     src.push_str("#[allow(dead_code)]\n");
     src.push_str(&format!(
         "pub const PK_COMPRESSED_SHA256: &str = \"{pk_sha_hex}\";\n\n"

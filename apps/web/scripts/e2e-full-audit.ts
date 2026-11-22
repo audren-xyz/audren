@@ -66,7 +66,8 @@ async function main() {
   const superRoot = computeMerkleRoot4Ary(path, commitment)
 
   const wasmBytes = await readFile(resolve(process.cwd(), 'public/wasm/audren_circuits.wasm'))
-  const prover = await AudrenWasmProver.init({ wasmBytes, useDevPk: true })
+  const pkCompressed = await readFile(resolve(process.cwd(), 'public/wasm/audren_joinsplit.pk'))
+  const prover = await AudrenWasmProver.init({ wasmBytes, pkCompressed })
   const ctxHash = computeJoinsplitCtxHash({
     poolId: 0,
     outLaneId: 1,

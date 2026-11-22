@@ -7,6 +7,7 @@
  */
 
 import {
+  CANONICAL_PK_SHA256,
   PROVE_OUTPUT_BYTES,
   TOTAL_DEPTH_4ARY,
   WITNESS_TOTAL_BYTES,
@@ -146,7 +147,6 @@ interface AudrenWasmExports {
   memory: WebAssembly.Memory;
   wasm_alloc(len: number): number;
   wasm_dealloc(ptr: number, len: number): void;
-  wasm_init_dev_pk(): number;
   wasm_load_pk_compressed(ptr: number, len: number): number;
   wasm_prove_joinsplit(
     witnessPtr: number,
@@ -162,13 +162,32 @@ export interface AudrenWasmProverInitOptions {
   wasmBytes?: Uint8Array | ArrayBuffer;
   /** URL to fetch `audren_circuits.wasm` (Browser/Worker, e.g. `/wasm/audren_circuits.wasm`). */
   wasmUrl?: string;
-  /** Optional compressed MPC ceremony proving key (`ProvingKey<Bn254>`). If omitted, call `initDevPk()`. */
-  pkCompressed?: Uint8Array;
-  /** If true (default when `pkCompressed` is omitted), automatically initialize the deterministic Devnet PK. */
-  useDevPk?: boolean;
+  /** Pre-fetched compressed ceremony proving key (`audren_joinsplit.pk`, 3,927,280 B). */
+  pkCompressed?: Uint8Array | ArrayBuffer;
+  /** URL to fetch `audren_joinsplit.pk` (Browser/Worker, defaults to sibling `/wasm/audren_joinsplit.pk`). */
+  pkUrl?: string;
+  /** Skip loading the proving key during `init()` (caller will call `loadProvingKeyCompressed()`). */
+  deferPk?: boolean;
+  /** Verify loaded proving key SHA-256 against `CANONICAL_PK_SHA256` (default: true). */
+  verifyPkHash?: boolean;
 }
 
-async function resolveDefaultWasmBytes(): Promise<Uint8Array> {
+function bytesToHex(bytes: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    out += bytes[i]!.toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', copy.buffer);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function resolveDefaultAssetBytes(relPath: string, hint: string): Promise<Uint8Array> {
   const proc = (globalThis as { process?: { versions?: { node?: string } } }).process;
   const isNode = typeof proc?.versions?.node === 'string';
   if (isNode) {
@@ -180,18 +199,23 @@ async function resolveDefaultWasmBytes(): Promise<Uint8Array> {
     const urlMod = (await import(/* webpackIgnore: true */ urlSpec)) as {
       fileURLToPath(u: URL): string;
     };
-    const wasmFile = urlMod.fileURLToPath(new URL('../wasm/audren_circuits.wasm', import.meta.url));
-    const buf = await fsMod.readFile(wasmFile);
+    const assetFile = urlMod.fileURLToPath(new URL(relPath, import.meta.url));
+    const buf = await fsMod.readFile(assetFile);
     return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
   }
-  throw new Error(
-    'In browser environments pass { wasmUrl: "/wasm/audren_circuits.wasm" } or { wasmBytes } to AudrenWasmProver.init()',
-  );
+  throw new Error(hint);
+}
+
+function defaultSiblingPkUrl(wasmUrl: string): string {
+  const [base] = wasmUrl.split('?');
+  const slash = base!.lastIndexOf('/');
+  const dir = slash >= 0 ? base!.slice(0, slash + 1) : '';
+  return `${dir}audren_joinsplit.pk?v=${CANONICAL_PK_SHA256.slice(0, 8)}`;
 }
 
 /**
  * Stateful handle to the loaded `audren_circuits.wasm` BN254 Groth16 prover instance.
- * Reuse one instance per Worker/process to keep the deserialized proving key warm in WASM RAM.
+ * Reuse one instance per Worker/process to keep the deserialized ceremony proving key warm in WASM RAM.
  */
 export class AudrenWasmProver {
   private readonly exports: AudrenWasmExports;
@@ -202,41 +226,71 @@ export class AudrenWasmProver {
   }
 
   static async init(options: AudrenWasmProverInitOptions = {}): Promise<AudrenWasmProver> {
-    let bytes: Uint8Array;
-    if (options.wasmBytes) {
-      bytes =
-        options.wasmBytes instanceof Uint8Array
-          ? options.wasmBytes
-          : new Uint8Array(options.wasmBytes);
+    const wasmPromise: Promise<Uint8Array> = options.wasmBytes
+      ? Promise.resolve(
+          options.wasmBytes instanceof Uint8Array
+            ? options.wasmBytes
+            : new Uint8Array(options.wasmBytes),
+        )
+      : options.wasmUrl
+        ? fetch(options.wasmUrl).then(async (res) => {
+            if (!res.ok) throw new Error(`Failed to fetch Audren WASM prover: HTTP ${res.status}`);
+            return new Uint8Array(await res.arrayBuffer());
+          })
+        : resolveDefaultAssetBytes(
+            '../wasm/audren_circuits.wasm',
+            'In browser environments pass { wasmUrl: "/wasm/audren_circuits.wasm", pkUrl: "/wasm/audren_joinsplit.pk" } to AudrenWasmProver.init()',
+          );
+
+    let pkPromise: Promise<Uint8Array | null>;
+    if (options.deferPk) {
+      pkPromise = Promise.resolve(null);
+    } else if (options.pkCompressed) {
+      pkPromise = Promise.resolve(
+        options.pkCompressed instanceof Uint8Array
+          ? options.pkCompressed
+          : new Uint8Array(options.pkCompressed),
+      );
+    } else if (options.pkUrl) {
+      pkPromise = fetch(options.pkUrl).then(async (res) => {
+        if (!res.ok) throw new Error(`Failed to fetch Audren ceremony PK: HTTP ${res.status}`);
+        return new Uint8Array(await res.arrayBuffer());
+      });
     } else if (options.wasmUrl) {
-      const res = await fetch(options.wasmUrl);
-      if (!res.ok) throw new Error(`Failed to fetch Audren WASM prover: HTTP ${res.status}`);
-      bytes = new Uint8Array(await res.arrayBuffer());
+      const siblingPkUrl = defaultSiblingPkUrl(options.wasmUrl);
+      pkPromise = fetch(siblingPkUrl).then(async (res) => {
+        if (!res.ok) throw new Error(`Failed to fetch Audren ceremony PK (${siblingPkUrl}): HTTP ${res.status}`);
+        return new Uint8Array(await res.arrayBuffer());
+      });
     } else {
-      bytes = await resolveDefaultWasmBytes();
+      pkPromise = resolveDefaultAssetBytes(
+        '../wasm/audren_joinsplit.pk',
+        'In browser environments pass { pkUrl: "/wasm/audren_joinsplit.pk" } or { pkCompressed } to AudrenWasmProver.init()',
+      );
     }
+
+    const [bytes, pkBytes] = await Promise.all([wasmPromise, pkPromise]);
 
     const wasmBuf = new Uint8Array(bytes.byteLength);
     wasmBuf.set(bytes);
     const { instance } = await WebAssembly.instantiate(wasmBuf, {});
     const prover = new AudrenWasmProver(instance.exports as unknown as AudrenWasmExports);
 
-    if (options.pkCompressed) {
-      prover.loadProvingKeyCompressed(options.pkCompressed);
-    } else if (options.useDevPk !== false) {
-      prover.initDevPk();
+    if (pkBytes) {
+      if (options.verifyPkHash !== false) {
+        const digest = await sha256Hex(pkBytes);
+        if (digest !== CANONICAL_PK_SHA256) {
+          throw new Error(
+            `Audren proving key SHA-256 mismatch: got ${digest}, expected ${CANONICAL_PK_SHA256}`,
+          );
+        }
+      }
+      prover.loadProvingKeyCompressed(pkBytes);
     }
     return prover;
   }
 
-  /** Initialize the deterministic development / Devnet proving key (`DEV_DETERMINISTIC_VK`). */
-  initDevPk(): number {
-    const pkSize = this.exports.wasm_init_dev_pk();
-    this.pkReady = true;
-    return pkSize;
-  }
-
-  /** Load a compressed `ProvingKey<Bn254>` (e.g. Phase-2 MPC ceremony artifact for Mainnet). */
+  /** Load a compressed `ProvingKey<Bn254>` (`audren_joinsplit.pk`, curve-validated inside WASM). */
   loadProvingKeyCompressed(pkCompressed: Uint8Array): void {
     const ptr = this.exports.wasm_alloc(pkCompressed.byteLength);
     try {
@@ -278,7 +332,7 @@ export class AudrenWasmProver {
    */
   proveJoinsplit(witness: JoinSplitWitness, seed32?: Uint8Array): JoinSplitProofResult {
     if (!this.pkReady) {
-      throw new Error('Proving key not initialized — call initDevPk() or loadProvingKeyCompressed()');
+      throw new Error('Proving key not initialized — pass pkUrl/pkCompressed or call loadProvingKeyCompressed()');
     }
     const witnessBytes = encodeJoinsplitWitness(witness);
     const seed =

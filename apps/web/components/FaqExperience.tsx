@@ -108,7 +108,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'custody',
     catLabel: 'Custody, MPC & audits',
     q: 'What is the Groth16 trusted-setup status, pause escape hatch, and audit status?',
-    a: 'Development and Devnet builds use DEV_DETERMINISTIC_VK over the frozen 17,861-R1CS circuit. Before Mainnet launch, vk_generated.rs must be replaced by a public Phase-2 MPC ceremony artifact alongside an independent program and circuit audit. Full 100% withdrawals (output_mask == 0, including WSOL unwrap) bypass SetPaused, while the BPF upgrade authority remains mutable during pre-audit releases.',
+    a: 'Audren freezes one minimal 17,861-R1CS circuit and anchors vk_id = 0 to the official Hermez/PSE Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 71+ independent public contributors) plus Audren’s verifiable BGM17 Phase-2 ceremony (zeroized OS CSPRNG + live drand Quicknet #34194203 and Solana Mainnet finalized blockhash beacon, published in ceremony/transcript.json). Additional community Phase-2 contributions remain open, full 100% withdrawals (output_mask == 0, including WSOL unwrap) bypass SetPaused, and an independent third-party audit is pending prior to revoking BPF upgrade authority.',
   },
 ]
 

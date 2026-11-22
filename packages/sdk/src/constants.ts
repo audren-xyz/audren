@@ -50,6 +50,9 @@ export const INSTRUCTION_COUNT = 9;
 
 export const GROTH16_PROOF_LEN = 192;
 export const VK_ID_DEFAULT = 0;
+export const CANONICAL_PK_BYTES = 3_927_280;
+export const CANONICAL_PK_SHA256 =
+  '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4';
 
 export const OPEN_PAGE_KIND_SUBTREE = 0;
 export const OPEN_PAGE_KIND_SUBROOT = 1;

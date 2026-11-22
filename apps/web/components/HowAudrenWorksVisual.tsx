@@ -388,9 +388,9 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
   {
     tag: 'SETUP & CEREMONY',
     question: 'What is the Groth16 trusted-setup provenance?',
-    verdict: 'SINGLE FROZEN CIRCUIT · MPC BEFORE MAINNET',
+    verdict: 'PERPETUAL PTAU (71+) · BGM17 CEREMONY · PRE-AUDIT',
     answer:
-      'Audren freezes one minimal 17,861-constraint JoinSplit circuit capable of scaling 4→8→16 lanes without ever re-running a ceremony. Pre-audit deployments use DEV_DETERMINISTIC_VK; a public Phase-2 MPC ceremony and independent audit are planned prior to production custody.',
+      'Audren freezes one minimal 17,861-constraint JoinSplit circuit capable of scaling 4→8→16 lanes without ever re-running a ceremony. Phase 1 uses Hermez/PSE Perpetual Powers of Tau (71+ independent public contributors) and Phase 2 uses verifiable BGM17 zeroized contributions + live drand Quicknet & Solana Mainnet beacon (ceremony/transcript.json). External security audit is pending prior to freezing upgrade authority.',
     primitive: 'BN254 Groth16 (vk_id = 0) · 192 B Proof · 3.75 MB Compressed PK',
   },
   {

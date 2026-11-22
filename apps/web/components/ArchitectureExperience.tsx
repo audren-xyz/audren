@@ -35,9 +35,9 @@ const INSTRUCTIONS = [
   },
   {
     tag: '0x04',
-    name: 'DepositSpl',
+    name: 'DepositSpl (SPL & Token-2022)',
     summary:
-      'Shield Classic SPL or Token-2022 tokens (~48k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe) and validates sanitized trailing TransferHook accounts.',
+      'Shield Classic SPL or SPL Token-2022 tokens (~48k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe) and validates sanitized trailing TransferHook accounts.',
   },
   {
     tag: '0x05',
@@ -435,10 +435,12 @@ export function ArchitectureExperience() {
                     pause check.
                   </li>
                   <li>
-                    <strong>Trusted setup provenance:</strong> Current builds embed{' '}
-                    <code>DEV_DETERMINISTIC_VK</code> for local testing and Devnet. Mainnet
-                    deployment requires replacing <code>vk_generated.rs</code> with a public
-                    Phase-2 MPC ceremony artifact and completing an independent audit.
+                    <strong>Trusted setup provenance:</strong> Phase 1 uses the official Hermez/PSE
+                    Perpetual Powers of Tau (<code>powersOfTau28_hez_final_15.ptau</code>, 71+
+                    independent public contributors). Phase 2 applies verifiable BGM17 zeroized
+                    contributions + a live drand Quicknet (<code>#34194203</code>) &amp; Solana
+                    Mainnet finalized blockhash beacon (<code>ceremony/transcript.json</code>).
+                    Additional community Phase-2 contributions remain open pending independent audit.
                   </li>
                   <li>
                     <strong>Upgrade authority &amp; issuers:</strong> The BPF upgrade authority

@@ -15,6 +15,7 @@ Verifies byte-for-byte parity across:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -328,12 +329,33 @@ def main() -> None:
     relay_audren = (ROOT / "apps" / "relay" / "src" / "solana" / "audren.ts").read_text()
     assert "@audren/sdk" in relay_audren, "apps/relay/src/solana/audren.ts must import canonical helpers from @audren/sdk"
 
-    # 13. Verify WASM prover artifact parity across SDK and Web App
+    # 13. Verify WASM prover & canonical ceremony ProvingKey parity across Rust, SDK, Web, and program VK
     sdk_wasm = ROOT / "packages" / "sdk" / "wasm" / "audren_circuits.wasm"
     web_wasm = ROOT / "apps" / "web" / "public" / "wasm" / "audren_circuits.wasm"
     assert sdk_wasm.is_file() and web_wasm.is_file(), "Missing audren_circuits.wasm in packages/sdk/wasm or apps/web/public/wasm"
     assert sdk_wasm.read_bytes() == web_wasm.read_bytes(), (
         "apps/web/public/wasm/audren_circuits.wasm drifted from packages/sdk/wasm/audren_circuits.wasm"
+    )
+    rust_pk = ROOT / "crates" / "audren-circuits" / "params" / "audren_joinsplit.pk"
+    sdk_pk = ROOT / "packages" / "sdk" / "wasm" / "audren_joinsplit.pk"
+    web_pk = ROOT / "apps" / "web" / "public" / "wasm" / "audren_joinsplit.pk"
+    for p in (rust_pk, sdk_pk, web_pk):
+        assert p.is_file(), f"Missing canonical ceremony proving key: {p.relative_to(ROOT)}"
+    pk_bytes = rust_pk.read_bytes()
+    assert sdk_pk.read_bytes() == pk_bytes, "packages/sdk/wasm/audren_joinsplit.pk drifted from Rust ceremony PK"
+    assert web_pk.read_bytes() == pk_bytes, "apps/web/public/wasm/audren_joinsplit.pk drifted from Rust ceremony PK"
+    pk_sha256 = hashlib.sha256(pk_bytes).hexdigest()
+    vk_gen = (ROOT / "program" / "src" / "vk_generated.rs").read_text(encoding="utf-8")
+    assert pk_sha256 in vk_gen, "program/src/vk_generated.rs PK_COMPRESSED_SHA256 drifted from audren_joinsplit.pk"
+    circuits_lib = (ROOT / "crates" / "audren-circuits" / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert pk_sha256 in circuits_lib, "crates/audren-circuits/src/lib.rs CANONICAL_PK_SHA256 drifted"
+    assert pk_sha256 in sdk_consts, "packages/sdk/src/constants.ts CANONICAL_PK_SHA256 drifted"
+    transcript = json.loads((ROOT / "ceremony" / "transcript.json").read_text(encoding="utf-8"))
+    assert transcript["final_artifacts"]["proving_key_sha256"] == pk_sha256, (
+        "ceremony/transcript.json proving_key_sha256 drifted"
+    )
+    assert transcript["final_artifacts"]["proving_key_bytes"] == len(pk_bytes), (
+        "ceremony/transcript.json proving_key_bytes drifted"
     )
 
     # 14. Verify apps/web/lib/protocol.ts & docs/DEPLOYMENTS.md parity

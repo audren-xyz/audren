@@ -533,12 +533,13 @@ dependencies = [
 
 [[package]]
 name = "audren-circuits"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ark-bn254 0.5.0",
  "ark-ec 0.5.0",
  "ark-ff 0.5.0",
  "ark-groth16",
+ "ark-poly 0.5.0",
  "ark-r1cs-std",
  "ark-relations",
  "ark-serialize 0.5.0",
@@ -554,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "audren-client"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agave-feature-set",
  "ark-bn254 0.5.0",
@@ -590,11 +591,11 @@ dependencies = [
 
 [[package]]
 name = "audren-core"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "audren-ffi"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agave-feature-set",
  "ark-bn254 0.5.0",

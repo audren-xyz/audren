@@ -24,9 +24,17 @@ use crate::{
     poseidon::{fr_from_be_bytes_strict, fr_to_be_bytes},
 };
 
-/// Deterministic development/Devnet setup seed (`DEV_DETERMINISTIC_VK` — MUST be replaced by
-/// the public Phase-2 MPC ceremony artifact prior to Mainnet deployment).
-pub const DEV_SETUP_SEED_V2: [u8; 32] = [0xA1; 32];
+/// SHA-256 hex digest of the canonical Groth16 ceremony proving key (`audren_joinsplit.pk`).
+/// Phase 1: Official Hermez/PSE Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`, 71+ contributors).
+/// Phase 2: Audren BGM17 ceremony (`ceremony/transcript.json`, drand Quicknet #34194203 & Solana Mainnet slot 472705896).
+pub const CANONICAL_PK_SHA256: &str =
+    "2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4";
+/// Exact compressed byte length of `audren_joinsplit.pk`.
+pub const CANONICAL_PK_BYTES: usize = 3_927_280;
+
+/// Canonical compressed ceremony proving key embedded for offline native Rust / Swift / Kotlin targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub const CANONICAL_PK_COMPRESSED: &[u8] = include_bytes!("../params/audren_joinsplit.pk");
 
 /// Exact fixed byte lengths for the WASM/FFI binary witness & proof ABI.
 pub const WITNESS_INPUT_BYTES: usize = 32 + 32 + 32 + 8 + 32 + 1 + TOTAL_DEPTH_4ARY + (TOTAL_DEPTH_4ARY * 3 * 32); // 2,077 B
@@ -39,11 +47,21 @@ const _: () = assert!(WITNESS_OUTPUT_BYTES == 104);
 const _: () = assert!(WITNESS_TOTAL_BYTES == 4_611);
 const _: () = assert!(PROVE_OUTPUT_BYTES == 384);
 
-/// Deterministic setup for local tests, CI, and Devnet (replaced by MPC ceremony PK/VK for Mainnet).
+/// Load the canonical ceremony `ProvingKey<Bn254>` & `VerifyingKey<Bn254>` (offline, ~15 ms,
+/// curve-validated, zero deterministic toxic waste).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_canonical_joinsplit_keys() -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
+    let pk = deserialize_pk_compressed(CANONICAL_PK_COMPRESSED)
+        .expect("embedded canonical audren_joinsplit.pk must deserialize");
+    let vk = pk.vk.clone();
+    (pk, vk)
+}
+
+/// Backward-compatible alias that loads the canonical ceremony proving & verifying keys.
+#[cfg(not(target_arch = "wasm32"))]
+#[deprecated(note = "Use load_canonical_joinsplit_keys()")]
 pub fn setup_joinsplit_dev() -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
-    let mut rng = ChaCha20Rng::from_seed(DEV_SETUP_SEED_V2);
-    Groth16::<Bn254>::circuit_specific_setup(JoinSplit4AryCircuit::empty_for_setup(), &mut rng)
-        .expect("joinsplit dev setup")
+    load_canonical_joinsplit_keys()
 }
 
 /// Serialize a `ProvingKey<Bn254>` to compact compressed bytes (`~3.75 MB`).
@@ -254,14 +272,6 @@ mod wasm_exports {
     #[no_mangle]
     pub unsafe extern "C" fn wasm_dealloc(ptr: *mut u8, len: usize) {
         let _ = Vec::from_raw_parts(ptr, 0, len);
-    }
-
-    #[no_mangle]
-    pub extern "C" fn wasm_init_dev_pk() -> u32 {
-        let (pk, _vk) = setup_joinsplit_dev();
-        let sz = pk.compressed_size() as u32;
-        CACHED_PK.with(|c| *c.borrow_mut() = Some(pk));
-        sz
     }
 
     #[no_mangle]

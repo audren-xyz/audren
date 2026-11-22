@@ -66,9 +66,10 @@ export default function TermsPage() {
               <span className={styles.cellIndex}>PRE-AUDIT STATUS</span>
               <h3>Independent verification</h3>
               <p className={styles.cellLead}>
-                Audren is in active pre-audit release using a deterministic development verifying
-                key (<code>DEV_DETERMINISTIC_VK</code>) and a mutable Solana BPF upgrade authority until
-                external cryptographic audits and the public Phase-2 Groth16 MPC ceremony conclude.
+                Audren is in active pre-audit release using Groth16 keys derived from the official
+                Hermez/PSE Perpetual Powers of Tau (71+ contributors) plus Audren&rsquo;s verifiable
+                BGM17 Phase-2 ceremony (<code>ceremony/transcript.json</code>), with a mutable
+                Solana BPF upgrade authority until external third-party security audits conclude.
               </p>
               <ul className={styles.dashList}>
                 <li>Before committing capital, review the sBPFv3 source code and Groth16 circuit in <code>audren-xyz/audren</code> and verify deployed ProgramData hashes on-chain.</li>

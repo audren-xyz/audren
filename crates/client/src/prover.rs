@@ -5,9 +5,10 @@ use ark_groth16::{ProvingKey, VerifyingKey};
 use audren_circuits::{
     deserialize_pk_compressed,
     joinsplit::{JoinSplit4AryCircuit, JoinSplitInputWitness, JoinSplitOutputWitness},
+    load_canonical_joinsplit_keys,
     note::{derive_asset_id, JoinSplitPublicInputs},
     poseidon::fr_to_be_bytes,
-    prove_joinsplit, serialize_pk_compressed, setup_joinsplit_dev,
+    prove_joinsplit, serialize_pk_compressed,
     solana_export::proof_to_solana_compressed_192,
     verify_joinsplit_offchain,
 };
@@ -51,10 +52,17 @@ pub struct AudrenProver {
 }
 
 impl AudrenProver {
-    /// Deterministic development/Devnet setup (matches `program/src/vk_generated.rs` `DEV_DETERMINISTIC_VK`).
-    pub fn from_dev_setup() -> Self {
-        let (pk, vk) = setup_joinsplit_dev();
+    /// Load the canonical Groth16 ceremony proving & verifying keys (offline, ~15 ms,
+    /// matches `program/src/vk_generated.rs` and `ceremony/transcript.json`).
+    pub fn from_canonical_pk() -> Self {
+        let (pk, vk) = load_canonical_joinsplit_keys();
         Self { pk, vk }
+    }
+
+    /// Backward-compatible alias for `AudrenProver::from_canonical_pk()`.
+    #[deprecated(note = "Use AudrenProver::from_canonical_pk()")]
+    pub fn from_dev_setup() -> Self {
+        Self::from_canonical_pk()
     }
 
     /// Load from a compressed `ProvingKey<Bn254>` byte buffer (`~3.75 MB`, validated on curve).

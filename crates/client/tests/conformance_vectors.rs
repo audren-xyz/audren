@@ -360,7 +360,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
     let path5 = build_historical_witness_4ary(2, 5, &lane_roots, 6, &[], &leaves, Some(&leaves));
     assert_eq!(path5.compute_root(cm), super_root);
 
-    let prover = AudrenProver::from_dev_setup();
+    let prover = AudrenProver::from_canonical_pk();
     let circuit = JoinSplit4AryCircuit::new_with_options(
         super_root,
         sol_asset,

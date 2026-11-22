@@ -83,7 +83,7 @@ let mut store = CompactWalletStore::new(0, 0);
 store.ingest_lane_pages(&fvk, 0, &[(0, &sub_raw)], &[(0, &memo_raw)], &[])?;
 let note = store.unspent_notes(None)[0];
 assert!(note.selective_disclosure_proof().verify_against_leaf(&note.commitment));
-let prover = AudrenProver::from_dev_setup();
+let prover = AudrenProver::from_canonical_pk();
 println!("Pool: {pool_pda} · Escrow: {escrow_pda} · Relay: {DEFAULT_RELAY_URL}");`,
   },
   swift: {
@@ -535,9 +535,10 @@ export function DevelopersExperience() {
                 <span className={styles.cellIndex}>CHECKLIST</span>
                 <h3>Read before integrating.</h3>
                 <p className={styles.cellLead}>
-                  Audren is pre-audit with <code>DEV_DETERMINISTIC_VK</code> for testing and
-                  Devnet. Mainnet requires replacing the verifying key with a public Phase-2 MPC
-                  ceremony artifact and completing an independent audit.
+                  Audren verifies proofs under Perpetual Powers of Tau (71+ contributors) +
+                  verifiable BGM17 Phase-2 ceremony keys (<code>ceremony/transcript.json</code>) and
+                  remains pre-audit with mutable upgrade authority pending independent security
+                  review.
                 </p>
                 <ul className={styles.dashList}>
                   <li>Persist <code>CompactWalletStore</code> locally (IndexedDB / mobile disk) with optional birthday slot so sealed pages are discarded immediately.</li>

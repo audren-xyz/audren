@@ -1,6 +1,6 @@
 {
   "name": "@audren/sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "TypeScript SDK for Audren — zero-indexer BN254 Groth16 global MASP core (PDAs, Poseidon, layouts, CompactWalletStore, relayer, tx v1, IDLs) plus WASM Groth16 prover (@audren/sdk/prover)",
   "exports": {
@@ -15,6 +15,7 @@
       "default": "./dist/prover-entry.js"
     },
     "./wasm/audren_circuits.wasm": "./wasm/audren_circuits.wasm",
+    "./wasm/audren_joinsplit.pk": "./wasm/audren_joinsplit.pk",
     "./idl/codama.json": "./idl/audren.codama.json",
     "./idl/anchor.json": "./idl/audren.anchor.json"
   },

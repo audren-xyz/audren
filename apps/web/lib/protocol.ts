@@ -7,11 +7,12 @@
  */
 
 export const AUDREN = {
-  version: '1.0.0',
+  version: '1.1.0',
   protocolVersion: 2,
-  releaseTag: 'v1.0.0',
+  releaseTag: 'v1.1.0',
   verifiedCommit: '6bf007ea99eb72de5f19504ddf9d45084156cecc',
-  vkProvenance: 'DEV_DETERMINISTIC_VK (pre-audit; public Phase-2 MPC ceremony planned)',
+  vkProvenance:
+    'Perpetual Powers of Tau (71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand #34194203 · Solana slot 472705896 · pre-audit)',
   circuitConstraints: 17_861,
   circuitFftDomain: 32_768,
   proofBytes: 192,
@@ -28,14 +29,14 @@ export const AUDREN = {
   securityPda: 'GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj',
   otterVerifyPda: 'FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt',
   elfBytes: 150_848,
-  elfSha256: 'fd798ef028ed97f60ccd076b10d49e5575db3af3d97a769eb1206b041310c4b5',
-  executableHash: 'db1a0a496ed73e7be43a9a6e8b95c3da682d322a2df9c066119aa3fff36c3ba5',
+  elfSha256: '8a1bc802a27c131dabe73182ac6527a90ecc2bf7cbc06eaa41c2489a60e8b9c9',
+  executableHash: 'e2a231f59138b6e074fa6abfc1b395541b8560ae02f75ebc18a07662df59f960',
   pkCompressedBytes: 3_927_280,
-  pkCompressedSha256: '1864924ae15936afe02242e4fc9179b0d590dea0b71b39d7c3464db034d3e7e4',
+  pkCompressedSha256: '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4',
   securityEmail: 'security@audren.xyz',
   githubOrg: 'https://github.com/audren-xyz',
   githubCore: 'https://github.com/audren-xyz/audren',
-  githubRelease: 'https://github.com/audren-xyz/audren/releases/tag/v1.0.0',
+  githubRelease: 'https://github.com/audren-xyz/audren/releases/tag/v1.1.0',
   githubExamples: 'https://github.com/audren-xyz/examples',
   osecVerifyStatusUrl: 'https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3',
   relayUrl: 'https://relay.audren.xyz',
@@ -106,7 +107,7 @@ export const MEASURED_CU_ROWS = [
     note: '4-ary Poseidon leaf append + 90 B SoA MemoPage + optional DEPOSIT_FLAG_FEE_FROM_AMOUNT sweep · 0 ZK proof',
   },
   {
-    ix: 'DepositSpl + TransferHook (Tag 4)',
+    ix: 'DepositSpl · SPL & Token-2022 (Tag 4)',
     cu: 48_100,
     maxCu: 52_885,
     note: 'Classic SPL or Token-2022 net vault delta solvency + TransferFeeConfig & safe TransferHook support',

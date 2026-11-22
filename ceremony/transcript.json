@@ -1,0 +1,81 @@
+{
+  "protocol": "Audren",
+  "circuit": {
+    "name": "JoinSplit4AryCircuit",
+    "curve": "BN254 (alt_bn128)",
+    "proof_system": "Groth16 (ark-groth16 0.5.0 / LibsnarkReduction)",
+    "r1cs_constraints": 17861,
+    "fft_domain_size": 32768,
+    "fft_power": 15,
+    "merkle_arity": 4,
+    "merkle_depth": 20,
+    "max_lanes": 16,
+    "public_inputs": 1,
+    "proof_wire_bytes": 192
+  },
+  "phase1": {
+    "source": "Hermez / PSE Perpetual Powers of Tau",
+    "file": "powersOfTau28_hez_final_15.ptau",
+    "independent_contributors": "71+",
+    "bytes": 37831832,
+    "blake2b_512": "982372c867d229c236091f767e703253249a9b432c1710b4f326306bfa2428a17b06240359606cfe4d580b10a5a1f63fbed499527069c18ae17060472969ae6e",
+    "sha256": "3ef2ecc5b75d687048cf2d59195119b42fb07c5af639c5f283d84bfa69829e7f",
+    "official_mirror": "https://circom.info/powersOfTau28_hez_final_15.ptau"
+  },
+  "phase2": {
+    "scheme": "BGM17 Groth16 Phase-2 MPC (Schnorr PoK + BN254 pairing & Fiat-Shamir RLC checks over all l_query & h_query points)",
+    "initial_pk_sha256": "c26cc7f794c3872dee8e8e0fbd62148fab650168ac214628987db91fdaec44ce",
+    "steps": [
+      {
+        "kind": "contribution",
+        "name": "audren_phase2_contribution_01",
+        "prev_pk_sha256": "c26cc7f794c3872dee8e8e0fbd62148fab650168ac214628987db91fdaec44ce",
+        "next_pk_sha256": "6a72472ade6693afbf77435ce7389cc73dec28a22a67805888117fdec86040ae",
+        "pub_delta_g1": "2a7e5208d6fd762e854d285fba606e0e6a3c794e604d468309abd127b9b5c124",
+        "pub_delta_g2": "d3baa7ca37abc96c6f56a2a98bb40d87b2701b7b7b60c395e4fc5edf5080370f0955741bed35fe4b39410354abb7d46cfc1ffde04bbbff2ad56a590fe9c88806",
+        "pok_r_g1": "17609a465923d004a81957144fe6e6f1144e8e95a6b4d21b8aa0f7cc06ad752b",
+        "pok_s": "196f6f0bbe54f1a76d65032748ddd2fda122a8a7d6577839c4d4165f7b04cb36",
+        "new_delta_g1": "2a7e5208d6fd762e854d285fba606e0e6a3c794e604d468309abd127b9b5c124",
+        "new_delta_g2": "d3baa7ca37abc96c6f56a2a98bb40d87b2701b7b7b60c395e4fc5edf5080370f0955741bed35fe4b39410354abb7d46cfc1ffde04bbbff2ad56a590fe9c88806"
+      },
+      {
+        "kind": "contribution",
+        "name": "audren_phase2_contribution_02",
+        "prev_pk_sha256": "6a72472ade6693afbf77435ce7389cc73dec28a22a67805888117fdec86040ae",
+        "next_pk_sha256": "2adbef1d597f42d19b637bd2e0e128c15371107fd85fc69d280abf70abd04273",
+        "pub_delta_g1": "e56b84f3cad205282908a23e50a4865fb4ab8404fe876ede78d5c05cbbf3e405",
+        "pub_delta_g2": "07ac40c3b332c485f36e2eccf08ceb8c3cfb7b291454b89a890f6e6c0769192f428fc535fb4c81a6dc4e62fd07be8070fcd1bad2cf58f54c833ba8c52d83879d",
+        "pok_r_g1": "615b681efe77baf76435878c0b1bb52ff0ca99f279cbe28f26fcd6242ac80898",
+        "pok_s": "0a3521ea47ceb45044557bb08ad8cba502b2a3e96a449149930ad65b9b645a8d",
+        "new_delta_g1": "cc9e348bfbac7b77aa179f81c6bdba80bc48a2e46508c317d9ab544cc45a15a9",
+        "new_delta_g2": "7a4e69d4a5652e7e359d2325cbcd48845c17d122beed6f7ebd3cbec0e9df20106fbf7f6d9519cdd89a46f625dca862f6dac179aad4396b5a796e83cbbb60d710"
+      },
+      {
+        "kind": "beacon",
+        "name": "drand_quicknet_and_solana_mainnet_finalized_beacon",
+        "drand_chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+        "drand_round": 34194203,
+        "drand_randomness": "32cfabece8d0d96c52111336e048c9915d02ac8d68fe0cd850c906efa8ced63e",
+        "solana_mainnet_slot": 472705896,
+        "solana_mainnet_blockhash": "DgJUj8Wfu8R6XLTae3PZuQYXhdgAG8hN3g1NyaR3cxHr",
+        "sha256_delay_iterations": 1048576,
+        "prev_pk_sha256": "2adbef1d597f42d19b637bd2e0e128c15371107fd85fc69d280abf70abd04273",
+        "next_pk_sha256": "2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4",
+        "pub_delta_g1": "c4f3ed8da3c9a7a6dda93843ba2d2d4a3beda1f08527c678ad57cb35586a8b08",
+        "pub_delta_g2": "c6e28739eacaa0757e16c9f8b8189a43ceee9e65e0712db1ab883a20ec63a222e7294e7d8f5eeb731cf9ad0c7d1f81c7385fcfe20441f4057107f7baa4dbef03",
+        "pok_r_g1": "11d5f4d6790f1e8899ee12292ccb43ab765ff2e2c0715e711129bed0bd0434ae",
+        "pok_s": "025676433f551761bebf0eed276169f8f8ab8aae7e19a701a44d81918cb00908",
+        "new_delta_g1": "4ff77a8ae50274271d3cdf318799f663302163255bdf748b109159cabfd4021a",
+        "new_delta_g2": "ccfbe5cb78ae2bd09ac29c8cd0740522cc1ad55a1be222306123c083b77f74074ee3beb19c75ff6b350aa7211172c1e08a1b71a000ee0e126554063a0f7f0aa8"
+      }
+    ],
+    "community_expansion_open": true,
+    "honest_disclosure": "Phase 1 is anchored to the official Hermez/PSE Perpetual Powers of Tau (71+ independent public contributors). Phase 2 contains the initial zeroized OS-CSPRNG contributions plus a verifiable live drand Quicknet (#34194203) and Solana Mainnet finalized blockhash (#472705896) randomness beacon (2^20 SHA-256 delay). Additional independent community Phase-2 contributions remain welcome via `ceremony contribute` prior to external security audit completion and BPF upgrade authority freeze."
+  },
+  "final_artifacts": {
+    "proving_key_file": "audren_joinsplit.pk",
+    "proving_key_bytes": 3927280,
+    "proving_key_sha256": "2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4",
+    "vk_generated_rs_sha256": "a93911a19ea782bf276f8325e9e97f21fd4004372919bf3ca2a38a9851e668e8"
+  }
+}

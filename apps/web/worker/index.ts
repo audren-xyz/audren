@@ -493,16 +493,18 @@ async function handleRpcAccounts(request: Request, env: Env): Promise<Response> 
   const commitment = body.commitment === 'finalized' ? 'finalized' : 'confirmed'
   const addresses = body.addresses.map((a) => String(a))
   const out: Array<string | null> = []
+  const owners: Array<string | null> = []
   for (let off = 0; off < addresses.length; off += 100) {
     const chunk = addresses.slice(off, off + 100)
     const res = await solanaRpc<{
-      value: Array<{ data: [string, string] } | null>
+      value: Array<{ data: [string, string]; owner?: string } | null>
     }>(env, cluster, 'getMultipleAccounts', [chunk, { encoding: 'base64', commitment }])
     for (let i = 0; i < chunk.length; i++) {
       out.push(res.value[i]?.data?.[0] ?? null)
+      owners.push(res.value[i]?.owner ?? null)
     }
   }
-  return jsonResponse({ cluster, accounts: out })
+  return jsonResponse({ cluster, accounts: out, owners })
 }
 
 async function handleWalletBalances(url: URL, env: Env): Promise<Response> {

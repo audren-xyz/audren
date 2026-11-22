@@ -25,6 +25,7 @@ import {
 import {
   AUDREN_DEFAULT_RELAY_URL,
   AUDREN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   ASSET_MODE_PRIVATE,
   ASSET_MODE_SOL,
   ASSET_MODE_SPL,
@@ -40,6 +41,8 @@ import {
   OPEN_PAGE_KIND_SUBTREE,
   SUBROOTS_PER_PAGE,
   SUBTREE_LEAVES,
+  SYSTEM_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
   WSOL_MINT,
   AudrenRelayClient,
   audrenInstructionToSolana,
@@ -184,6 +187,93 @@ function mintLabel(mintStr: string): { symbol: string; decimals: number } {
   if (mintStr === WSOL_MINT) return { symbol: 'WSOL', decimals: 9 }
   if (mintStr === USDC_MAINNET_MINT) return { symbol: 'USDC', decimals: 6 }
   return { symbol: shortHash(mintStr, 4, 4), decimals: 6 }
+}
+
+function parseTransferFeeConfig(mintData: Uint8Array | null): { bps: bigint; maxFee: bigint } | null {
+  if (!mintData || mintData.byteLength <= 166 || mintData[165] !== 1) return null
+  const dv = new DataView(mintData.buffer, mintData.byteOffset, mintData.byteLength)
+  let off = 166
+  while (off + 4 <= mintData.byteLength) {
+    const extType = dv.getUint16(off, true)
+    const extLen = dv.getUint16(off + 2, true)
+    off += 4
+    if (off + extLen > mintData.byteLength) break
+    if (extType === 1 && extLen >= 108) {
+      // Newer transfer fee sits at offset 90..108 inside TransferFeeConfig (epoch:8, maxFee:8, bps:2)
+      const newerMax = dv.getBigUint64(off + 98, true)
+      const newerBps = BigInt(dv.getUint16(off + 106, true))
+      if (newerBps > 0n) return { bps: newerBps, maxFee: newerMax }
+      const olderMax = dv.getBigUint64(off + 80, true)
+      const olderBps = BigInt(dv.getUint16(off + 88, true))
+      if (olderBps > 0n) return { bps: olderBps, maxFee: olderMax }
+      return null
+    }
+    off += extLen
+  }
+  return null
+}
+
+function computeNetAfterTransferFee(gross: bigint, fee: { bps: bigint; maxFee: bigint } | null): bigint {
+  if (!fee || fee.bps <= 0n || gross <= 0n) return gross
+  const rawFee = fee.bps >= 10_000n ? gross : (gross * fee.bps + 9_999n) / 10_000n
+  const capped = rawFee > fee.maxFee ? fee.maxFee : rawFee
+  return gross > capped ? gross - capped : 0n
+}
+
+async function resolveMintOnChain(
+  cluster: SolanaCluster,
+  mintStr: string,
+): Promise<{
+  tokenProgram: string
+  isToken2022: boolean
+  decimals: number | null
+  transferFee: { bps: bigint; maxFee: bigint } | null
+}> {
+  const res = await fetch('/api/rpc/accounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cluster, addresses: [mintStr] }),
+  })
+  const json = (await res.json()) as {
+    accounts?: Array<string | null>
+    owners?: Array<string | null>
+    error?: string
+  }
+  if (!res.ok || !json.accounts) {
+    throw new Error(json.error ?? `Failed to inspect mint ${mintStr}`)
+  }
+  const owner = json.owners?.[0] ?? null
+  const isToken2022 = owner === TOKEN_2022_PROGRAM_ID
+  const data = json.accounts[0] ? fromBase64(json.accounts[0]) : null
+  const decimals = data && data.byteLength >= 45 ? data[44]! : null
+  const transferFee = isToken2022 ? parseTransferFeeConfig(data) : null
+  return {
+    tokenProgram: isToken2022 ? TOKEN_2022_PROGRAM_ID : CLASSIC_TOKEN_PROGRAM_ID,
+    isToken2022,
+    decimals,
+    transferFee,
+  }
+}
+
+function buildCreateAtaIdempotentIx(
+  payer: string,
+  ata: string,
+  owner: string,
+  mint: string,
+  tokenProgram: string,
+): AudrenInstruction {
+  return {
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    accounts: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: tokenProgram, isSigner: false, isWritable: false },
+    ],
+    data: new Uint8Array([1]),
+  }
 }
 
 function createWorkerBatchFetcher(cluster: SolanaCluster): AccountBatchFetcher {
@@ -624,9 +714,18 @@ export function LiveWalletVault() {
 
       const mintBytes = isSol ? NATIVE_SOL_MINT_BYTES : base58Decode(depositMint)
       const detNoteFee = BigInt(poolSnap.deterministicNoteRentFee ?? pool.noteRentFee.toString())
-      const committedAmount = isSol && feeFromAmount ? amount - detNoteFee : amount
+      const mintInfo = isSol ? null : await resolveMintOnChain(cluster, depositMint)
+      const committedAmount = isSol
+        ? feeFromAmount
+          ? amount - detNoteFee
+          : amount
+        : computeNetAfterTransferFee(amount, mintInfo?.transferFee ?? null)
       if (committedAmount <= 0n) {
-        throw new Error(`Deposit amount must exceed deterministic note rent fee (${formatUnits(detNoteFee, 9)} SOL)`)
+        throw new Error(
+          isSol
+            ? `Deposit amount must exceed deterministic note rent fee (${formatUnits(detNoteFee, 9)} SOL)`
+            : 'Net deposit amount after Token-2022 TransferFee must be > 0',
+        )
       }
       const { tweak, blinding, memo90 } = encryptNoteMemo(
         keys.viewPk,
@@ -653,10 +752,16 @@ export function LiveWalletVault() {
           }),
         )
       } else {
-        const tokenProgram = tok?.tokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID
+        const tokenProgram = mintInfo?.tokenProgram ?? tok?.tokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID
         const vaultAuth = deriveVaultAuthPdaSync(0, AUDREN_PROGRAM_ID).address
         const depositorAta = tok?.ata ?? deriveAssociatedTokenAddressSync(connected.address, depositMint, tokenProgram).address
         const vaultAta = deriveAssociatedTokenAddressSync(vaultAuth, depositMint, tokenProgram).address
+        const [vaultAtaInfo] = await fetcher([vaultAta])
+        if (!vaultAtaInfo) {
+          ixs.push(
+            buildCreateAtaIdempotentIx(connected.address, vaultAta, vaultAuth, depositMint, tokenProgram),
+          )
+        }
         ixs.push(
           buildDepositSplInstruction({
             poolId: 0,
@@ -678,13 +783,17 @@ export function LiveWalletVault() {
       }
 
       setStatusMsg('Waiting for wallet approval…')
-      const res = await signAndBroadcastDirect(ixs, 250_000)
+      const res = await signAndBroadcastDirect(ixs, 280_000)
       setLastReceipt({
-        kind: isSol ? 'DepositSol (Tag 3)' : 'DepositSpl (Tag 4)',
+        kind: isSol
+          ? 'DepositSol (Tag 3)'
+          : mintInfo?.isToken2022
+            ? 'DepositSpl · Token-2022 (Tag 4)'
+            : 'DepositSpl · SPL (Tag 4)',
         signature: res.signature,
         cluster,
         relayed: false,
-        summary: `Shielded ${depositAmount} ${mintLabel(depositMint).symbol} into Lane #${laneId}`,
+        summary: `Shielded ${depositAmount} ${mintLabel(depositMint).symbol}${mintInfo?.isToken2022 ? ' (Token-2022)' : ''} into Lane #${laneId}`,
       })
       setStatusMsg('Deposit confirmed — syncing CompactWalletStore…')
       await syncVault(keys, cluster, store)
@@ -833,7 +942,10 @@ export function LiveWalletVault() {
       const pubOutAmt = mode === 'withdraw' ? amount : 0n
       const pubFeeAmt = mode === 'withdraw' ? relayerFeeAmount : 0n
       const pubAssetIdBytes = mode === 'withdraw' ? frToBeBytes(assetId) : new Uint8Array(32)
-      const tokenProgram = CLASSIC_TOKEN_PROGRAM_ID
+      const tokenProgram =
+        assetMode === ASSET_MODE_SPL
+          ? (await resolveMintOnChain(cluster, mintStr)).tokenProgram
+          : CLASSIC_TOKEN_PROGRAM_ID
       const rawRecipient = mode === 'withdraw' ? withdrawRecipient.trim() : null
       const recipientPubkey =
         rawRecipient && assetMode === ASSET_MODE_SPL && !isWsolUnwrap
@@ -923,12 +1035,20 @@ export function LiveWalletVault() {
         })
         signature = sub.signature
       } else {
-        const prepPages = await fetcher([
-          deriveNfPagePdaSync(0, outLaneId, outNfSeq, AUDREN_PROGRAM_ID).address,
-        ])
+        const nfPageAddr = deriveNfPagePdaSync(0, outLaneId, outNfSeq, AUDREN_PROGRAM_ID).address
+        const checkAddrs =
+          rawRecipient && recipientPubkey && assetMode === ASSET_MODE_SPL && !isWsolUnwrap
+            ? [nfPageAddr, recipientPubkey]
+            : [nfPageAddr]
+        const prepPages = await fetcher(checkAddrs)
         const preIxs: AudrenInstruction[] = []
         if (!prepPages[0]) {
           preIxs.push(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: outNfSeq, payer: payerPubkey }))
+        }
+        if (checkAddrs.length === 2 && !prepPages[1] && rawRecipient && recipientPubkey) {
+          preIxs.push(
+            buildCreateAtaIdempotentIx(payerPubkey, recipientPubkey, rawRecipient, mintStr, tokenProgram),
+          )
         }
         setStatusMsg('Waiting for wallet approval…')
         const sent = await signAndBroadcastDirect([...preIxs, ix], 350_000)
@@ -981,6 +1101,11 @@ export function LiveWalletVault() {
       let relayerFeeAmount = 0n
       let relayerFeeRecipient: string | null = null
 
+      const inTokenProgram = isNativeSolIn
+        ? CLASSIC_TOKEN_PROGRAM_ID
+        : (await resolveMintOnChain(cluster, inMintStr)).tokenProgram
+      const outTokenProgram = (await resolveMintOnChain(cluster, swapOutMint)).tokenProgram
+
       if (useRelayer) {
         const info = await relayClient.getInfo(cluster)
         if (!info.relayerPubkey) throw new Error(`Relayer missing fee payer for ${cluster}`)
@@ -1016,6 +1141,8 @@ export function LiveWalletVault() {
             shardId: escrowShard,
             inputMint: routerInMint,
             outputMint: swapOutMint,
+            tokenProgramIn: inTokenProgram,
+            tokenProgramOut: outTokenProgram,
           }),
         })
         const built = (await res.json()) as {
@@ -1168,15 +1295,15 @@ export function LiveWalletVault() {
           ? null
           : {
               mint: inMintStr,
-              vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, inMintStr, CLASSIC_TOKEN_PROGRAM_ID).address,
-              escrowAta: deriveAssociatedTokenAddressSync(escrowPda, inMintStr, CLASSIC_TOKEN_PROGRAM_ID).address,
-              tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+              vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, inMintStr, inTokenProgram).address,
+              escrowAta: deriveAssociatedTokenAddressSync(escrowPda, inMintStr, inTokenProgram).address,
+              tokenProgram: inTokenProgram,
             },
         outSpl: {
           mint: swapOutMint,
-          vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, swapOutMint, CLASSIC_TOKEN_PROGRAM_ID).address,
-          escrowAta: deriveAssociatedTokenAddressSync(escrowPda, swapOutMint, CLASSIC_TOKEN_PROGRAM_ID).address,
-          tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+          vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, swapOutMint, outTokenProgram).address,
+          escrowAta: deriveAssociatedTokenAddressSync(escrowPda, swapOutMint, outTokenProgram).address,
+          tokenProgram: outTokenProgram,
         },
         relayerFeeRecipient: relayerFeeAmount > 0n ? relayerFeeRecipient : null,
       })
@@ -1192,8 +1319,39 @@ export function LiveWalletVault() {
         })
         signature = sub.signature
       } else {
+        const nfPageAddr = deriveNfPagePdaSync(0, outLaneId, outNfSeq, AUDREN_PROGRAM_ID).address
+        const outVaultAta = deriveAssociatedTokenAddressSync(vaultAuth, swapOutMint, outTokenProgram).address
+        const outEscrowAta = deriveAssociatedTokenAddressSync(escrowPda, swapOutMint, outTokenProgram).address
+        const inEscrowAta = isNativeSolIn
+          ? null
+          : deriveAssociatedTokenAddressSync(escrowPda, inMintStr, inTokenProgram).address
+        const checkAddrs = inEscrowAta
+          ? [nfPageAddr, outVaultAta, outEscrowAta, inEscrowAta]
+          : [nfPageAddr, outVaultAta, outEscrowAta]
+        const prep = await fetcher(checkAddrs)
+        const preIxs: AudrenInstruction[] = []
+        if (!prep[0]) {
+          preIxs.push(
+            buildOpenPageInstruction({
+              poolId: 0,
+              laneId: outLaneId,
+              pageKind: OPEN_PAGE_KIND_NULLIFIER,
+              pageSeq: outNfSeq,
+              payer: payerPubkey,
+            }),
+          )
+        }
+        if (!prep[1]) {
+          preIxs.push(buildCreateAtaIdempotentIx(payerPubkey, outVaultAta, vaultAuth, swapOutMint, outTokenProgram))
+        }
+        if (!prep[2]) {
+          preIxs.push(buildCreateAtaIdempotentIx(payerPubkey, outEscrowAta, escrowPda, swapOutMint, outTokenProgram))
+        }
+        if (inEscrowAta && !prep[3]) {
+          preIxs.push(buildCreateAtaIdempotentIx(payerPubkey, inEscrowAta, escrowPda, inMintStr, inTokenProgram))
+        }
         setStatusMsg('Waiting for wallet approval…')
-        const sent = await signAndBroadcastDirect([ix], 600_000)
+        const sent = await signAndBroadcastDirect([...preIxs, ix], 600_000)
         signature = sent.signature
       }
 
@@ -1380,8 +1538,9 @@ export function LiveWalletVault() {
       <div className="lv-notice-bar is-warn">
         <AlertCircle size={15} />
         <span>
-          <strong>Audren ({AUDREN.releaseTag}):</strong> 192 B BN254 Groth16 global 4-ary MASP (17,861 R1CS).
-          Currently running <code>DEV_DETERMINISTIC_VK</code> prior to external audits and Phase-2 MPC ceremony.
+          <strong>Audren ({AUDREN.releaseTag}):</strong> 192 B BN254 Groth16 global 4-ary MASP (17,861 R1CS) ·
+          Perpetual Powers of Tau + BGM17 ceremony (<code>{shortHash(AUDREN.pkCompressedSha256, 8, 6)}</code>) ·
+          Pre-audit release (open for independent security audit &amp; additional community Phase-2 contributions).
         </span>
       </div>
 
@@ -1650,7 +1809,8 @@ export function LiveWalletVault() {
                       <option value={NATIVE_SOL_MINT_STR}>Native SOL ({formatUnits(pubSolLamports, 9)} available)</option>
                       {pubTokens.map((t) => (
                         <option key={t.mint} value={t.mint}>
-                          {mintLabel(t.mint).symbol} ({t.uiAmountString} available)
+                          {mintLabel(t.mint).symbol}
+                          {t.tokenProgram === TOKEN_2022_PROGRAM_ID ? ' [Token-2022]' : ' [SPL]'} ({t.uiAmountString} available)
                         </option>
                       ))}
                     </select>
