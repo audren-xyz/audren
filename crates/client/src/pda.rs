@@ -1,4 +1,4 @@
-//! Deterministic V2 PDA derivation helpers matching `program/src/state.rs` bit-for-bit.
+//! Deterministic Audren PDA derivation helpers matching `program/src/state.rs` bit-for-bit.
 
 use audren_core::{
     ASSOCIATED_TOKEN_PROGRAM_ID, CKPT_SEED, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MEMO_SEED,

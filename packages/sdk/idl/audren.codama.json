@@ -6,7 +6,7 @@
     "kind": "programNode",
     "name": "audren",
     "publicKey": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "origin": "shank",
     "docs": [
       "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16, 4-ary Depth-20 MASP) and Protocol-Agnostic DeFi Execution Program on Solana."
@@ -1930,6 +1930,26 @@
             "docs": [
               "System Program."
             ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "nextSubtreePage",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": true,
+            "docs": [
+              "Optional rollover SubtreePage."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "nextMemoPage",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": true,
+            "docs": [
+              "Optional rollover MemoPage."
+            ]
           }
         ],
         "arguments": [
@@ -3771,9 +3791,9 @@
         "kind": "errorNode",
         "name": "pageSeqOutOfRange",
         "code": 6029,
-        "message": "OpenPage sequence exceeds active_seq + 1 lookahead bound.",
+        "message": "OpenPage sequence exceeds cur_seq + 2 lookahead bound.",
         "docs": [
-          "OpenPage sequence exceeds active_seq + 1 lookahead bound."
+          "OpenPage sequence exceeds cur_seq + 2 lookahead bound."
         ]
       },
       {

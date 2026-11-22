@@ -18,7 +18,8 @@ export interface Env {
   MAINNET_RELAYER_SECRETS_JSON?: string
   DEVNET_RELAYER_SECRETS_JSON?: string
   /**
-   * Optional read-only relayer `FullViewingKey` JSON (`{ spendPkHex, nkHex, viewSkHex, viewPkHex }`)
+   * Optional read-only relayer `FullViewingKey` JSON
+   * (`{ spendPkHex, nkHex, viewSkHex, viewPkHex }` or `{ spendPk, nk, viewSk, viewPk }`)
    * with ZERO spend authority on the hot Worker, enabling Mode 1 shielded `cm2` fee verification
    * on private `JoinSplit` transfers (`ASSET_MODE_PRIVATE`).
    */
@@ -203,10 +204,10 @@ export function getRelayerFvk(
   if (!raw?.trim()) return null
   try {
     const obj = JSON.parse(raw) as Record<string, unknown>
-    const spendPk = hexToBytes32(obj.spendPkHex)
-    const nk = hexToBytes32(obj.nkHex)
-    const viewSk = hexToBytes32(obj.viewSkHex)
-    const viewPk = hexToBytes32(obj.viewPkHex)
+    const spendPk = hexToBytes32(obj.spendPkHex ?? obj.spendPk)
+    const nk = hexToBytes32(obj.nkHex ?? obj.nk)
+    const viewSk = hexToBytes32(obj.viewSkHex ?? obj.viewSk)
+    const viewPk = hexToBytes32(obj.viewPkHex ?? obj.viewPk)
     if (!spendPk || !nk || !viewSk || !viewPk) return null
     const fvk: FullViewingKey = { spendPk, nk, viewSk, viewPk }
     return { fvk, shieldedAddress: formatAudrenAddress(spendPk, viewPk) }

@@ -7,9 +7,9 @@
  */
 
 export const AUDREN = {
-  version: '1.1.0',
+  version: '1.1.1',
   protocolVersion: 2,
-  releaseTag: 'v1.1.0',
+  releaseTag: 'v1.1.1',
   verifiedCommit: '62b5bdb44ce4fdacdac588f0d194802a7e625155',
   vkProvenance:
     'Perpetual Powers of Tau (71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand #34194203 · Solana slot 472705896 · pre-audit)',
@@ -28,15 +28,15 @@ export const AUDREN = {
   idlPda: '5QoLwK1C3NpUXjsHEV14RsQE65MaaiT9WxGvoTyxBPsn',
   securityPda: 'GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj',
   otterVerifyPda: 'FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt',
-  elfBytes: 150_848,
-  elfSha256: '8a1bc802a27c131dabe73182ac6527a90ecc2bf7cbc06eaa41c2489a60e8b9c9',
-  executableHash: 'e2a231f59138b6e074fa6abfc1b395541b8560ae02f75ebc18a07662df59f960',
+  elfBytes: 151_648,
+  elfSha256: 'ce1e5d06247490022fcd75751db566d6eb2f57f840d43ef50a9d31a9197d90ba',
+  executableHash: '878f02a19a6cadc6e402b9938bc4276aa9aa29bbd023c271714b754537772f94',
   pkCompressedBytes: 3_927_280,
   pkCompressedSha256: '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4',
   securityEmail: 'security@audren.xyz',
   githubOrg: 'https://github.com/audren-xyz',
   githubCore: 'https://github.com/audren-xyz/audren',
-  githubRelease: 'https://github.com/audren-xyz/audren/releases/tag/v1.1.0',
+  githubRelease: 'https://github.com/audren-xyz/audren/releases/tag/v1.1.1',
   githubExamples: 'https://github.com/audren-xyz/examples',
   osecVerifyStatusUrl: 'https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3',
   relayUrl: 'https://relay.audren.xyz',

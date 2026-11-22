@@ -1,3 +1,4 @@
+import { buildCreateAtaIdempotentInstruction } from '@audren/sdk'
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import type { SolanaAccountMeta, SolanaInstruction } from '../types'
@@ -222,17 +223,21 @@ export function buildCreateAtaIdempotentIx(params: {
   mint: Uint8Array
   tokenProgram: Uint8Array
 }): SolanaInstruction {
+  const sdkIx = buildCreateAtaIdempotentInstruction({
+    payer: base58Encode(params.payer),
+    ata: base58Encode(params.ata),
+    owner: base58Encode(params.owner),
+    mint: base58Encode(params.mint),
+    tokenProgram: base58Encode(params.tokenProgram),
+  })
   return {
-    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
-    accounts: [
-      { pubkey: params.payer, isSigner: true, isWritable: true },
-      { pubkey: params.ata, isSigner: false, isWritable: true },
-      { pubkey: params.owner, isSigner: false, isWritable: false },
-      { pubkey: params.mint, isSigner: false, isWritable: false },
-      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: params.tokenProgram, isSigner: false, isWritable: false },
-    ],
-    data: new Uint8Array([1]), // CreateIdempotent
+    programId: base58Decode(sdkIx.programId),
+    accounts: sdkIx.accounts.map((a) => ({
+      pubkey: base58Decode(a.pubkey),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+    data: sdkIx.data,
   }
 }
 

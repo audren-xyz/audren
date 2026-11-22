@@ -2,7 +2,7 @@
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "spec": "0.1.0",
     "description": "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
@@ -372,6 +372,18 @@
           "name": "system_program",
           "writable": false,
           "signer": false
+        },
+        {
+          "name": "next_subtree_page",
+          "writable": true,
+          "signer": false,
+          "optional": true
+        },
+        {
+          "name": "next_memo_page",
+          "writable": true,
+          "signer": false,
+          "optional": true
         }
       ],
       "args": [
@@ -1739,7 +1751,7 @@
     {
       "code": 6029,
       "name": "PageSeqOutOfRange",
-      "msg": "OpenPage sequence exceeds active_seq + 1 lookahead bound."
+      "msg": "OpenPage sequence exceeds cur_seq + 2 lookahead bound."
     },
     {
       "code": 6030,

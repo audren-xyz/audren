@@ -215,6 +215,8 @@ export const okxAdapter: AggregatorAdapter = {
         ix.programId !== 'ComputeBudget111111111111111111111111111111' &&
         ix.programId !== 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL' &&
         ix.programId !== '11111111111111111111111111111111' &&
+        ix.programId !== 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' &&
+        ix.programId !== 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb' &&
         ix.accounts.some((a) => a.pubkey === req.escrowPubkey),
     )
     if (!swapIx) {

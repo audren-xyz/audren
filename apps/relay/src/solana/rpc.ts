@@ -1,3 +1,4 @@
+import { inspectToken2022UnsafeSelfPay } from '@audren/sdk'
 import {
   CLASSIC_TOKEN_PROGRAM_ID_STR,
   TOKEN_2022_PROGRAM_ID_STR,
@@ -102,36 +103,6 @@ export interface OnChainMintMeta {
   hasUnsafeSelfPayExt: boolean
 }
 
-function inspectToken2022MintSelfPaySafety(bytes: Uint8Array): boolean {
-  if (bytes.length <= 166) return false
-  let pos = 166
-  while (pos + 4 <= bytes.length) {
-    const extType = bytes[pos]! | (bytes[pos + 1]! << 8)
-    if (extType === 0) break
-    const extLen = bytes[pos + 2]! | (bytes[pos + 3]! << 8)
-    const valStart = pos + 4
-    const valEnd = valStart + extLen
-    if (valEnd > bytes.length) return true
-    // 9 = NonTransferable, 12 = PermanentDelegate
-    if (extType === 9 || extType === 12) return true
-    // 14 = TransferHook { authority[32], program_id[32] }
-    if (extType === 14 && extLen >= 64) {
-      const prog = bytes.subarray(valStart + 32, valStart + 64)
-      if (prog.some((b) => b !== 0)) return true
-    }
-    // 1 = TransferFeeConfig { authority[32], withdraw_authority[32], withheld[8],
-    //     older_transfer_fee { epoch[8], maximum_fee[8], bps[2] },
-    //     newer_transfer_fee { epoch[8], maximum_fee[8], bps[2] } }
-    if (extType === 1 && extLen >= 108) {
-      const olderBps = bytes[valStart + 88]! | (bytes[valStart + 89]! << 8)
-      const newerBps = bytes[valStart + 106]! | (bytes[valStart + 107]! << 8)
-      if (olderBps > 500 || newerBps > 500) return true
-    }
-    pos = valEnd
-  }
-  return false
-}
-
 const MINT_META_CACHE = new Map<string, OnChainMintMeta>()
 
 export async function fetchMintMetas(
@@ -171,7 +142,7 @@ export async function fetchMintMetas(
       const tokenProgram = isT22 ? TOKEN_2022_PROGRAM_ID_STR : CLASSIC_TOKEN_PROGRAM_ID_STR
       const decimals = isValidMint ? bytes![44]! : 0
       const hasUnsafeSelfPayExt = Boolean(
-        isValidT22Mint && bytes && inspectToken2022MintSelfPaySafety(bytes),
+        isValidT22Mint && bytes && inspectToken2022UnsafeSelfPay(bytes),
       )
       const meta: OnChainMintMeta = { mint, tokenProgram, decimals, isValidMint, hasUnsafeSelfPayExt }
       if (isValidMint) {

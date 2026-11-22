@@ -21,7 +21,7 @@ export const TOTAL_DEPTH_4ARY = 20;
 export const SUBTREE_LEVELS_4ARY = 4;
 export const CHECKPOINT_RING_SLOTS = 256;
 
-// Namespaced V2 PDA seed prefixes
+// Canonical namespaced PDA seed prefixes (`audren_v2_*`)
 export const POOL_SEED = 'audren_v2_pool';
 export const LANE_SEED = 'audren_v2_lane';
 export const LANE_RENT_SEED = 'audren_v2_lrent';

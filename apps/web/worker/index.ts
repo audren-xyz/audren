@@ -6,8 +6,10 @@ import {
   MEMO_NOTES_PER_PAGE,
   MEMO_PAGE_LEN,
   NATIVE_SOL_MINT_BYTES,
+  NF_PER_PAGE,
   NUM_ESCROW_SHARDS,
   OPEN_PAGE_KIND_MEMO,
+  OPEN_PAGE_KIND_NULLIFIER,
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
   SUBROOTS_PER_PAGE,
@@ -34,6 +36,7 @@ import {
   deriveEscrowPdaSync,
   deriveLanePdaSync,
   deriveMemoPdaSync,
+  deriveNfPagePdaSync,
   derivePoolPdaSync,
   deriveSolVaultPdaSync,
   deriveStealthOwner,
@@ -59,7 +62,6 @@ interface ServiceBinding {
 interface Env {
   ASSETS: ServiceBinding
   GATEWAY?: ServiceBinding
-  GATEWAY_SEARCH?: ServiceBinding
   TOKEN_GATEWAY_ORIGIN?: string
   CANONICAL_HOST?: string
   DEVNET_RPC_URL?: string
@@ -91,22 +93,7 @@ const JUPITER_CPI_EXCLUDED_DEXES = [
   'Sanctum Prop S',
 ]
 
-const SHA256_RE = /^[0-9a-f]{64}$/
-const MINT_ICON_CACHE = new Map<string, { iconUrl: string; symbol: string }>()
 const RATE_BUCKETS = new Map<string, { count: number; resetAt: number }>()
-
-const POPULAR_TOKEN_MINTS = [
-  'So11111111111111111111111111111111111111112',
-  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
-  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
-  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',
-  '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo',
-  'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn',
-  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
-  'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
-  '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R',
-  'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij',
-]
 
 interface GatewayTokenCard {
   mint: string
@@ -164,6 +151,8 @@ interface InitializedPoolSnapshot {
   deterministicNoteRentFee: string
   nfRentFee: string
   currentSlot: string
+  currentEpoch: string
+  lastPublishedSlot: string | null
   totalNotes: string
   totalNullifiers: string
   lanes: Array<{
@@ -208,19 +197,6 @@ function jsonResponse(body: unknown, status = 200, extraHeaders?: Record<string,
 
 function shortMint(mint: string): string {
   return mint.length > 10 ? `${mint.slice(0, 4)}…${mint.slice(-4)}` : mint
-}
-
-function isSafeExternalIconUrl(raw: string): boolean {
-  try {
-    const u = new URL(raw)
-    if (u.protocol !== 'https:') return false
-    const h = u.hostname.toLowerCase()
-    if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal')) return false
-    if (/^\d+\.\d+\.\d+\.\d+$/.test(h) || h.includes(':')) return false
-    return true
-  } catch {
-    return false
-  }
 }
 
 function checkRateLimit(ip: string, bucket: string, maxRequests: number): boolean {
@@ -355,12 +331,16 @@ async function fetchPoolSnapshot(
   }
 
   const pool = decodePoolState(fromBase64(poolAcc.data[0]))
-  const [currentSlot, subRent, srRent, memoRent] = await Promise.all([
-    solanaRpc<number>(env, cluster, 'getSlot', [{ commitment: 'confirmed' }]),
+  const [epochInfo, subRent, srRent, memoRent] = await Promise.all([
+    solanaRpc<{ epoch: number; absoluteSlot: number }>(env, cluster, 'getEpochInfo', [
+      { commitment: 'confirmed' },
+    ]),
     solanaRpc<number>(env, cluster, 'getMinimumBalanceForRentExemption', [SUBTREE_PAGE_LEN]),
     solanaRpc<number>(env, cluster, 'getMinimumBalanceForRentExemption', [SUBROOT_PAGE_LEN]),
     solanaRpc<number>(env, cluster, 'getMinimumBalanceForRentExemption', [MEMO_PAGE_LEN]),
   ])
+  const currentSlot = epochInfo.absoluteSlot
+  const currentEpoch = epochInfo.epoch
   const divCeil = (a: bigint, b: bigint) => (a + b - 1n) / b
   const livePerNote =
     divCeil(BigInt(subRent), BigInt(SUBTREE_LEAVES)) +
@@ -413,12 +393,16 @@ async function fetchPoolSnapshot(
 
   let latestCheckpoint: InitializedPoolSnapshot['latestCheckpoint'] = null
   let bestSlot = -1n
+  let bestAnySlot = -1n
+  const curSlotBig = BigInt(currentSlot)
   const scanCkptAccounts = (pdas: string[], vals: Array<{ data: [string, string] } | null>) => {
     for (let i = 0; i < pdas.length; i++) {
       const acc = vals[i]
       if (!acc?.data?.[0]) continue
       const ck = decodeRootCheckpoint(fromBase64(acc.data[0]))
-      if (ck.publishedSlot > bestSlot) {
+      if (ck.publishedSlot > bestAnySlot) bestAnySlot = ck.publishedSlot
+      const age = curSlotBig >= ck.publishedSlot ? curSlotBig - ck.publishedSlot : 0n
+      if (age <= pool.maxCkptAge && ck.publishedSlot > bestSlot) {
         bestSlot = ck.publishedSlot
         latestCheckpoint = {
           slotIndex: ck.slotIdx,
@@ -473,6 +457,8 @@ async function fetchPoolSnapshot(
     deterministicNoteRentFee: deterministicNoteRentFee.toString(),
     nfRentFee: pool.nfRentFee.toString(),
     currentSlot: String(currentSlot),
+    currentEpoch: String(currentEpoch),
+    lastPublishedSlot: bestAnySlot >= 0n ? bestAnySlot.toString() : null,
     totalNotes: totalNotes.toString(),
     totalNullifiers: totalNullifiers.toString(),
     lanes,
@@ -610,47 +596,16 @@ async function handleRpcSend(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ cluster, signature, slot })
 }
 
-async function handleTxInspect(url: URL, env: Env): Promise<Response> {
-  const cluster = parseCluster(url.searchParams.get('cluster'))
-  const signature = url.searchParams.get('signature')?.trim()
-  if (!signature) return jsonResponse({ error: 'signature is required' }, 400)
-  const tx = await solanaRpc<{
-    slot: number
-    blockTime: number | null
-    meta: {
-      err: unknown
-      fee: number
-      computeUnitsConsumed?: number
-      logMessages?: string[]
-    } | null
-  } | null>(env, cluster, 'getTransaction', [
-    signature,
-    { encoding: 'jsonParsed', maxSupportedTransactionVersion: 1, commitment: 'confirmed' },
-  ])
-  if (!tx) return jsonResponse({ error: 'Transaction not found yet' }, 404)
-  return jsonResponse({
-    cluster,
-    signature,
-    slot: tx.slot,
-    blockTime: tx.blockTime,
-    feeLamports: tx.meta?.fee ?? 0,
-    computeUnitsConsumed: tx.meta?.computeUnitsConsumed ?? null,
-    err: tx.meta?.err ?? null,
-    logs: tx.meta?.logMessages ?? [],
-  })
-}
-
 function normalizeGatewayCard(mint: string, card: GatewayTokenCard): ResolvedTokenInfo {
   const flagged = Array.isArray(card.trust?.flags) && card.trust!.flags!.length > 0
   const tier = typeof card.trust?.tier === 'number' ? card.trust.tier : null
-  const logoSha = !flagged && typeof card.logo === 'string' && SHA256_RE.test(card.logo) ? card.logo : null
   return {
     mint,
     symbol: !flagged && card.symbol?.trim() ? card.symbol.trim() : shortMint(mint),
     name: !flagged && card.name?.trim() ? card.name.trim() : 'Solana Token',
     decimals: typeof card.decimals === 'number' ? card.decimals : null,
     tokenProgram: card.tokenProgram === 'token-2022' ? TOKEN_2022_PROGRAM_ID : CLASSIC_TOKEN_PROGRAM_ID,
-    logoUrl: logoSha ? `/api/tokens/logo/${logoSha}.webp` : null,
+    logoUrl: null,
     priceUsd: typeof card.price?.mid === 'number' && card.price.mid > 0 ? card.price.mid : null,
     liquidityUsd: typeof card.liquidityUsd === 'number' && card.liquidityUsd > 0 ? card.liquidityUsd : null,
     verified: !flagged && tier !== null && tier <= 2,
@@ -661,18 +616,13 @@ function normalizeGatewayCard(mint: string, card: GatewayTokenCard): ResolvedTok
 function normalizeJupiterToken(tok: JupiterTokenV2): ResolvedTokenInfo {
   const flagged = tok.audit?.isSus === true
   const symbol = !flagged && tok.symbol?.trim() ? tok.symbol.trim() : shortMint(tok.id)
-  const hasIcon = !flagged && typeof tok.icon === 'string' && isSafeExternalIconUrl(tok.icon)
-  if (hasIcon && tok.icon) {
-    MINT_ICON_CACHE.set(tok.id, { iconUrl: tok.icon, symbol })
-  }
-  const symParam = encodeURIComponent(symbol.replace(/[^A-Za-z0-9]/g, '').slice(0, 4) || tok.id.slice(0, 2))
   return {
     mint: tok.id,
     symbol,
     name: !flagged && tok.name?.trim() ? tok.name.trim() : 'Solana Token',
     decimals: typeof tok.decimals === 'number' ? tok.decimals : null,
     tokenProgram: tok.tokenProgram === TOKEN_2022_PROGRAM_ID ? TOKEN_2022_PROGRAM_ID : CLASSIC_TOKEN_PROGRAM_ID,
-    logoUrl: hasIcon ? `/api/tokens/mint-logo/${tok.id}.webp?s=${symParam}` : null,
+    logoUrl: null,
     priceUsd: typeof tok.usdPrice === 'number' && tok.usdPrice > 0 ? tok.usdPrice : null,
     liquidityUsd: typeof tok.liquidity === 'number' && tok.liquidity > 0 ? tok.liquidity : null,
     verified: !flagged && tok.isVerified === true,
@@ -697,30 +647,10 @@ async function fetchJupiterTokens(env: Env, pathAndQuery: string): Promise<Jupit
   }
 }
 
-async function handleTokensSearch(url: URL, env: Env): Promise<Response> {
-  const q = (url.searchParams.get('q') ?? '').trim()
-  if (env.GATEWAY_SEARCH) {
-    try {
-      const origin = env.TOKEN_GATEWAY_ORIGIN?.trim() || DEFAULT_GATEWAY_ORIGIN
-      const res = await env.GATEWAY_SEARCH.fetch(`${origin}/search?q=${encodeURIComponent(q)}&limit=12`)
-      if (res.ok) {
-        const cards = (await res.json()) as GatewayTokenCard[]
-        if (Array.isArray(cards) && cards.length > 0) {
-          return jsonResponse({ tokens: cards.map((c) => normalizeGatewayCard(c.mint, c)) })
-        }
-      }
-    } catch {
-      // fall through to authenticated Jupiter tokens API
-    }
-  }
-  const path = q ? `search?query=${encodeURIComponent(q)}` : `search?query=${encodeURIComponent(POPULAR_TOKEN_MINTS.join(','))}`
-  const rows = await fetchJupiterTokens(env, path)
-  return jsonResponse({ tokens: rows.slice(0, 15).map(normalizeJupiterToken) })
-}
-
 async function handleTokensResolve(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json().catch(() => null)) as { mints?: unknown } | null
+  const body = (await request.json().catch(() => null)) as { mints?: unknown; cluster?: string } | null
   const mints = Array.isArray(body?.mints) ? body!.mints.map(String).slice(0, 40) : []
+  const cluster = parseCluster(body?.cluster)
   if (mints.length === 0) return jsonResponse({ tokens: {} })
   const out: Record<string, ResolvedTokenInfo> = {}
   if (env.GATEWAY) {
@@ -735,19 +665,46 @@ async function handleTokensResolve(request: Request, env: Env): Promise<Response
       // fall through
     }
   }
-  const missing = mints.filter((m) => !out[m])
-  if (missing.length > 0) {
-    const rows = await fetchJupiterTokens(env, `search?query=${encodeURIComponent(missing.join(','))}`)
+  const missingMeta = mints.filter((m) => !out[m])
+  if (missingMeta.length > 0) {
+    const rows = await fetchJupiterTokens(env, `search?query=${encodeURIComponent(missingMeta.join(','))}`)
     for (const r of rows) out[r.id] = normalizeJupiterToken(r)
   }
+  // Always hydrate on-chain decimals & tokenProgram for any mint still missing metadata or decimals
+  const needsChain = mints.filter((m) => !out[m] || out[m]!.decimals === null)
+  if (needsChain.length > 0) {
+    try {
+      const res = await solanaRpc<{
+        value: Array<{ data: [string, string]; owner: string } | null>
+      }>(env, cluster, 'getMultipleAccounts', [needsChain, { encoding: 'base64', commitment: 'confirmed' }])
+      needsChain.forEach((mint, idx) => {
+        const acc = res.value[idx]
+        if (!acc?.data?.[0]) return
+        const bytes = fromBase64(acc.data[0])
+        if (bytes.byteLength < 45) return
+        const decimals = bytes[44]!
+        const tokenProgram = acc.owner === TOKEN_2022_PROGRAM_ID ? TOKEN_2022_PROGRAM_ID : CLASSIC_TOKEN_PROGRAM_ID
+        const prev = out[mint]
+        out[mint] = prev
+          ? { ...prev, decimals: prev.decimals ?? decimals, tokenProgram }
+          : {
+              mint,
+              symbol: shortMint(mint),
+              name: 'Solana Token',
+              decimals,
+              tokenProgram,
+              logoUrl: null,
+              priceUsd: null,
+              liquidityUsd: null,
+              verified: false,
+              flagged: false,
+            }
+      })
+    } catch {
+      // Cluster RPC may be unconfigured in local preview
+    }
+  }
   return jsonResponse({ tokens: out })
-}
-
-function buildMonogramSvg(symbolHint: string | null | undefined, mint: string): string {
-  const clean = (symbolHint ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase()
-  const label = (clean || mint.slice(0, 2).toUpperCase()).slice(0, 3) || '?'
-  const fontSize = label.length >= 3 ? 11 : 13
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" rx="20" fill="#eef1ec"/><rect x="0.75" y="0.75" width="38.5" height="38.5" rx="19.25" fill="none" stroke="#c8d0c6" stroke-width="1.5"/><text x="50%" y="53%" text-anchor="middle" dominant-baseline="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="${fontSize}" font-weight="700" fill="#18221b">${label}</text></svg>`
 }
 
 async function handleJupiterQuote(request: Request, env: Env): Promise<Response> {
@@ -783,6 +740,7 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
 
 async function handleJupiterSwapInstructions(request: Request, env: Env): Promise<Response> {
   const body = (await request.json().catch(() => null)) as {
+    cluster?: string
     quoteResponse?: unknown
     poolId?: number
     shardId?: number
@@ -794,6 +752,7 @@ async function handleJupiterSwapInstructions(request: Request, env: Env): Promis
   if (!body?.quoteResponse || !body.inputMint || !body.outputMint) {
     return jsonResponse({ error: 'quoteResponse, inputMint, and outputMint are required' }, 400)
   }
+  const cluster = parseCluster(body.cluster)
   const poolId = body.poolId ?? 0
   const shardId = (body.shardId ?? 0) % NUM_ESCROW_SHARDS
   const escrowPda = deriveEscrowPdaSync(poolId, shardId, AUDREN_PROGRAM_ID).address
@@ -831,6 +790,31 @@ async function handleJupiterSwapInstructions(request: Request, env: Env): Promis
   if (!res.ok || !jup.swapInstruction) {
     return jsonResponse({ error: jup.error ?? `Jupiter swap-instructions HTTP ${res.status}` }, res.status)
   }
+
+  // Resolve Address Lookup Tables for Direct Self-Pay v0 transaction compression
+  const altAddresses = (jup.addressLookupTableAddresses ?? []).slice(0, 8)
+  const lookupTables: Record<string, string[]> = {}
+  if (altAddresses.length > 0) {
+    try {
+      const altRes = await solanaRpc<{
+        value: Array<{ data: [string, string] } | null>
+      }>(env, cluster, 'getMultipleAccounts', [altAddresses, { encoding: 'base64', commitment: 'confirmed' }])
+      altAddresses.forEach((altAddr, idx) => {
+        const raw = altRes.value[idx]?.data?.[0]
+        if (!raw) return
+        const bytes = fromBase64(raw)
+        if (bytes.byteLength < 56) return
+        const addrs: string[] = []
+        for (let off = 56; off + 32 <= bytes.byteLength; off += 32) {
+          addrs.push(base58Encode(bytes.subarray(off, off + 32)))
+        }
+        if (addrs.length > 0) lookupTables[altAddr] = addrs
+      })
+    } catch {
+      // Proceed without resolved ALTs if RPC lookup fails
+    }
+  }
+
   return jsonResponse({
     provider: 'jupiter',
     escrowPda,
@@ -841,6 +825,7 @@ async function handleJupiterSwapInstructions(request: Request, env: Env): Promis
     vaultOutAta,
     swapInstruction: jup.swapInstruction,
     addressLookupTableAddresses: jup.addressLookupTableAddresses ?? [],
+    lookupTables,
     excludedDexes: JUPITER_CPI_EXCLUDED_DEXES,
   })
 }
@@ -962,6 +947,7 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
 
   // Best-effort RootCheckpoint publish after DepositSol settles (never fails the deposit on CheckpointTooSoon)
   let checkpointSignature: string | null = null
+  let checkpointSlotIndex: number | null = null
   try {
     const curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'confirmed' }])
     const ckptInterval = BigInt(snap.ckptInterval) > 0n ? BigInt(snap.ckptInterval) : 1n
@@ -976,6 +962,7 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
     )
     const ckTx = await sendAndConfirmV1(env, 'devnet', demo, [ckIx], 120_000)
     checkpointSignature = ckTx.signature
+    checkpointSlotIndex = slotIdx
   } catch {
     // Checkpoint already published in this epoch or slot advanced — deposit succeeded cleanly.
   }
@@ -987,8 +974,39 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
     leafIndex: nextLeaf.toString(),
     amountLamports: amount.toString(),
     commitmentHex: toHex(frToBeBytes(commitment)),
+    memo90B64: toBase64(memo90),
     checkpointSignature,
+    checkpointSlotIndex,
     ...tx,
+  })
+}
+
+async function handleDevnetCheckpoint(request: Request, env: Env): Promise<Response> {
+  const demo = decodeDemoKeypair(env)
+  if (!demo) return jsonResponse({ error: 'Devnet sandbox relayer is not configured on this Worker' }, 503)
+  if (!checkRateLimit(getClientIp(request), 'devnet_ckpt', RATE_MAX_REQUESTS)) {
+    return jsonResponse({ error: 'Devnet checkpoint rate limit exceeded; retry shortly' }, 429)
+  }
+  const snap = await fetchPoolSnapshot(env, 'devnet', 0)
+  if (!snap.initialized) {
+    return jsonResponse({ error: 'Devnet Pool #0 is not initialized yet' }, 503)
+  }
+  const curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'confirmed' }])
+  const ckptInterval = BigInt(snap.ckptInterval) > 0n ? BigInt(snap.ckptInterval) : 1n
+  const slotIdx = Number((BigInt(curSlot) / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
+  const ckIx = toV1Ix(
+    buildPublishCheckpointInstruction({
+      poolId: 0,
+      slotIdx,
+      activeLanes: snap.activeLanes,
+      payer: demo.pubkeyStr,
+    }),
+  )
+  const ckTx = await sendAndConfirmV1(env, 'devnet', demo, [ckIx], 120_000)
+  return jsonResponse({
+    cluster: 'devnet',
+    slotIdx,
+    ...ckTx,
   })
 }
 
@@ -1008,33 +1026,125 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
   if (body?.cluster && body.cluster !== 'devnet') {
     return jsonResponse({ error: 'apps/web only relays Devnet sandbox transactions; use relay.audren.xyz for Mainnet' }, 403)
   }
-  if (!body?.instructionDataB64 || !Array.isArray(body.accounts)) {
-    return jsonResponse({ error: 'instructionDataB64 and accounts are required' }, 400)
+  if (
+    !body?.instructionDataB64 ||
+    typeof body.instructionDataB64 !== 'string' ||
+    body.instructionDataB64.length > 5_400 ||
+    !Array.isArray(body.accounts) ||
+    body.accounts.length < 12 ||
+    body.accounts.length > 62
+  ) {
+    return jsonResponse({ error: 'Valid instructionDataB64 and 12..62 accounts are required' }, 400)
   }
-  const ixData = fromBase64(body.instructionDataB64)
-  if (ixData.byteLength === 0 || (ixData[0] !== TAG_JOINSPLIT && ixData[0] !== TAG_EXEC_VIA_ESCROW)) {
+
+  let ixData: Uint8Array
+  try {
+    ixData = fromBase64(body.instructionDataB64)
+  } catch {
+    return jsonResponse({ error: 'instructionDataB64 must be valid base64' }, 400)
+  }
+  const tag = ixData[0]
+  if (tag !== TAG_JOINSPLIT && tag !== TAG_EXEC_VIA_ESCROW) {
     return jsonResponse({ error: 'Only Audren JoinSplit (Tag 6) and ExecViaEscrow (Tag 7) may be relayed' }, 400)
   }
-  if (!body.accounts.some((a) => a.pubkey === demo.pubkeyStr && a.isSigner)) {
-    return jsonResponse({ error: `Fee payer account must match Devnet sandbox relayer ${demo.pubkeyStr}` }, 400)
+  const minDataLen = tag === TAG_JOINSPLIT ? 378 : 544
+  if (ixData.byteLength < minDataLen) {
+    return jsonResponse({ error: `Instruction data too short (${ixData.byteLength} < ${minDataLen})` }, 400)
   }
-  for (const a of body.accounts) {
-    if (a.isSigner && a.pubkey !== demo.pubkeyStr) {
-      return jsonResponse({ error: 'Only the relayer fee payer may sign a relayed transaction' }, 400)
+
+  const payerAcc = body.accounts[0]
+  if (!payerAcc || payerAcc.pubkey !== demo.pubkeyStr || !payerAcc.isSigner || !payerAcc.isWritable) {
+    return jsonResponse(
+      { error: `accounts[0] must be Devnet sandbox relayer ${demo.pubkeyStr} (writable signer)` },
+      400,
+    )
+  }
+  const pool0Pda = derivePoolPdaSync(0, AUDREN_PROGRAM_ID).address
+  if (body.accounts[1]?.pubkey !== pool0Pda) {
+    return jsonResponse({ error: `accounts[1] must be canonical Pool #0 (${pool0Pda})` }, 400)
+  }
+
+  const decodedAccounts: V1Instruction['accounts'] = []
+  for (let i = 0; i < body.accounts.length; i++) {
+    const a = body.accounts[i]
+    if (!a || typeof a.pubkey !== 'string') {
+      return jsonResponse({ error: `Missing pubkey at accounts[${i}]` }, 400)
+    }
+    if (i > 0 && a.isSigner) {
+      return jsonResponse({ error: 'Only accounts[0] (relayer fee payer) may sign a relayed transaction' }, 400)
+    }
+    let pk: Uint8Array
+    try {
+      pk = base58Decode(a.pubkey)
+    } catch {
+      return jsonResponse({ error: `Invalid base58 pubkey at accounts[${i}]` }, 400)
+    }
+    if (pk.byteLength !== 32) {
+      return jsonResponse({ error: `accounts[${i}] must be a 32-byte Solana pubkey` }, 400)
+    }
+    decodedAccounts.push({ pubkey: pk, isSigner: Boolean(a.isSigner), isWritable: Boolean(a.isWritable) })
+  }
+
+  // Ensure output/nullifier pages exist on Devnet Pool #0 outLaneId before Tag 6 JoinSplit
+  const preIxs: V1Instruction[] = []
+  if (tag === TAG_JOINSPLIT) {
+    const outLaneId = ixData[6]!
+    const lanePda = deriveLanePdaSync(0, outLaneId, AUDREN_PROGRAM_ID).address
+    const laneRes = await solanaRpc<{ value: Array<{ data: [string, string] } | null> }>(
+      env,
+      'devnet',
+      'getMultipleAccounts',
+      [[lanePda], { encoding: 'base64', commitment: 'confirmed' }],
+    )
+    const laneRaw = laneRes.value[0]?.data?.[0]
+    if (laneRaw) {
+      const hdr = decodeLaneHeader(fromBase64(laneRaw))
+      const subSeq = hdr.nextLeaf / BigInt(SUBTREE_LEAVES)
+      const rootSeq = subSeq / BigInt(SUBROOTS_PER_PAGE)
+      const memoSeq = hdr.nextLeaf / BigInt(MEMO_NOTES_PER_PAGE)
+      const nfSeq = hdr.nfCount / BigInt(NF_PER_PAGE)
+      const pageAddrs = [
+        deriveSubtreePdaSync(0, outLaneId, subSeq, AUDREN_PROGRAM_ID).address,
+        deriveSubrootPdaSync(0, outLaneId, rootSeq, AUDREN_PROGRAM_ID).address,
+        deriveMemoPdaSync(0, outLaneId, memoSeq, AUDREN_PROGRAM_ID).address,
+        deriveNfPagePdaSync(0, outLaneId, nfSeq, AUDREN_PROGRAM_ID).address,
+      ]
+      const pageCheck = await solanaRpc<{ value: Array<unknown | null> }>(
+        env,
+        'devnet',
+        'getMultipleAccounts',
+        [pageAddrs, { encoding: 'base64', commitment: 'confirmed' }],
+      )
+      if (!pageCheck.value[0]) {
+        preIxs.push(
+          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_SUBTREE, pageSeq: subSeq, payer: demo.pubkeyStr })),
+        )
+      }
+      if (!pageCheck.value[1]) {
+        preIxs.push(
+          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_SUBROOT, pageSeq: rootSeq, payer: demo.pubkeyStr })),
+        )
+      }
+      if (!pageCheck.value[2]) {
+        preIxs.push(
+          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_MEMO, pageSeq: memoSeq, payer: demo.pubkeyStr })),
+        )
+      }
+      if (!pageCheck.value[3]) {
+        preIxs.push(
+          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: nfSeq, payer: demo.pubkeyStr })),
+        )
+      }
     }
   }
 
   const ix: V1Instruction = {
     programId: base58Decode(AUDREN_PROGRAM_ID),
-    accounts: body.accounts.map((a) => ({
-      pubkey: base58Decode(a.pubkey),
-      isSigner: a.isSigner,
-      isWritable: a.isWritable,
-    })),
+    accounts: decodedAccounts,
     data: ixData,
   }
   const cuLimit = Math.min(1_200_000, Math.max(200_000, body.computeUnitLimit ?? 400_000))
-  const tx = await sendAndConfirmV1(env, 'devnet', demo, [ix], cuLimit)
+  const tx = await sendAndConfirmV1(env, 'devnet', demo, [...preIxs, ix], cuLimit)
   return jsonResponse({ cluster: 'devnet', relayerPubkey: demo.pubkeyStr, ...tx })
 }
 
@@ -1078,6 +1188,10 @@ const worker = {
         return await handleDevnetDeposit(request, env)
       }
 
+      if (url.pathname === '/api/devnet/checkpoint' && request.method === 'POST') {
+        return await handleDevnetCheckpoint(request, env)
+      }
+
       if (url.pathname === '/api/rpc/accounts' && request.method === 'POST') {
         return await handleRpcAccounts(request, env)
       }
@@ -1094,51 +1208,8 @@ const worker = {
         return await handleRpcSend(request, env)
       }
 
-      if (url.pathname === '/api/tx/inspect' && request.method === 'GET') {
-        return await handleTxInspect(url, env)
-      }
-
-      if (url.pathname === '/api/tokens/search' && request.method === 'GET') {
-        return await handleTokensSearch(url, env)
-      }
-
       if (url.pathname === '/api/tokens/resolve' && request.method === 'POST') {
         return await handleTokensResolve(request, env)
-      }
-
-      if (url.pathname.startsWith('/api/tokens/logo/') && request.method === 'GET') {
-        const sha = url.pathname.slice('/api/tokens/logo/'.length).replace(/\.webp$/, '')
-        if (env.GATEWAY && SHA256_RE.test(sha)) {
-          const origin = env.TOKEN_GATEWAY_ORIGIN?.trim() || DEFAULT_GATEWAY_ORIGIN
-          const res = await env.GATEWAY.fetch(`${origin}/logo/${sha}.webp`)
-          if (res.ok) return res
-        }
-        return new Response(buildMonogramSvg(url.searchParams.get('s'), sha), {
-          headers: { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=86400' },
-        })
-      }
-
-      if (url.pathname.startsWith('/api/tokens/mint-logo/') && request.method === 'GET') {
-        const mint = url.pathname.slice('/api/tokens/mint-logo/'.length).replace(/\.webp$/, '')
-        const cached = MINT_ICON_CACHE.get(mint)
-        if (cached && isSafeExternalIconUrl(cached.iconUrl)) {
-          try {
-            const img = await fetch(cached.iconUrl)
-            if (img.ok && (img.headers.get('content-type') ?? '').startsWith('image/')) {
-              return new Response(img.body, {
-                headers: {
-                  'content-type': img.headers.get('content-type') ?? 'image/png',
-                  'cache-control': 'public, max-age=86400',
-                },
-              })
-            }
-          } catch {
-            // fall back to SVG monogram
-          }
-        }
-        return new Response(buildMonogramSvg(url.searchParams.get('s'), mint), {
-          headers: { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=86400' },
-        })
       }
 
       if (url.pathname === '/api/jupiter/quote' && request.method === 'POST') {

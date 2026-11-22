@@ -23,7 +23,7 @@ The service sees connection metadata and public instruction/quote parameters. `s
     │  • Live RPC pricing: fetches mint decimals/program & live rent schedule via Solana RPC
     │  • Pre-flight simulation: verifies exact lamport outflow, Mode 1 shielded cm2 fee (via read-only FVK), or Mode 2/3 fee inflow
     │  • Atomic RelayGuard reservation: enforces daily SOL budget, per-IP caps & nullifier lock
-    │  • Signs & broadcasts single Solana Transaction v1 (`0x81`, auto-prepending `OpenPage` lookahead if needed)
+    │  • Signs & broadcasts single Solana Transaction v1 (`0x81`, with validated `setupAtas` / allowlisted `preInstructions`)
     ▼
   Solana Mainnet & Devnet RPC
 ```

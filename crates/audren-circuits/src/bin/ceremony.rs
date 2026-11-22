@@ -3,21 +3,20 @@
 //! Independently verifiable Phase-2 Groth16 trusted setup for the frozen
 //! `JoinSplit4AryCircuit` (`17,861` R1CS, `2^15 = 32,768` FFT domain, BN254):
 //!
-//!   1. `init`       — Parses & pairing-verifies official Hermez/PSE Perpetual Powers of Tau
-//!                     (`powersOfTau28_hez_final_15.ptau`, 71+ public contributors), transforms
-//!                     monomial powers into `ark-bn254` `LibsnarkReduction` Lagrange QAP form,
-//!                     and writes `phase2_0000.pk`.
+//!   1. `init` — Parses & pairing-verifies official Hermez/PSE Perpetual Powers of Tau
+//!      (`powersOfTau28_hez_final_15.ptau`, 71+ public contributors), transforms monomial
+//!      powers into `ark-bn254` `LibsnarkReduction` Lagrange QAP form, and writes `phase2_0000.pk`.
 //!   2. `contribute` — Applies a BGM17 Phase-2 contribution (`delta_k` from OS CSPRNG), emits
-//!                     Schnorr PoK + pairing-verifiable transition receipt JSON, and zeroizes
-//!                     all secret scalars from RAM immediately.
-//!   3. `beacon`     — Applies a deterministic, publicly verifiable final beacon contribution
-//!                     derived via `2^20` sequential SHA-256 iterations over a live drand
-//!                     League of Entropy round + Solana Mainnet finalized blockhash.
-//!   4. `verify`     — Independently verifies `.ptau` -> `init` -> every contribution -> beacon
-//!                     via BN254 pairing checks (including Fiat-Shamir random linear combination
-//!                     checks over ALL `l_query` and `h_query` elements) + live Groth16 proof test.
-//!   5. `export`     — Exports the verified `ProvingKey<Bn254>` verifying key into
-//!                     `program/src/vk_generated.rs` (`groth16-solana` `alt_bn128` wire format).
+//!      Schnorr PoK + pairing-verifiable transition receipt JSON, and zeroizes all secret
+//!      scalars from RAM immediately.
+//!   3. `beacon` — Applies a deterministic, publicly verifiable final beacon contribution
+//!      derived via `2^20` sequential SHA-256 iterations over a live drand League of Entropy
+//!      round + Solana Mainnet finalized blockhash.
+//!   4. `verify` — Independently verifies `ceremony/transcript.json` + `audren_joinsplit.pk` +
+//!      `program/src/vk_generated.rs` (and optional `.ptau` end-to-end Phase-1 -> Phase-2 QAP
+//!      + Fiat-Shamir RLC pairing checks over ALL `l_query` & `h_query` elements) + live Groth16 test.
+//!   5. `export` — Exports the verified `ProvingKey<Bn254>` verifying key into
+//!      `program/src/vk_generated.rs` (`groth16-solana` `alt_bn128` wire format).
 
 use std::{
     env, fs,
@@ -39,7 +38,10 @@ use audren_circuits::{
     deserialize_pk_compressed,
     joinsplit::JoinSplit4AryCircuit,
     prove_joinsplit,
-    solana_export::{proof_to_solana_compressed_192, render_solana_vk_const},
+    solana_export::{
+        proof_to_solana_compressed_192, render_solana_vk_const, render_vk_generated_rs,
+        CANONICAL_VK_PROVENANCE,
+    },
     verify_joinsplit_offchain,
 };
 use rand::RngCore;
@@ -70,7 +72,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn hex_decode(s: &str) -> Vec<u8> {
     let s = s.trim();
-    assert!(s.len() % 2 == 0, "odd hex length");
+    assert!(s.len().is_multiple_of(2), "odd hex length");
     let mut out = Vec::with_capacity(s.len() / 2);
     let b = s.as_bytes();
     for i in (0..b.len()).step_by(2) {
@@ -503,15 +505,11 @@ fn derive_beacon_delta(
     d
 }
 
-fn verify_transition(
+fn verify_phase1_and_rlc(
     prev: &ProvingKey<Bn254>,
     prev_sha: &str,
     next: &ProvingKey<Bn254>,
     next_sha: &str,
-    pub_delta_g1: G1Affine,
-    pub_delta_g2: G2Affine,
-    pok_r_g1: G1Affine,
-    pok_s: Fr,
 ) {
     // 1. All Phase-1 elements MUST be strictly invariant across every Phase-2 transition.
     assert_eq!(prev.vk.alpha_g1, next.vk.alpha_g1, "alpha_g1 mutated!");
@@ -525,43 +523,19 @@ fn verify_transition(
     assert_eq!(prev.l_query.len(), next.l_query.len(), "l_query length mutated!");
     assert_eq!(prev.h_query.len(), next.h_query.len(), "h_query length mutated!");
 
-    // 2. Non-degenerate contribution
-    assert!(!pub_delta_g1.is_zero() && !pub_delta_g2.is_zero(), "zero delta contribution!");
-    assert!(!next.delta_g1.is_zero() && !next.vk.delta_g2.is_zero(), "zero resulting delta!");
-    assert_ne!(prev.delta_g1, next.delta_g1, "identity contribution (delta=1) rejected!");
-
-    // 3. Schnorr PoK of delta_k bound to prev_sha256 & delta points
-    let g1 = G1Affine::generator();
-    let g2 = G2Affine::generator();
-    let e = schnorr_challenge(prev_sha, &prev.delta_g1, &next.delta_g1, &pub_delta_g1, &pok_r_g1);
-    let lhs = (g1.into_group() * pok_s).into_affine();
-    let rhs = (pok_r_g1.into_group() + pub_delta_g1.into_group() * e).into_affine();
-    assert_eq!(lhs, rhs, "Schnorr PoK verification FAILED!");
-
-    // 4. Pairing checks linking pub_delta_g1, pub_delta_g2, prev.delta, next.delta
-    assert_eq!(
-        Bn254::pairing(pub_delta_g1, g2),
-        Bn254::pairing(g1, pub_delta_g2),
-        "pub_delta G1/G2 pairing mismatch!"
-    );
-    assert_eq!(
-        Bn254::pairing(next.delta_g1, g2),
-        Bn254::pairing(prev.delta_g1, pub_delta_g2),
-        "delta_g1 transition pairing mismatch!"
-    );
-    assert_eq!(
-        Bn254::pairing(g1, next.vk.delta_g2),
-        Bn254::pairing(pub_delta_g1, prev.vk.delta_g2),
-        "delta_g2 transition pairing mismatch!"
-    );
-
-    // 5. Fiat-Shamir random linear combination pairing check over EVERY l_query & h_query element
-    let l_coeffs = derive_rlc_scalars(b"audren/ceremony/rlc_l", prev_sha, next_sha, prev.l_query.len());
+    // 2. Fiat-Shamir random linear combination pairing check over EVERY l_query & h_query element
+    let l_coeffs =
+        derive_rlc_scalars(b"audren/ceremony/rlc_l", prev_sha, next_sha, prev.l_query.len());
     let mut l_prev_acc = G1Projective::zero();
     let mut l_next_acc = G1Projective::zero();
-    for i in 0..prev.l_query.len() {
-        l_prev_acc += prev.l_query[i].into_group() * l_coeffs[i];
-        l_next_acc += next.l_query[i].into_group() * l_coeffs[i];
+    for ((prev_pt, next_pt), &c) in prev
+        .l_query
+        .iter()
+        .zip(next.l_query.iter())
+        .zip(l_coeffs.iter())
+    {
+        l_prev_acc += prev_pt.into_group() * c;
+        l_next_acc += next_pt.into_group() * c;
     }
     assert_eq!(
         Bn254::pairing(l_next_acc.into_affine(), next.vk.delta_g2),
@@ -569,18 +543,89 @@ fn verify_transition(
         "l_query inverse-delta scaling pairing check FAILED!"
     );
 
-    let h_coeffs = derive_rlc_scalars(b"audren/ceremony/rlc_h", prev_sha, next_sha, prev.h_query.len());
+    let h_coeffs =
+        derive_rlc_scalars(b"audren/ceremony/rlc_h", prev_sha, next_sha, prev.h_query.len());
     let mut h_prev_acc = G1Projective::zero();
     let mut h_next_acc = G1Projective::zero();
-    for j in 0..prev.h_query.len() {
-        h_prev_acc += prev.h_query[j].into_group() * h_coeffs[j];
-        h_next_acc += next.h_query[j].into_group() * h_coeffs[j];
+    for ((prev_pt, next_pt), &c) in prev
+        .h_query
+        .iter()
+        .zip(next.h_query.iter())
+        .zip(h_coeffs.iter())
+    {
+        h_prev_acc += prev_pt.into_group() * c;
+        h_next_acc += next_pt.into_group() * c;
     }
     assert_eq!(
         Bn254::pairing(h_next_acc.into_affine(), next.vk.delta_g2),
         Bn254::pairing(h_prev_acc.into_affine(), prev.vk.delta_g2),
         "h_query inverse-delta scaling pairing check FAILED!"
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_delta_step(
+    prev_sha: &str,
+    prev_delta_g1: G1Affine,
+    prev_delta_g2: G2Affine,
+    next_delta_g1: G1Affine,
+    next_delta_g2: G2Affine,
+    pub_delta_g1: G1Affine,
+    pub_delta_g2: G2Affine,
+    pok_r_g1: G1Affine,
+    pok_s: Fr,
+) {
+    assert!(!pub_delta_g1.is_zero() && !pub_delta_g2.is_zero(), "zero delta contribution!");
+    assert!(!next_delta_g1.is_zero() && !next_delta_g2.is_zero(), "zero resulting delta!");
+    assert_ne!(prev_delta_g1, next_delta_g1, "identity contribution (delta=1) rejected!");
+
+    let g1 = G1Affine::generator();
+    let g2 = G2Affine::generator();
+    let e = schnorr_challenge(prev_sha, &prev_delta_g1, &next_delta_g1, &pub_delta_g1, &pok_r_g1);
+    let lhs = (g1.into_group() * pok_s).into_affine();
+    let rhs = (pok_r_g1.into_group() + pub_delta_g1.into_group() * e).into_affine();
+    assert_eq!(lhs, rhs, "Schnorr PoK verification FAILED!");
+
+    assert_eq!(
+        Bn254::pairing(pub_delta_g1, g2),
+        Bn254::pairing(g1, pub_delta_g2),
+        "pub_delta G1/G2 pairing mismatch!"
+    );
+    assert_eq!(
+        Bn254::pairing(next_delta_g1, g2),
+        Bn254::pairing(prev_delta_g1, pub_delta_g2),
+        "delta_g1 transition pairing mismatch!"
+    );
+    assert_eq!(
+        Bn254::pairing(g1, next_delta_g2),
+        Bn254::pairing(pub_delta_g1, prev_delta_g2),
+        "delta_g2 transition pairing mismatch!"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_transition(
+    prev: &ProvingKey<Bn254>,
+    prev_sha: &str,
+    next: &ProvingKey<Bn254>,
+    next_sha: &str,
+    pub_delta_g1: G1Affine,
+    pub_delta_g2: G2Affine,
+    pok_r_g1: G1Affine,
+    pok_s: Fr,
+) {
+    verify_delta_step(
+        prev_sha,
+        prev.delta_g1,
+        prev.vk.delta_g2,
+        next.delta_g1,
+        next.vk.delta_g2,
+        pub_delta_g1,
+        pub_delta_g2,
+        pok_r_g1,
+        pok_s,
+    );
+    verify_phase1_and_rlc(prev, prev_sha, next, next_sha);
 }
 
 fn sanity_prove_and_verify(pk: &ProvingKey<Bn254>) {
@@ -605,26 +650,6 @@ fn sanity_prove_and_verify(pk: &ProvingKey<Bn254>) {
     assert_eq!(wire192.len(), 192);
 }
 
-fn render_vk_generated_rs(pk: &ProvingKey<Bn254>, pk_sha256: &str, provenance: &str) -> String {
-    let mut src = String::new();
-    src.push_str("//! Auto-generated VerifyingKey for Audren `JoinSplit4AryCircuit` (`vk_id = 0`).\n");
-    src.push_str("//!\n");
-    src.push_str(&format!("//! Provenance: {provenance}\n"));
-    src.push_str(&format!("//! ProvingKey compressed SHA-256: `{pk_sha256}`\n"));
-    src.push_str("//! Phase 1: Official Hermez/PSE Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`,\n");
-    src.push_str("//!          71+ public contributors, BLAKE2b-512 `982372c8...69ae6e`, SHA-256 `3ef2ecc5...9e7f`).\n");
-    src.push_str("//! Phase 2: BGM17 Groth16 MPC ceremony (`ceremony/transcript.json`, verifiable via\n");
-    src.push_str("//!          `cargo run -p audren-circuits --release --bin ceremony -- verify`).\n\n");
-    src.push_str("#[allow(dead_code)]\n");
-    src.push_str(&format!("pub const VK_PROVENANCE: &str = \"{provenance}\";\n"));
-    src.push_str("#[allow(dead_code)]\n");
-    src.push_str(&format!(
-        "pub const PK_COMPRESSED_SHA256: &str = \"{pk_sha256}\";\n\n"
-    ));
-    src.push_str(&render_solana_vk_const("VK_JOINSPLIT_DEFAULT", &pk.vk));
-    src
-}
-
 fn get_arg(args: &[String], flag: &str) -> String {
     args.iter()
         .position(|a| a == flag)
@@ -640,25 +665,324 @@ fn get_opt_arg(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-fn parse_json_str(json: &str, key: &str) -> String {
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn find_json_value_start(json: &str, key: &str) -> usize {
+    let bytes = json.as_bytes();
     let pat = format!("\"{key}\"");
-    let pos = json.find(&pat).unwrap_or_else(|| panic!("missing JSON key {key}"));
-    let rest = &json[pos + pat.len()..];
-    let colon = rest.find(':').unwrap();
-    let after = rest[colon + 1..].trim_start();
-    assert!(after.starts_with('"'), "expected string value for {key}");
-    let end = after[1..].find('"').unwrap();
-    after[1..1 + end].to_string()
+    let pat_b = pat.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'"' => {
+                if depth == 1 && bytes[i..].starts_with(pat_b) {
+                    let mut j = i + pat_b.len();
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b':' {
+                        j += 1;
+                        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        return j;
+                    }
+                }
+                in_str = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    panic!("missing top-level JSON key {key}");
+}
+
+fn extract_balanced_slice(json: &str, start: usize, open: u8, close: u8) -> &str {
+    let bytes = json.as_bytes();
+    assert_eq!(bytes[start], open, "expected {} at offset {start}", open as char);
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    for (rel, &b) in bytes[start..].iter().enumerate() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+        } else if b == open {
+            depth += 1;
+        } else if b == close {
+            depth -= 1;
+            if depth == 0 {
+                return &json[start..=start + rel];
+            }
+        }
+    }
+    panic!("unterminated JSON container starting at {start}");
+}
+
+fn extract_json_object<'a>(json: &'a str, key: &str) -> &'a str {
+    let start = find_json_value_start(json, key);
+    extract_balanced_slice(json, start, b'{', b'}')
+}
+
+fn extract_json_object_array<'a>(json: &'a str, key: &str) -> Vec<&'a str> {
+    let start = find_json_value_start(json, key);
+    let arr = extract_balanced_slice(json, start, b'[', b']');
+    let bytes = arr.as_bytes();
+    let mut items = Vec::new();
+    let mut i = 1usize; // skip '['
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{' {
+            let obj = extract_balanced_slice(arr, i, b'{', b'}');
+            items.push(obj);
+            i += obj.len();
+        } else {
+            i += 1;
+        }
+    }
+    items
+}
+
+fn parse_json_str(json: &str, key: &str) -> String {
+    let start = find_json_value_start(json, key);
+    let bytes = json.as_bytes();
+    assert_eq!(bytes[start], b'"', "expected string value for {key}");
+    let mut out = String::new();
+    let mut i = start + 1;
+    let mut esc = false;
+    while i < bytes.len() {
+        let ch = json[i..].chars().next().unwrap();
+        i += ch.len_utf8();
+        if esc {
+            match ch {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other => out.push(other),
+            }
+            esc = false;
+        } else if ch == '\\' {
+            esc = true;
+        } else if ch == '"' {
+            return out;
+        } else {
+            out.push(ch);
+        }
+    }
+    panic!("unterminated string value for {key}");
 }
 
 fn parse_json_u64(json: &str, key: &str) -> u64 {
-    let pat = format!("\"{key}\"");
-    let pos = json.find(&pat).unwrap_or_else(|| panic!("missing JSON key {key}"));
-    let rest = &json[pos + pat.len()..];
-    let colon = rest.find(':').unwrap();
-    let after = rest[colon + 1..].trim_start();
-    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let start = find_json_value_start(json, key);
+    let digits: String = json[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().expect("u64")
+}
+
+fn verify_transcript(
+    transcript_path: &str,
+    pk_path: &str,
+    vk_rs_opt: Option<&str>,
+    ptau_opt: Option<&str>,
+) {
+    let transcript = fs::read_to_string(transcript_path)
+        .unwrap_or_else(|e| panic!("failed to read transcript {transcript_path}: {e}"));
+    let phase1 = extract_json_object(&transcript, "phase1");
+    let phase2 = extract_json_object(&transcript, "phase2");
+    let final_artifacts = extract_json_object(&transcript, "final_artifacts");
+    let steps = extract_json_object_array(phase2, "steps");
+    assert!(!steps.is_empty(), "transcript has zero Phase-2 steps");
+
+    let pk_bytes = fs::read(pk_path)
+        .unwrap_or_else(|e| panic!("failed to read proving key {pk_path}: {e}"));
+    let final_pk_sha = sha256_hex(&pk_bytes);
+    let exp_pk_bytes = parse_json_u64(final_artifacts, "proving_key_bytes") as usize;
+    let exp_pk_sha = parse_json_str(final_artifacts, "proving_key_sha256");
+    assert_eq!(
+        pk_bytes.len(),
+        exp_pk_bytes,
+        "proving key byte length mismatch ({} != {exp_pk_bytes})",
+        pk_bytes.len()
+    );
+    assert_eq!(
+        final_pk_sha, exp_pk_sha,
+        "proving key SHA-256 mismatch ({final_pk_sha} != {exp_pk_sha})"
+    );
+    let final_pk = deserialize_pk(&pk_bytes);
+    println!("1. Loaded & curve-validated final PK: {pk_path} ({} bytes, SHA-256: {final_pk_sha})", pk_bytes.len());
+
+    let initial_pk_sha = parse_json_str(phase2, "initial_pk_sha256");
+    let mut cur_sha = initial_pk_sha.clone();
+    let mut cur_delta_g1 = G1Affine::generator();
+    let mut cur_delta_g2 = G2Affine::generator();
+    let g1 = G1Affine::generator();
+    let g2 = G2Affine::generator();
+
+    println!("2. Verifying {} Phase-2 transcript steps (Schnorr PoKs + BN254 pairings + beacon)...", steps.len());
+    for (idx, step) in steps.iter().enumerate() {
+        let kind = parse_json_str(step, "kind");
+        let name = parse_json_str(step, "name");
+        let prev_sha = parse_json_str(step, "prev_pk_sha256");
+        let next_sha = parse_json_str(step, "next_pk_sha256");
+        assert_eq!(prev_sha, cur_sha, "Step #{} prev_pk_sha256 chain break", idx + 1);
+
+        let pub_g1 = g1_from_hex(&parse_json_str(step, "pub_delta_g1"));
+        let pub_g2 = g2_from_hex(&parse_json_str(step, "pub_delta_g2"));
+        let pok_r = g1_from_hex(&parse_json_str(step, "pok_r_g1"));
+        let pok_s = fr_from_hex(&parse_json_str(step, "pok_s"));
+        let new_g1 = g1_from_hex(&parse_json_str(step, "new_delta_g1"));
+        let new_g2 = g2_from_hex(&parse_json_str(step, "new_delta_g2"));
+
+        verify_delta_step(
+            &cur_sha,
+            cur_delta_g1,
+            cur_delta_g2,
+            new_g1,
+            new_g2,
+            pub_g1,
+            pub_g2,
+            pok_r,
+            pok_s,
+        );
+
+        if kind == "beacon" {
+            let delay = parse_json_u64(step, "sha256_delay_iterations") as usize;
+            assert_eq!(delay, BEACON_SHA256_ITERATIONS, "unexpected beacon delay iterations");
+            let dr = parse_json_u64(step, "drand_round");
+            let drand_rand = parse_json_str(step, "drand_randomness");
+            let slot = parse_json_u64(step, "solana_mainnet_slot");
+            let bh = parse_json_str(step, "solana_mainnet_blockhash");
+            let exp_delta = derive_beacon_delta(&cur_sha, dr, &drand_rand, slot, &bh);
+            assert_eq!(
+                (g1.into_group() * exp_delta).into_affine(),
+                pub_g1,
+                "beacon pub_delta_g1 does not match 2^20 SHA-256 drand+Solana derivation!"
+            );
+            assert_eq!(
+                (g2.into_group() * exp_delta).into_affine(),
+                pub_g2,
+                "beacon pub_delta_g2 does not match 2^20 SHA-256 drand+Solana derivation!"
+            );
+            let exp_r_bytes = Sha256::digest(format!("audren/beacon/r/{cur_sha}/{dr}").as_bytes());
+            let exp_r = Fr::from_be_bytes_mod_order(&exp_r_bytes);
+            assert_eq!(
+                (g1.into_group() * exp_r).into_affine(),
+                pok_r,
+                "beacon deterministic pok_r_g1 mismatch!"
+            );
+            if idx + 1 == steps.len() {
+                let inv_delta = exp_delta.inverse().expect("beacon delta invertible");
+                let mut pre_beacon_pk = final_pk.clone();
+                apply_delta(&mut pre_beacon_pk, inv_delta);
+                let recovered_pre_sha = sha256_hex(&serialize_pk(&pre_beacon_pk));
+                assert_eq!(
+                    recovered_pre_sha, cur_sha,
+                    "inverting beacon delta on final PK did NOT recover committed pre-beacon PK SHA-256!"
+                );
+                println!("   OK: inverted public beacon on final PK -> exact pre-beacon PK SHA-256 ({recovered_pre_sha})");
+            }
+        }
+
+        println!("   Step #{} ({kind}: {name}) Schnorr PoK + BN254 pairings OK ({next_sha})", idx + 1);
+        cur_sha = next_sha;
+        cur_delta_g1 = new_g1;
+        cur_delta_g2 = new_g2;
+    }
+
+    assert_eq!(cur_sha, final_pk_sha, "transcript final step SHA-256 != final PK SHA-256");
+    assert_eq!(final_pk.delta_g1, cur_delta_g1, "final PK delta_g1 != transcript final new_delta_g1");
+    assert_eq!(final_pk.vk.delta_g2, cur_delta_g2, "final PK delta_g2 != transcript final new_delta_g2");
+
+    if let Some(ptau_path) = ptau_opt {
+        println!("3. Verifying Phase-1 Perpetual Powers of Tau ({ptau_path}) & full QAP + RLC pairings...");
+        let ptau = parse_and_verify_ptau(Path::new(ptau_path));
+        assert_eq!(
+            ptau.sha256,
+            parse_json_str(phase1, "sha256"),
+            "transcript phase1.sha256 mismatch"
+        );
+        let pk_0 = build_initial_phase2_pk(&ptau);
+        let pk_0_sha = sha256_hex(&serialize_pk(&pk_0));
+        assert_eq!(
+            pk_0_sha, initial_pk_sha,
+            "deterministic .ptau + JoinSplit4AryCircuit initial PK SHA-256 mismatch!"
+        );
+        println!("   OK: deterministic Phase-1 -> Phase-2 initial PK matches transcript ({pk_0_sha})");
+        verify_phase1_and_rlc(&pk_0, &initial_pk_sha, &final_pk, &final_pk_sha);
+        println!("   OK: ALL Phase-1 elements invariant + Fiat-Shamir RLC pairings verified over all {} l_query & {} h_query points.", final_pk.l_query.len(), final_pk.h_query.len());
+    } else {
+        println!("3. Skipping Phase-1 .ptau QAP + RLC re-derivation (pass `--ptau powersOfTau28_hez_final_15.ptau` for full Phase-1 -> Phase-2 audit).");
+    }
+
+    println!("4. Running live Groth16 prove+verify against final ceremony PK...");
+    sanity_prove_and_verify(&final_pk);
+    println!("   OK: live Groth16 prove + off-chain verify + 192 B wire export passed.");
+
+    if let Some(vk_rs_path) = vk_rs_opt {
+        let vk_rs = fs::read_to_string(vk_rs_path).expect("read vk_generated.rs");
+        let exp_vk_sha = parse_json_str(final_artifacts, "vk_generated_rs_sha256");
+        let actual_vk_sha = sha256_hex(vk_rs.as_bytes());
+        assert_eq!(
+            actual_vk_sha, exp_vk_sha,
+            "{vk_rs_path} SHA-256 ({actual_vk_sha}) != transcript vk_generated_rs_sha256 ({exp_vk_sha})"
+        );
+        assert!(
+            vk_rs.contains(&final_pk_sha),
+            "{vk_rs_path} does not embed final ceremony PK SHA-256 ({final_pk_sha})"
+        );
+        let expected_const = render_solana_vk_const("VK_JOINSPLIT_DEFAULT", &final_pk.vk);
+        assert!(
+            vk_rs.contains(&expected_const),
+            "VK_JOINSPLIT_DEFAULT bytes in {vk_rs_path} do NOT match final ceremony VerifyingKey!"
+        );
+        println!("5. Verified {vk_rs_path} SHA-256 ({actual_vk_sha}) & VK_JOINSPLIT_DEFAULT bytes match byte-for-byte.");
+    }
+    println!("\nCEREMONY VERIFICATION PASSED 100% (final PK SHA-256: {final_pk_sha})");
 }
 
 fn main() {
@@ -700,7 +1024,7 @@ fn main() {
             let now_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
             let mut h = Sha512::new();
             h.update(b"audren/ceremony/phase2/contribute_v1");
-            h.update(&os_rand);
+            h.update(os_rand);
             h.update(prev_sha.as_bytes());
             h.update(now_ns.to_le_bytes());
             h.update(extra.as_bytes());
@@ -753,8 +1077,9 @@ fn main() {
             sanity_prove_and_verify(&next_pk);
 
             fs::write(&out_path, &next_bytes).unwrap();
+            let escaped_name = json_escape(&name);
             let att = format!(
-                "{{\n  \"kind\": \"contribution\",\n  \"name\": \"{name}\",\n  \"prev_pk_sha256\": \"{prev_sha}\",\n  \"next_pk_sha256\": \"{next_sha}\",\n  \"pub_delta_g1\": \"{}\",\n  \"pub_delta_g2\": \"{}\",\n  \"pok_r_g1\": \"{}\",\n  \"pok_s\": \"{}\",\n  \"new_delta_g1\": \"{}\",\n  \"new_delta_g2\": \"{}\"\n}}\n",
+                "{{\n  \"kind\": \"contribution\",\n  \"name\": \"{escaped_name}\",\n  \"prev_pk_sha256\": \"{prev_sha}\",\n  \"next_pk_sha256\": \"{next_sha}\",\n  \"pub_delta_g1\": \"{}\",\n  \"pub_delta_g2\": \"{}\",\n  \"pok_r_g1\": \"{}\",\n  \"pok_s\": \"{}\",\n  \"new_delta_g1\": \"{}\",\n  \"new_delta_g2\": \"{}\"\n}}\n",
                 affine_g1_hex(&pub_delta_g1),
                 affine_g2_hex(&pub_delta_g2),
                 affine_g1_hex(&pok_r_g1),
@@ -837,92 +1162,108 @@ fn main() {
             );
         }
         "verify" => {
-            let ptau_path = get_arg(&args, "--ptau");
-            let init_path = get_arg(&args, "--initial");
-            let steps_arg = get_arg(&args, "--steps"); // comma-separated pk:att.json pairs
-            let vk_rs_opt = get_opt_arg(&args, "--vk-rs");
+            if get_opt_arg(&args, "--initial").is_some() || get_opt_arg(&args, "--steps").is_some() {
+                let ptau_path = get_arg(&args, "--ptau");
+                let init_path = get_arg(&args, "--initial");
+                let steps_arg = get_arg(&args, "--steps"); // comma-separated pk:att.json pairs
+                let vk_rs_opt = get_opt_arg(&args, "--vk-rs");
 
-            println!("1. Verifying Perpetual Powers of Tau ({ptau_path})...");
-            let ptau = parse_and_verify_ptau(Path::new(&ptau_path));
-            let expected_init = build_initial_phase2_pk(&ptau);
-            let expected_init_bytes = serialize_pk(&expected_init);
-            let actual_init_bytes = fs::read(&init_path).expect("read initial pk");
-            assert_eq!(
-                sha256_hex(&expected_init_bytes),
-                sha256_hex(&actual_init_bytes),
-                "initial phase2_0000.pk does NOT match deterministic .ptau + R1CS derivation!"
-            );
-            println!("   OK: initial phase2_0000.pk matches .ptau + frozen JoinSplit4AryCircuit byte-for-byte.");
+                println!("1. Verifying Perpetual Powers of Tau ({ptau_path})...");
+                let ptau = parse_and_verify_ptau(Path::new(&ptau_path));
+                let expected_init = build_initial_phase2_pk(&ptau);
+                let expected_init_bytes = serialize_pk(&expected_init);
+                let actual_init_bytes = fs::read(&init_path).expect("read initial pk");
+                assert_eq!(
+                    sha256_hex(&expected_init_bytes),
+                    sha256_hex(&actual_init_bytes),
+                    "initial phase2_0000.pk does NOT match deterministic .ptau + R1CS derivation!"
+                );
+                println!("   OK: initial phase2_0000.pk matches .ptau + frozen JoinSplit4AryCircuit byte-for-byte.");
 
-            let mut cur_pk = expected_init;
-            let mut cur_sha = sha256_hex(&actual_init_bytes);
+                let mut cur_pk = expected_init;
+                let mut cur_sha = sha256_hex(&actual_init_bytes);
 
-            for (idx, pair) in steps_arg.split(',').enumerate() {
-                let (pk_p, att_p) = pair.split_once(':').expect("step format pk:att.json");
-                let att = fs::read_to_string(att_p).expect("read attestation");
-                let next_bytes = fs::read(pk_p).expect("read step pk");
-                let next_sha = sha256_hex(&next_bytes);
-                let next_pk = deserialize_pk(&next_bytes);
+                for (idx, pair) in steps_arg.split(',').enumerate() {
+                    let (pk_p, att_p) = pair.split_once(':').expect("step format pk:att.json");
+                    let att = fs::read_to_string(att_p).expect("read attestation");
+                    let next_bytes = fs::read(pk_p).expect("read step pk");
+                    let next_sha = sha256_hex(&next_bytes);
+                    let next_pk = deserialize_pk(&next_bytes);
 
-                let kind = parse_json_str(&att, "kind");
-                let name = parse_json_str(&att, "name");
-                assert_eq!(parse_json_str(&att, "prev_pk_sha256"), cur_sha);
-                assert_eq!(parse_json_str(&att, "next_pk_sha256"), next_sha);
+                    let kind = parse_json_str(&att, "kind");
+                    let name = parse_json_str(&att, "name");
+                    assert_eq!(parse_json_str(&att, "prev_pk_sha256"), cur_sha);
+                    assert_eq!(parse_json_str(&att, "next_pk_sha256"), next_sha);
 
-                let pub_g1 = g1_from_hex(&parse_json_str(&att, "pub_delta_g1"));
-                let pub_g2 = g2_from_hex(&parse_json_str(&att, "pub_delta_g2"));
-                let pok_r = g1_from_hex(&parse_json_str(&att, "pok_r_g1"));
-                let pok_s = fr_from_hex(&parse_json_str(&att, "pok_s"));
+                    let pub_g1 = g1_from_hex(&parse_json_str(&att, "pub_delta_g1"));
+                    let pub_g2 = g2_from_hex(&parse_json_str(&att, "pub_delta_g2"));
+                    let pok_r = g1_from_hex(&parse_json_str(&att, "pok_r_g1"));
+                    let pok_s = fr_from_hex(&parse_json_str(&att, "pok_s"));
 
-                verify_transition(&cur_pk, &cur_sha, &next_pk, &next_sha, pub_g1, pub_g2, pok_r, pok_s);
+                    verify_transition(&cur_pk, &cur_sha, &next_pk, &next_sha, pub_g1, pub_g2, pok_r, pok_s);
 
-                if kind == "beacon" {
-                    let dr = parse_json_u64(&att, "drand_round");
-                    let drand_rand = parse_json_str(&att, "drand_randomness");
-                    let slot = parse_json_u64(&att, "solana_mainnet_slot");
-                    let bh = parse_json_str(&att, "solana_mainnet_blockhash");
-                    let exp_delta = derive_beacon_delta(&cur_sha, dr, &drand_rand, slot, &bh);
-                    let mut exp_next = cur_pk.clone();
-                    apply_delta(&mut exp_next, exp_delta);
-                    assert_eq!(
-                        sha256_hex(&serialize_pk(&exp_next)),
-                        next_sha,
-                        "beacon deterministic transition mismatch!"
-                    );
+                    if kind == "beacon" {
+                        let dr = parse_json_u64(&att, "drand_round");
+                        let drand_rand = parse_json_str(&att, "drand_randomness");
+                        let slot = parse_json_u64(&att, "solana_mainnet_slot");
+                        let bh = parse_json_str(&att, "solana_mainnet_blockhash");
+                        let exp_delta = derive_beacon_delta(&cur_sha, dr, &drand_rand, slot, &bh);
+                        let mut exp_next = cur_pk.clone();
+                        apply_delta(&mut exp_next, exp_delta);
+                        assert_eq!(
+                            sha256_hex(&serialize_pk(&exp_next)),
+                            next_sha,
+                            "beacon deterministic transition mismatch!"
+                        );
+                    }
+                    println!("   Step #{} ({kind}: {name}) pairing-verified OK ({next_sha})", idx + 1);
+                    cur_pk = next_pk;
+                    cur_sha = next_sha;
                 }
-                println!("   Step #{} ({kind}: {name}) pairing-verified OK ({next_sha})", idx + 1);
-                cur_pk = next_pk;
-                cur_sha = next_sha;
-            }
 
-            println!("3. Running live Groth16 prove+verify against final ceremony PK...");
-            sanity_prove_and_verify(&cur_pk);
+                println!("3. Running live Groth16 prove+verify against final ceremony PK...");
+                sanity_prove_and_verify(&cur_pk);
 
-            if let Some(vk_rs_path) = vk_rs_opt {
-                let vk_rs = fs::read_to_string(&vk_rs_path).expect("read vk_generated.rs");
-                assert!(
-                    vk_rs.contains(&cur_sha),
-                    "vk_generated.rs does not match final ceremony PK SHA-256 ({cur_sha})"
+                if let Some(vk_rs_path) = vk_rs_opt {
+                    let vk_rs = fs::read_to_string(&vk_rs_path).expect("read vk_generated.rs");
+                    assert!(
+                        vk_rs.contains(&cur_sha),
+                        "vk_generated.rs does not match final ceremony PK SHA-256 ({cur_sha})"
+                    );
+                    let expected_const = render_solana_vk_const("VK_JOINSPLIT_DEFAULT", &cur_pk.vk);
+                    assert!(
+                        vk_rs.contains(&expected_const),
+                        "VK_JOINSPLIT_DEFAULT bytes in {vk_rs_path} do NOT match final ceremony VerifyingKey!"
+                    );
+                    println!("   OK: {vk_rs_path} matches final ceremony VerifyingKey byte-for-byte.");
+                }
+                println!("\nCEREMONY VERIFICATION PASSED 100% (final PK SHA-256: {cur_sha})");
+            } else {
+                let transcript_path = get_opt_arg(&args, "--transcript")
+                    .unwrap_or_else(|| "ceremony/transcript.json".into());
+                let pk_path = get_opt_arg(&args, "--pk")
+                    .unwrap_or_else(|| "crates/audren-circuits/params/audren_joinsplit.pk".into());
+                let vk_rs_path = get_opt_arg(&args, "--vk-rs")
+                    .unwrap_or_else(|| "program/src/vk_generated.rs".into());
+                let ptau_opt = get_opt_arg(&args, "--ptau");
+                verify_transcript(
+                    &transcript_path,
+                    &pk_path,
+                    Some(vk_rs_path.as_str()),
+                    ptau_opt.as_deref(),
                 );
-                let expected_const = render_solana_vk_const("VK_JOINSPLIT_DEFAULT", &cur_pk.vk);
-                assert!(
-                    vk_rs.contains(&expected_const),
-                    "VK_JOINSPLIT_DEFAULT bytes in {vk_rs_path} do NOT match final ceremony VerifyingKey!"
-                );
-                println!("   OK: {vk_rs_path} matches final ceremony VerifyingKey byte-for-byte.");
             }
-            println!("\nCEREMONY VERIFICATION PASSED 100% (final PK SHA-256: {cur_sha})");
         }
         "export" => {
             let pk_path = get_arg(&args, "--pk");
             let out_vk = get_arg(&args, "--out-vk");
             let provenance = get_opt_arg(&args, "--provenance")
-                .unwrap_or_else(|| "Perpetual Powers of Tau (2^15) + Audren BGM17 Phase-2 Ceremony".into());
+                .unwrap_or_else(|| CANONICAL_VK_PROVENANCE.into());
             let pk_bytes = fs::read(&pk_path).expect("read final pk");
             let pk_sha = sha256_hex(&pk_bytes);
             let pk = deserialize_pk(&pk_bytes);
             sanity_prove_and_verify(&pk);
-            let rs = render_vk_generated_rs(&pk, &pk_sha, &provenance);
+            let rs = render_vk_generated_rs(&pk.vk, &pk_sha, &provenance);
             fs::write(&out_vk, rs).unwrap();
             println!("Exported verified VerifyingKey -> {out_vk} (PK SHA-256: {pk_sha}, {} bytes)", pk_bytes.len());
         }

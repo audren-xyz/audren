@@ -351,8 +351,8 @@ fn build_canonical_vectors() -> ConformanceVectors {
     leaves[5] = cm;
     let sub0 = compute_subtree_256_root(&leaves, 6);
     let mut lroot = sub0;
-    for h in 4..18 {
-        lroot = poseidon4(lroot, zeros[h], zeros[h], zeros[h]);
+    for z in zeros.iter().take(18).skip(4) {
+        lroot = poseidon4(lroot, *z, *z, *z);
     }
     let mut lane_roots = [zeros[18]; NUM_LANES];
     lane_roots[2] = lroot;

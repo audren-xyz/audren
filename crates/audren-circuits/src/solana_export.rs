@@ -47,6 +47,38 @@ pub fn proof_to_solana_compressed_192(proof: &Proof<Bn254>) -> [u8; 192] {
     out
 }
 
+/// Canonical ceremony provenance string embedded in `program/src/vk_generated.rs`.
+pub const CANONICAL_VK_PROVENANCE: &str = "Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand Quicknet #34194203 & Solana Mainnet slot 472705896)";
+
+/// Render the full `program/src/vk_generated.rs` file (shared identically by `gen_vk` and `ceremony`).
+pub fn render_vk_generated_rs(
+    vk: &VerifyingKey<Bn254>,
+    pk_sha256: &str,
+    provenance: &str,
+) -> String {
+    let mut src = String::new();
+    src.push_str("//! Auto-generated VerifyingKey for Audren `JoinSplit4AryCircuit` (`vk_id = 0`).\n");
+    src.push_str("//!\n");
+    src.push_str(&format!("//! Provenance: {provenance}\n"));
+    src.push_str(&format!("//! ProvingKey compressed SHA-256: `{pk_sha256}`\n"));
+    src.push_str(
+        "//! Phase 1: Official Hermez/PSE Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`,\n",
+    );
+    src.push_str(
+        "//!          71+ public contributors, BLAKE2b-512 `982372c8...69ae6e`, SHA-256 `3ef2ecc5...9e7f`).\n",
+    );
+    src.push_str("//! Phase 2: BGM17 Groth16 MPC ceremony (`ceremony/transcript.json`, verifiable via\n");
+    src.push_str("//!          `cargo run -p audren-circuits --release --bin ceremony -- verify`).\n\n");
+    src.push_str("#[allow(dead_code)]\n");
+    src.push_str(&format!("pub const VK_PROVENANCE: &str = \"{provenance}\";\n"));
+    src.push_str("#[allow(dead_code)]\n");
+    src.push_str(&format!(
+        "pub const PK_COMPRESSED_SHA256: &str = \"{pk_sha256}\";\n\n"
+    ));
+    src.push_str(&render_solana_vk_const("VK_JOINSPLIT_DEFAULT", vk));
+    src
+}
+
 /// Render an Arkworks `VerifyingKey<Bn254>` into a Rust constant for `groth16-solana`.
 pub fn render_solana_vk_const(const_name: &str, vk: &VerifyingKey<Bn254>) -> String {
     let nr_pubinputs = vk.gamma_abc_g1.len() - 1;

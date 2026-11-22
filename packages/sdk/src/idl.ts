@@ -9,7 +9,7 @@ export const AUDREN_CODAMA_IDL = {
     "kind": "programNode",
     "name": "audren",
     "publicKey": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "origin": "shank",
     "docs": [
       "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16, 4-ary Depth-20 MASP) and Protocol-Agnostic DeFi Execution Program on Solana."
@@ -1933,6 +1933,26 @@ export const AUDREN_CODAMA_IDL = {
             "docs": [
               "System Program."
             ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "nextSubtreePage",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": true,
+            "docs": [
+              "Optional rollover SubtreePage."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "nextMemoPage",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": true,
+            "docs": [
+              "Optional rollover MemoPage."
+            ]
           }
         ],
         "arguments": [
@@ -3774,9 +3794,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "pageSeqOutOfRange",
         "code": 6029,
-        "message": "OpenPage sequence exceeds active_seq + 1 lookahead bound.",
+        "message": "OpenPage sequence exceeds cur_seq + 2 lookahead bound.",
         "docs": [
-          "OpenPage sequence exceeds active_seq + 1 lookahead bound."
+          "OpenPage sequence exceeds cur_seq + 2 lookahead bound."
         ]
       },
       {
@@ -3815,7 +3835,7 @@ export const AUDREN_ANCHOR_IDL = {
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "spec": "0.1.0",
     "description": "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
@@ -4185,6 +4205,18 @@ export const AUDREN_ANCHOR_IDL = {
           "name": "system_program",
           "writable": false,
           "signer": false
+        },
+        {
+          "name": "next_subtree_page",
+          "writable": true,
+          "signer": false,
+          "optional": true
+        },
+        {
+          "name": "next_memo_page",
+          "writable": true,
+          "signer": false,
+          "optional": true
         }
       ],
       "args": [
@@ -5552,7 +5584,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6029,
       "name": "PageSeqOutOfRange",
-      "msg": "OpenPage sequence exceeds active_seq + 1 lookahead bound."
+      "msg": "OpenPage sequence exceeds cur_seq + 2 lookahead bound."
     },
     {
       "code": 6030,

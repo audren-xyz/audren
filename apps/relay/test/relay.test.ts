@@ -25,10 +25,12 @@ import {
   exportFullViewingKey,
   frToBeBytes,
 } from '@audren/sdk'
-import { DEFAULT_ALLOWED_PRE_IX_PROGRAMS, loadPolicyConfig } from '../src/env'
+import { DEFAULT_ALLOWED_PRE_IX_PROGRAMS, getRelayerFvk, loadPolicyConfig } from '../src/env'
+import { okxAdapter } from '../src/aggregators/okx'
+import { titanAdapter } from '../src/aggregators/titan'
 import { FirewallError, validateRelaySubmission } from '../src/policy/firewall'
-import { computeNativeFeeQuote } from '../src/policy/pricing'
-import { toBase64 } from '../src/solana/codec'
+import { computeNativeFeeQuote, computeSwapFeePlan } from '../src/policy/pricing'
+import { toBase64, toHex } from '../src/solana/codec'
 
 const relayerSecret = new Uint8Array(32).fill(0x42)
 const relayerPubkey = ed25519.getPublicKey(relayerSecret)
@@ -327,4 +329,79 @@ test('3-mode dynamic pricing computes self_paying shielded_cm2, withdraw, and ex
   assert.equal(qTransfer.feeSide, 'shielded_cm2')
   assert.equal(qTransfer.feeShieldedAddress, relayerShieldedKeys.address)
   assert.ok(BigInt(qTransfer.relayerFee) > 5_000_000n)
+
+  // Unsafe Token-2022 output mints must never be billed as self_paying in swap fee plans
+  const unsafePlan = computeSwapFeePlan({
+    cfg,
+    rentSchedule,
+    outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    outputDecimals: 6,
+    estimatedOutAmount: 500_000_000n,
+    solPriceUsd: 150,
+    outputTokenPriceUsd: 1,
+    feeAccount: relayerB58,
+    feeAccountExists: true,
+    hasUnsafeSelfPayExt: true,
+  })
+  assert.equal(unsafePlan.billingMode, 'sponsored')
+  assert.equal(unsafePlan.platformFeeBps, 0)
+  assert.equal(unsafePlan.feeAccount, null)
+})
+
+test('getRelayerFvk accepts both *Hex and short field names', () => {
+  const canonicalJson = JSON.stringify({
+    spendPkHex: toHex(relayerFvk.spendPk),
+    nkHex: toHex(relayerFvk.nk),
+    viewSkHex: toHex(relayerFvk.viewSk),
+    viewPkHex: toHex(relayerFvk.viewPk),
+  })
+  const shortJson = JSON.stringify({
+    spendPk: toHex(relayerFvk.spendPk),
+    nk: toHex(relayerFvk.nk),
+    viewSk: toHex(relayerFvk.viewSk),
+    viewPk: toHex(relayerFvk.viewPk),
+  })
+  const parsedCanonical = getRelayerFvk({ MAINNET_RELAYER_FVK_JSON: canonicalJson } as never, 'mainnet')
+  const parsedShort = getRelayerFvk({ MAINNET_RELAYER_FVK_JSON: shortJson } as never, 'mainnet')
+  assert.ok(parsedCanonical)
+  assert.ok(parsedShort)
+  assert.equal(parsedCanonical.shieldedAddress, relayerShieldedKeys.address)
+  assert.equal(parsedShort.shieldedAddress, relayerShieldedKeys.address)
+})
+
+test('OKX and Titan swapInstructions skip SPL Token / Token-2022 wrapper instructions', async () => {
+  const escrowPubkey = deriveEscrowPdaSync(0, 0).address
+  const routerProg = base58Encode(new Uint8Array(32).fill(0x55))
+  const tokenSyncIx = {
+    programId: CLASSIC_TOKEN_PROGRAM_ID,
+    data: toBase64(new Uint8Array([17])),
+    accounts: [{ pubkey: escrowPubkey, isSigner: true, isWritable: true }],
+  }
+  const realSwapIx = {
+    programId: routerProg,
+    data: toBase64(new Uint8Array([1, 2, 3])),
+    accounts: [{ pubkey: escrowPubkey, isSigner: true, isWritable: true }],
+  }
+
+  const okxBuilt = await okxAdapter.swapInstructions({} as never, {
+    escrowPubkey,
+    inputMint: WSOL_MINT,
+    outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    quoteResponse: {
+      escrowPubkey,
+      instructionLists: [tokenSyncIx, realSwapIx],
+    },
+  })
+  assert.equal(okxBuilt.swapInstruction.programId, routerProg)
+
+  const titanBuilt = await titanAdapter.swapInstructions({} as never, {
+    escrowPubkey,
+    inputMint: WSOL_MINT,
+    outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    quoteResponse: {
+      escrowPubkey,
+      route: { instructions: [tokenSyncIx, realSwapIx] },
+    },
+  })
+  assert.equal(titanBuilt.swapInstruction.programId, routerProg)
 })

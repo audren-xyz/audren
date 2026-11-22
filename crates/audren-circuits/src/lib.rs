@@ -57,13 +57,6 @@ pub fn load_canonical_joinsplit_keys() -> (ProvingKey<Bn254>, VerifyingKey<Bn254
     (pk, vk)
 }
 
-/// Backward-compatible alias that loads the canonical ceremony proving & verifying keys.
-#[cfg(not(target_arch = "wasm32"))]
-#[deprecated(note = "Use load_canonical_joinsplit_keys()")]
-pub fn setup_joinsplit_dev() -> (ProvingKey<Bn254>, VerifyingKey<Bn254>) {
-    load_canonical_joinsplit_keys()
-}
-
 /// Serialize a `ProvingKey<Bn254>` to compact compressed bytes (`~3.75 MB`).
 pub fn serialize_pk_compressed(pk: &ProvingKey<Bn254>) -> Vec<u8> {
     let mut out = Vec::with_capacity(pk.compressed_size());
@@ -247,13 +240,10 @@ mod wasm_exports {
     use super::*;
     use std::cell::RefCell;
 
-    fn custom_rng(buf: &mut [u8]) -> Result<(), getrandom::Error> {
-        // Proving always accepts an explicit caller-supplied 32-byte CSPRNG seed;
-        // this hook satisfies `getrandom` for deterministic dev PK initialization.
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(37).wrapping_add(13);
-        }
-        Ok(())
+    fn custom_rng(_buf: &mut [u8]) -> Result<(), getrandom::Error> {
+        // Proving always accepts an explicit caller-supplied 32-byte CSPRNG seed from the host;
+        // ambient getrandom is intentionally disabled on wasm32-unknown-unknown.
+        Err(getrandom::Error::UNSUPPORTED)
     }
     getrandom::register_custom_getrandom!(custom_rng);
 
@@ -438,8 +428,8 @@ mod tests {
         }
         let sub0_at_100 = compute_subtree_256_root(&leaves[0..256], 100);
         let mut cur = sub0_at_100;
-        for h in 4..18 {
-            cur = poseidon::poseidon4(cur, zeros[h], zeros[h], zeros[h]);
+        for &z in zeros.iter().take(18).skip(4) {
+            cur = poseidon::poseidon4(cur, z, z, z);
         }
         let mut lane_roots = [zeros[18]; NUM_LANES];
         lane_roots[3] = cur;

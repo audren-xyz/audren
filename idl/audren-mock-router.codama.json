@@ -6,7 +6,7 @@
     "kind": "programNode",
     "name": "audrenMockRouter",
     "publicKey": "11111111111111111111111111111111",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "origin": "shank",
     "docs": [
       "Minimal Pinocchio sBPFv3 mock AMM, yield vault, and adversarial CPI harness for Audren ExecViaEscrow integration tests."

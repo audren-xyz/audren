@@ -59,12 +59,6 @@ impl AudrenProver {
         Self { pk, vk }
     }
 
-    /// Backward-compatible alias for `AudrenProver::from_canonical_pk()`.
-    #[deprecated(note = "Use AudrenProver::from_canonical_pk()")]
-    pub fn from_dev_setup() -> Self {
-        Self::from_canonical_pk()
-    }
-
     /// Load from a compressed `ProvingKey<Bn254>` byte buffer (`~3.75 MB`, validated on curve).
     pub fn from_compressed_pk(bytes: &[u8]) -> Result<Self, ClientError> {
         let pk = deserialize_pk_compressed(bytes)

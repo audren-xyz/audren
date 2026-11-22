@@ -173,6 +173,7 @@ async function sendV1(ixs, computeUnitLimit = 300_000, priorityFeeLamports = 25_
   ]);
 
   let slot = 0;
+  let confirmed = false;
   for (let i = 0; i < 60; i++) {
     await sleep(600);
     const st = await rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
@@ -180,8 +181,12 @@ async function sendV1(ixs, computeUnitLimit = 300_000, priorityFeeLamports = 25_
     if (v?.err) throw new Error(`Tx ${sig} failed on-chain: ${JSON.stringify(v.err)}`);
     if (v?.confirmationStatus === 'confirmed' || v?.confirmationStatus === 'finalized') {
       slot = v.slot ?? 0;
+      confirmed = true;
       break;
     }
+  }
+  if (!confirmed) {
+    throw new Error(`Tx ${sig} was not confirmed within 36s`);
   }
   let cu = null;
   for (let i = 0; i < 6; i++) {
@@ -235,24 +240,54 @@ async function publishFreshCheckpoint(poolId, pool) {
   throw new Error('Failed to publish fresh RootCheckpoint after retries');
 }
 
-async function ensurePages(poolId, laneId, nextLeaf, nfCount) {
+async function ensurePages(poolId, laneId, nextLeaf, nfCount, notesToAppend = 1, nfsToAppend = 0) {
   const subSeq = nextLeaf / BigInt(SUBTREE_LEAVES);
   const rootSeq = subSeq / BigInt(SUBROOTS_PER_PAGE);
   const memoSeq = nextLeaf / BigInt(MEMO_NOTES_PER_PAGE);
   const nfSeq = nfCount / BigInt(NF_PER_PAGE);
-  const raws = await fetchBatch([
+  const lastLeaf = nextLeaf + BigInt(Math.max(0, notesToAppend - 1));
+  const lastSubSeq = lastLeaf / BigInt(SUBTREE_LEAVES);
+  const lastMemoSeq = lastLeaf / BigInt(MEMO_NOTES_PER_PAGE);
+  const lastNfSeq = (nfCount + BigInt(Math.max(0, nfsToAppend - 1))) / BigInt(NF_PER_PAGE);
+  const needNextSub = lastSubSeq > subSeq;
+  const needNextMemo = lastMemoSeq > memoSeq;
+  const needNextNf = lastNfSeq > nfSeq;
+
+  const queries = [
     deriveSubtreePdaSync(poolId, laneId, subSeq, AUDREN_PROGRAM_ID).address,
     deriveSubrootPdaSync(poolId, laneId, rootSeq, AUDREN_PROGRAM_ID).address,
     deriveMemoPdaSync(poolId, laneId, memoSeq, AUDREN_PROGRAM_ID).address,
     deriveNfPagePdaSync(poolId, laneId, nfSeq, AUDREN_PROGRAM_ID).address,
-  ]);
+  ];
+  if (needNextSub) queries.push(deriveSubtreePdaSync(poolId, laneId, subSeq + 1n, AUDREN_PROGRAM_ID).address);
+  if (needNextMemo) queries.push(deriveMemoPdaSync(poolId, laneId, memoSeq + 1n, AUDREN_PROGRAM_ID).address);
+  if (needNextNf) queries.push(deriveNfPagePdaSync(poolId, laneId, nfSeq + 1n, AUDREN_PROGRAM_ID).address);
+  const raws = await fetchBatch(queries);
   const ixs = [];
   if (!raws[0]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_SUBTREE, poolId, laneId, pageSeq: subSeq }));
   if (!raws[1]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_SUBROOT, poolId, laneId, pageSeq: rootSeq }));
   if (!raws[2]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_MEMO, poolId, laneId, pageSeq: memoSeq }));
   if (!raws[3]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_NULLIFIER, poolId, laneId, pageSeq: nfSeq }));
-  if (ixs.length > 0) await sendV1(ixs, 200_000);
-  return { subSeq, rootSeq, memoSeq, nfSeq };
+  let idx = 4;
+  if (needNextSub) {
+    if (!raws[idx++]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_SUBTREE, poolId, laneId, pageSeq: subSeq + 1n }));
+  }
+  if (needNextMemo) {
+    if (!raws[idx++]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_MEMO, poolId, laneId, pageSeq: memoSeq + 1n }));
+  }
+  if (needNextNf) {
+    if (!raws[idx++]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_NULLIFIER, poolId, laneId, pageSeq: nfSeq + 1n }));
+  }
+  if (ixs.length > 0) await sendV1(ixs, 250_000);
+  return {
+    subSeq,
+    rootSeq,
+    memoSeq,
+    nfSeq,
+    nextSubSeq: needNextSub ? subSeq + 1n : undefined,
+    nextMemoSeq: needNextMemo ? memoSeq + 1n : undefined,
+    nextNfSeq: needNextNf ? nfSeq + 1n : undefined,
+  };
 }
 
 async function main() {
@@ -349,7 +384,7 @@ async function main() {
   // 4. Zero-indexer ordinary-RPC CompactWalletStore sync
   console.log('\n[4] Syncing Alice CompactWalletStore via ordinary Solana RPC getMultipleAccounts...');
   const aliceStore = new CompactWalletStore(poolId);
-  const sync1 = await syncCompactStoreWithRpc({
+  await syncCompactStoreWithRpc({
     fetchBatch,
     store: aliceStore,
     fvk: exportFullViewingKey(alice),
@@ -373,7 +408,7 @@ async function main() {
   const transferLane = 1;
   const [lane1Raw] = await fetchBatch([deriveLanePdaSync(poolId, transferLane, AUDREN_PROGRAM_ID).address]);
   const lane1 = decodeLaneHeader(lane1Raw);
-  const trPages = await ensurePages(poolId, transferLane, lane1.nextLeaf, lane1.nfCount);
+  const trPages = await ensurePages(poolId, transferLane, lane1.nextLeaf, lane1.nfCount, 2, 1);
 
   const sendAmt = 2_000_000n;
   const changeAmt = depositAmount - sendAmt; // 3_000_000n
@@ -438,6 +473,11 @@ async function main() {
     outRootSeq: trPages.rootSeq,
     outMemoSeq: trPages.memoSeq,
     outNfSeq: trPages.nfSeq,
+    rollover: {
+      nextSubSeq: trPages.nextSubSeq ?? null,
+      nextMemoSeq: trPages.nextMemoSeq ?? null,
+      nextNfSeq: trPages.nextNfSeq ?? null,
+    },
     outputMask: 0b011,
     assetMode: ASSET_MODE_PRIVATE,
     proof192: trProof.proof192,
@@ -486,7 +526,7 @@ async function main() {
   const withdrawLane = 2;
   const [lane2Raw] = await fetchBatch([deriveLanePdaSync(poolId, withdrawLane, AUDREN_PROGRAM_ID).address]);
   const lane2 = decodeLaneHeader(lane2Raw);
-  const wdPages = await ensurePages(poolId, withdrawLane, lane2.nextLeaf, lane2.nfCount);
+  const wdPages = await ensurePages(poolId, withdrawLane, lane2.nextLeaf, lane2.nfCount, 0, 1);
 
   const wdCtx = computeJoinsplitCtxHash({
     poolId,
@@ -539,6 +579,11 @@ async function main() {
     outRootSeq: wdPages.rootSeq,
     outMemoSeq: wdPages.memoSeq,
     outNfSeq: wdPages.nfSeq,
+    rollover: {
+      nextSubSeq: wdPages.nextSubSeq ?? null,
+      nextMemoSeq: wdPages.nextMemoSeq ?? null,
+      nextNfSeq: wdPages.nextNfSeq ?? null,
+    },
     outputMask: 0,
     assetMode: ASSET_MODE_SOL,
     proof192: wdProof.proof192,

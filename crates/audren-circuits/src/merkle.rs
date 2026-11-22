@@ -164,9 +164,7 @@ pub fn extract_intra_subtree_siblings(
 ) -> ([[Fr; 3]; SUBTREE_LEVELS_4ARY], [u8; SUBTREE_LEVELS_4ARY]) {
     assert!(target_offset < valid_len && valid_len <= SUBTREE_LEAVES);
     let mut page_nodes = [Fr::from(0u64); SUBTREE_LEAVES];
-    for i in 0..valid_len {
-        page_nodes[i] = page_leaves[i];
-    }
+    page_nodes[..valid_len].copy_from_slice(&page_leaves[..valid_len]);
     let mut siblings = [[Fr::from(0u64); 3]; SUBTREE_LEVELS_4ARY];
     let mut positions = [0u8; SUBTREE_LEVELS_4ARY];
     let mut cur_idx = target_offset;
@@ -199,6 +197,7 @@ pub fn extract_intra_subtree_siblings(
 
 /// Assemble a full 20-level `MerklePath4Ary` from pre-frozen intra-subtree siblings (`levels 0..4`)
 /// plus upper level-4 finalized subroots (`levels 4..18`) and checkpoint `lane_roots` (`levels 18..20`).
+#[allow(clippy::too_many_arguments)]
 pub fn build_witness_from_frozen_subsiblings(
     lane_id: usize,
     target_leaf_idx: u64,
@@ -214,19 +213,15 @@ pub fn build_witness_from_frozen_subsiblings(
 
     let zeros = zero_hashes_4ary();
     let mut path = MerklePath4Ary::default();
-    for h in 0..SUBTREE_LEVELS_4ARY {
-        path.siblings[h] = intra_siblings[h];
-        path.positions[h] = intra_positions[h];
-    }
+    path.siblings[..SUBTREE_LEVELS_4ARY].copy_from_slice(intra_siblings);
+    path.positions[..SUBTREE_LEVELS_4ARY].copy_from_slice(intra_positions);
 
     let target_page_idx = (target_leaf_idx / SUBTREE_LEAVES as u64) as usize;
     let frontier_page_idx = (ckpt_lane_leaf_count / SUBTREE_LEAVES as u64) as usize;
     let frontier_rem = (ckpt_lane_leaf_count % SUBTREE_LEAVES as u64) as usize;
 
     let mut level_nodes: Vec<Fr> = Vec::with_capacity(frontier_page_idx + 1);
-    for p in 0..frontier_page_idx {
-        level_nodes.push(finalized_subtree_roots[p]);
-    }
+    level_nodes.extend_from_slice(&finalized_subtree_roots[..frontier_page_idx]);
     if frontier_rem > 0 {
         let f_leaves = frontier_page_leaves
             .expect("frontier_page_leaves required when ckpt_lane_leaf_count % 256 != 0");
@@ -234,8 +229,12 @@ pub fn build_witness_from_frozen_subsiblings(
     }
 
     let mut node_idx = target_page_idx;
-    for h in SUBTREE_LEVELS_4ARY..LANE_DEPTH_4ARY {
-        let zero_at_h = zeros[h];
+    for (h, &zero_at_h) in zeros
+        .iter()
+        .enumerate()
+        .take(LANE_DEPTH_4ARY)
+        .skip(SUBTREE_LEVELS_4ARY)
+    {
         let group_start = (node_idx / 4) * 4;
         let pos = node_idx % 4;
         path.positions[h] = pos as u8;
@@ -307,9 +306,9 @@ pub fn build_witness_from_frozen_subsiblings(
 
     path.positions[LANE_DEPTH_4ARY + 1] = group4 as u8;
     let mut s_i = 0;
-    for k in 0..4 {
+    for (k, &gh) in group_hashes.iter().enumerate() {
         if k != group4 {
-            path.siblings[LANE_DEPTH_4ARY + 1][s_i] = group_hashes[k];
+            path.siblings[LANE_DEPTH_4ARY + 1][s_i] = gh;
             s_i += 1;
         }
     }

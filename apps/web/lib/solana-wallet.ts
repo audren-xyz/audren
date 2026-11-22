@@ -375,32 +375,27 @@ export async function sendAndConfirmSignedTransactions(
   cluster: SolanaCluster,
   signedTransactions: Uint8Array[],
   options?: {
-    vaultOutAta?: string
     onProgress?: (idx: number, total: number, signature: string) => void
   },
-): Promise<Array<{ signature: string; slot: number; wireBytes: number; actualOut?: string | null }>> {
+): Promise<Array<{ signature: string; slot: number; wireBytes: number }>> {
   const results: Array<{
     signature: string
     slot: number
     wireBytes: number
-    actualOut?: string | null
   }> = []
   for (let i = 0; i < signedTransactions.length; i++) {
     const wire = signedTransactions[i]
-    const isLast = i === signedTransactions.length - 1
     const sendRes = await fetch('/api/rpc/send', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         cluster,
         transactionB64: toBase64(wire),
-        ...(isLast && options?.vaultOutAta ? { vaultOutAta: options.vaultOutAta } : {}),
       }),
     })
     const sendJson = (await sendRes.json()) as {
       signature?: string
       slot?: number
-      actualOut?: string | null
       error?: string
     }
     if (!sendRes.ok || !sendJson.signature) {
@@ -411,7 +406,6 @@ export async function sendAndConfirmSignedTransactions(
       signature: sendJson.signature,
       slot: sendJson.slot ?? 0,
       wireBytes: wire.length,
-      actualOut: sendJson.actualOut ?? null,
     })
   }
   return results

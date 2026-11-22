@@ -3,7 +3,7 @@
 //! Provides zero-indexer ordinary-RPC state synchronization (`CompactWalletStore`),
 //! BN254 Groth16 proving (`AudrenProver`), canonical key hierarchy (`AudrenKeys`,
 //! `FullViewingKey`, Mode 1 `SelectiveDisclosureProof`, deterministic `DefiSessionKeypair`),
-//! canonical PDA derivation, and builders for all 9 on-chain V2 instructions.
+//! canonical PDA derivation, and builders for all 9 on-chain Audren instructions.
 
 pub mod instructions;
 pub mod keys;

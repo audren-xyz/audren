@@ -13,10 +13,19 @@
  */
 
 import {
+  ASSET_MODE_PRIVATE,
+  CLASSIC_TOKEN_PROGRAM_ID,
+  EXEC_KIND_SOL,
+  EXEC_KIND_SPL,
   TAG_DEPOSIT_SOL,
-  TAG_JOINSPLIT,
   WSOL_MINT,
   base58Decode,
+  base58Encode,
+  buildExecViaEscrowInstruction,
+  buildJoinsplitInstruction,
+  deriveAssociatedTokenAddressSync,
+  deriveEscrowPdaSync,
+  deriveVaultAuthPdaSync,
 } from '@audren/sdk'
 import { USDC_MAINNET_MINT_STR, toBase64 } from '../src/solana/codec'
 
@@ -108,43 +117,156 @@ async function main() {
   assert(ix.status === 200 && ix.body.ok === true, `/v1/swap/instructions failed: ${JSON.stringify(ix.body)}`)
   console.log(`  [4/5] /v1/swap/quote & /v1/swap/instructions OK (provider=${quoteObj.provider}, out=${quoteObj.outAmount})`)
 
-  // 4. Zero-Trust Firewall Rejections
-  const dummyBuf = new Uint8Array(169)
-  dummyBuf[0] = TAG_DEPOSIT_SOL
+  // 4. Zero-Trust Firewall Rejections (realistic >=12-account payloads exercising each exact rule!)
+  const devnetRelayer = String(infoDevnet.body.relayerPubkey)
+  const validJsIx = buildJoinsplitInstruction({
+    payer: devnetRelayer,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PRIVATE,
+    proof192: new Uint8Array(192).fill(0x11),
+    nf0: new Uint8Array(32).fill(0x01),
+    nf1: new Uint8Array(32),
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: new Uint8Array(0),
+  })
+
+  // 4a. Tag 3 (DepositSol) rejected on tag check
+  const depositTagPayload = new Uint8Array(validJsIx.data)
+  depositTagPayload[0] = TAG_DEPOSIT_SOL
   const badTag = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       cluster: 'devnet',
-      instructionDataB64: toBase64(dummyBuf),
-      accounts: [{ pubkey: String(infoDevnet.body.relayerPubkey), isSigner: true, isWritable: true }],
+      instructionDataB64: toBase64(depositTagPayload),
+      accounts: validJsIx.accounts,
     }),
   })
   assert(
-    badTag.status === 400 && badTag.body.code === 'FIREWALL_REJECTED',
-    `Expected Tag 3 FIREWALL_REJECTED (400), got ${badTag.status}: ${JSON.stringify(badTag.body)}`,
+    badTag.status === 400 &&
+      badTag.body.code === 'FIREWALL_REJECTED' &&
+      String(badTag.body.error ?? '').includes('DepositSol'),
+    `Expected Tag 3 DepositSol FIREWALL_REJECTED (400), got ${badTag.status}: ${JSON.stringify(badTag.body)}`,
   )
 
-  const extraSignerBuf = new Uint8Array(400)
-  extraSignerBuf[0] = TAG_JOINSPLIT
+  // 4b. Extra non-relayer signer rejected on signer check
+  const extraSignerAccounts = validJsIx.accounts.map((a, idx) =>
+    idx === 1 ? { ...a, isSigner: true } : a,
+  )
   const extraSigner = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       cluster: 'devnet',
-      instructionDataB64: toBase64(extraSignerBuf),
-      accounts: [
-        { pubkey: String(infoDevnet.body.relayerPubkey), isSigner: true, isWritable: true },
-        { pubkey: relayerPubkey, isSigner: true, isWritable: false },
+      instructionDataB64: toBase64(validJsIx.data),
+      accounts: extraSignerAccounts,
+    }),
+  })
+  assert(
+    extraSigner.status === 400 &&
+      extraSigner.body.code === 'FIREWALL_REJECTED' &&
+      String(extraSigner.body.error ?? '').includes('extra signer'),
+    `Expected extra signer FIREWALL_REJECTED (400), got ${extraSigner.status}: ${JSON.stringify(extraSigner.body)}`,
+  )
+
+  // 4c. Wrong payer (accounts[0] != devnet relayer) rejected on payer check
+  const wrongPayerAccounts = validJsIx.accounts.map((a, idx) =>
+    idx === 0 ? { ...a, pubkey: base58Encode(new Uint8Array(32).fill(0x5a)) } : a,
+  )
+  const wrongPayer = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      cluster: 'devnet',
+      instructionDataB64: toBase64(validJsIx.data),
+      accounts: wrongPayerAccounts,
+    }),
+  })
+  assert(
+    wrongPayer.status === 400 &&
+      wrongPayer.body.code === 'FIREWALL_REJECTED' &&
+      String(wrongPayer.body.error ?? '').includes('accounts[0] must be relayer'),
+    `Expected wrong payer FIREWALL_REJECTED (400), got ${wrongPayer.status}: ${JSON.stringify(wrongPayer.body)}`,
+  )
+
+  // 4d. Disallowed preInstruction program rejected on crank allowlist check
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const escrow = deriveEscrowPdaSync(0, 0).address
+  const validExecIx = buildExecViaEscrowInstruction({
+    payer: devnetRelayer,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    escrowShard: 0,
+    changeMask: 0,
+    inKind: EXEC_KIND_SOL,
+    outKind: EXEC_KIND_SPL,
+    feeOnOutput: false,
+    outSpl: {
+      mint: USDC_MAINNET_MINT_STR,
+      vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, USDC_MAINNET_MINT_STR, CLASSIC_TOKEN_PROGRAM_ID).address,
+      escrowAta: deriveAssociatedTokenAddressSync(escrow, USDC_MAINNET_MINT_STR, CLASSIC_TOKEN_PROGRAM_ID).address,
+      tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    },
+    relayerFeeAmount: 0n,
+    proof192: new Uint8Array(192).fill(0x11),
+    nf0: new Uint8Array(32).fill(0x02),
+    nf1: new Uint8Array(32),
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    amountIn: 100_000_000n,
+    minAmountOut: 1n,
+    outStealthOwner: new Uint8Array(32).fill(0x03),
+    outBlinding: new Uint8Array(32).fill(0x04),
+    dynMemoHead: new Uint8Array(34).fill(0x05),
+    dynMask56: new Uint8Array(56).fill(0x06),
+    routerProg: base58Encode(new Uint8Array(32).fill(0x77)),
+    routerIxData: new Uint8Array([1, 2, 3]),
+    routerAccounts: [{ pubkey: base58Encode(new Uint8Array(32).fill(0x88)), isSigner: false, isWritable: true }],
+    changeMemos: new Uint8Array(0),
+  })
+  const badPreIx = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      cluster: 'devnet',
+      instructionDataB64: toBase64(validExecIx.data),
+      accounts: validExecIx.accounts,
+      preInstructions: [
+        {
+          programId: base58Encode(new Uint8Array(32).fill(0x99)),
+          accounts: [],
+          data: toBase64(new Uint8Array([1, 2, 3])),
+        },
       ],
     }),
   })
   assert(
-    extraSigner.status === 400 && extraSigner.body.code === 'FIREWALL_REJECTED',
-    `Expected extra signer FIREWALL_REJECTED (400), got ${extraSigner.status}: ${JSON.stringify(extraSigner.body)}`,
+    badPreIx.status === 400 &&
+      badPreIx.body.code === 'FIREWALL_REJECTED' &&
+      String(badPreIx.body.error ?? '').includes('crank allowlist'),
+    `Expected disallowed preInstruction FIREWALL_REJECTED (400), got ${badPreIx.status}: ${JSON.stringify(badPreIx.body)}`,
   )
 
-  console.log(`  [5/5] Zero-trust Firewall rejections OK (Tag 3 blocked, extra signer blocked)`)
+  console.log(
+    `  [5/5] Zero-trust Firewall rejections OK (Tag 3, extra signer, wrong payer, disallowed preInstruction)`,
+  )
   console.log(`\nALL RELAY EMPIRICAL E2E CHECKS PASSED (${RELAY_BASE})\n`)
 }
 

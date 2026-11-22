@@ -7,7 +7,6 @@ use ark_r1cs_std::{
     boolean::Boolean,
     eq::EqGadget,
     fields::fp::FpVar,
-    select::CondSelectGadget,
     R1CSVar,
 };
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
@@ -15,8 +14,8 @@ use audren_core::instruction::ASSET_ID_DOMAIN;
 use sha2::{Digest, Sha256};
 
 pub use audren_core::{
-    DOMAIN_DUMMY_NF, DOMAIN_DYN_BLIND, DOMAIN_NK, DOMAIN_NOTE, DOMAIN_NULLIFIER, DOMAIN_PK,
-    DOMAIN_PUB_HASH_A, DOMAIN_PUB_HASH_B, DOMAIN_PUB_HASH_FINAL, DOMAIN_STEALTH, NATIVE_SOL_MINT,
+    DOMAIN_DUMMY_NF, DOMAIN_NK, DOMAIN_NOTE, DOMAIN_NULLIFIER, DOMAIN_PK, DOMAIN_PUB_HASH_A,
+    DOMAIN_PUB_HASH_B, DOMAIN_PUB_HASH_FINAL, DOMAIN_STEALTH, NATIVE_SOL_MINT,
 };
 
 use crate::poseidon::{poseidon2, poseidon3, poseidon4, poseidon5, poseidon_hash_var};
@@ -87,19 +86,6 @@ pub fn compute_real_nullifier(nk: Fr, note_commitment: Fr, leaf_index: u64) -> F
 #[inline]
 pub fn compute_dummy_nullifier(nk: Fr, blinding: Fr) -> Fr {
     poseidon3(Fr::from(DOMAIN_DUMMY_NF), nk, blinding)
-}
-
-/// Canonical dynamic output blinding:
-/// `blinding = Poseidon5(DOMAIN_DYN_BLIND, slot, lane_id, leaf_index, ctx_hash)`.
-#[inline]
-pub fn compute_dynamic_blinding(slot: u64, lane_id: u64, leaf_index: u64, ctx_hash: Fr) -> Fr {
-    poseidon5(
-        Fr::from(DOMAIN_DYN_BLIND),
-        Fr::from(slot),
-        Fr::from(lane_id),
-        Fr::from(leaf_index),
-        ctx_hash,
-    )
 }
 
 /// Pack `(public_amount_out: u64, relayer_fee_amount: u64)` injectively into one BN254 Fr element:
@@ -229,14 +215,4 @@ pub fn constrain_public_input_hash(
             ctx_hash.clone(),
         ],
     )
-}
-
-/// Keep a shared helper to select dummy vs real field value cleanly.
-#[inline]
-pub fn select_fr_var(
-    cond: &Boolean<Fr>,
-    on_true: &FpVar<Fr>,
-    on_false: &FpVar<Fr>,
-) -> Result<FpVar<Fr>, SynthesisError> {
-    FpVar::conditionally_select(cond, on_true, on_false)
 }

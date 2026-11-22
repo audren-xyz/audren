@@ -113,7 +113,7 @@ const FLOWS: FlowDefinition[] = [
         label: 'Recipient (You)',
         visibility: 'hidden',
         badge: 'HIDDEN',
-        value: 'One-time stealth key P in place of the reusable recipient address',
+        value: 'One-time Poseidon stealth owner in place of the reusable recipient address',
       },
       {
         label: 'Link to other payments',
@@ -460,7 +460,7 @@ export function HowAudrenWorksVisual() {
 
   const copySampleAddress = () => {
     const sample =
-      'aud136et2wsvTXKWMrmEQDrG7nRTofxBdSw6ZkwzmUT9vARfpCkY8YR9ENm9QV9WoUW3Nb1tp3BGejPA8BG8PWCWrwFL'
+      'aud1Bzeekem3VfwxvTueYbWyZvRxvon9eD8duQLdj3FPEEZZe12BggMChombGhV3Ywujmet3YSXSoMd7jkd3WBaisnvF'
     navigator.clipboard?.writeText(sample).catch(() => {})
     setCopiedSample(true)
     window.setTimeout(() => setCopiedSample(false), 1600)

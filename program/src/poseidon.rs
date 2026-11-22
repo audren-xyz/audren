@@ -157,14 +157,13 @@ pub fn append_leaf_4ary_in_place(
     let mut k = idx;
     let mut finalized_sub_root: Option<[u8; 32]> = None;
 
-    for h in 0..LANE_DEPTH_4ARY {
+    for (h, &z) in ZERO_HASHES_4ARY.iter().enumerate().take(LANE_DEPTH_4ARY) {
         let pos = (k & 3) as usize;
         if pos < 3 {
             let off = frontier_offset(h, pos);
             lane_data[off..off + 32].copy_from_slice(&cur);
         }
 
-        let z = ZERO_HASHES_4ARY[h];
         let mut f0 = [0u8; 32];
         let mut f1 = [0u8; 32];
         let mut f2 = [0u8; 32];

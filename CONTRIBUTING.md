@@ -16,17 +16,18 @@ Before opening a pull request, run the full zero-drift and typecheck suite:
 # 1. Zero-drift verification (IDLs, SDK, relayer, web protocol register, docs, manifests)
 python3 idl/verify-idl.py
 
-# 2. Rust program, mock router, and workspace checks
+# 2. Rust program, mock router, mock hook, and workspace checks
 cargo check --manifest-path program/Cargo.toml
 cargo check --manifest-path program/Cargo.toml --features no-entrypoint
 cargo test --manifest-path program/Cargo.toml
 cargo check --manifest-path tests/mock-router/Cargo.toml
+cargo check --manifest-path tests/mock-hook/Cargo.toml
 cargo check --workspace --tests
 
 # 3. TypeScript SDK, Privacy Relayer, and Web UI checks
 pnpm --dir packages/sdk typecheck && pnpm --dir packages/sdk test
-pnpm --dir apps/relay typecheck
-pnpm --dir apps/web check
+pnpm --dir apps/relay typecheck && pnpm --dir apps/relay test
+pnpm --dir apps/web check && pnpm --dir apps/web e2e:audit
 
 # 4. Cross-language conformance suites (Rust, FFI, Swift & Kotlin)
 cargo test -p audren-client --test conformance_vectors
@@ -42,13 +43,14 @@ If your change modifies any instruction, account layout, PDA seed, error code, o
 python3 idl/generate-idl.py && python3 idl/verify-idl.py
 ```
 
-If your change modifies `program/` or `tests/mock-router/`, build the deterministic sBPFv3 artifacts and run the LiteSVM end-to-end suite:
+If your change modifies `program/`, `tests/mock-router/`, or `tests/mock-hook/`, build the deterministic sBPFv3 artifacts and run the LiteSVM end-to-end suite:
 
 ```bash
 python3 scripts/build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy
 python3 scripts/build-sbf.py --manifest-path tests/mock-router/Cargo.toml --sbf-out-dir target/deploy
-cargo test --test litesvm_e2e -- --nocapture
-AUDREN_REQUIRE_SBF=1 cargo test -p audren-ffi --test cross_sdk_litesvm -- --nocapture
+python3 scripts/build-sbf.py --manifest-path tests/mock-hook/Cargo.toml --sbf-out-dir target/deploy
+cargo test -p audren-client --release --test litesvm_e2e -- --nocapture
+AUDREN_REQUIRE_SBF=1 cargo test -p audren-ffi --release --test cross_sdk_litesvm -- --nocapture
 ```
 
 ## Pull Request Guidelines

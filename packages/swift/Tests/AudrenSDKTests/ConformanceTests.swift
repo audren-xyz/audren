@@ -82,6 +82,17 @@ private struct CtxHashVectors: Decodable {
     let exec_fee_on_output_ctx_hash_hex: String
 }
 
+private struct Groth16Vector: Decodable {
+    let super_root_hex: String
+    let nf0_hex: String
+    let nf1_hex: String
+    let cm0_hex: String
+    let cm1_hex: String
+    let cm2_hex: String
+    let public_input_hash_hex: String
+    let proof_192_hex: String
+}
+
 private struct PoolStateVector: Decodable {
     let raw_hex: String
     let pool_id: UInt32
@@ -106,6 +117,7 @@ private struct ConformanceVectors: Decodable {
     let memo: MemoVector
     let selective_disclosure: SelectiveDisclosureVector
     let ctx_hashes: CtxHashVectors
+    let groth16: Groth16Vector
     let pool_state: PoolStateVector
     let checkpoint_raw_hex: String
 }
@@ -138,7 +150,7 @@ private func loadVectors() throws -> ConformanceVectors {
 }
 
 final class ConformanceTests: XCTestCase {
-    func testV2ConformanceVectors() throws {
+    func testConformanceVectors() throws {
         let v = try loadVectors()
 
         XCTAssertEqual(protocolVersion(), v.protocol_version)
@@ -169,7 +181,7 @@ final class ConformanceTests: XCTestCase {
         let sess3 = try deriveDefiSessionKeypair(seed: aliceSeed, sessionIndex: 3)
         XCTAssertEqual(sess3.pubkeyB58, v.defi_session_3.pubkey_b58)
 
-        // 2. Asset ID & 13 V2 PDAs
+        // 2. Asset ID & 13 Canonical PDAs
         XCTAssertEqual(
             dataToHex(try deriveAssetIdBytes(mintBytes: Data(repeating: 0, count: 32))),
             v.asset_ids.native_sol_asset_id_hex
@@ -247,5 +259,100 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(ck.laneCounts[2], 6)
         XCTAssertEqual(defaultRelayUrl(), "https://relay.audren.xyz")
         XCTAssertFalse(jupiterCpiExcludedDexes().isEmpty)
+
+        // 5. Native BN254 Groth16 proving via `proveJoinsplitWitnessBytes`
+        let zeroHashes = [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0532fd436e19c70e51209694d9c215250937921b8b79060488c1206db73e9946",
+            "1ea8dbbca1ca3a574b1b871aad1e8bc47571c7e11a99a6fb25f3f19d4bfad32c",
+            "1b98ec5a992cd3688e655aef8674386f4e84f0a442eaab4840427e359c214dd2",
+            "0fd83a3939005974d559c13c652a31942ffd61cab9a038e04239af96cafaee14",
+            "11eb54967ae25ce42205223461cda9dbb1a1811db38b71e404d1fd94c9627777",
+            "1c682a99981cf10a215d2788721e0ca060ddc0932cbb04c903eee3bd899dcfc0",
+            "2b3de1ae8e72d64a5cb03934061e3fd03789273f370e32d576ae54b4cbeca719",
+            "1b64ed0dc55f80f1f3da256b451baf16110fc268311a13fe903f87945b734861",
+            "06efb4c4a55b0225fd1088d357b2432f422b0593015c57980e373ecef9029c72",
+            "262138dff44f5352d2d7ec48461c771444a6c00c761a3263735d0a99143a51f1",
+            "07ea118d86ace14a8eaa26fc18b36fefe7d5f5b00e0eb9ebfd1c88f37131c178",
+            "0c2a4af81a2cd78159ce2f3d7ee05367fc5b3c3e1becea2a86d1e66dd27ffb7f",
+            "1a953a710c22f79c369c976fc9981ffdbfe236695297fec65886e645e6fa2884",
+            "16b0c5e286286eb6c4774ad6292b4f0bdc5b36cb7890b27544268892ae255e0d",
+            "2dd7186449cc82702fb8f2d7fa86e0095263f8afb521e1976f499e67a0d7cbb8",
+            "151399c724e17408a7a43cdadba2fc000da9339c56e4d49c6cdee6c4356fbc68",
+            "1905d56dc6be6157b64b80d21a207b96e862aea4b68f4674ce4c1b7db4a8bc2e",
+            "16d33ae1e54afb1453fc544206899ddf3e1a5bdc7f6d8993550aa6876a380319",
+            "16e195c570f224cc86219527096fa55516cc9ee1b96764dd263db0884983fdaf",
+        ]
+        func u64Le(_ x: UInt64) -> Data {
+            var le = x.littleEndian
+            return Data(bytes: &le, count: 8)
+        }
+        func u64Be32(_ x: UInt64) -> Data {
+            var be = x.bigEndian
+            return Data(repeating: 0, count: 24) + Data(bytes: &be, count: 8)
+        }
+        let solAsset = hexToData(v.asset_ids.native_sol_asset_id_hex)
+        var w = Data(capacity: 4611)
+        w.append(hexToData(v.groth16.super_root_hex))
+        w.append(solAsset)
+        w.append(Data(repeating: 0, count: 32))
+        w.append(u64Le(0))
+        w.append(u64Le(0))
+        w.append(ctxPriv)
+        w.append(1) // omit_nf1 = true
+
+        // Input 0: real note at lane 2, leaf 5
+        w.append(alice.spendSk)
+        w.append(enc.tweak)
+        w.append(solAsset)
+        w.append(u64Le(v.memo.amount))
+        w.append(enc.blinding)
+        w.append(0) // is_dummy = false
+        var pos = [UInt8](repeating: 0, count: 20)
+        pos[0] = 1
+        pos[1] = 1
+        pos[18] = 2
+        w.append(contentsOf: pos)
+        for zh in zeroHashes {
+            let z = hexToData(zh)
+            w.append(z)
+            w.append(z)
+            w.append(z)
+        }
+
+        // Input 1: dummy
+        w.append(alice.spendSk)
+        w.append(Data(repeating: 0, count: 32))
+        w.append(solAsset)
+        w.append(u64Le(0))
+        w.append(u64Be32(0x5555))
+        w.append(1) // is_dummy = true
+        w.append(Data(repeating: 0, count: 20 + 20 * 3 * 32))
+
+        // Outputs 0, 1, 2
+        w.append(hexToData("297407e33a8667d5d8235b00a22b34f66113f3d1b9c5486704f12647a0ee1041"))
+        w.append(solAsset)
+        w.append(u64Le(1_000_000))
+        w.append(u64Be32(0x201))
+
+        w.append(hexToData("20944e988ecb9bf1ad2edbbc8b782ff1695fcd197058948fdf9ef6426fa55528"))
+        w.append(solAsset)
+        w.append(u64Le(500_000))
+        w.append(u64Be32(0x202))
+
+        w.append(Data(repeating: 0, count: 32))
+        w.append(solAsset)
+        w.append(u64Le(0))
+        w.append(u64Be32(0x203))
+        XCTAssertEqual(w.count, 4611)
+
+        let proved = try proveJoinsplitWitnessBytes(witness4611: w, seed32: Data(repeating: 0x99, count: 32))
+        XCTAssertEqual(dataToHex(proved.nf0), v.groth16.nf0_hex)
+        XCTAssertEqual(dataToHex(proved.nf1), v.groth16.nf1_hex)
+        XCTAssertEqual(dataToHex(proved.cm0), v.groth16.cm0_hex)
+        XCTAssertEqual(dataToHex(proved.cm1), v.groth16.cm1_hex)
+        XCTAssertEqual(dataToHex(proved.cm2), v.groth16.cm2_hex)
+        XCTAssertEqual(dataToHex(proved.publicInputHash), v.groth16.public_input_hash_hex)
+        XCTAssertEqual(dataToHex(proved.proof192), v.groth16.proof_192_hex)
     }
 }

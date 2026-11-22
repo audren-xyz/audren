@@ -86,6 +86,7 @@ export function computeSwapFeePlan(params: {
   outputTokenPriceUsd: number | null
   feeAccount: string | null
   feeAccountExists: boolean
+  hasUnsafeSelfPayExt?: boolean
 }): SwapFeePlan {
   const {
     cfg,
@@ -97,6 +98,7 @@ export function computeSwapFeePlan(params: {
     outputTokenPriceUsd,
     feeAccount,
     feeAccountExists,
+    hasUnsafeSelfPayExt = false,
   } = params
 
   const baseSwapLamports = rentSchedule.swapBaselineLamports + 15_000n
@@ -105,7 +107,7 @@ export function computeSwapFeePlan(params: {
   const estimatedRelayCostUsd =
     solPriceUsd && solPriceUsd > 0 ? costSol * solPriceUsd : null
 
-  if (!feeAccount) {
+  if (!feeAccount || hasUnsafeSelfPayExt) {
     return {
       billingMode: 'sponsored',
       platformFeeBps: 0,
@@ -118,7 +120,9 @@ export function computeSwapFeePlan(params: {
       estimatedRelayCostUsd,
       estimatedSwapUsd: null,
       estimatedFeeUsd: 0,
-      reason: 'Relayer fee account unavailable on this cluster; action sponsored under rate limits.',
+      reason: hasUnsafeSelfPayExt
+        ? 'Token-2022 output mint carries extensions excluded from self-pay fee credit; sponsored under rate limits.'
+        : 'Relayer fee account unavailable on this cluster; action sponsored under rate limits.',
     }
   }
 

@@ -3,16 +3,17 @@
 use std::path::PathBuf;
 
 use audren_ffi::{
-    canonical_program_id, compute_exec_ctx_hash_ffi, compute_joinsplit_ctx_hash_ffi,
-    decode_audren_address, decode_pool_state_account, decode_root_checkpoint_account,
-    decrypt_and_verify_memo_entry, derive_asset_id_bytes, derive_checkpoint_pda,
-    derive_defi_session_keypair, derive_escrow_pda, derive_keys_from_seed, derive_lane_pda,
-    derive_lane_rent_pda, derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda,
-    derive_pool_pda, derive_sol_vault_pda, derive_subaccount_keys, derive_subroot_pda,
-    derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda, encrypt_note_memo,
-    export_full_viewing_key, prepare_dynamic_swap_memo, protocol_version,
-    verify_selective_disclosure_proof, FfiAccountMeta, FfiExecCtxHashParams,
-    FfiJoinSplitCtxHashParams, FfiSelectiveDisclosureProof,
+    build_joinsplit_ix, canonical_program_id, compute_exec_ctx_hash_ffi,
+    compute_joinsplit_ctx_hash_ffi, decode_audren_address, decode_pool_state_account,
+    decode_root_checkpoint_account, decrypt_and_verify_memo_entry, derive_asset_id_bytes,
+    derive_checkpoint_pda, derive_defi_session_keypair, derive_escrow_pda, derive_keys_from_seed,
+    derive_lane_pda, derive_lane_rent_pda, derive_memo_pda, derive_nf_page_pda,
+    derive_nullifier_pda, derive_pool_pda, derive_sol_vault_pda, derive_subaccount_keys,
+    derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda,
+    encrypt_note_memo, export_full_viewing_key, prepare_dynamic_swap_memo, protocol_version,
+    prove_joinsplit_witness_bytes, verify_selective_disclosure_proof, FfiAccountMeta,
+    FfiExecCtxHashParams, FfiJoinSplitCtxHashParams, FfiJoinSplitParams,
+    FfiSelectiveDisclosureProof,
 };
 use serde_json::Value;
 
@@ -74,7 +75,7 @@ fn ffi_conformance_matches_spec_vectors() {
         v["asset_ids"]["usdc_asset_id_hex"]
     );
 
-    // 3. All 13 V2 PDAs
+    // 3. All 13 canonical PDAs
     let p = &v["pdas"];
     let pool_id = p["pool_id"].as_u64().unwrap() as u32;
     let lane_id = p["lane_id"].as_u64().unwrap() as u8;
@@ -159,7 +160,7 @@ fn ffi_conformance_matches_spec_vectors() {
     assert_eq!(to_hex(&ctx_priv), v["ctx_hashes"]["joinsplit_private_ctx_hash_hex"]);
 
     let ctx_exec = compute_exec_ctx_hash_ffi(FfiExecCtxHashParams {
-        program_id: pid,
+        program_id: pid.clone(),
         pool_id: 0,
         out_lane_id: 1,
         escrow_shard: 3,
@@ -187,7 +188,7 @@ fn ffi_conformance_matches_spec_vectors() {
             },
         ],
         out_stealth_owner: enc.stealth_owner,
-        out_blinding: enc.blinding,
+        out_blinding: enc.blinding.clone(),
         dyn_memo_head: dyn_m.dyn_head_34,
         dyn_mask_56: dyn_m.dyn_mask_56,
         router_ix_data: vec![1, 2, 3, 4],
@@ -203,4 +204,128 @@ fn ffi_conformance_matches_spec_vectors() {
     let ck = decode_root_checkpoint_account(from_hex(v["checkpoint_raw_hex"].as_str().unwrap())).unwrap();
     assert_eq!(ck.slot_idx, 13);
     assert_eq!(ck.lane_counts[2], 6);
+
+    // 8. Live BN254 Groth16 proving via `prove_joinsplit_witness_bytes`
+    let zero_hashes = [
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0532fd436e19c70e51209694d9c215250937921b8b79060488c1206db73e9946",
+        "1ea8dbbca1ca3a574b1b871aad1e8bc47571c7e11a99a6fb25f3f19d4bfad32c",
+        "1b98ec5a992cd3688e655aef8674386f4e84f0a442eaab4840427e359c214dd2",
+        "0fd83a3939005974d559c13c652a31942ffd61cab9a038e04239af96cafaee14",
+        "11eb54967ae25ce42205223461cda9dbb1a1811db38b71e404d1fd94c9627777",
+        "1c682a99981cf10a215d2788721e0ca060ddc0932cbb04c903eee3bd899dcfc0",
+        "2b3de1ae8e72d64a5cb03934061e3fd03789273f370e32d576ae54b4cbeca719",
+        "1b64ed0dc55f80f1f3da256b451baf16110fc268311a13fe903f87945b734861",
+        "06efb4c4a55b0225fd1088d357b2432f422b0593015c57980e373ecef9029c72",
+        "262138dff44f5352d2d7ec48461c771444a6c00c761a3263735d0a99143a51f1",
+        "07ea118d86ace14a8eaa26fc18b36fefe7d5f5b00e0eb9ebfd1c88f37131c178",
+        "0c2a4af81a2cd78159ce2f3d7ee05367fc5b3c3e1becea2a86d1e66dd27ffb7f",
+        "1a953a710c22f79c369c976fc9981ffdbfe236695297fec65886e645e6fa2884",
+        "16b0c5e286286eb6c4774ad6292b4f0bdc5b36cb7890b27544268892ae255e0d",
+        "2dd7186449cc82702fb8f2d7fa86e0095263f8afb521e1976f499e67a0d7cbb8",
+        "151399c724e17408a7a43cdadba2fc000da9339c56e4d49c6cdee6c4356fbc68",
+        "1905d56dc6be6157b64b80d21a207b96e862aea4b68f4674ce4c1b7db4a8bc2e",
+        "16d33ae1e54afb1453fc544206899ddf3e1a5bdc7f6d8993550aa6876a380319",
+        "16e195c570f224cc86219527096fa55516cc9ee1b96764dd263db0884983fdaf",
+    ];
+    let sol_asset = from_hex(v["asset_ids"]["native_sol_asset_id_hex"].as_str().unwrap());
+    let u64_be32 = |x: u64| -> Vec<u8> {
+        let mut b = vec![0u8; 32];
+        b[24..32].copy_from_slice(&x.to_be_bytes());
+        b
+    };
+    let mut w = Vec::with_capacity(4_611);
+    w.extend_from_slice(&from_hex(v["groth16"]["super_root_hex"].as_str().unwrap()));
+    w.extend_from_slice(&sol_asset);
+    w.extend_from_slice(&[0u8; 32]);
+    w.extend_from_slice(&0u64.to_le_bytes());
+    w.extend_from_slice(&0u64.to_le_bytes());
+    w.extend_from_slice(&ctx_priv);
+    w.push(1); // omit_nf1 = true
+
+    // Input 0: real note at lane 2, leaf 5
+    w.extend_from_slice(&alice.spend_sk);
+    w.extend_from_slice(&enc.tweak);
+    w.extend_from_slice(&sol_asset);
+    w.extend_from_slice(&v["memo"]["amount"].as_u64().unwrap().to_le_bytes());
+    w.extend_from_slice(&enc.blinding);
+    w.push(0); // is_dummy = false
+    let mut pos = [0u8; 20];
+    pos[0] = 1;
+    pos[1] = 1;
+    pos[18] = 2;
+    w.extend_from_slice(&pos);
+    for zh in zero_hashes {
+        let z = from_hex(zh);
+        for _ in 0..3 {
+            w.extend_from_slice(&z);
+        }
+    }
+
+    // Input 1: dummy
+    w.extend_from_slice(&alice.spend_sk);
+    w.extend_from_slice(&[0u8; 32]);
+    w.extend_from_slice(&sol_asset);
+    w.extend_from_slice(&0u64.to_le_bytes());
+    w.extend_from_slice(&u64_be32(0x5555));
+    w.push(1); // is_dummy = true
+    w.extend_from_slice(&[0u8; 20 + 20 * 3 * 32]);
+
+    // Outputs 0, 1, 2
+    w.extend_from_slice(&from_hex("297407e33a8667d5d8235b00a22b34f66113f3d1b9c5486704f12647a0ee1041"));
+    w.extend_from_slice(&sol_asset);
+    w.extend_from_slice(&1_000_000u64.to_le_bytes());
+    w.extend_from_slice(&u64_be32(0x201));
+
+    w.extend_from_slice(&from_hex("20944e988ecb9bf1ad2edbbc8b782ff1695fcd197058948fdf9ef6426fa55528"));
+    w.extend_from_slice(&sol_asset);
+    w.extend_from_slice(&500_000u64.to_le_bytes());
+    w.extend_from_slice(&u64_be32(0x202));
+
+    w.extend_from_slice(&[0u8; 32]);
+    w.extend_from_slice(&sol_asset);
+    w.extend_from_slice(&0u64.to_le_bytes());
+    w.extend_from_slice(&u64_be32(0x203));
+    assert_eq!(w.len(), 4_611);
+
+    let proved = prove_joinsplit_witness_bytes(w, vec![0x99u8; 32]).unwrap();
+    assert_eq!(to_hex(&proved.nf0), v["groth16"]["nf0_hex"]);
+    assert_eq!(to_hex(&proved.nf1), v["groth16"]["nf1_hex"]);
+    assert_eq!(to_hex(&proved.cm0), v["groth16"]["cm0_hex"]);
+    assert_eq!(to_hex(&proved.cm1), v["groth16"]["cm1_hex"]);
+    assert_eq!(to_hex(&proved.cm2), v["groth16"]["cm2_hex"]);
+    assert_eq!(to_hex(&proved.public_input_hash), v["groth16"]["public_input_hash_hex"]);
+    assert_eq!(to_hex(&proved.proof_192), v["groth16"]["proof_192_hex"]);
+
+    // 9. Partial SPL withdraw accounts in `build_joinsplit_ix` must return InvalidInput
+    let partial_err = build_joinsplit_ix(FfiJoinSplitParams {
+        program_id: pid,
+        payer: s0.pubkey_b58.clone(),
+        pool_id: 0,
+        vk_id: 0,
+        ckpt_slot_idx: 13,
+        out_lane_id: 2,
+        out_sub_seq: 0,
+        out_root_seq: 0,
+        out_memo_seq: 0,
+        out_nf_seq: 0,
+        output_mask: 0,
+        asset_mode: 2,
+        unwrap_wsol: false,
+        spl_mint: Some(v["asset_ids"]["usdc_mint_b58"].as_str().unwrap().to_string()),
+        spl_vault_ata: None,
+        spl_token_prog: None,
+        proof_192: proved.proof_192,
+        nf0: proved.nf0,
+        nf1: proved.nf1,
+        cm0: proved.cm0,
+        cm1: proved.cm1,
+        cm2: proved.cm2,
+        public_amount_out: 1,
+        relayer_fee_amount: 0,
+        recipient: s0.pubkey_b58.clone(),
+        relayer_fee_recipient: s0.pubkey_b58,
+        memos_bytes: vec![],
+    });
+    assert!(partial_err.is_err(), "partial SPL withdraw accounts must return InvalidInput");
 }

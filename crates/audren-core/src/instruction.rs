@@ -40,7 +40,7 @@ pub const DEPOSIT_FLAG_FEE_FROM_AMOUNT: u8 = 1 << 2;
 
 /// `JoinSplit` (`TAG_JOINSPLIT`) flag in `data[8]`: when `ASSET_MODE_SPL` with `mint == WSOL_MINT`
 /// under Classic SPL Token, unwrap `public_amount_out` (and optional public `relayer_fee_amount`)
-/// atomically through a 1-shot `audren_unwrap` PDA into Native SOL (`output_mask == 0` bypasses pause).
+/// atomically through a 1-shot `audren_v2_unwrap` PDA into Native SOL (`output_mask == 0` bypasses pause).
 pub const WITHDRAW_FLAG_UNWRAP_WSOL: u8 = 1 << 3;
 
 /// `ExecViaEscrow` (`TAG_EXEC_VIA_ESCROW`) leg asset kinds.

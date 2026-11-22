@@ -132,17 +132,27 @@ export function resolveEscrowIndices(
 }
 
 /**
- * Strip the external signer bit on `escrowAddress` before attaching action accounts
- * to Audren's `ExecViaEscrow` instruction (Audren signs `escrow` via `invoke_signed`).
+ * Strip the external signer bit on `escrowAddress` AND promote `isWritable: true` on any
+ * account whose pubkey is `escrowAddress`, listed in `extraWritablePubkeys`, or appears
+ * with `isWritable: true` anywhere in `actionAccounts` (matching Solana's transaction-wide
+ * writability union so on-chain `hash_router_accounts_arena` matches `ctx_hash` bit-for-bit).
  */
 export function prepareEscrowAccountsForAudren(
   actionAccounts: readonly RouterAccountMeta[],
   escrowAddress: string,
+  extraWritablePubkeys?: readonly string[],
 ): RouterAccountMeta[] {
+  const writableSet = new Set<string>([escrowAddress]);
+  if (extraWritablePubkeys) {
+    for (const pk of extraWritablePubkeys) writableSet.add(pk);
+  }
+  for (const meta of actionAccounts) {
+    if (meta.isWritable) writableSet.add(meta.pubkey);
+  }
   return actionAccounts.map((meta) => ({
     pubkey: meta.pubkey,
     isSigner: meta.pubkey === escrowAddress ? false : meta.isSigner,
-    isWritable: meta.isWritable,
+    isWritable: meta.isWritable || writableSet.has(meta.pubkey),
   }));
 }
 
@@ -157,10 +167,11 @@ export interface PreparedEscrowAccounts {
 }
 
 /**
- * High-level cross-SDK helper (mirrors Rust `prepare_escrow_accounts`, Swift `prepareEscrowAccounts`,
- * and Kotlin `prepareEscrowAccounts`): derives the sharded `escrow` PDA and its input/output
- * ATAs, locates `(escrowIdx, escrowInIdx, escrowOutIdx)`, and strips the external signer bit on
- * `escrow` so Audren can sign via `invoke_signed`.
+ * High-level helper (mirrors Rust `prepare_escrow_accounts`): derives the sharded `escrow`
+ * PDA and its input/output ATAs, locates `(escrowIdx, escrowInIdx, escrowOutIdx)`, strips
+ * the external signer bit on `escrow` so Audren can sign via `invoke_signed`, and applies
+ * Solana's transaction-wide writability promotion across `escrow`, escrow ATAs, and any
+ * `extraWritablePubkeys`.
  */
 export async function prepareEscrowAccounts(params: {
   poolId: number;
@@ -170,6 +181,7 @@ export async function prepareEscrowAccounts(params: {
   inputTokenProgram?: string;
   outputTokenProgram?: string;
   actionAccounts: readonly RouterAccountMeta[];
+  extraWritablePubkeys?: readonly string[];
   programId?: string;
 }): Promise<PreparedEscrowAccounts> {
   const programId = params.programId ?? AUDREN_PROGRAM_ID;
@@ -192,7 +204,11 @@ export async function prepareEscrowAccounts(params: {
     escrowInAta,
     escrowOutAta,
   );
-  const accounts = prepareEscrowAccountsForAudren(params.actionAccounts, escrowPda);
+  const accounts = prepareEscrowAccountsForAudren(params.actionAccounts, escrowPda, [
+    escrowInAta,
+    escrowOutAta,
+    ...(params.extraWritablePubkeys ?? []),
+  ]);
   return {
     escrowPda,
     escrowInAta,

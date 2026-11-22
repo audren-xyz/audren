@@ -76,18 +76,24 @@ def parse_core_constants() -> dict:
     for name, val in re.findall(r'pub const ([A-Z0-9_]+_MAGIC):\s*\[u8;\s*8\]\s*=\s*\*b"([^"]+)";', layout_rs):
         magics[name] = val
 
-    lengths: dict[str, int] = {
-        "POOL_STATE_LEN": 128,
-        "SENTINEL_LEN": 16,
-        "LANE_STATE_LEN": 1824,
-        "SUBTREE_PAGE_LEN": 8256,
-        "SUBROOT_PAGE_LEN": 9664,
-        "MEMO_PAGE_LEN": 10144,
-        "NF_PAGE_LEN": 9664,
-        "CKPT_LEN": 704,
-    }
+    lengths: dict[str, int] = {}
     for name, val_s in re.findall(r"pub const ([A-Z0-9_]+_LEN):\s*usize\s*=\s*([0-9_]+);", layout_rs):
         lengths[name] = int(val_s.replace("_", ""))
+    for name, val_s in re.findall(r"assert!\(([A-Z0-9_]+_LEN)\s*==\s*([0-9_]+)", layout_rs):
+        lengths[name] = int(val_s.replace("_", ""))
+    required_lengths = (
+        "POOL_STATE_LEN",
+        "SENTINEL_LEN",
+        "LANE_STATE_LEN",
+        "SUBTREE_PAGE_LEN",
+        "SUBROOT_PAGE_LEN",
+        "MEMO_PAGE_LEN",
+        "NF_PAGE_LEN",
+        "CKPT_LEN",
+    )
+    missing_lengths = [k for k in required_lengths if k not in lengths]
+    if missing_lengths:
+        raise RuntimeError(f"Could not parse account lengths from layout.rs: {missing_lengths}")
 
     return {
         "program_id": program_id,
@@ -129,7 +135,7 @@ ERROR_DOCS: dict[str, str] = {
     "InvalidFieldElement": "32-byte input is not a canonical BN254 scalar (< Fr modulus).",
     "PoolPaused": "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open).",
     "Unauthorized": "Required authority signer is missing or mismatched.",
-    "PageSeqOutOfRange": "OpenPage sequence exceeds active_seq + 1 lookahead bound.",
+    "PageSeqOutOfRange": "OpenPage sequence exceeds cur_seq + 2 lookahead bound.",
     "InvalidTargetProgram": "Target program must be executable and cannot be Audren, System, Token, or ATA.",
     "EscrowAuthorityAltered": "Target CPI altered swap_escrow owner, data length, or drained lamports.",
     "EscrowAccountAltered": "Target CPI altered an escrow token account owner, delegate, close_authority, TLV, or size.",
@@ -556,6 +562,8 @@ def build_audren_codama(core: dict) -> dict:
                 ix_acc("subrootPage", True, False, ["Active SubtreeRootPage PDA."]),
                 ix_acc("memoPage", True, False, ["Active MemoPage PDA."]),
                 ix_acc("systemProgram", False, False, ["System Program."]),
+                ix_acc("nextSubtreePage", True, False, ["Optional rollover SubtreePage."], is_optional=True),
+                ix_acc("nextMemoPage", True, False, ["Optional rollover MemoPage."], is_optional=True),
             ],
             [
                 ix_arg("poolId", num_t("u32")),

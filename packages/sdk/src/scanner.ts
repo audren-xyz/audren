@@ -125,7 +125,8 @@ export async function syncCompactStoreWithRpc(params: {
     const targetMemoMax = laneHdr.nextLeaf / BigInt(MEMO_NOTES_PER_PAGE);
     const targetNfMax = laneHdr.nfCount / BigInt(NF_PER_PAGE);
 
-    const startSub = laneState.frontierSubSeq;
+    const memoSubSeq = laneState.nextMemoLeaf / BigInt(SUBTREE_LEAVES);
+    const startSub = laneState.frontierSubSeq < memoSubSeq ? laneState.frontierSubSeq : memoSubSeq;
     const startMemo = laneState.nextMemoLeaf / BigInt(MEMO_NOTES_PER_PAGE);
     const startNf = laneState.nextNfIndex / BigInt(NF_PER_PAGE);
 

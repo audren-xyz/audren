@@ -223,7 +223,7 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
     ok: true,
     protocolVersion: PROTOCOL_VERSION,
     service: 'audren-relay',
-    domain: 'relay.audren.xyz',
+    domain: url.host,
     programId: AUDREN_PROGRAM_ID_STR,
     cluster: requestedCluster,
     configured: activeCluster.configured,
@@ -306,7 +306,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
     .trim()
     .toLowerCase()
   const op: AudrenOpKind =
-    rawOp === 'exec_escrow' || rawOp === 'swap'
+    rawOp === 'exec' || rawOp === 'exec_escrow' || rawOp === 'swap'
       ? 'exec_escrow'
       : rawOp === 'transfer'
         ? 'transfer'
@@ -591,6 +591,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       outputTokenPriceUsd: outPriceUsd,
       feeAccount: includeFee ? relayerFeeAtaB58 : null,
       feeAccountExists,
+      hasUnsafeSelfPayExt: outMeta.hasUnsafeSelfPayExt,
     })
 
     // If USD prices weren't available before quoting, fetch a baseline quote first to know real outAmount
@@ -616,6 +617,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
         outputTokenPriceUsd: outPriceUsd,
         feeAccount: includeFee ? relayerFeeAtaB58 : null,
         feeAccountExists,
+        hasUnsafeSelfPayExt: outMeta.hasUnsafeSelfPayExt,
       })
       if (feePlan.platformFeeBps > 0 && includeFee && relayer) {
         quoteResult = await quoteWithSelection(env, cfg, baseline.winner.provider, {
@@ -889,10 +891,11 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   const relayer = getRelayerPubkeyForCluster(env, cluster, requestedPayer)
   const fvkInfo = getRelayerFvk(env, cluster)
   if (!rpcUrl || !relayer) {
+    const reqHost = new URL(request.url).host
     return json(
       request,
       cfg.corsOrigins,
-      { error: `${cluster} privacy relayer is not configured on relay.audren.xyz` },
+      { error: `${cluster} privacy relayer is not configured on ${reqHost}` },
       503,
     )
   }
@@ -1228,12 +1231,10 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     reservationId = reservation.reservationId
 
     // 7. Broadcast & confirm on Solana via RPC
-    let txBroadcast = false
     const sentSig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
       toBase64(signed.wireBytes),
       { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
     ])
-    txBroadcast = true
     let slot = 0
     try {
       const conf = await waitForConfirmation(rpcUrl, sentSig)
@@ -1256,7 +1257,6 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       reservationId = undefined
       throw confErr
     }
-    void txBroadcast
 
     // 8. Commit EXACT simulated cost into SQLite Durable Object & clear pending reservation
     await guard.commit({
@@ -1291,13 +1291,21 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       simulatedFeeUnits:
         verdict.nativeSolFeeToRelayer > 0n
           ? verdict.nativeSolFeeToRelayer.toString()
-          : simulatedFeeUnits.toString(),
+          : verdict.shieldedCm2Fee
+            ? verdict.shieldedCm2Fee.amount.toString()
+            : simulatedFeeUnits.toString(),
       simulatedFeeMint:
         verdict.nativeSolFeeToRelayer > 0n
           ? SYSTEM_PROGRAM_ID_STR
-          : verdict.watchedRelayerFeeMint,
+          : verdict.shieldedCm2Fee
+            ? verdict.shieldedCm2Fee.mint
+            : verdict.watchedRelayerFeeMint,
       simulatedFeeAccount:
-        verdict.nativeSolFeeToRelayer > 0n ? relayer.pubkeyB58 : verdict.watchedRelayerFeeAta,
+        verdict.nativeSolFeeToRelayer > 0n
+          ? relayer.pubkeyB58
+          : verdict.shieldedCm2Fee
+            ? fvkInfo?.shieldedAddress ?? null
+            : verdict.watchedRelayerFeeAta,
       netSponsoredLamports: netSponsoredLamports.toString(),
       signature: sentSig,
       slot,
@@ -1362,7 +1370,7 @@ export default {
       return json(request, cfg.corsOrigins, {
         ok: true,
         service: 'audren-relay',
-        domain: 'relay.audren.xyz',
+        domain: url.host,
         programId: AUDREN_PROGRAM_ID_STR,
         timestamp: new Date().toISOString(),
       })

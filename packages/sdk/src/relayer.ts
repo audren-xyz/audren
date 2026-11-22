@@ -1,7 +1,7 @@
 /**
  * HTTP client for any Audren Privacy Relayer (`https://relay.audren.xyz` or self-hosted).
  *
- * Supports all three V2 fee settlement modes:
+ * Supports all three protocol fee settlement modes:
  * 1. `transfer` (`ASSET_MODE_PRIVATE`): shielded `cm2` fee note verified via relayer read-only FVK.
  * 2. `withdraw` (`ASSET_MODE_SOL` / `ASSET_MODE_SPL` / `WITHDRAW_FLAG_UNWRAP_WSOL`): public fee deduction.
  * 3. `exec_escrow` (`ExecViaEscrow` Tag 7): input-leg fee or `EXEC_FLAG_FEE_ON_OUTPUT`.
@@ -17,6 +17,7 @@ export type RelayOperation = 'transfer' | 'withdraw' | 'exec_escrow';
 export interface RelayRentSchedule {
   nullifierRentLamports: string;
   noteRentPerLeafLamports: string;
+  pageRentPerNoteLamports?: string;
   ataRentLamports: string;
   swapBaselineLamports: string;
 }
@@ -131,6 +132,7 @@ export interface RelaySubmitRequest {
   preInstructions?: RouterSwapInstruction[];
   computeUnitLimit?: number;
   priorityFeeLamports?: string;
+  vaultOutAta?: string;
   provider?: RelayAggregatorId;
 }
 

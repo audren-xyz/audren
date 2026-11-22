@@ -1,20 +1,20 @@
 //! Multi-Asset & Adversarial sBPFv3 Mock AMM Router for Audren LiteSVM verification.
 //!
 //! Supports both honest swaps (SPL->SOL, SOL->SPL, SPL->SPL across multiple indexed pools + up to
-//! 64 trailing router accounts) and adversarial router attacks to prove both baseline exploitability
-//! adversarial attacks strictly blocked by the Audren escrow firewall:
+//! 64 trailing router accounts) and adversarial router attacks strictly blocked by the Audren
+//! escrow firewall:
 //!   - `TAG_INIT_DEX` (0): init `dex_pool` PDA `["dex_pool", pool_idx]` with `(rate_bps, liq)`
 //!   - `TAG_SET_RATE` (1): update `rate_bps` on a `dex_pool`
 //!   - `TAG_SWAP_SPL_TO_SOL` (3): SPL/T22 -> Native SOL (reads `rate_bps` from passed `dex_pool`)
 //!   - `TAG_SWAP_SOL_TO_SPL` (4): Native SOL -> SPL/T22 (with optional `leave_dust_lamports`)
 //!   - `TAG_SWAP_SPL_TO_SPL` (5): SPL/T22 -> SPL/T22 with `attack_mode`:
-//!       0 = honest swap
-//!       1 = `SystemProgram::Assign(escrow, attacker_prog)` (permanent escrow shard ownership hijack)
-//!       2 = `spl_token::SetAuthority(AccountOwner -> attacker)` on unrelated `other_escrow_ata`
-//!       3 = `SystemProgram::Transfer(escrow -> attacker)` (SPL->SPL escrow lamport drain)
-//!       4 = Token-2022 `Reallocate([MemoTransfer]) + EnableRequiredMemoTransfers` on `escrow_in`
-//!       5 = `spl_token::Approve(delegate = attacker)` on `escrow_in`
-//!       6 = Create uninitialized canonical escrow ATA + hijack owner to `attacker`
+//!     0 = honest swap
+//!     1 = `SystemProgram::Assign(escrow, attacker_prog)` (permanent escrow shard ownership hijack)
+//!     2 = `spl_token::SetAuthority(AccountOwner -> attacker)` on unrelated `other_escrow_ata`
+//!     3 = `SystemProgram::Transfer(escrow -> attacker)` (SPL->SPL escrow lamport drain)
+//!     4 = Token-2022 `Reallocate([MemoTransfer]) + EnableRequiredMemoTransfers` on `escrow_in`
+//!     5 = `spl_token::Approve(delegate = attacker)` on `escrow_in`
+//!     6 = Create uninitialized canonical escrow ATA + hijack owner to `attacker`
 
 #![no_std]
 #![allow(unexpected_cfgs)]

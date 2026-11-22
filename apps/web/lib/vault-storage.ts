@@ -32,8 +32,13 @@ const IDB_NAME = 'audren_v2_vault_store'
 const IDB_STORE = 'compact_stores'
 const IDB_VERSION = 1
 
-function storeKey(cluster: string, poolId: number, spendPkBytes: Uint8Array): string {
-  return `audren_v2_store:${cluster}:${poolId}:${base58Encode(spendPkBytes)}`
+function storeKey(
+  cluster: string,
+  poolId: number,
+  spendPkBytes: Uint8Array,
+  walletScope = 'local',
+): string {
+  return `audren_v2_store:${cluster}:${poolId}:${walletScope}:${base58Encode(spendPkBytes)}`
 }
 
 async function openVaultDb(): Promise<IDBDatabase | null> {
@@ -128,10 +133,11 @@ export async function loadEncryptedCompactStore(
   keys: Pick<AudrenKeys, 'spendPkBytes' | 'viewSk'>,
   cluster: string,
   poolId = 0,
+  walletScope = 'local',
 ): Promise<CompactWalletStore | null> {
   if (typeof window === 'undefined') return null
   try {
-    const raw = await idbGet(storeKey(cluster, poolId, keys.spendPkBytes))
+    const raw = await idbGet(storeKey(cluster, poolId, keys.spendPkBytes, walletScope))
     if (!raw) return null
     const env = JSON.parse(raw) as { iv?: string; ct?: string }
     if (!env.iv || !env.ct) return null
@@ -156,6 +162,7 @@ export async function saveEncryptedCompactStore(
   cluster: string,
   poolId: number,
   store: CompactWalletStore,
+  walletScope = 'local',
 ): Promise<void> {
   if (typeof window === 'undefined') return
   try {
@@ -171,7 +178,7 @@ export async function saveEncryptedCompactStore(
       toArrayBuffer(encoder.encode(store.toJSON())),
     )
     await idbSet(
-      storeKey(cluster, poolId, keys.spendPkBytes),
+      storeKey(cluster, poolId, keys.spendPkBytes, walletScope),
       JSON.stringify({ iv: toBase64(iv), ct: toBase64(new Uint8Array(ct)) }),
     )
   } catch {
@@ -183,9 +190,10 @@ export async function clearEncryptedCompactStore(
   spendPkBytes: Uint8Array,
   cluster: string,
   poolId = 0,
+  walletScope = 'local',
 ): Promise<void> {
   if (typeof window === 'undefined') return
-  await idbDelete(storeKey(cluster, poolId, spendPkBytes))
+  await idbDelete(storeKey(cluster, poolId, spendPkBytes, walletScope))
 }
 
 // ============================================================================

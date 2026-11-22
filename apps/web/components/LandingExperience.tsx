@@ -155,7 +155,7 @@ function PrivacyComparisonCard() {
   return (
     <figure
       className={styles.comparison}
-      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances, and Audren private ring transfer"
+      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances, and Audren shielded pool transfer"
     >
       <figcaption className={styles.figureHeader}>
         <div>
@@ -333,7 +333,7 @@ function SharedVaultRingStage({
         className={styles.ringSvg}
         viewBox="0 0 580 272"
         role="img"
-        aria-label={`${activeCase.tab} inside Audren shared vault ring: ${activeCase.resultText}`}
+        aria-label={`${activeCase.tab} inside Audren global shielded pool: ${activeCase.resultText}`}
       >
         <defs>
           <radialGradient id={`vault-glow-${runId}`} cx="50%" cy="50%" r="50%">
@@ -919,7 +919,7 @@ export function LandingExperience() {
           </div>
         </section>
 
-        {/* INTERACTIVE SHARED VAULT & PRIVATE RING */}
+        {/* INTERACTIVE SHARED VAULT & GLOBAL MASP */}
         <section className={`container ${styles.lifeSection}`} id="use-cases">
           <div className={styles.sectionIntro}>
             <div>
@@ -931,12 +931,12 @@ export function LandingExperience() {
             </div>
             <p>
               Public vaults hold the pooled assets; private notes authorize spending. Proofs conceal
-              the source note among selected candidates. Public amounts, timing and outside
-              information can still connect activity.
+              the spent note across the entire historical global pool. Public amounts, timing and
+              outside information can still connect activity.
             </p>
           </div>
 
-          <div className={styles.usecaseNav} role="tablist" aria-label="What you can do inside the ring">
+          <div className={styles.usecaseNav} role="tablist" aria-label="What you can do inside the global shielded pool">
             {RING_CASES.map((item, idx) => (
               <button
                 key={item.id}
@@ -996,7 +996,7 @@ export function LandingExperience() {
           <p className={styles.editorialNote}>
             <strong>More TVL does not automatically mean more privacy.</strong> More independently
             owned, plausible activity may help — dollars alone do not establish that. Timing,
-            public amounts and candidate selection still matter.
+            public amounts and input-count selection still matter.
           </p>
         </section>
 
@@ -1157,7 +1157,7 @@ export function LandingExperience() {
                   <li>Private JoinSplit conceals spent notes across the entire pool history, recipient, token &amp; amount</li>
                   <li>Supports SOL, Classic SPL and transferable Token-2022 in one shared anonymity set</li>
                   <li>Protocol-agnostic ExecViaEscrow CPI + fee-on-output + self-paying WSOL unwrap (~103k–158k CU)</li>
-                  <li>Zero indexer or CDN required (CompactWalletStore = 1.28 MB @ 10M notes); Phase-2 MPC &amp; audit pending</li>
+                  <li>Zero indexer or CDN required (CompactWalletStore = 1.28 MB @ 10M notes); PPoT + BGM17 ceremony live, independent audit pending</li>
                 </ul>
               </article>
             </div>

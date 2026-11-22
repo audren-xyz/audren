@@ -123,6 +123,7 @@ fn run_ts_driver(payload: &Value) -> Value {
     serde_json::from_slice(&out.stdout).expect("parse driver stdout JSON")
 }
 
+#[allow(clippy::result_large_err)]
 fn send_v1(
     svm: &mut LiteSVM,
     payer: &Keypair,
@@ -149,7 +150,7 @@ fn send_v1(
 }
 
 #[test]
-fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain_v2() {
+fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
     let root = repo_root();
     let so_path = root.join("target/deploy/audren.so");
     assert!(

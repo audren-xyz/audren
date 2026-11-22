@@ -2,7 +2,7 @@
 
 All addresses below are public on-chain Solana accounts. No private keys or RPC credentials are stored in this repository.
 
-## On-Chain Program (`audren` v1.1.0)
+## On-Chain Program (`audren` v1.1.1)
 
 | Field | Value |
 |---|---|
@@ -10,12 +10,12 @@ All addresses below are public on-chain Solana accounts. No private keys or RPC 
 | **ProgramData Account** | `Gj4hW4KuMTNR9YTPmixRPsNcMNwRvYTXdksxLgoGRiVM` |
 | **Pool #0 PDA (`audren_v2_pool`)** | `8CN7uxRdQGjuAaZQVVcHRZbptSzvgfUv7tg8EarLHztF` |
 | **Sol Vault PDA (`audren_v2_sol`)** | `CEpjPxvw68qVqCGAHmpYxVk6XRBqf6asLpiri8wFiD7K` |
-| **Vault Authority PDA (`audren_v2_vauth`)** | `53H7qJDZxmFbEcBpCJ8GE3LNTL3zjdJwCjwWRKkXE8J7` |
+| **Vault Authority PDA (`audren_v2_vault`)** | `53H7qJDZxmFbEcBpCJ8GE3LNTL3zjdJwCjwWRKkXE8J7` |
 | **Instruction Architecture** | Solana sBPFv3 (`pinocchio 0.11.1`, `#![no_std]`) + Transaction v1 (`0x81`, `4,096 B`) |
 | **ZK Proof Verification** | `192 B` BN254 Groth16 (`17,861` R1CS, 4-ary Depth-20 global MASP) via `alt_bn128` syscall (`groth16-solana`) |
 | **Verifying Key Provenance** | Phase 1: Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`, 71+ contributors) · Phase 2: Audren BGM17 ceremony (drand Quicknet `#34194203` + Solana Mainnet slot `472705896`, [`ceremony/transcript.json`](../ceremony/transcript.json)) · Pre-audit |
 | **Proving Key (`audren_joinsplit.pk`)** | `3,927,280 B` · SHA-256 `2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4` |
-| **Compiled sBPFv3 ELF (`v1.1.0`)** | `150,848 B` · SHA-256 `8a1bc802a27c131dabe73182ac6527a90ecc2bf7cbc06eaa41c2489a60e8b9c9` · `solana-verify` `e2a231f59138b6e074fa6abfc1b395541b8560ae02f75ebc18a07662df59f960` |
+| **Compiled sBPFv3 ELF (`v1.1.1`)** | `151,648 B` · SHA-256 `ce1e5d06247490022fcd75751db566d6eb2f57f840d43ef50a9d31a9197d90ba` · `solana-verify` `878f02a19a6cadc6e402b9938bc4276aa9aa29bbd023c271714b754537772f94` |
 | **Published IDLs** | [`idl/audren.codama.json`](../idl/audren.codama.json) (Codama v1.8.0) · [`idl/audren.anchor.json`](../idl/audren.anchor.json) (Anchor v0.30+) |
 | **Security Policy & Metadata** | [`SECURITY.md`](../SECURITY.md) · [`idl/security.json`](../idl/security.json) (`security@audren.xyz`) |
 
@@ -38,9 +38,9 @@ Mainnet releases use deterministic Linux/Docker builds via the Solana Foundation
 | **Target Architecture** | `sBPFv3` (`--arch v3 --cargo-build-sbf-args="--tools-version v1.57"`) |
 | **Workspace / Library** | `--workspace-path program --library-name audren` |
 | **Otter Verify PDA (Mainnet)** | `FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt` |
-| **Verified Source Commit (`v1.1.0`)** | `62b5bdb44ce4fdacdac588f0d194802a7e625155` |
+| **Verified Source Commit (`v1.1.1`)** | `62b5bdb44ce4fdacdac588f0d194802a7e625155` |
 | **Source Repository** | `https://github.com/audren-xyz/audren` |
-| **GitHub Release** | [`v1.1.0`](https://github.com/audren-xyz/audren/releases/tag/v1.1.0) |
+| **GitHub Release** | [`v1.1.1`](https://github.com/audren-xyz/audren/releases/tag/v1.1.1) |
 | **Explorer / OtterSec Status** | [Mainnet Verified Build](https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build) · [`verify.osec.io`](https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3) |
 
 ## Deployment, Metadata, Verified Build & Release Workflow
@@ -57,7 +57,7 @@ python3 idl/generate-idl.py && python3 idl/verify-idl.py
 # 3. Upgrade Devnet (deploys ELF + syncs & verifies `security` and `idl` metadata)
 ./scripts/upgrade-program.sh devnet
 
-# 4. Upgrade Mainnet from a clean, pushed commit (after Phase-2 MPC VK is frozen)
+# 4. Upgrade Mainnet from a clean, pushed commit (with frozen BGM17 ceremony VK and Docker build)
 ./scripts/upgrade-program.sh mainnet
 
 # 5. Audit live cluster compliance

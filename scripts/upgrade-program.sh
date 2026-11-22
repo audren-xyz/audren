@@ -7,13 +7,14 @@ set -euo pipefail
 #   1. Local drift verification (`idl/verify-idl.py`: IDLs, @audren/sdk, security.json,
 #      embedded .security.txt, Cargo.toml versions, and pinned Agave/sBPFv3 toolchain).
 #   2. sBPFv3 ELF64 header verification (`scripts/build-sbf.py --check-elf`).
-#   3. Program deployment (`solana program deploy`).
+#   3. Program deployment (two-step `write-buffer --use-rpc` + `deploy --buffer --use-rpc`
+#      on Mainnet to eliminate UDP/QUIC chunk drops and orphaned buffer leaks).
 #   4. Automatic Solana Program Metadata sync (`security` + `idl`) with round-trip verification.
 #   5. On Mainnet: automatic Solana Verified Build attestation (Otter Verify PDA update +
 #      remote job submission to `verify.osec.io`) AND automatic GitHub tag + Release cutting
-#      (`v<version>` with verified ELF, SHA-256, IDLs, and security.json), requiring a clean
-#      pushed commit and deterministic Docker build (`build-verifiable`) unless
-#      `ALLOW_UNVERIFIED_DEPLOY=1`.
+#      (`v<version>` with verified ELF, SHA-256, `audren_joinsplit.pk`, `transcript.json`, IDLs,
+#      and `security.json`), requiring a clean pushed commit and deterministic Docker build
+#      (`build-verifiable`) unless `ALLOW_UNVERIFIED_DEPLOY=1`.
 #
 # Configuration is read strictly from environment variables or gitignored `.credentials/operator.env`:
 #   MAINNET_RPC_URL      - Solana Mainnet RPC URL
@@ -50,6 +51,7 @@ AGAVE_VERSION="4.3.0"
 TOOLS_VERSION="v1.57"
 SBF_ARCH="v3"
 VERIFY_BASE_IMAGE="solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd"
+PROGRAM_METADATA_PKG="@solana-program/program-metadata@0.11.0"
 REPO_OWNER_NAME="audren-xyz/audren"
 REPO_URL="https://github.com/${REPO_OWNER_NAME}"
 PROGRAM_LIB_NAME="audren"
@@ -142,6 +144,34 @@ PY
   exit 1
 }
 
+resolve_solana_keygen() {
+  local solana_bin sibling
+  solana_bin="$(resolve_solana_cli)"
+  sibling="$(dirname "$solana_bin")/solana-keygen"
+  if [[ -x "$sibling" ]]; then
+    echo "$sibling"
+    return 0
+  fi
+  if command -v solana-keygen >/dev/null 2>&1; then
+    command -v solana-keygen
+    return 0
+  fi
+  echo "Error: solana-keygen not found alongside $solana_bin or on PATH." >&2
+  exit 1
+}
+
+_AUDREN_CLEANUP_PATHS=()
+cleanup_temp_paths() {
+  local p
+  for p in "${_AUDREN_CLEANUP_PATHS[@]:-}"; do
+    if [[ -n "$p" ]]; then
+      rm -rf "$p"
+    fi
+  done
+  return 0
+}
+trap cleanup_temp_paths EXIT
+
 require_solana_verify() {
   if ! command -v solana-verify >/dev/null 2>&1; then
     cat >&2 <<'EOF'
@@ -160,7 +190,7 @@ verify_onchain_metadata() {
   local fetched attempt
   fetched="$(mktemp "/tmp/audren-fetch-${seed}-XXXXXX.txt")"
   for attempt in 1 2 3 4; do
-    if npx --yes @solana-program/program-metadata@latest fetch "$seed" \
+    if npx --yes "$PROGRAM_METADATA_PKG" fetch "$seed" \
       "$PROGRAM_ID" \
       --rpc "$rpc_url" >"$fetched" 2>/dev/null &&
       python3 - "$expected_path" "$fetched" "$seed" <<'PY'
@@ -195,7 +225,7 @@ publish_security() {
   local cluster="$1"
   local rpc_url="$2"
   echo "Publishing canonical security metadata ($SECURITY_PATH) for $PROGRAM_ID on $cluster..."
-  npx --yes @solana-program/program-metadata@latest write security \
+  npx --yes "$PROGRAM_METADATA_PKG" write security \
     "$PROGRAM_ID" \
     "$SECURITY_PATH" \
     --format json \
@@ -206,7 +236,7 @@ publish_security() {
 
 list_metadata_buffers() {
   local rpc_url="$1"
-  npx --yes @solana-program/program-metadata@latest list-buffers \
+  npx --yes "$PROGRAM_METADATA_PKG" list-buffers \
     --keypair "$KEYPAIR" \
     --rpc "$rpc_url" 2>/dev/null | python3 -c '
 import re, sys
@@ -218,17 +248,19 @@ for m in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", sys.stdin.read()):
 publish_idl() {
   local cluster="$1"
   local rpc_url="$2"
-  local min_idl
+  local min_idl solana_keygen
   min_idl="$(mktemp /tmp/audren-idl-XXXXXX.json)"
+  _AUDREN_CLEANUP_PATHS+=("$min_idl")
   python3 -c "import json, pathlib, sys; pathlib.Path(sys.argv[2]).write_text(json.dumps(json.loads(pathlib.Path(sys.argv[1]).read_text()), separators=(',',':')))" "$IDL_PATH" "$min_idl"
 
   local authority
-  authority="$(solana-keygen pubkey "$KEYPAIR")"
+  solana_keygen="$(resolve_solana_keygen)"
+  authority="$("$solana_keygen" pubkey "$KEYPAIR")"
   local before_buffers
   before_buffers="$(list_metadata_buffers "$rpc_url")"
 
   echo "Publishing canonical Codama IDL ($IDL_PATH) for $PROGRAM_ID on $cluster..."
-  if ! npx --yes @solana-program/program-metadata@latest write idl \
+  if ! npx --yes "$PROGRAM_METADATA_PKG" write idl \
     "$PROGRAM_ID" \
     "$min_idl" \
     --format json \
@@ -253,23 +285,23 @@ PY
       exit 1
     fi
     echo "Populating buffer $new_buffer and finalizing canonical IDL..." >&2
-    if ! npx --yes @solana-program/program-metadata@latest update-buffer \
+    if ! npx --yes "$PROGRAM_METADATA_PKG" update-buffer \
       "$new_buffer" \
       "$min_idl" \
       --format json \
       --keypair "$KEYPAIR" \
       --rpc "$rpc_url"; then
-      npx --yes @solana-program/program-metadata@latest close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
+      npx --yes "$PROGRAM_METADATA_PKG" close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
       rm -f "$min_idl"
       exit 1
     fi
-    if ! npx --yes @solana-program/program-metadata@latest write idl \
+    if ! npx --yes "$PROGRAM_METADATA_PKG" write idl \
       "$PROGRAM_ID" \
       --buffer "$new_buffer" \
       --close-buffer \
       --keypair "$KEYPAIR" \
       --rpc "$rpc_url"; then
-      npx --yes @solana-program/program-metadata@latest close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
+      npx --yes "$PROGRAM_METADATA_PKG" close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
       rm -f "$min_idl"
       exit 1
     fi
@@ -331,8 +363,9 @@ verify_onchain_build() {
   require_solana_verify
   require_keypair
 
-  local uploader
-  uploader="$(solana-keygen pubkey "$KEYPAIR")"
+  local uploader solana_keygen
+  solana_keygen="$(resolve_solana_keygen)"
+  uploader="$("$solana_keygen" pubkey "$KEYPAIR")"
 
   echo "Verifying $PROGRAM_ID on $cluster against ${REPO_URL}@${commit} and uploading Otter Verify PDA..."
   solana-verify verify-from-repo \
@@ -439,7 +472,7 @@ PY
 
   local tmp_dir sha_file notes_file
   tmp_dir="$(mktemp -d /tmp/audren-release-XXXXXX)"
-  trap 'rm -rf "$tmp_dir"' RETURN
+  _AUDREN_CLEANUP_PATHS+=("$tmp_dir")
   sha_file="${tmp_dir}/audren.so.sha256"
   notes_file="${tmp_dir}/release-notes.md"
 
@@ -577,7 +610,15 @@ rel = json.loads(sys.argv[1])
 tag = sys.argv[2]
 assert rel.get("tag_name") == tag, f"Release tag mismatch: {rel.get('tag_name')} != {tag}"
 assets = {a["name"] for a in rel.get("assets", [])}
-required = {"audren.so", "audren.so.sha256", "audren.codama.json", "audren.anchor.json", "security.json"}
+required = {
+    "audren.so",
+    "audren.so.sha256",
+    "audren_joinsplit.pk",
+    "transcript.json",
+    "audren.codama.json",
+    "audren.anchor.json",
+    "security.json",
+}
 missing = required - assets
 if missing:
     sys.exit(f"GitHub Release {tag} missing required assets: {sorted(missing)}")
@@ -668,7 +709,11 @@ case "$1" in
     if [[ -z "$COMMIT_ARG" ]]; then
       COMMIT_ARG="$(curl -fsS "https://verify.osec.io/status/${PROGRAM_ID}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("commit",""))')"
     fi
-    COMMIT_SHA="$(resolve_verified_commit "$COMMIT_ARG")"
+    REQUIRE_CLEAN_HEAD=1
+    if [[ "${ALLOW_CROSS_COMMIT_RELEASE:-0}" == "1" ]]; then
+      REQUIRE_CLEAN_HEAD=0
+    fi
+    COMMIT_SHA="$(resolve_verified_commit "$COMMIT_ARG" "$REQUIRE_CLEAN_HEAD")"
     publish_github_release "$COMMIT_SHA"
     exit 0
     ;;
@@ -744,18 +789,57 @@ PY
     fi
 
     SOLANA_BIN="$(resolve_solana_cli)"
+    SOLANA_KEYGEN_BIN="$(resolve_solana_keygen)"
     TOTAL_STEPS=3
     if [[ "$CLUSTER" == "mainnet" ]]; then
       TOTAL_STEPS=4
     fi
     PRIORITY_FEE="${SOLANA_PRIORITY_FEE_MICROLAMPORTS:-50000}"
-    echo "Step 1/${TOTAL_STEPS}: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN, priority fee ${PRIORITY_FEE} micro-lamports)..."
-    "$SOLANA_BIN" program deploy "$SO_PATH" \
-      --program-id "$PROGRAM_ID" \
-      --upgrade-authority "$KEYPAIR" \
-      --keypair "$KEYPAIR" \
-      --with-compute-unit-price "$PRIORITY_FEE" \
-      --url "$RPC_URL"
+    USE_TWO_STEP="${SOLANA_DEPLOY_TWO_STEP:-$([[ "$CLUSTER" == "mainnet" ]] && echo 1 || echo 0)}"
+    echo "Step 1/${TOTAL_STEPS}: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN, priority fee ${PRIORITY_FEE} micro-lamports, RPC mode)..."
+    if [[ "$USE_TWO_STEP" == "1" ]]; then
+      BUF_KEYPAIR="$(mktemp /tmp/audren-buffer-XXXXXX.json)"
+      "$SOLANA_KEYGEN_BIN" new --no-bip39-passphrase --silent --force -o "$BUF_KEYPAIR" >/dev/null
+      BUF_PUBKEY="$("$SOLANA_KEYGEN_BIN" pubkey "$BUF_KEYPAIR")"
+      echo "  [1a] Writing sBPFv3 ELF to buffer $BUF_PUBKEY via --use-rpc..."
+      if ! "$SOLANA_BIN" program write-buffer "$SO_PATH" \
+        --buffer "$BUF_KEYPAIR" \
+        --buffer-authority "$KEYPAIR" \
+        --keypair "$KEYPAIR" \
+        --use-rpc \
+        --max-sign-attempts 10 \
+        --with-compute-unit-price "$PRIORITY_FEE" \
+        --url "$RPC_URL"; then
+        echo "Error: write-buffer failed. Buffer keypair preserved at $BUF_KEYPAIR (pubkey: $BUF_PUBKEY)." >&2
+        echo "Resume with: \"$SOLANA_BIN\" program write-buffer \"$SO_PATH\" --buffer \"$BUF_KEYPAIR\" --buffer-authority \"$KEYPAIR\" --keypair \"$KEYPAIR\" --use-rpc --with-compute-unit-price \"$PRIORITY_FEE\" --url \"$RPC_URL\"" >&2
+        echo "Or reclaim rent with: \"$SOLANA_BIN\" program close \"$BUF_PUBKEY\" --authority \"$KEYPAIR\" --keypair \"$KEYPAIR\" --url \"$RPC_URL\"" >&2
+        exit 1
+      fi
+      echo "  [1b] Deploying verified buffer $BUF_PUBKEY to $PROGRAM_ID via --use-rpc..."
+      if ! "$SOLANA_BIN" program deploy \
+        --buffer "$BUF_KEYPAIR" \
+        --program-id "$PROGRAM_ID" \
+        --upgrade-authority "$KEYPAIR" \
+        --keypair "$KEYPAIR" \
+        --use-rpc \
+        --max-sign-attempts 10 \
+        --with-compute-unit-price "$PRIORITY_FEE" \
+        --url "$RPC_URL"; then
+        echo "Error: deploy from buffer $BUF_PUBKEY failed. Buffer keypair preserved at $BUF_KEYPAIR." >&2
+        echo "Retry deploy or reclaim rent via: \"$SOLANA_BIN\" program close \"$BUF_PUBKEY\" --authority \"$KEYPAIR\" --keypair \"$KEYPAIR\" --url \"$RPC_URL\"" >&2
+        exit 1
+      fi
+      rm -f "$BUF_KEYPAIR"
+    else
+      "$SOLANA_BIN" program deploy "$SO_PATH" \
+        --program-id "$PROGRAM_ID" \
+        --upgrade-authority "$KEYPAIR" \
+        --keypair "$KEYPAIR" \
+        --use-rpc \
+        --max-sign-attempts 10 \
+        --with-compute-unit-price "$PRIORITY_FEE" \
+        --url "$RPC_URL"
+    fi
 
     echo "Step 2/${TOTAL_STEPS}: Syncing canonical Program Metadata (security + idl) on $CLUSTER..."
     publish_security "$CLUSTER" "$RPC_URL"

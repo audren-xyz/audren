@@ -163,7 +163,7 @@ test('TypeScript @audren/sdk & @audren/sdk/prover WASM match spec/test-vectors.j
   assert.equal(verifySelectiveDisclosureProof(sd, cmBe), true);
   assert.equal(verifySelectiveDisclosureProof(sd, badCm), false);
 
-  // 6. All 13 V2 PDAs
+  // 6. All 13 canonical PDAs
   const nfSample = frToBeBytes(computeRealNullifier(alice.nk, cm, (2n << 36n) | 5n));
   assert.equal(toHex(nfSample), vectors.pdas.nullifier_hex);
   const checkPda = (got, exp) => {

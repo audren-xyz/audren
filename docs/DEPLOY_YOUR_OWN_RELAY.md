@@ -27,7 +27,7 @@ Convert the first 32 bytes (Ed25519 seed) to base64:
 node -e "const k=JSON.parse(require('fs').readFileSync('.credentials/my-relayer-mainnet.json','utf8')); console.log(Buffer.from(k.slice(0,32)).toString('base64'))"
 ```
 
-For Mode 1 shielded `cm2` transfer fees, keep your relayer's Audren master seed **offline** (cold storage) and export **only** its read-only `FullViewingKey` JSON (`{ "spendPk": "<hex>", "nk": "<hex>", "viewSk": "<hex>", "viewPk": "<hex>" }`) into the Worker secret `MAINNET_RELAYER_FVK_JSON`.
+For Mode 1 shielded `cm2` transfer fees, keep your relayer's Audren master seed **offline** (cold storage) and export **only** its read-only `FullViewingKey` JSON (`{ "spendPkHex": "<hex>", "nkHex": "<hex>", "viewSkHex": "<hex>", "viewPkHex": "<hex>" }`; short aliases `spendPk`/`nk`/`viewSk`/`viewPk` are also accepted) into the Worker secret `MAINNET_RELAYER_FVK_JSON`.
 
 ---
 
@@ -52,7 +52,11 @@ npx wrangler secret put DEVNET_RELAYER_SECRET_B64
 
 # Configure at least one DEX aggregator:
 npx wrangler secret put JUPITER_API_KEY
-# Optional additional aggregators: DFLOW_API_KEY, TITAN_API_KEY, BEDROCK_API_KEY, OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE
+# Optional additional aggregators:
+# DFLOW_API_KEY (+ optional DFLOW_API_URL)
+# TITAN_API_URL + TITAN_API_KEY
+# BEDROCK_API_URL + BEDROCK_API_KEY
+# OKX_API_KEY + OKX_SECRET_KEY + OKX_PASSPHRASE (+ optional OKX_API_URL)
 ```
 
 ---

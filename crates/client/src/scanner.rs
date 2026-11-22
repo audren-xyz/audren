@@ -108,9 +108,8 @@ where
     };
 
     let mut lane_roots_fr = [Fr::from(0u64); NUM_LANES];
-    for i in 0..NUM_LANES {
-        lane_roots_fr[i] =
-            fr_from_be_bytes_strict(&ckpt.lane_roots[i]).ok_or(ClientError::InvalidFieldElement)?;
+    for (dst, src) in lane_roots_fr.iter_mut().zip(ckpt.lane_roots.iter()) {
+        *dst = fr_from_be_bytes_strict(src).ok_or(ClientError::InvalidFieldElement)?;
     }
     let path = build_historical_witness_4ary(
         l,

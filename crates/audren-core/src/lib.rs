@@ -62,7 +62,7 @@ pub const WSOL_MINT: Bytes32 = decode_base58("So11111111111111111111111111111111
 /// Canonical 32-byte mint identifier for Native SOL inside Audren note commitments & memos.
 pub const NATIVE_SOL_MINT: Bytes32 = [0u8; 32];
 
-/// Namespaced V2 PDA seed prefixes (zero collision with legacy V1 accounts on `AUDREN_PROGRAM_ID`).
+/// Canonical PDA seed prefixes on `AUDREN_PROGRAM_ID`.
 pub const POOL_SEED: &[u8] = b"audren_v2_pool";
 pub const LANE_SEED: &[u8] = b"audren_v2_lane";
 pub const LANE_RENT_SEED: &[u8] = b"audren_v2_lrent";
@@ -83,6 +83,7 @@ pub const DOMAIN_STEALTH: u64 = 2;
 pub const DOMAIN_NOTE: u64 = 3;
 pub const DOMAIN_NULLIFIER: u64 = 4;
 pub const DOMAIN_DUMMY_NF: u64 = 5;
+/// Reserved domain tag (never reused; dynamic swap outputs use user-supplied ECDH `out_blinding`).
 pub const DOMAIN_DYN_BLIND: u64 = 6;
 pub const DOMAIN_PUB_HASH_A: u64 = 7;
 pub const DOMAIN_PUB_HASH_B: u64 = 8;
@@ -130,17 +131,6 @@ pub enum PoolMode {
     Permissionless = 0,
     /// Reserved for opt-in institutional audited pools (`vk_id = 1`).
     InstitutionalAudited = 1,
-}
-
-impl PoolMode {
-    #[inline]
-    pub const fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::Permissionless),
-            1 => Some(Self::InstitutionalAudited),
-            _ => None,
-        }
-    }
 }
 
 /// Custom on-chain error codes returned via `ProgramError::Custom(code)` (`6000..=6032`).

@@ -158,7 +158,7 @@ impl AudrenAddress {
             .into_vec()
             .map_err(|_| ClientError::InvalidEncoding("invalid base58 in aud1 address"))?;
         if raw.len() != 65 || raw[0] != ADDR_VERSION_V2 {
-            return Err(ClientError::InvalidEncoding("invalid aud1 v2 address length or version"));
+            return Err(ClientError::InvalidEncoding("invalid aud1 address length or version"));
         }
         let spend_pk: [u8; 32] = raw[1..33].try_into().unwrap();
         let view_pk: [u8; 32] = raw[33..65].try_into().unwrap();

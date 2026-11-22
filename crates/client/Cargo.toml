@@ -20,8 +20,7 @@ rand = { version = "0.8.5", default-features = false, features = ["std", "std_rn
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-solana-address = { version = "~2.7.0", features = ["curve25519", "std"] }
-solana-sha256-hasher = "3.1.0"
+solana-address = { version = "~2.7.0", features = ["copy", "curve25519", "std"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]

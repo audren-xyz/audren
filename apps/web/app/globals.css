@@ -213,31 +213,7 @@ pre,
    BUTTONS & TYPOGRAPHY PRIMITIVES
    ============================================================================ */
 
-.kicker {
-  margin: 0 0 14px;
-  font-size: 0.72rem;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  color: var(--muted);
-}
-
-.kicker-light {
-  color: #a6a094;
-}
-
-.eyebrow {
-  margin: 0 0 12px;
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 0.72rem;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 .btn-ink,
-.btn-pine,
-.btn-rule,
 .btn-paper,
 .btn-rule-light {
   display: inline-flex;
@@ -256,22 +232,6 @@ pre,
     transform 0.12s ease;
 }
 
-.btn-pine {
-  background: var(--vault);
-  color: var(--paper);
-  border: 1px solid var(--vault);
-}
-
-.btn-pine:hover:not(:disabled) {
-  background: var(--carbon);
-  border-color: var(--carbon);
-}
-
-.btn-pine:disabled {
-  opacity: 0.48;
-  cursor: not-allowed;
-}
-
 .btn-ink {
   background: var(--carbon);
   color: var(--paper);
@@ -286,16 +246,6 @@ pre,
 .btn-ink:disabled {
   opacity: 0.55;
   cursor: not-allowed;
-}
-
-.btn-rule {
-  background: transparent;
-  color: var(--ink);
-  border: 1px solid var(--rule-strong);
-}
-
-.btn-rule:hover {
-  background: var(--bone);
 }
 
 .btn-paper {
@@ -339,22 +289,6 @@ pre,
 /* ============================================================================
    HERO — EDITORIAL MASTHEAD + PHYSICAL REDACTED LEDGER SLIP
    ============================================================================ */
-
-/* Signature Physical Artifact: The Redacted Solana Ledger Slip */
-
-/* Physical black-ink redaction bar with fine architectural hatch */
-.redaction-bar {
-  display: block;
-  height: 15px;
-  background: repeating-linear-gradient(
-    -45deg,
-    #121210,
-    #121210 5px,
-    #252420 5px,
-    #252420 7px
-  );
-  border-radius: 1px;
-}
 
 .slip-link {
   display: inline-flex;
@@ -460,17 +394,6 @@ pre,
 .aud-addr-title-wrap h3 code {
   font-size: 0.88em;
   color: var(--vault);
-}
-
-.aud-addr-stamp {
-  font-size: 0.7rem;
-  letter-spacing: 0.08em;
-  color: var(--vault);
-  background: var(--vault-tint);
-  border: 1px solid var(--vault-rule);
-  padding: 5px 10px;
-  border-radius: var(--radius);
-  white-space: nowrap;
 }
 
 .aud-addr-specimen {
@@ -592,6 +515,7 @@ pre,
 }
 
 /* Flow Theater */
+
 .flow-theater {
   background: var(--sheet);
   border: 1px solid var(--rule-strong);
@@ -710,6 +634,7 @@ pre,
 }
 
 /* Visual Stage & Gliding Packet Track */
+
 .flow-stage {
   padding: 22px 24px 24px;
   border-bottom: 1px solid var(--rule);
@@ -903,6 +828,7 @@ pre,
 }
 
 /* Synchronized Bottom Split: Reality vs. Solscan */
+
 .flow-compare-split {
   display: grid;
   grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
@@ -1061,6 +987,7 @@ pre,
 }
 
 /* Section 4 — Cryptographic Soundness Matrix */
+
 .soundness-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1236,42 +1163,11 @@ pre,
   letter-spacing: 0.06em;
 }
 
-.back-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-secondary);
-  font-weight: 600;
-}
-
-.back-link:hover {
-  color: var(--ink);
-}
-
 .demo-meta-tags {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.meta-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  background: var(--sheet);
-  color: var(--ink-secondary);
-  font-weight: 500;
-}
-
-.meta-tag.is-mainnet {
-  border-color: var(--vault);
-  background: var(--vault-tint);
-  color: var(--vault);
-  font-weight: 600;
 }
 
 .demo-header {
@@ -1301,708 +1197,17 @@ pre,
   color: var(--ink-secondary);
 }
 
-/* 1-Click Horizontal Command Bar */
-
-.alert-banner {
-  margin-top: 0;
-  margin-bottom: 20px;
-  padding: 12px 14px;
-  border: 1px solid var(--vermilion);
-  background: var(--vermilion-tint);
-  color: var(--vermilion);
-  font-size: 0.88rem;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
 /* ============================================================================
    VISUAL SHARED VAULT LOCKER WALL
    ============================================================================ */
-
-.locker-wall-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  flex-wrap: wrap;
-  margin-bottom: 22px;
-}
-
-.locker-wall-head h2 {
-  margin: 0;
-  font-family: var(--font-serif), Georgia, serif;
-  font-size: clamp(1.75rem, 3vw, 2.35rem);
-  font-weight: 400;
-  line-height: 1.1;
-}
-
-.ledger-sub {
-  margin: 8px 0 0;
-  font-size: 0.93rem;
-  color: var(--ink-secondary);
-  max-width: 44rem;
-}
-
-.locker-wall-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.locker-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.locker-box {
-  background: var(--sheet);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.locker-box.is-yours {
-  border: 2px solid var(--vault);
-  background: var(--vault-tint);
-  box-shadow: 3px 3px 0 var(--vault);
-}
-
-.locker-box-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.67rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-}
-
-.locker-id {
-  color: var(--muted);
-}
-
-.locker-box.is-yours .locker-id {
-  color: var(--vault);
-}
-
-.locker-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--muted);
-}
-
-.locker-state.is-open {
-  padding: 2px 6px;
-  background: var(--vault);
-  color: var(--paper);
-}
-
-.locker-locked-body {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.locker-stranger-note {
-  margin-top: 2px;
-  font-size: 0.61rem;
-  letter-spacing: 0.05em;
-  color: var(--muted);
-}
-
-.locker-open-body {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
-
-.locker-open-amt {
-  font-size: 1.18rem;
-  font-weight: 700;
-  color: var(--ink);
-}
-
-.locker-open-memo {
-  display: inline-block;
-  padding: 2px 7px;
-  background: var(--sheet);
-  border: 1px solid var(--vault);
-  color: var(--vault);
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-
-.locker-dev-toggle {
-  margin-top: 16px;
-}
-
-.ledger-table-wrap {
-  overflow-x: auto;
-  border: 1px solid var(--rule-strong);
-  background: var(--sheet);
-}
-
-.ledger-table {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 680px;
-  font-size: 0.84rem;
-}
-
-.ledger-table th,
-.ledger-table td {
-  padding: 11px 15px;
-  text-align: left;
-  border-bottom: 1px solid var(--rule);
-}
-
-.ledger-table thead th {
-  font-family: var(--font-mono), monospace;
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  background: var(--paper);
-  border-bottom: 1px solid var(--rule-strong);
-}
-
-.ledger-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.ledger-table tbody tr.is-yours {
-  background: var(--vault-tint);
-}
-
-.muted-cell {
-  color: var(--muted);
-}
-
-.row-badge {
-  display: inline-block;
-  padding: 3px 8px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  border-radius: var(--radius);
-}
-
-.row-badge.is-yours {
-  background: var(--vault);
-  color: var(--paper);
-}
-
-.row-badge.is-locked {
-  border: 1px solid var(--rule);
-  background: var(--paper);
-  color: var(--muted);
-}
 
 /* ============================================================================
    ACCOUNTANT RECEIPT STRIP & KEYS DRAWER
    ============================================================================ */
 
-.btn-rule-sm {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 7px 12px;
-  border-radius: var(--radius);
-  font-size: 0.71rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-}
-
-.btn-rule-sm {
-  background: var(--sheet);
-  color: var(--ink);
-  border: 1px solid var(--rule-strong);
-}
-
-.btn-rule-sm:hover:not(:disabled) {
-  background: var(--bone);
-}
-
-.btn-tamper-sm {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 9px 14px;
-  border-radius: var(--radius);
-  font-size: 0.71rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  cursor: pointer;
-}
-
-.btn-tamper-sm {
-  background: transparent;
-  color: var(--vermilion);
-  border: 1px solid var(--vermilion);
-}
-
-.btn-tamper-sm:hover:not(:disabled) {
-  background: var(--vermilion-tint);
-}
-
-.btn-tamper-sm:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-}
-
-.receipt-output {
-  margin-top: 16px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-}
-
-.verify-strip {
-  padding: 14px 16px;
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  font-size: 0.88rem;
-  line-height: 1.5;
-  border-bottom: 1px solid var(--rule);
-}
-
-.verify-strip.is-valid {
-  background: var(--vault-tint);
-  color: var(--ink);
-}
-
-.verify-strip.is-invalid {
-  background: var(--vermilion-tint);
-  color: var(--vermilion);
-}
-
-.verify-stamp {
-  flex-shrink: 0;
-  padding: 2px 8px;
-  border: 1.5px solid currentColor;
-  font-size: 0.67rem;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-}
-
-.verify-strip.is-valid .verify-stamp {
-  color: var(--vault);
-}
-
-.receipt-json-details summary {
-  list-style: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--ink-secondary);
-  cursor: pointer;
-}
-
-.receipt-json-details summary::-webkit-details-marker {
-  display: none;
-}
-
-.receipt-json-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 14px;
-  border-top: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-  font-size: 0.74rem;
-  color: var(--muted);
-}
-
-.receipt-json {
-  margin: 0;
-  padding: 12px 14px;
-  font-size: 0.73rem;
-  line-height: 1.55;
-  color: var(--ink);
-  overflow-x: auto;
-  max-height: 240px;
-}
-
-/* Collapsible Keys & Solana v1 Proof Drawer */
-.keys-drawer {
-  border: 1px solid var(--rule);
-  background: var(--sheet);
-  border-radius: var(--radius);
-}
-
-.keys-drawer summary {
-  list-style: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 18px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  color: var(--ink-secondary);
-  cursor: pointer;
-}
-
-.keys-drawer summary::-webkit-details-marker {
-  display: none;
-}
-
-.keys-drawer[open] summary {
-  border-bottom: 1px solid var(--rule);
-  color: var(--ink);
-}
-
-.keys-drawer-body {
-  padding: 20px 18px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-}
-
-.drawer-subhead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
-  font-size: 0.67rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-}
-
-.mini-action-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border: 1px solid var(--rule-strong);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--ink);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  cursor: pointer;
-}
-
-.mini-action-btn:hover:not(:disabled) {
-  background: var(--bone);
-}
-
-.demo-help {
-  margin: 0;
-  font-size: 0.88rem;
-  line-height: 1.58;
-  color: var(--ink-secondary);
-}
-
-.key-box {
-  border: 1px solid var(--rule);
-  background: var(--paper);
-}
-
-.key-row {
-  padding: 11px 13px;
-  border-bottom: 1px solid var(--rule);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.key-row:last-child {
-  border-bottom: none;
-}
-
-.key-label {
-  font-size: 0.65rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-}
-
-.key-val-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.key-val-wrap code {
-  font-size: 0.82rem;
-  color: var(--ink);
-  word-break: break-all;
-}
-
-.icon-copy-btn {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  background: var(--sheet);
-  color: var(--ink);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.icon-copy-btn:hover {
-  border-color: var(--rule-strong);
-  background: var(--bone);
-}
-
-.tech-kv {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  font-size: 0.74rem;
-}
-
-.tech-kv dt {
-  color: var(--muted);
-  margin-bottom: 2px;
-}
-
-.tech-kv dd {
-  margin: 0;
-  color: var(--ink);
-  word-break: break-all;
-}
-
-/* Verified Mainnet Lifecycle Grid */
-.verified-tx-section {
-  margin-top: 52px;
-  padding-top: 40px;
-  border-top: 1px solid var(--rule-strong);
-}
-
-.lifecycle-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--rule-strong);
-  border-left: 1px solid var(--rule-strong);
-  background: var(--sheet);
-}
-
-.lifecycle-cell {
-  padding: 20px;
-  border-right: 1px solid var(--rule-strong);
-  border-bottom: 1px solid var(--rule-strong);
-  display: flex;
-  flex-direction: column;
-}
-
-.lifecycle-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 14px;
-  font-size: 0.68rem;
-}
-
-.lc-step {
-  font-weight: 600;
-  color: var(--muted);
-}
-
-.cluster-tag {
-  padding: 2px 6px;
-  border: 1px solid var(--rule);
-  color: var(--muted);
-  font-weight: 600;
-  letter-spacing: 0.05em;
-}
-
-.cluster-tag.is-mainnet {
-  border-color: var(--vault);
-  background: var(--vault-tint);
-  color: var(--vault);
-}
-
-.lifecycle-cell h3 {
-  margin: 0 0 10px;
-  font-family: var(--font-serif), Georgia, serif;
-  font-size: 1.2rem;
-  font-weight: 400;
-  line-height: 1.2;
-}
-
-.lc-line {
-  margin: 0 0 8px;
-  font-size: 0.84rem;
-  line-height: 1.5;
-  color: var(--ink-secondary);
-}
-
-.lc-line.is-hidden-line {
-  flex: 1;
-  color: var(--ink);
-}
-
-.lc-links {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--rule);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-
-.lc-solscan {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--vault);
-}
-
-.lc-exp {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  color: var(--muted);
-}
-
-.lc-solscan:hover,
-.lc-exp:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
 /* ============================================================================
    DOC PAGES (/architecture, /faq, /privacy, /terms)
    ============================================================================ */
-
-.doc-shell {
-  width: 100%;
-  max-width: 980px;
-  margin: 0 auto;
-  padding: 36px var(--pad) 88px;
-  flex: 1;
-}
-
-.doc-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--font-mono), monospace;
-  font-size: 0.74rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-bottom: 24px;
-}
-
-.doc-back:hover {
-  color: var(--ink);
-}
-
-.doc-header {
-  padding-bottom: 28px;
-  margin-bottom: 36px;
-  border-bottom: 1px solid var(--rule-strong);
-}
-
-.doc-header h1 {
-  margin: 0 0 12px;
-  font-family: var(--font-serif), Georgia, serif;
-  font-size: clamp(2.1rem, 4vw, 3.1rem);
-  font-weight: 400;
-  line-height: 1.08;
-  letter-spacing: -0.025em;
-}
-
-.doc-header p {
-  margin: 0;
-  font-size: 0.98rem;
-  line-height: 1.62;
-  color: var(--ink-secondary);
-  max-width: 46rem;
-}
-
-.doc-section {
-  margin-bottom: 44px;
-}
-
-.doc-section h2 {
-  margin: 0 0 14px;
-  font-family: var(--font-serif), Georgia, serif;
-  font-size: 1.65rem;
-  font-weight: 400;
-}
-
-.doc-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 14px;
-  border: 1px solid var(--rule-strong);
-  background: var(--sheet);
-  font-size: 0.87rem;
-}
-
-.doc-table th,
-.doc-table td {
-  padding: 11px 14px;
-  text-align: left;
-  vertical-align: top;
-  border-bottom: 1px solid var(--rule);
-}
-
-.doc-table thead th {
-  font-family: var(--font-mono), monospace;
-  font-size: 0.7rem;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--muted);
-  background: var(--paper);
-  border-bottom: 1px solid var(--rule-strong);
-}
-
-.doc-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.faq-list {
-  border-top: 1px solid var(--rule-strong);
-}
-
-.faq-item {
-  border-bottom: 1px solid var(--rule);
-  padding: 20px 0;
-}
-
-.faq-item summary {
-  font-family: var(--font-serif), Georgia, serif;
-  font-size: 1.26rem;
-  cursor: pointer;
-  color: var(--ink);
-}
-
-.faq-item p {
-  margin: 10px 0 0;
-  font-size: 0.94rem;
-  line-height: 1.65;
-  color: var(--ink-secondary);
-}
 
 /* ============================================================================
    FOOTER — ARCHITECTURAL COLOPHON
@@ -2083,6 +1288,7 @@ pre,
 }
 
 /* Spinner */
+
 .spin {
   animation: spin 1s linear infinite;
 }
@@ -2098,17 +1304,8 @@ pre,
    ============================================================================ */
 
 @media (max-width: 1080px) {
-  .section-head-split,
-  .keys-drawer-body {
+  .section-head-split {
     grid-template-columns: 1fr;
-  }
-
-  .locker-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .lifecycle-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .footer-grid {
@@ -2168,8 +1365,6 @@ pre,
     text-underline-offset: 4px;
   }
 
-  .lifecycle-grid,
-  .locker-grid,
   .aud-addr-legend,
   .flow-compare-split,
   .soundness-grid {
@@ -2354,6 +1549,7 @@ pre,
 }
 
 /* Connect & Unlock Sheets */
+
 .lv-connect-sheet {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
@@ -2423,19 +1619,6 @@ pre,
   font-size: 0.82rem;
   color: var(--ink-secondary);
   line-height: 1.45;
-}
-
-.lv-history-section {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.lv-history-head h3 {
-  margin: 4px 0 0;
-  font-family: var(--font-serif), Georgia, serif;
-  font-size: 1.4rem;
-  font-weight: 400;
 }
 
 .lv-audit-head h4 {
@@ -2634,16 +1817,6 @@ pre,
   color: var(--vault);
 }
 
-.lv-memo-tag {
-  padding: 2px 6px;
-  border: 1px solid var(--vault-rule);
-  background: var(--vault-tint);
-  color: var(--vault);
-  font-size: 0.64rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-}
-
 .lv-redacted-bar {
   width: 112px;
   height: 15px;
@@ -2686,21 +1859,6 @@ pre,
   gap: 8px;
 }
 
-.lv-chip-btn {
-  padding: 8px 13px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-  color: var(--ink);
-  font-size: 0.82rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.lv-chip-btn.is-active {
-  background: var(--carbon);
-  color: var(--paper);
-}
-
 .lv-empty-action {
   padding: 20px;
   border: 1px dashed var(--rule-strong);
@@ -2719,6 +1877,7 @@ pre,
 }
 
 /* Jupiter Live Quote Card */
+
 .lv-quote-card {
   padding: 14px 16px;
   border: 1px solid var(--vault-rule);
@@ -2738,20 +1897,9 @@ pre,
   color: var(--vault);
 }
 
-.lv-quote-loading,
-.lv-quote-err {
+.lv-quote-loading {
   margin: 0;
   font-size: 0.8rem;
-}
-
-.lv-quote-err {
-  color: var(--vermilion);
-}
-
-.lv-quote-details {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
 .lv-quote-pair {
@@ -2783,114 +1931,9 @@ pre,
   color: var(--vault);
 }
 
-.lv-quote-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  font-size: 0.7rem;
-  color: var(--ink-secondary);
-}
-
-.lv-quote-meta .is-warn {
-  color: var(--vermilion);
-  font-weight: 600;
-}
-
-/* Transparent Fee & Relayer Selector */
-
-.lv-fee-title {
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--ink);
-}
-
-.lv-mode-cards {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.lv-mode-card {
-  padding: 11px;
-  border: 1px solid var(--rule-strong);
-  background: var(--sheet);
-  text-align: left;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  transition: background 0.14s ease, border-color 0.14s ease;
-}
-
-.lv-mode-card.is-selected {
-  border-color: var(--vault);
-  background: var(--vault-tint);
-  box-shadow: inset 0 0 0 1px var(--vault);
-}
-
-.lv-mode-card.is-disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
-
-.lv-mode-top {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.66rem;
-  font-weight: 600;
-  color: var(--vault);
-}
-
-.lv-mode-card strong {
-  font-size: 0.84rem;
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.lv-mode-card p {
-  margin: 0;
-  font-size: 0.76rem;
-  line-height: 1.4;
-  color: var(--ink-secondary);
-}
-
-.lv-priority-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--rule);
-  font-size: 0.68rem;
-  color: var(--muted);
-}
-
 .lv-priority-btns {
   display: inline-flex;
   border: 1px solid var(--rule-strong);
-}
-
-.lv-prio-btn {
-  padding: 5px 9px;
-  border: none;
-  border-right: 1px solid var(--rule-strong);
-  background: var(--sheet);
-  color: var(--ink);
-  font-size: 0.66rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.lv-prio-btn:last-child {
-  border-right: none;
-}
-
-.lv-prio-btn.is-active {
-  background: var(--carbon);
-  color: var(--paper);
 }
 
 .btn-primary,
@@ -2944,6 +1987,7 @@ pre,
 }
 
 /* Error Banner */
+
 .lv-error-bar {
   display: flex;
   align-items: flex-start;
@@ -2957,6 +2001,7 @@ pre,
 }
 
 /* Post-Transaction Audit Slip + Inline SDK Code Drawer */
+
 .lv-audit-card {
   border: 1px solid var(--rule-strong);
   background: var(--sheet);
@@ -2981,434 +2026,13 @@ pre,
   font-weight: 400;
 }
 
-.lv-audit-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.lv-audit-facts {
-  margin: 0;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-}
-
-.lv-audit-facts > div {
-  padding: 12px 14px;
-  border-right: 1px solid var(--rule);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.lv-audit-facts > div:last-child {
-  border-right: none;
-}
-
-.lv-audit-facts dt {
-  font-size: 0.64rem;
-  color: var(--muted);
-  letter-spacing: 0.06em;
-}
-
-.lv-audit-facts dd {
-  margin: 0;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--ink);
-  word-break: break-word;
-}
-
-.lv-audit-compare {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.lv-audit-col {
-  padding: 14px 16px;
-  border: 1px solid var(--rule);
-  background: var(--paper);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.lv-audit-col.is-private {
-  border-color: var(--vault-rule);
-  background: var(--vault-tint);
-}
-
-.lv-audit-col span {
-  font-size: 0.66rem;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  color: var(--muted);
-}
-
-.lv-audit-col.is-private span {
-  color: var(--vault);
-}
-
-.lv-audit-col p {
-  margin: 0;
-  font-size: 0.86rem;
-  line-height: 1.5;
-  color: var(--ink);
-}
-
-.lv-sdk-drawer {
-  border-top: 1px solid var(--rule);
-  padding-top: 14px;
-}
-
-.lv-sdk-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 13px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-  color: var(--ink);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-}
-
-.lv-sdk-toggle:hover {
-  background: var(--carbon);
-  color: var(--paper);
-}
-
-.lv-sdk-code-wrap {
-  position: relative;
-  margin-top: 12px;
-  border: 1px solid var(--carbon);
-  background: var(--carbon);
-  color: var(--paper);
-  padding: 16px;
-  overflow-x: auto;
-}
-
-.lv-sdk-code-wrap pre {
-  margin: 0;
-  font-size: 0.76rem;
-  line-height: 1.55;
-}
-
-.lv-sdk-copy {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 9px;
-  border: 1px solid var(--carbon-rule);
-  background: var(--carbon-raised);
-  color: var(--paper);
-  font-size: 0.67rem;
-  cursor: pointer;
-}
-
-.lv-sdk-copy:hover {
-  background: var(--vault);
-}
-
 /* ============================================================================
    GUIDED DEMO UX — INSTALL VS FREE TEST, STEPPER, INTERACTIVE LEDGER,
    VISUAL FLOW STRIP, LIVE SEARCHABLE TOKEN PICKER, NEXT-STEP ACTIONS
    ============================================================================ */
 
-.lv-welcome-shell {
-  width: 100%;
-}
-
-.lv-alt-link {
-  margin-top: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px dashed var(--rule-strong);
-  background: transparent;
-  color: var(--ink-secondary);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  cursor: pointer;
-}
-
-.lv-alt-link:hover {
-  background: var(--bone);
-  color: var(--ink);
-}
-
-.lv-install-split {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  border: 1px solid var(--rule-strong);
-  background: var(--sheet);
-}
-
-.lv-install-card {
-  padding: clamp(22px, 3vw, 32px);
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  border-right: 1px solid var(--rule-strong);
-}
-
-.lv-install-card.is-free {
-  border-right: none;
-  background: var(--vault-tint);
-}
-
-.lv-install-card h2 {
-  margin: 0;
-  font-family: var(--font-serif), Georgia, serif;
-  font-size: clamp(1.45rem, 2.2vw, 1.85rem);
-  font-weight: 500;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
-}
-
-.lv-install-card > p {
-  margin: 0;
-  font-size: 0.92rem;
-  color: var(--ink-secondary);
-  line-height: 1.55;
-}
-
-.lv-install-links {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.lv-install-btn {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px 14px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-  text-decoration: none;
-  transition: background 0.14s ease, color 0.14s ease;
-}
-
-.lv-install-btn > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.lv-install-btn strong {
-  font-size: 0.94rem;
-  font-weight: 600;
-}
-
-.lv-install-btn span {
-  font-size: 0.69rem;
-  color: var(--muted);
-}
-
-.lv-install-btn:hover {
-  background: var(--carbon);
-  color: var(--paper);
-}
-
-.lv-install-btn:hover span {
-  color: #c8c2b4;
-}
-
-.lv-install-note {
-  margin: 4px 0 0 !important;
-  font-size: 0.68rem !important;
-  color: var(--muted) !important;
-  letter-spacing: 0.04em;
-}
-
-.lv-free-bullets {
-  margin: 4px 0 8px;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  font-size: 0.9rem;
-  color: var(--ink);
-}
-
-.lv-free-cta {
-  margin-top: auto;
-  align-self: flex-start;
-}
-
-/* Token Identity, Logos & Row Action Buttons */
-.lv-balance-row.is-clickable {
-  padding: 10px 10px;
-  margin: 0 -10px;
-  transition: background 0.12s ease;
-}
-
-.lv-balance-row.is-clickable:hover {
-  background: var(--bone);
-}
-
-.lv-balance-row.is-selected {
-  background: var(--vault-tint);
-}
-
-.lv-balance-row > .lv-token-id,
-.lv-token-id {
-  display: flex;
-  flex-direction: row !important;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.lv-token-id > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.lv-token-id > div > span {
-  font-size: 0.7rem;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.lv-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
-  object-fit: cover;
-  border: 1px solid var(--rule);
-  background: var(--paper);
-  flex-shrink: 0;
-}
-
-.lv-avatar.is-fallback {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  color: var(--ink);
-  background: var(--bone);
-  border-color: var(--rule-strong);
-}
-
-.lv-avatar.is-locked {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--carbon-raised);
-  border-color: var(--carbon-rule);
-  color: #e6e0d2;
-}
-
-.lv-row-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.lv-row-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 10px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-  color: var(--ink);
-  font-size: 0.69rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.lv-row-action:hover:not(:disabled) {
-  background: var(--vault);
-  border-color: var(--vault);
-  color: var(--paper);
-}
-
-.lv-row-action:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* Private Balance Rows with Direct Send / Swap / Withdraw Chips */
-.lv-private-row {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--rule);
-}
-
-.lv-private-row:last-child {
-  border-bottom: none;
-}
-
-.lv-private-row-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.lv-private-row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding-left: 38px;
-}
-
-.lv-row-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 9px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-  color: var(--ink);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  cursor: pointer;
-}
-
-.lv-row-chip:hover {
-  background: var(--carbon);
-  color: var(--paper);
-}
-
-.lv-row-chip.is-primary {
-  border-color: var(--vault);
-  background: var(--vault-tint);
-  color: var(--vault);
-}
-
-.lv-row-chip.is-primary:hover {
-  background: var(--vault);
-  color: var(--paper);
-}
-
 /* Plain-English Jupiter-Ready SOL Checkbox Card */
+
 .lv-checkbox-card {
   display: flex;
   align-items: flex-start;
@@ -3442,6 +2066,7 @@ pre,
 }
 
 /* Quick Amount Pills */
+
 .lv-quick-pills {
   display: flex;
   flex-wrap: wrap;
@@ -3478,173 +2103,6 @@ pre,
   cursor: not-allowed;
 }
 
-.lv-change-hint {
-  margin: 4px 0 0;
-  font-size: 0.7rem;
-  color: var(--pine-deep);
-}
-
-.lv-starter-picks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-/* Live Searchable Token Picker for Swap Output */
-
-.lv-token-trigger {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 11px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-  color: var(--ink);
-  text-align: left;
-  cursor: pointer;
-}
-
-.lv-token-trigger:hover {
-  background: var(--bone);
-}
-
-.lv-change-tag {
-  font-size: 0.67rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: var(--vault);
-  flex-shrink: 0;
-}
-
-.lv-search-box {
-  border: 1px solid var(--rule-strong);
-  background: var(--sheet);
-  display: flex;
-  flex-direction: column;
-}
-
-.lv-search-input-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--rule);
-  background: var(--paper);
-  color: var(--muted);
-}
-
-.lv-search-input {
-  width: 100%;
-  border: none;
-  background: transparent;
-  color: var(--ink);
-  font-size: 0.88rem;
-  outline: none;
-}
-
-.lv-search-results {
-  max-height: 230px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-}
-
-.lv-search-empty {
-  margin: 0;
-  padding: 14px 12px;
-  font-size: 0.74rem;
-  color: var(--muted);
-}
-
-.lv-search-item {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 12px;
-  border: none;
-  border-bottom: 1px solid var(--rule);
-  background: transparent;
-  color: var(--ink);
-  text-align: left;
-  cursor: pointer;
-}
-
-.lv-search-item:last-child {
-  border-bottom: none;
-}
-
-.lv-search-item:hover {
-  background: var(--bone);
-}
-
-.lv-search-item.is-selected {
-  background: var(--vault-tint);
-}
-
-.lv-search-meta {
-  font-size: 0.74rem;
-  font-weight: 600;
-  color: var(--ink-secondary);
-  white-space: nowrap;
-}
-
-/* 1-Click "What to try next" strip on live transaction receipts */
-.lv-audit-next {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--vault-rule);
-  background: var(--vault-tint);
-}
-
-.lv-audit-next > span {
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: var(--vault);
-}
-
-.lv-audit-next-btns {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.lv-next-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 11px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
-  color: var(--ink);
-  font-size: 0.72rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.lv-next-chip:hover {
-  background: var(--carbon);
-  color: var(--paper);
-}
-
-.lv-next-chip.is-primary {
-  background: var(--vault);
-  border-color: var(--vault);
-  color: var(--paper);
-}
-
-.lv-next-chip.is-primary:hover {
-  background: var(--carbon);
-  border-color: var(--carbon);
-}
-
 /* Unmistakable Confirmed Transaction Proof Banner */
 
 .sb-confirmed-pill {
@@ -3659,59 +2117,9 @@ pre,
   letter-spacing: 0.05em;
 }
 
-.sb-confirmed-pill.is-dark {
-  background: var(--carbon);
-}
-
-/* Step 2: Live Private Spend (Proves You Control Your Temp Balance) */
-
-.locker-box.is-spent {
-  border-color: var(--rule-strong);
-  background: var(--bone);
-}
-
-.locker-state.is-spent {
-  color: var(--ink-secondary);
-}
-
-.locker-spent-note {
-  font-size: 0.66rem;
-  line-height: 1.45;
-  color: var(--ink-secondary);
-}
-
 /* ============================================================================
    SIMPLIFIED CONNECTED WORKSPACE (2 CLEAN CARDS ABOVE THE FOLD + PUBLIC BAR)
    ============================================================================ */
-
-.lv-reconnecting-card {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
-  padding: 20px 22px;
-  border: 1px solid var(--rule-strong);
-  background: var(--sheet);
-  color: var(--ink);
-}
-
-.lv-reconnecting-card > div {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  flex: 1;
-  min-width: 200px;
-}
-
-.lv-reconnecting-card strong {
-  font-size: 0.96rem;
-  font-weight: 700;
-}
-
-.lv-reconnecting-card span {
-  font-size: 0.72rem;
-  color: var(--ink-muted);
-}
 
 .lv-workspace {
   display: grid;
@@ -3778,110 +2186,8 @@ pre,
   gap: 8px;
 }
 
-.lv-private-total {
-  margin-top: 8px;
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-}
-
-.lv-private-total strong {
-  font-size: 2rem;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1.05;
-  color: var(--ink);
-}
-
-.lv-private-card.is-stranger .lv-private-total strong {
-  color: var(--paper);
-}
-
-.lv-redacted-bar.is-lg {
-  width: 148px;
-  height: 26px;
-}
-
-.lv-inline-unlock {
-  padding: 22px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 14px;
-}
-
-.lv-inline-unlock p {
-  margin: 0;
-  font-size: 0.92rem;
-  line-height: 1.55;
-  color: var(--ink-muted);
-}
-
-.lv-inline-unlock strong {
-  color: var(--ink);
-}
-
-.lv-howto-box {
-  padding: 20px 22px 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.lv-howto-lead {
-  margin: 0;
-  font-size: 0.9rem;
-  line-height: 1.55;
-  color: var(--ink-muted);
-}
-
-.lv-howto-lead strong {
-  color: var(--ink);
-}
-
-.lv-private-card.is-stranger .lv-howto-lead,
-.lv-private-card.is-stranger .lv-howto-lead strong {
-  color: rgba(255, 255, 255, 0.85);
-}
-
-.lv-howto-steps {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.lv-howto-steps li {
-  display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  font-size: 0.84rem;
-  line-height: 1.48;
-  color: var(--ink-muted);
-}
-
-.lv-howto-steps li strong {
-  color: var(--ink);
-}
-
-.lv-private-card.is-stranger .lv-howto-steps li,
-.lv-private-card.is-stranger .lv-howto-steps li strong {
-  color: rgba(255, 255, 255, 0.82);
-}
-
 .lv-private-card .lv-balance-list {
   padding: 0 22px;
-}
-
-.lv-private-card.is-stranger .lv-private-row {
-  border-bottom-color: rgba(255, 255, 255, 0.14);
-}
-
-.lv-private-card.is-stranger .lv-token-id > div > span {
-  color: rgba(255, 255, 255, 0.65);
 }
 
 .lv-private-foot {
@@ -3920,19 +2226,16 @@ pre,
 }
 
 /* Right Action Box */
+
 .lv-simple-action {
   background: var(--sheet);
 }
 
 .lv-verb-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border-bottom: 1px solid var(--rule-strong);
   background: var(--paper);
-}
-
-.lv-verb-tabs.sb-verb-tabs-3 {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .lv-verb-tab {
@@ -3982,6 +2285,7 @@ pre,
 }
 
 /* Unified Public Wallet Strip at Top of Left Balance Card */
+
 .lv-pub-strip {
   border-bottom: 1px solid var(--rule-strong);
   background: var(--paper);
@@ -4028,58 +2332,6 @@ pre,
   color: rgba(255, 255, 255, 0.65);
 }
 
-.lv-pub-strip-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.lv-private-total-wrap {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 10px;
-}
-
-.lv-private-sub-amt {
-  font-size: 0.74rem;
-  color: var(--ink-muted);
-}
-
-.lv-private-card.is-stranger .lv-private-sub-amt {
-  color: rgba(255, 255, 255, 0.7);
-}
-
-/* Direction Flow Pill inside Every Action Tab */
-.lv-dir-pill {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--vault-rule);
-  background: var(--vault-tint);
-  font-size: 0.7rem;
-  letter-spacing: 0.04em;
-  color: var(--ink-muted);
-}
-
-.lv-dir-pill strong {
-  color: var(--vault);
-  font-weight: 700;
-}
-
-/* Unified Sandbox Top Pill + Inline Proof Cards */
-.sb-mode-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--ink);
-}
-
 .sb-mini-proof {
   display: flex;
   flex-direction: column;
@@ -4113,24 +2365,6 @@ pre,
   color: var(--ink);
 }
 
-.sb-compare-mini {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.sb-drawer-stack {
-  display: flex;
-  flex-direction: column;
-}
-
-.sb-drawer-vault {
-  padding: 18px 20px;
-  border-bottom: 1px solid var(--rule);
-  background: var(--sheet);
-}
-
 .lv-simple-body {
   padding: 16px 20px 18px;
   display: flex;
@@ -4144,74 +2378,10 @@ pre,
   gap: 7px;
 }
 
-.lv-field-top {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 0.7rem;
-  letter-spacing: 0.04em;
-  color: var(--ink-muted);
-}
-
 .lv-amount-big {
   font-size: 1.3rem !important;
   font-weight: 700;
   padding: 11px 14px !important;
-}
-
-.lv-plain-summary {
-  margin: 0;
-  padding: 11px 13px;
-  border-left: 2px solid var(--vault);
-  background: var(--paper);
-  font-size: 0.82rem;
-  line-height: 1.5;
-  color: var(--ink-muted);
-}
-
-.lv-plain-summary strong {
-  color: var(--ink);
-}
-
-.lv-adv-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 9px 12px;
-  border: 1px solid var(--rule);
-  background: var(--paper);
-  color: var(--ink-muted);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-}
-
-.lv-adv-toggle:hover {
-  border-color: var(--rule-strong);
-  color: var(--ink);
-}
-
-.lv-adv-box {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 14px;
-  border: 1px solid var(--rule);
-  background: var(--paper);
-}
-
-/* Compact Collapsible Public Wallet Bar */
-
-.lv-public-drawer-list {
-  border-top: 1px solid var(--rule);
-  background: var(--sheet);
-  padding: 0 18px;
-  max-height: 300px;
-  overflow-y: auto;
 }
 
 @media (max-width: 1040px) {
@@ -4219,31 +2389,8 @@ pre,
     grid-template-columns: 1fr;
   }
 
-  .lv-install-split,
-  .lv-connect-sheet,
-  .lv-audit-compare {
+  .lv-connect-sheet {
     grid-template-columns: 1fr;
-  }
-
-  .lv-install-card {
-    border-right: none;
-    border-bottom: 1px solid var(--rule-strong);
-  }
-
-  .lv-install-card.is-free {
-    border-bottom: none;
-  }
-
-  .lv-audit-facts {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .lv-audit-facts > div:nth-child(2n) {
-    border-right: none;
-  }
-
-  .lv-audit-facts > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--rule);
   }
 }
 
@@ -4252,44 +2399,17 @@ pre,
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .lv-verb-tabs.sb-verb-tabs-3 {
-    grid-template-columns: 1fr;
-  }
-
   .lv-verb-tab {
     border-bottom: 1px solid var(--rule);
-  }
-
-  .lv-mode-cards,
-  .lv-audit-facts {
-    grid-template-columns: 1fr;
   }
 
   .lv-balance-row {
     flex-wrap: wrap;
   }
-
-  .lv-row-right {
-    width: 100%;
-    justify-content: space-between;
-    padding-left: 38px;
-  }
-
-  .lv-private-row-actions {
-    padding-left: 0;
-  }
-
-  .lv-audit-facts > div {
-    border-right: none;
-    border-bottom: 1px solid var(--rule-strong);
-  }
-
-  .lv-audit-facts > div:last-child {
-    border-bottom: none;
-  }
 }
 
 /* Vault Production Hardening Utilities (Pause Escape, Rent Reclaim, Merge, Encrypted Backup) */
+
 .lv-notice-bar {
   display: flex;
   flex-wrap: wrap;
@@ -4307,42 +2427,11 @@ pre,
   color: var(--ink);
 }
 
-.lv-notice-bar.is-reclaim {
-  background: rgba(17, 94, 68, 0.08);
-  color: var(--ink);
-}
-
 .lv-unlock-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-}
-
-.lv-merge-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 22px;
-  border-top: 1px solid var(--rule);
-  background: var(--paper);
-  font-size: 0.7rem;
-  color: var(--ink-muted);
-}
-
-.lv-merge-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-}
-
-.lv-merge-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
 }
 
 .lv-backup-box {
@@ -4382,39 +2471,9 @@ pre,
   min-width: 0;
 }
 
-.lv-file-label {
-  cursor: pointer;
-}
-
 .lv-backup-status {
   color: var(--pine);
   font-weight: 600;
-}
-
-.lv-rent-breakdown {
-  margin: 4px 0 0;
-  font-size: 0.68rem;
-  line-height: 1.45;
-  color: var(--ink-muted);
-}
-
-/* Live On-Chain Verification Strip inside Audit Cards */
-.lv-onchain-proof {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 14px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--rule);
-  background: var(--sheet);
-  font-size: 0.7rem;
-  color: var(--ink-muted);
-}
-
-.lv-proof-kicker {
-  font-weight: 700;
-  color: var(--ink);
-  letter-spacing: 0.04em;
 }
 
 .lv-proof-badge {
@@ -4431,19 +2490,8 @@ pre,
   color: var(--pine);
 }
 
-.lv-proof-badge.is-recipient {
-  border-color: rgba(17, 94, 68, 0.45);
-  background: rgba(17, 94, 68, 0.05);
-  color: var(--ink);
-}
-
-.lv-proof-badge.is-public {
-  border-color: rgba(180, 110, 20, 0.5);
-  background: rgba(180, 110, 20, 0.08);
-  color: var(--ink);
-}
-
 /* Selective Disclosure Viewing Receipt Drawer per Note */
+
 .lv-receipt-drawer {
   margin-top: 10px;
   padding: 12px 14px;
@@ -4469,14 +2517,6 @@ pre,
   margin: 0;
   font-size: 0.76rem;
   line-height: 1.45;
-  color: var(--ink-muted);
-}
-
-.lv-receipt-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  font-size: 0.68rem;
   color: var(--ink-muted);
 }
 
@@ -4506,6 +2546,7 @@ pre,
 }
 
 /* Bring Your Own Relayer Endpoint Controls */
+
 .lv-custom-relay {
   display: flex;
   flex-direction: column;
@@ -4536,9 +2577,4 @@ pre,
 .lv-custom-relay-form p {
   margin: 0;
   line-height: 1.45;
-}
-
-.lv-custom-relay-err {
-  color: #a62b2b;
-  font-weight: 600;
 }

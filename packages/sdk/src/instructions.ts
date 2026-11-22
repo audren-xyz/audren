@@ -7,7 +7,9 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import {
   ASSET_MODE_SOL,
   ASSET_MODE_SPL,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   AUDREN_PROGRAM_ID,
+  CLASSIC_TOKEN_PROGRAM_ID,
   CTX_DOMAIN_EXEC_VIA_ESCROW,
   CTX_DOMAIN_JOINSPLIT,
   CTX_DOMAIN_ROUTER_ACCOUNTS,
@@ -34,6 +36,7 @@ import {
   WITHDRAW_FLAG_UNWRAP_WSOL,
 } from './constants.ts';
 import {
+  base58Encode,
   deriveCheckpointPdaSync,
   deriveEscrowPdaSync,
   deriveLanePdaSync,
@@ -50,7 +53,7 @@ import {
   toPubkeyBytes,
 } from './pda.ts';
 import { bytes32ToFrMasked, frToBeBytes } from './poseidon.ts';
-import type { RouterAccountMeta } from './swap.ts';
+import { prepareEscrowAccountsForAudren, type RouterAccountMeta } from './swap.ts';
 
 const utf8Encoder = new TextEncoder();
 
@@ -95,6 +98,16 @@ function isAllZero32(b: Uint8Array): boolean {
   return true;
 }
 
+function assertLen(bytes: Uint8Array, expected: number, label: string): void {
+  if (bytes.byteLength !== expected) {
+    throw new RangeError(`${label} must be ${expected} bytes, got ${bytes.byteLength}`);
+  }
+}
+
+function pubkeyToB58(pk: string | Uint8Array): string {
+  return typeof pk === 'string' ? pk : base58Encode(toPubkeyBytes(pk));
+}
+
 function divCeil(a: bigint, b: bigint): bigint {
   return (a + b - 1n) / b;
 }
@@ -108,6 +121,35 @@ export function deterministicNoteRentFee(
 ): bigint {
   const live = divCeil(subRent, 256n) + divCeil(srRent, 256n * 300n) + divCeil(memoRent, 112n);
   return poolNoteRentFeeCap < live ? poolNoteRentFeeCap : live;
+}
+
+/**
+ * Build a canonical SPL Associated Token Account `CreateIdempotent` (`data = [1]`) instruction
+ * supporting both Classic SPL Token and SPL Token-2022 mints.
+ */
+export function buildCreateAtaIdempotentInstruction(params: {
+  payer: string;
+  ata: string;
+  owner: string;
+  mint: string;
+  tokenProgram?: string;
+}): AudrenInstruction {
+  return {
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    accounts: [
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.ata, isSigner: false, isWritable: true },
+      { pubkey: params.owner, isSigner: false, isWritable: false },
+      { pubkey: params.mint, isSigner: false, isWritable: false },
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+      {
+        pubkey: params.tokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID,
+        isSigner: false,
+        isWritable: false,
+      },
+    ],
+    data: new Uint8Array([1]),
+  };
 }
 
 /** Exact `JoinSplit` `ctx_hash` matching `program/src/lib.rs` bit-for-bit. */
@@ -125,7 +167,14 @@ export function computeJoinsplitCtxHash(params: {
   relayerFeeAmount: bigint;
   memosBytes: Uint8Array;
 }): bigint {
+  assertLen(params.publicAssetId, 32, 'publicAssetId');
   const programBytes = toPubkeyBytes(params.programId ?? AUDREN_PROGRAM_ID);
+  if (params.publicAmountOut > 0n && !params.recipient) {
+    throw new Error('recipient is required when publicAmountOut > 0');
+  }
+  if (params.relayerFeeAmount > 0n && !params.relayerFeeRecipient) {
+    throw new Error('relayerFeeRecipient is required when relayerFeeAmount > 0');
+  }
   const recBytes =
     params.publicAmountOut > 0n
       ? toPubkeyBytes(params.recipient!)
@@ -167,7 +216,13 @@ export function computeRouterAccountsHash(routerAccounts: readonly RouterAccount
   return sha256(concat(...parts));
 }
 
-/** Exact `ExecViaEscrow` `ctx_hash` matching `program/src/lib.rs` bit-for-bit. */
+/**
+ * Exact `ExecViaEscrow` `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
+ *
+ * Applies Solana's transaction-wide writability promotion across `escrowPda`, `solVault`,
+ * `relayerFeeRecipient`, `extraWritablePubkeys`, and duplicate writable `routerAccounts`
+ * before hashing `router_accounts` so PDA/duplicate accounts match on-chain `AccountView::is_writable()`.
+ */
 export function computeExecCtxHash(params: {
   programId?: string;
   poolId: number;
@@ -185,6 +240,7 @@ export function computeExecCtxHash(params: {
   minAmountOut: bigint;
   routerProg: string | Uint8Array;
   routerAccounts: readonly RouterAccountMeta[];
+  extraWritablePubkeys?: readonly (string | Uint8Array)[];
   outStealthOwner: Uint8Array;
   outBlinding: Uint8Array;
   dynMemoHead: Uint8Array;
@@ -192,8 +248,36 @@ export function computeExecCtxHash(params: {
   routerIxData: Uint8Array;
   changeMemos: Uint8Array;
 }): bigint {
-  const programBytes = toPubkeyBytes(params.programId ?? AUDREN_PROGRAM_ID);
-  const routerAccsHash = computeRouterAccountsHash(params.routerAccounts);
+  assertLen(params.assetIn, 32, 'assetIn');
+  assertLen(params.assetOut, 32, 'assetOut');
+  assertLen(params.outStealthOwner, 32, 'outStealthOwner');
+  assertLen(params.outBlinding, 32, 'outBlinding');
+  assertLen(params.dynMemoHead, DYN_MEMO_HEAD_LEN, 'dynMemoHead');
+  assertLen(params.dynMask56, MEMO_CT_LEN, 'dynMask56');
+  if (params.relayerFeeAmount > 0n && !params.relayerFeeRecipient) {
+    throw new Error('relayerFeeRecipient is required when relayerFeeAmount > 0');
+  }
+  const programId = params.programId ?? AUDREN_PROGRAM_ID;
+  const programBytes = toPubkeyBytes(programId);
+  const escrowPda = deriveEscrowPdaSync(params.poolId, params.escrowShard, programId).address;
+  const extraWritable: string[] = [];
+  if (params.inKind === 0 || params.outKind === 0) {
+    extraWritable.push(deriveSolVaultPdaSync(params.poolId, programId).address);
+  }
+  if (params.relayerFeeAmount > 0n && params.relayerFeeRecipient) {
+    extraWritable.push(pubkeyToB58(params.relayerFeeRecipient));
+  }
+  if (params.extraWritablePubkeys) {
+    for (const pk of params.extraWritablePubkeys) {
+      extraWritable.push(pubkeyToB58(pk));
+    }
+  }
+  const normalizedRouterAccounts = prepareEscrowAccountsForAudren(
+    params.routerAccounts,
+    escrowPda,
+    extraWritable,
+  );
+  const routerAccsHash = computeRouterAccountsHash(normalizedRouterAccounts);
   const feeRecBytes =
     params.relayerFeeAmount > 0n
       ? toPubkeyBytes(params.relayerFeeRecipient!)
@@ -230,7 +314,7 @@ export function computeExecCtxHash(params: {
 }
 
 // =============================================================================
-// 9 Canonical V2 Instruction Builders (0x00..=0x08)
+// 9 Canonical Audren Instruction Builders (0x00..=0x08)
 // =============================================================================
 
 export function buildInitPoolInstruction(params: {
@@ -357,6 +441,8 @@ export function buildDepositSolInstruction(params: {
     typeof params.stealthOwner === 'bigint' ? frToBeBytes(params.stealthOwner) : params.stealthOwner;
   const blindBytes =
     typeof params.blinding === 'bigint' ? frToBeBytes(params.blinding) : params.blinding;
+  assertLen(stealthBytes, 32, 'stealthOwner');
+  assertLen(blindBytes, 32, 'blinding');
 
   const data = concat(
     new Uint8Array([TAG_DEPOSIT_SOL]),
@@ -424,6 +510,8 @@ export function buildDepositSplInstruction(params: {
     typeof params.stealthOwner === 'bigint' ? frToBeBytes(params.stealthOwner) : params.stealthOwner;
   const blindBytes =
     typeof params.blinding === 'bigint' ? frToBeBytes(params.blinding) : params.blinding;
+  assertLen(stealthBytes, 32, 'stealthOwner');
+  assertLen(blindBytes, 32, 'blinding');
 
   const data = concat(
     new Uint8Array([TAG_DEPOSIT_SPL]),
@@ -521,8 +609,17 @@ export function buildJoinsplitInstruction(params: {
   memosBytes: Uint8Array;
   transferHookAccounts?: readonly RouterAccountMeta[];
 }): AudrenInstruction {
-  if (params.proof192.byteLength !== GROTH16_PROOF_LEN) {
-    throw new RangeError(`proof192 must be ${GROTH16_PROOF_LEN} bytes`);
+  assertLen(params.proof192, GROTH16_PROOF_LEN, 'proof192');
+  assertLen(params.nf0, 32, 'nf0');
+  assertLen(params.nf1, 32, 'nf1');
+  assertLen(params.cm0, 32, 'cm0');
+  assertLen(params.cm1, 32, 'cm1');
+  assertLen(params.cm2, 32, 'cm2');
+  if (params.publicAmountOut > 0n && !params.recipient) {
+    throw new Error('recipient is required when publicAmountOut > 0');
+  }
+  if (params.relayerFeeAmount > 0n && !params.relayerFeeRecipient) {
+    throw new Error('relayerFeeRecipient is required when relayerFeeAmount > 0');
   }
   const programId = params.programId ?? AUDREN_PROGRAM_ID;
   const unwrapWsol = Boolean(params.unwrapWsol);
@@ -658,16 +755,24 @@ export function buildExecViaEscrowInstruction(params: {
   routerProg: string;
   routerIxData: Uint8Array;
   routerAccounts: readonly RouterAccountMeta[];
+  extraWritablePubkeys?: readonly string[];
   changeMemos: Uint8Array;
 }): AudrenInstruction {
-  if (
-    params.proof192.byteLength !== GROTH16_PROOF_LEN ||
-    params.dynMemoHead.byteLength !== DYN_MEMO_HEAD_LEN ||
-    params.dynMask56.byteLength !== MEMO_CT_LEN
-  ) {
-    throw new RangeError('Invalid proof or dynamic memo wire length');
+  assertLen(params.proof192, GROTH16_PROOF_LEN, 'proof192');
+  assertLen(params.nf0, 32, 'nf0');
+  assertLen(params.nf1, 32, 'nf1');
+  assertLen(params.cm0, 32, 'cm0');
+  assertLen(params.cm1, 32, 'cm1');
+  assertLen(params.cm2, 32, 'cm2');
+  assertLen(params.outStealthOwner, 32, 'outStealthOwner');
+  assertLen(params.outBlinding, 32, 'outBlinding');
+  assertLen(params.dynMemoHead, DYN_MEMO_HEAD_LEN, 'dynMemoHead');
+  assertLen(params.dynMask56, MEMO_CT_LEN, 'dynMask56');
+  if (params.relayerFeeAmount > 0n && !params.relayerFeeRecipient) {
+    throw new Error('relayerFeeRecipient is required when relayerFeeAmount > 0');
   }
   const programId = params.programId ?? AUDREN_PROGRAM_ID;
+  const escrowPda = deriveEscrowPdaSync(params.poolId, params.escrowShard, programId).address;
   const feeOnOutput = Boolean(params.feeOnOutput);
   const rSub = params.rollover?.nextSubSeq ?? null;
   const rMemo = params.rollover?.nextMemoSeq ?? null;
@@ -728,7 +833,7 @@ export function buildExecViaEscrowInstruction(params: {
     { pubkey: deriveSubrootPdaSync(params.poolId, params.outLaneId, params.outRootSeq, programId).address, isSigner: false, isWritable: true },
     { pubkey: deriveMemoPdaSync(params.poolId, params.outLaneId, params.outMemoSeq, programId).address, isSigner: false, isWritable: true },
     { pubkey: deriveNfPagePdaSync(params.poolId, params.outLaneId, params.outNfSeq, programId).address, isSigner: false, isWritable: true },
-    { pubkey: deriveEscrowPdaSync(params.poolId, params.escrowShard, programId).address, isSigner: false, isWritable: true },
+    { pubkey: escrowPda, isSigner: false, isWritable: true },
     { pubkey: params.routerProg, isSigner: false, isWritable: false },
     { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
   ];
@@ -782,7 +887,15 @@ export function buildExecViaEscrowInstruction(params: {
       isWritable: true,
     });
   }
-  accounts.push(...params.routerAccounts);
+  const precedingWritable = accounts.filter((a) => a.isWritable).map((a) => a.pubkey);
+  const normalizedRouterAccounts = prepareEscrowAccountsForAudren(
+    params.routerAccounts,
+    escrowPda,
+    params.extraWritablePubkeys
+      ? [...precedingWritable, ...params.extraWritablePubkeys]
+      : precedingWritable,
+  );
+  accounts.push(...normalizedRouterAccounts);
   return { programId, accounts, data };
 }
 

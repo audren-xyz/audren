@@ -19,7 +19,7 @@ import { AUDREN_CODAMA_IDL, AUDREN_ANCHOR_IDL } from "@audren/sdk";
 
 ## Regenerating & Verifying Against Rust Source
 
-IDLs are deterministically derived from `crates/audren-core/src/{lib.rs,instruction.rs,layout.rs}` so all 9 instruction tags (`0..=8`), 8 account byte layouts (`PoolState` 128 B, `LaneTreeState` 1,824 B, `SubtreePage` 8,256 B, `SubtreeRootPage` 9,664 B, `MemoPage` 10,144 B, `NullifierPage` 9,664 B, `RootCheckpoint` 704 B, `NullifierPDA` 0 B), 13 PDA seeds (`audren_v2_*`), and 33 error codes (`1..=33`) remain strictly synchronized with the on-chain sBPFv3 program:
+IDLs are deterministically derived from `crates/audren-core/src/{lib.rs,instruction.rs,layout.rs}` so all 9 instruction tags (`0..=8`), 8 account byte layouts (`PoolState` 128 B, `LaneRentVault` 16 B, `LaneTreeState` 1,824 B, `SubtreePage` 8,256 B, `SubtreeRootPage` 9,664 B, `MemoPage` 10,144 B, `NullifierPage` 9,664 B, `RootCheckpoint` 704 B), 13 PDA seeds (`audren_v2_*`), and 33 error codes (`6000..=6032`) remain strictly synchronized with the on-chain sBPFv3 program:
 
 ```bash
 python3 idl/generate-idl.py

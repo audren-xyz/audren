@@ -54,7 +54,7 @@ import {
   readU32le,
   readU64le,
 } from './codec'
-import type { AudrenOpKind, SolanaAccountMeta, SolanaInstruction } from '../types'
+import type { SolanaAccountMeta, SolanaInstruction } from '../types'
 
 // ============================================================================
 // Audren Protocol Constants, PDAs & Wire Parsers
@@ -91,61 +91,36 @@ export {
 }
 
 export const AUDREN_PROGRAM_ID = base58Decode(AUDREN_PROGRAM_ID_STR)
-export const MAX_APPEND_LANES = NUM_LANES
 export const MAX_ESCROW_SHARDS = NUM_ESCROW_SHARDS
 
-export const derivePoolPda = (poolId = 0) => ({
-  address: derivePoolPdaSync(poolId).addressBytes,
-  bump: derivePoolPdaSync(poolId).bump,
+const toPdaBytes = (derived: { addressBytes: Uint8Array; bump: number }) => ({
+  address: derived.addressBytes,
+  bump: derived.bump,
 })
-export const deriveSolVaultPda = (poolId = 0) => ({
-  address: deriveSolVaultPdaSync(poolId).addressBytes,
-  bump: deriveSolVaultPdaSync(poolId).bump,
-})
-export const deriveVaultAuthPda = (poolId = 0) => ({
-  address: deriveVaultAuthPdaSync(poolId).addressBytes,
-  bump: deriveVaultAuthPdaSync(poolId).bump,
-})
-export const deriveLanePda = (poolId: number, laneId: number) => ({
-  address: deriveLanePdaSync(poolId, laneId).addressBytes,
-  bump: deriveLanePdaSync(poolId, laneId).bump,
-})
-export const deriveLaneRentVaultPda = (poolId: number, laneId: number) => ({
-  address: deriveLaneRentVaultPdaSync(poolId, laneId).addressBytes,
-  bump: deriveLaneRentVaultPdaSync(poolId, laneId).bump,
-})
-export const deriveSubtreePda = (poolId: number, laneId: number, seq: bigint) => ({
-  address: deriveSubtreePdaSync(poolId, laneId, seq).addressBytes,
-  bump: deriveSubtreePdaSync(poolId, laneId, seq).bump,
-})
-export const deriveSubrootPda = (poolId: number, laneId: number, seq: bigint) => ({
-  address: deriveSubrootPdaSync(poolId, laneId, seq).addressBytes,
-  bump: deriveSubrootPdaSync(poolId, laneId, seq).bump,
-})
-export const deriveMemoPda = (poolId: number, laneId: number, seq: bigint) => ({
-  address: deriveMemoPdaSync(poolId, laneId, seq).addressBytes,
-  bump: deriveMemoPdaSync(poolId, laneId, seq).bump,
-})
-export const deriveNfPagePda = (poolId: number, laneId: number, seq: bigint) => ({
-  address: deriveNfPagePdaSync(poolId, laneId, seq).addressBytes,
-  bump: deriveNfPagePdaSync(poolId, laneId, seq).bump,
-})
-export const deriveCheckpointPda = (poolId: number, slotIdx: number) => ({
-  address: deriveCheckpointPdaSync(poolId, slotIdx).addressBytes,
-  bump: deriveCheckpointPdaSync(poolId, slotIdx).bump,
-})
-export const deriveNullifierPda = (poolId: number, nf32: Uint8Array) => ({
-  address: deriveNullifierPdaSync(poolId, nf32).addressBytes,
-  bump: deriveNullifierPdaSync(poolId, nf32).bump,
-})
-export const deriveEscrowPda = (poolId: number, shardId: number) => ({
-  address: deriveEscrowPdaSync(poolId, shardId).addressBytes,
-  bump: deriveEscrowPdaSync(poolId, shardId).bump,
-})
-export const deriveUnwrapPda = (poolId: number, nf0: Uint8Array) => ({
-  address: deriveUnwrapPdaSync(poolId, nf0).addressBytes,
-  bump: deriveUnwrapPdaSync(poolId, nf0).bump,
-})
+
+export const derivePoolPda = (poolId = 0) => toPdaBytes(derivePoolPdaSync(poolId))
+export const deriveSolVaultPda = (poolId = 0) => toPdaBytes(deriveSolVaultPdaSync(poolId))
+export const deriveVaultAuthPda = (poolId = 0) => toPdaBytes(deriveVaultAuthPdaSync(poolId))
+export const deriveLanePda = (poolId: number, laneId: number) =>
+  toPdaBytes(deriveLanePdaSync(poolId, laneId))
+export const deriveLaneRentVaultPda = (poolId: number, laneId: number) =>
+  toPdaBytes(deriveLaneRentVaultPdaSync(poolId, laneId))
+export const deriveSubtreePda = (poolId: number, laneId: number, seq: bigint) =>
+  toPdaBytes(deriveSubtreePdaSync(poolId, laneId, seq))
+export const deriveSubrootPda = (poolId: number, laneId: number, seq: bigint) =>
+  toPdaBytes(deriveSubrootPdaSync(poolId, laneId, seq))
+export const deriveMemoPda = (poolId: number, laneId: number, seq: bigint) =>
+  toPdaBytes(deriveMemoPdaSync(poolId, laneId, seq))
+export const deriveNfPagePda = (poolId: number, laneId: number, seq: bigint) =>
+  toPdaBytes(deriveNfPagePdaSync(poolId, laneId, seq))
+export const deriveCheckpointPda = (poolId: number, slotIdx: number) =>
+  toPdaBytes(deriveCheckpointPdaSync(poolId, slotIdx))
+export const deriveNullifierPda = (poolId: number, nf32: Uint8Array) =>
+  toPdaBytes(deriveNullifierPdaSync(poolId, nf32))
+export const deriveEscrowPda = (poolId: number, shardId: number) =>
+  toPdaBytes(deriveEscrowPdaSync(poolId, shardId))
+export const deriveUnwrapPda = (poolId: number, nf0: Uint8Array) =>
+  toPdaBytes(deriveUnwrapPdaSync(poolId, nf0))
 
 function popcount3(mask: number): number {
   return (mask & 1) + ((mask >> 1) & 1) + ((mask >> 2) & 1)
@@ -504,10 +479,4 @@ export function parseExecEscrowMeta(
     escrowPda: base58Encode(expectedEscrow),
     routerAccountsStartIdx: cursor,
   }
-}
-
-export function opKindFromTag(tag: number, assetMode?: number): AudrenOpKind | null {
-  if (tag === TAG_JOINSPLIT) return assetMode === ASSET_MODE_PRIVATE ? 'transfer' : 'withdraw'
-  if (tag === TAG_EXEC_VIA_ESCROW) return 'exec_escrow'
-  return null
 }

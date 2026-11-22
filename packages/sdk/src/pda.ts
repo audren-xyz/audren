@@ -1,5 +1,5 @@
 /**
- * Solana Base58 codec, `aud1...` V2 stealth address codec (version `0x02`, 65 bytes),
+ * Solana Base58 codec, `aud1...` stealth address codec (version `0x02`, 65 bytes),
  * and canonical Audren PDA derivations (`audren_v2_*`) matching `crates/client/src/pda.rs`
  * byte-for-byte.
  */

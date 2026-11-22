@@ -25,10 +25,10 @@ import {
 import {
   AUDREN_DEFAULT_RELAY_URL,
   AUDREN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID,
   ASSET_MODE_PRIVATE,
   ASSET_MODE_SOL,
   ASSET_MODE_SPL,
+  CHECKPOINT_RING_SLOTS,
   CLASSIC_TOKEN_PROGRAM_ID,
   CompactWalletStore,
   MEMO_NOTES_PER_PAGE,
@@ -48,17 +48,23 @@ import {
   audrenInstructionToSolana,
   base58Decode,
   base58Encode,
+  buildCreateAtaIdempotentInstruction,
   buildDepositSolInstruction,
   buildDepositSplInstruction,
   buildExecViaEscrowInstruction,
   buildJoinsplitInstruction,
   buildOpenPageInstruction,
+  buildPublishCheckpointInstruction,
   bytes32ToFrMasked,
   computeExecCtxHash,
   computeJoinsplitCtxHash,
+  computeToken2022NetAmount,
+  concatBytes,
   decodePoolState,
+  decodeRootCheckpoint,
   deriveAssetId,
   deriveAssociatedTokenAddressSync,
+  deriveCheckpointPdaSync,
   deriveDefiSessionKeypair,
   deriveEscrowPdaSync,
   deriveKeysFromSeed,
@@ -75,17 +81,25 @@ import {
   frToBeBytes,
   fromBase64,
   parseAudrenAddress,
+  parseToken2022TransferFeeConfig,
   prepareDynamicSwapMemo,
+  prepareEscrowAccountsForAudren,
   reconstructWitness,
   syncCompactStoreWithRpc,
   toBase64,
   toHex,
+  u32le,
+  u64le,
   verifySelectiveDisclosureProof,
   type AccountBatchFetcher,
   type AudrenInstruction,
   type AudrenKeys,
+  type MerklePath4Ary,
   type OwnedNote,
+  type RelayAggregatorId,
+  type RelaySetupAta,
   type SelectiveDisclosureProof,
+  type Token2022TransferFee,
 } from '@/lib/audren-crypto'
 import {
   clearEncryptedCompactStore,
@@ -115,6 +129,7 @@ import {
 import { AUDREN, shortHash, solscanAddress, solscanTx } from '@/lib/protocol'
 
 type VaultTab = 'deposit' | 'send' | 'swap' | 'withdraw' | 'compliance'
+type UnlockSource = 'wallet' | 'local' | 'backup' | null
 
 interface PublicTokenBalance {
   ata: string
@@ -125,14 +140,49 @@ interface PublicTokenBalance {
   tokenProgram: string
 }
 
+interface TokenMetaEntry {
+  symbol: string
+  decimals: number
+  tokenProgram?: string
+}
+
+interface PoolApiSnapshot {
+  initialized?: boolean
+  activeLanes?: number
+  paused?: boolean
+  ckptInterval?: string
+  maxCkptAge?: string
+  noteRentFee?: string
+  deterministicNoteRentFee?: string
+  currentSlot?: string
+  currentEpoch?: string
+  lastPublishedSlot?: string | null
+  totalNotes?: string
+  totalNullifiers?: string
+  solVaultLamports?: number
+  lanes?: Array<{ laneId: number; nextLeaf: string; nfCount: string } | null>
+  latestCheckpoint?: {
+    slotIndex: number
+    epochId: string
+    publishedSlot: string
+    laneCounts: string[]
+  } | null
+}
+
 interface PoolSummary {
   initialized: boolean
   activeLanes: number
   paused: boolean
+  ckptInterval: bigint
+  currentSlot: bigint
+  currentEpoch: bigint
+  lastPublishedSlot: bigint | null
   totalNotes: string
   totalNullifiers: string
   solVaultLamports: number
   latestCheckpointSlot: number | null
+  latestCheckpointEpochId: bigint | null
+  latestCheckpointLaneCounts: bigint[] | null
 }
 
 interface ActionReceipt {
@@ -146,6 +196,22 @@ interface ActionReceipt {
 
 const USDC_MAINNET_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const RELAY_STORAGE_KEY = 'audren_v2_custom_relay_url'
+const NATIVE_SOL_MINT_STR = base58Encode(NATIVE_SOL_MINT_BYTES)
+
+const BASE_TOKEN_META: Record<string, TokenMetaEntry> = {
+  [NATIVE_SOL_MINT_STR]: { symbol: 'SOL', decimals: 9 },
+  [WSOL_MINT]: { symbol: 'WSOL', decimals: 9, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
+  [USDC_MAINNET_MINT]: { symbol: 'USDC', decimals: 6, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
+}
+
+const VALID_AGGREGATORS: readonly RelayAggregatorId[] = ['jupiter', 'bedrock', 'dflow', 'titan', 'okx']
+
+function parseAggregatorId(raw: unknown): RelayAggregatorId {
+  if (typeof raw === 'string' && (VALID_AGGREGATORS as readonly string[]).includes(raw)) {
+    return raw as RelayAggregatorId
+  }
+  return 'jupiter'
+}
 
 function randomFr(): bigint {
   return bytes32ToFrMasked(crypto.getRandomValues(new Uint8Array(32)))
@@ -159,6 +225,15 @@ function formatUnits(raw: bigint, decimals: number): string {
   const frac = (v % base).toString().padStart(decimals, '0').replace(/0+$/, '')
   const body = frac ? `${whole}.${frac.slice(0, 6)}` : whole.toString()
   return neg ? `-${body}` : body
+}
+
+function formatUnitsExact(raw: bigint, decimals: number): string {
+  const v = raw < 0n ? 0n : raw
+  if (decimals <= 0) return v.toString()
+  const base = 10n ** BigInt(decimals)
+  const whole = v / base
+  const frac = (v % base).toString().padStart(decimals, '0').replace(/0+$/, '')
+  return frac ? `${whole}.${frac}` : whole.toString()
 }
 
 function parseUnits(input: string, decimals: number): bigint | null {
@@ -180,54 +255,42 @@ function isAllowedRelayUrl(raw: string): boolean {
   }
 }
 
-const NATIVE_SOL_MINT_STR = base58Encode(NATIVE_SOL_MINT_BYTES)
-
-function mintLabel(mintStr: string): { symbol: string; decimals: number } {
-  if (mintStr === NATIVE_SOL_MINT_STR) return { symbol: 'SOL', decimals: 9 }
-  if (mintStr === WSOL_MINT) return { symbol: 'WSOL', decimals: 9 }
-  if (mintStr === USDC_MAINNET_MINT) return { symbol: 'USDC', decimals: 6 }
-  return { symbol: shortHash(mintStr, 4, 4), decimals: 6 }
-}
-
-function parseTransferFeeConfig(mintData: Uint8Array | null): { bps: bigint; maxFee: bigint } | null {
-  if (!mintData || mintData.byteLength <= 166 || mintData[165] !== 1) return null
-  const dv = new DataView(mintData.buffer, mintData.byteOffset, mintData.byteLength)
-  let off = 166
-  while (off + 4 <= mintData.byteLength) {
-    const extType = dv.getUint16(off, true)
-    const extLen = dv.getUint16(off + 2, true)
-    off += 4
-    if (off + extLen > mintData.byteLength) break
-    if (extType === 1 && extLen >= 108) {
-      // Newer transfer fee sits at offset 90..108 inside TransferFeeConfig (epoch:8, maxFee:8, bps:2)
-      const newerMax = dv.getBigUint64(off + 98, true)
-      const newerBps = BigInt(dv.getUint16(off + 106, true))
-      if (newerBps > 0n) return { bps: newerBps, maxFee: newerMax }
-      const olderMax = dv.getBigUint64(off + 80, true)
-      const olderBps = BigInt(dv.getUint16(off + 88, true))
-      if (olderBps > 0n) return { bps: olderBps, maxFee: olderMax }
-      return null
-    }
-    off += extLen
+function isValidSolanaPubkey(raw: string): boolean {
+  try {
+    return base58Decode(raw.trim()).byteLength === 32
+  } catch {
+    return false
   }
-  return null
 }
 
-function computeNetAfterTransferFee(gross: bigint, fee: { bps: bigint; maxFee: bigint } | null): bigint {
-  if (!fee || fee.bps <= 0n || gross <= 0n) return gross
-  const rawFee = fee.bps >= 10_000n ? gross : (gross * fee.bps + 9_999n) / 10_000n
-  const capped = rawFee > fee.maxFee ? fee.maxFee : rawFee
-  return gross > capped ? gross - capped : 0n
+function buildSystemTransferIx(from: string, to: string, lamports: bigint): AudrenInstruction {
+  return {
+    programId: SYSTEM_PROGRAM_ID,
+    accounts: [
+      { pubkey: from, isSigner: true, isWritable: true },
+      { pubkey: to, isSigner: false, isWritable: true },
+    ],
+    data: concatBytes(u32le(2), u64le(lamports)),
+  }
+}
+
+function buildSyncNativeIx(wsolAta: string): AudrenInstruction {
+  return {
+    programId: CLASSIC_TOKEN_PROGRAM_ID,
+    accounts: [{ pubkey: wsolAta, isSigner: false, isWritable: true }],
+    data: new Uint8Array([17]),
+  }
 }
 
 async function resolveMintOnChain(
   cluster: SolanaCluster,
   mintStr: string,
+  currentEpoch: bigint,
 ): Promise<{
   tokenProgram: string
   isToken2022: boolean
   decimals: number | null
-  transferFee: { bps: bigint; maxFee: bigint } | null
+  transferFee: Token2022TransferFee | null
 }> {
   const res = await fetch('/api/rpc/accounts', {
     method: 'POST',
@@ -246,33 +309,12 @@ async function resolveMintOnChain(
   const isToken2022 = owner === TOKEN_2022_PROGRAM_ID
   const data = json.accounts[0] ? fromBase64(json.accounts[0]) : null
   const decimals = data && data.byteLength >= 45 ? data[44]! : null
-  const transferFee = isToken2022 ? parseTransferFeeConfig(data) : null
+  const transferFee = isToken2022 ? parseToken2022TransferFeeConfig(data, currentEpoch) : null
   return {
     tokenProgram: isToken2022 ? TOKEN_2022_PROGRAM_ID : CLASSIC_TOKEN_PROGRAM_ID,
     isToken2022,
     decimals,
     transferFee,
-  }
-}
-
-function buildCreateAtaIdempotentIx(
-  payer: string,
-  ata: string,
-  owner: string,
-  mint: string,
-  tokenProgram: string,
-): AudrenInstruction {
-  return {
-    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
-    accounts: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: ata, isSigner: false, isWritable: true },
-      { pubkey: owner, isSigner: false, isWritable: false },
-      { pubkey: mint, isSigner: false, isWritable: false },
-      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: tokenProgram, isSigner: false, isWritable: false },
-    ],
-    data: new Uint8Array([1]),
   }
 }
 
@@ -299,12 +341,54 @@ function createWorkerBatchFetcher(cluster: SolanaCluster): AccountBatchFetcher {
   }
 }
 
+async function ensureLanePagesPreIxs(params: {
+  fetcher: AccountBatchFetcher
+  payer: string
+  laneId: number
+  subSeq: bigint
+  rootSeq: bigint
+  memoSeq: bigint
+  nfSeq: bigint
+  includeOutputs: boolean
+}): Promise<AudrenInstruction[]> {
+  const { fetcher, payer, laneId, subSeq, rootSeq, memoSeq, nfSeq, includeOutputs } = params
+  const nfAddr = deriveNfPagePdaSync(0, laneId, nfSeq, AUDREN_PROGRAM_ID).address
+  const addrs = includeOutputs
+    ? [
+        deriveSubtreePdaSync(0, laneId, subSeq, AUDREN_PROGRAM_ID).address,
+        deriveSubrootPdaSync(0, laneId, rootSeq, AUDREN_PROGRAM_ID).address,
+        deriveMemoPdaSync(0, laneId, memoSeq, AUDREN_PROGRAM_ID).address,
+        nfAddr,
+      ]
+    : [nfAddr]
+  const res = await fetcher(addrs)
+  const ixs: AudrenInstruction[] = []
+  if (includeOutputs) {
+    if (!res[0]) {
+      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_SUBTREE, pageSeq: subSeq, payer }))
+    }
+    if (!res[1]) {
+      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_SUBROOT, pageSeq: rootSeq, payer }))
+    }
+    if (!res[2]) {
+      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_MEMO, pageSeq: memoSeq, payer }))
+    }
+    if (!res[3]) {
+      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: nfSeq, payer }))
+    }
+  } else if (!res[0]) {
+    ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: nfSeq, payer }))
+  }
+  return ixs
+}
+
 export function LiveWalletVault() {
   const [cluster, setCluster] = useState<SolanaCluster>('devnet')
   const [discovered, setDiscovered] = useState<DiscoveredSolanaWallet[]>([])
   const [connected, setConnected] = useState<ConnectedSolanaWallet | null>(null)
   const [connecting, setConnecting] = useState(false)
 
+  const [unlockSource, setUnlockSource] = useState<UnlockSource>(null)
   const [seedBytes, setSeedBytes] = useState<Uint8Array | null>(null)
   const [keys, setKeys] = useState<AudrenKeys | null>(null)
   const [store, setStore] = useState<CompactWalletStore | null>(null)
@@ -315,6 +399,7 @@ export function LiveWalletVault() {
   const [poolInfo, setPoolInfo] = useState<PoolSummary | null>(null)
   const [pubSolLamports, setPubSolLamports] = useState<bigint>(0n)
   const [pubTokens, setPubTokens] = useState<PublicTokenBalance[]>([])
+  const [tokenMeta, setTokenMeta] = useState<Record<string, TokenMetaEntry>>(BASE_TOKEN_META)
 
   const [tab, setTab] = useState<VaultTab>('deposit')
   const [busy, setBusy] = useState(false)
@@ -332,6 +417,7 @@ export function LiveWalletVault() {
   const [depositMint, setDepositMint] = useState<string>(NATIVE_SOL_MINT_STR)
   const [depositAmount, setDepositAmount] = useState<string>('0.05')
   const [feeFromAmount, setFeeFromAmount] = useState<boolean>(false)
+  const [wrapSolToWsol, setWrapSolToWsol] = useState<boolean>(false)
 
   const [selectedNoteKey, setSelectedNoteKey] = useState<string>('')
   const [sendRecipient, setSendRecipient] = useState<string>('')
@@ -342,12 +428,18 @@ export function LiveWalletVault() {
   const [swapSlippageBps, setSwapSlippageBps] = useState<number>(100)
   const [swapFeeOnOutput, setSwapFeeOnOutput] = useState<boolean>(true)
   const [swapQuoteOut, setSwapQuoteOut] = useState<string | null>(null)
+  const [swapQuoteProvider, setSwapQuoteProvider] = useState<RelayAggregatorId | null>(null)
   const [swapQuoteLoading, setSwapQuoteLoading] = useState(false)
   const [swapQuoteRaw, setSwapQuoteRaw] = useState<unknown>(null)
 
   const [withdrawRecipient, setWithdrawRecipient] = useState<string>('')
   const [withdrawAmount, setWithdrawAmount] = useState<string>('')
   const [unwrapWsol, setUnwrapWsol] = useState<boolean>(true)
+  const [withdrawFeePreview, setWithdrawFeePreview] = useState<{
+    relayerFee: bigint
+    billingMode: 'self_paying' | 'sponsored'
+    reason: string
+  } | null>(null)
 
   const [sessionIndex, setSessionIndex] = useState<number>(0)
   const [receiptJson, setReceiptJson] = useState<string>('')
@@ -356,6 +448,27 @@ export function LiveWalletVault() {
   const [backupPassphrase, setBackupPassphrase] = useState('')
   const [backupStatus, setBackupStatus] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const lockedFileInputRef = useRef<HTMLInputElement | null>(null)
+
+  const connectedAddress = connected?.address ?? null
+  const walletScope = connectedAddress ?? 'local'
+
+  const getTokenMeta = useCallback(
+    (mintStr: string): TokenMetaEntry => {
+      const cached = tokenMeta[mintStr]
+      if (cached) return cached
+      const pub = pubTokens.find((t) => t.mint === mintStr)
+      if (pub) {
+        return {
+          symbol: shortHash(mintStr, 4, 4),
+          decimals: pub.decimals,
+          tokenProgram: pub.tokenProgram,
+        }
+      }
+      return { symbol: shortHash(mintStr, 4, 4), decimals: 6 }
+    },
+    [tokenMeta, pubTokens],
+  )
 
   useEffect(() => {
     let active = true
@@ -374,13 +487,32 @@ export function LiveWalletVault() {
     }
   }, [])
 
+  // Reset vault session state cleanly if the user switches accounts inside their browser wallet extension
   useEffect(() => {
     if (!connected) return
     const match = discovered.find((d) => d.name === connected.name)
     if (!match) return
     return subscribeWalletStandardAccounts(match, (next) => {
-      setConnected(next)
-      setWithdrawRecipient((prev) => prev || next.address)
+      setConnected((prev) => {
+        if (prev && prev.address !== next.address) {
+          setKeys(null)
+          setSeedBytes(null)
+          setUnlockSource(null)
+          setStore(null)
+          setUnspentNotes([])
+          setSelectedNoteKey('')
+          setLastReceipt(null)
+          setErrorMsg(null)
+          setStatusMsg('Wallet account changed — unlock vault for the active account')
+          setSwapQuoteOut(null)
+          setSwapQuoteRaw(null)
+          setSwapQuoteProvider(null)
+          setWithdrawRecipient(next.address)
+        } else if (!prev) {
+          setWithdrawRecipient((r) => r || next.address)
+        }
+        return next
+      })
     })
   }, [connected, discovered])
 
@@ -396,30 +528,34 @@ export function LiveWalletVault() {
       try {
         const poolRes = await fetch(`/api/pool?cluster=${targetCluster}&poolId=0`)
         if (poolRes.ok) {
-          const pj = (await poolRes.json()) as {
-            initialized?: boolean
-            activeLanes?: number
-            paused?: boolean
-            totalNotes?: string
-            totalNullifiers?: string
-            solVaultLamports?: number
-            latestCheckpoint?: { slotIndex: number } | null
-          }
+          const pj = (await poolRes.json()) as PoolApiSnapshot
           setPoolInfo({
             initialized: Boolean(pj.initialized),
             activeLanes: pj.activeLanes ?? 4,
             paused: Boolean(pj.paused),
+            ckptInterval: BigInt(pj.ckptInterval ?? '50'),
+            currentSlot: BigInt(pj.currentSlot ?? '0'),
+            currentEpoch: BigInt(pj.currentEpoch ?? '0'),
+            lastPublishedSlot: pj.lastPublishedSlot ? BigInt(pj.lastPublishedSlot) : null,
             totalNotes: pj.totalNotes ?? '0',
             totalNullifiers: pj.totalNullifiers ?? '0',
             solVaultLamports: pj.solVaultLamports ?? 0,
             latestCheckpointSlot: pj.latestCheckpoint?.slotIndex ?? null,
+            latestCheckpointEpochId: pj.latestCheckpoint ? BigInt(pj.latestCheckpoint.epochId) : null,
+            latestCheckpointLaneCounts: pj.latestCheckpoint
+              ? pj.latestCheckpoint.laneCounts.map((c) => BigInt(c))
+              : null,
           })
         }
       } catch {
         setPoolInfo(null)
       }
 
-      if (!ownerAddr) return
+      if (!ownerAddr) {
+        setPubSolLamports(0n)
+        setPubTokens([])
+        return
+      }
       try {
         const balRes = await fetch(
           `/api/wallet/balances?cluster=${targetCluster}&owner=${encodeURIComponent(ownerAddr)}`,
@@ -436,8 +572,6 @@ export function LiveWalletVault() {
     [],
   )
 
-  const connectedAddress = connected?.address ?? null
-
   useEffect(() => {
     let active = true
     void Promise.resolve().then(() => {
@@ -451,29 +585,116 @@ export function LiveWalletVault() {
     }
   }, [cluster, connectedAddress, refreshPoolAndBalances])
 
+  // Dynamically hydrate token symbols & exact on-chain decimals via /api/tokens/resolve
+  const mintsToResolveKey = useMemo(() => {
+    const needed = new Set<string>()
+    for (const t of pubTokens) {
+      if (!tokenMeta[t.mint]) needed.add(t.mint)
+    }
+    for (const n of unspentNotes) {
+      const m = base58Encode(n.mint)
+      if (!tokenMeta[m]) needed.add(m)
+    }
+    if (isValidSolanaPubkey(swapOutMint) && !tokenMeta[swapOutMint]) {
+      needed.add(swapOutMint)
+    }
+    if (depositMint !== NATIVE_SOL_MINT_STR && isValidSolanaPubkey(depositMint) && !tokenMeta[depositMint]) {
+      needed.add(depositMint)
+    }
+    return Array.from(needed).sort().join(',')
+  }, [pubTokens, unspentNotes, swapOutMint, depositMint, tokenMeta])
+
+  useEffect(() => {
+    if (!mintsToResolveKey) return
+    let active = true
+    const mints = mintsToResolveKey.split(',').filter(Boolean)
+    fetch('/api/tokens/resolve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mints, cluster }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(
+        (
+          data: {
+            tokens?: Record<
+              string,
+              { symbol?: string; decimals?: number | null; tokenProgram?: string }
+            >
+          } | null,
+        ) => {
+          if (!active || !data?.tokens) return
+          setTokenMeta((prev) => {
+            let changed = false
+            const next = { ...prev }
+            for (const [m, info] of Object.entries(data.tokens ?? {})) {
+              const dec = typeof info.decimals === 'number' ? info.decimals : prev[m]?.decimals ?? null
+              if (dec === null) continue
+              const sym = info.symbol?.trim() || shortHash(m, 4, 4)
+              if (
+                !prev[m] ||
+                prev[m]!.symbol !== sym ||
+                prev[m]!.decimals !== dec ||
+                prev[m]!.tokenProgram !== info.tokenProgram
+              ) {
+                next[m] = { symbol: sym, decimals: dec, tokenProgram: info.tokenProgram }
+                changed = true
+              }
+            }
+            return changed ? next : prev
+          })
+        },
+      )
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [mintsToResolveKey, cluster])
+
   const syncVault = useCallback(
-    async (activeKeys: AudrenKeys, targetCluster: SolanaCluster, existingStore: CompactWalletStore | null) => {
+    async (
+      activeKeys: AudrenKeys,
+      targetCluster: SolanaCluster,
+      existingStore: CompactWalletStore | null,
+      scope: string,
+    ) => {
       setSyncing(true)
       setErrorMsg(null)
       try {
         let curStore = existingStore
         if (!curStore) {
-          curStore = (await loadEncryptedCompactStore(activeKeys, targetCluster, 0)) ?? new CompactWalletStore(0)
+          curStore =
+            (await loadEncryptedCompactStore(activeKeys, targetCluster, 0, scope)) ??
+            new CompactWalletStore(0)
         }
         const fvk = exportFullViewingKey(activeKeys)
         const fetcher = createWorkerBatchFetcher(targetCluster)
+        let syncWarning: string | null = null
         try {
           await syncCompactStoreWithRpc({ store: curStore, fvk, fetchBatch: fetcher })
-          await saveEncryptedCompactStore(activeKeys, targetCluster, 0, curStore)
+          await saveEncryptedCompactStore(activeKeys, targetCluster, 0, curStore, scope)
         } catch (syncErr) {
-          const msg = syncErr instanceof Error ? syncErr.message : String(syncErr)
-          setStatusMsg(`Vault ready (RPC sync skipped: ${msg})`)
+          syncWarning = syncErr instanceof Error ? syncErr.message : String(syncErr)
         }
         const unspent = curStore.unspentNotes()
         setStore(curStore)
         setUnspentNotes(unspent)
         if (unspent.length > 0) {
-          setSelectedNoteKey((prev) => prev || `${unspent[0]!.laneId}:${unspent[0]!.leafIndex.toString()}`)
+          setSelectedNoteKey((prev) => {
+            if (prev && unspent.some((n) => `${n.laneId}:${n.leafIndex.toString()}` === prev)) {
+              return prev
+            }
+            return `${unspent[0]!.laneId}:${unspent[0]!.leafIndex.toString()}`
+          })
+        } else {
+          setSelectedNoteKey('')
+        }
+        if (syncWarning) {
+          setStatusMsg(`Vault ready (RPC sync skipped: ${syncWarning})`)
+        } else {
+          setStatusMsg(
+            `Synced ${unspent.length} unspent shielded ${unspent.length === 1 ? 'note' : 'notes'} on ${targetCluster} via ordinary RPC`,
+          )
         }
       } finally {
         setSyncing(false)
@@ -481,6 +702,34 @@ export function LiveWalletVault() {
     },
     [],
   )
+
+  const handleClusterSwitch = (nextCluster: SolanaCluster) => {
+    if (nextCluster === cluster) return
+    setCluster(nextCluster)
+    setStore(null)
+    setUnspentNotes([])
+    setSelectedNoteKey('')
+    setLastReceipt(null)
+    setErrorMsg(null)
+    setStatusMsg(null)
+    setSwapQuoteOut(null)
+    setSwapQuoteRaw(null)
+    setSwapQuoteProvider(null)
+    setWithdrawFeePreview(null)
+    setReceiptJson('')
+    setReceiptVerdict(null)
+    setPubSolLamports(0n)
+    setPubTokens([])
+    setDepositMint(NATIVE_SOL_MINT_STR)
+    if (unlockSource === 'wallet') {
+      // Wallet-derived keys bind the cluster name in signMessage; require explicit unlock on the new cluster
+      setKeys(null)
+      setSeedBytes(null)
+      setUnlockSource(null)
+    } else if (keys) {
+      void syncVault(keys, nextCluster, null, walletScope)
+    }
+  }
 
   const handleConnectWallet = async (wallet: DiscoveredSolanaWallet) => {
     setConnecting(true)
@@ -501,18 +750,29 @@ export function LiveWalletVault() {
     setConnected(null)
     setSeedBytes(null)
     setKeys(null)
+    setUnlockSource(null)
     setStore(null)
     setUnspentNotes([])
+    setSelectedNoteKey('')
+    setLastReceipt(null)
+    setStatusMsg(null)
+    setErrorMsg(null)
     setPubSolLamports(0n)
     setPubTokens([])
   }
 
   const unlockFromSeed = useCallback(
-    async (seed: Uint8Array, targetCluster: SolanaCluster) => {
+    async (
+      seed: Uint8Array,
+      targetCluster: SolanaCluster,
+      source: UnlockSource,
+      scope: string,
+    ) => {
       const derived = deriveKeysFromSeed(seed)
       setSeedBytes(seed)
       setKeys(derived)
-      await syncVault(derived, targetCluster, null)
+      setUnlockSource(source)
+      await syncVault(derived, targetCluster, null, scope)
     },
     [syncVault],
   )
@@ -527,8 +787,7 @@ export function LiveWalletVault() {
       const buf = new ArrayBuffer(sig.byteLength)
       new Uint8Array(buf).set(sig)
       const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf))
-      await unlockFromSeed(digest, cluster)
-      setStatusMsg('Audren vault unlocked from wallet signature')
+      await unlockFromSeed(digest, cluster, 'wallet', connected.address)
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
     } finally {
@@ -541,7 +800,7 @@ export function LiveWalletVault() {
     setErrorMsg(null)
     try {
       const freshSeed = crypto.getRandomValues(new Uint8Array(32))
-      await unlockFromSeed(freshSeed, cluster)
+      await unlockFromSeed(freshSeed, cluster, 'local', walletScope)
       setStatusMsg('Ephemeral local Audren vault created — export an encrypted backup before closing')
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
@@ -563,10 +822,46 @@ export function LiveWalletVault() {
     [selectedNote],
   )
 
+  const selectedNoteMeta = useMemo(
+    () => getTokenMeta(selectedNoteMintStr),
+    [getTokenMeta, selectedNoteMintStr],
+  )
+
+  const swapOutMeta = useMemo(
+    () => getTokenMeta(swapOutMint),
+    [getTokenMeta, swapOutMint],
+  )
+
+  const isSelectedNoteNativeSol = selectedNote !== null && selectedNoteMintStr === NATIVE_SOL_MINT_STR
+
+  // Detect whether any unspent note is newer than the latest unexpired RootCheckpoint
+  const noteNeedsCheckpoint = useMemo(() => {
+    if (!poolInfo?.initialized) return false
+    if (poolInfo.latestCheckpointSlot === null || !poolInfo.latestCheckpointLaneCounts) {
+      return unspentNotes.length > 0
+    }
+    return unspentNotes.some((n) => {
+      const laneCount = poolInfo.latestCheckpointLaneCounts?.[n.laneId] ?? 0n
+      return n.leafIndex >= laneCount
+    })
+  }, [poolInfo, unspentNotes])
+
+  const slotsUntilNextCheckpoint = useMemo(() => {
+    if (!poolInfo?.initialized || poolInfo.ckptInterval <= 0n) return 0n
+    const curEpoch = poolInfo.currentSlot / poolInfo.ckptInterval
+    if (poolInfo.latestCheckpointEpochId !== null && curEpoch <= poolInfo.latestCheckpointEpochId) {
+      const nextEpochSlot = (curEpoch + 1n) * poolInfo.ckptInterval
+      return nextEpochSlot > poolInfo.currentSlot ? nextEpochSlot - poolInfo.currentSlot : 0n
+    }
+    return 0n
+  }, [poolInfo])
+
   // Live swap quote effect — strictly primitive dependencies!
+  const selectedNoteDecimals = selectedNoteMeta.decimals
   const fetchSwapQuote = useCallback(
     async (
       inMint: string,
+      inDecimals: number,
       outMint: string,
       amountStr: string,
       slippage: number,
@@ -574,12 +869,17 @@ export function LiveWalletVault() {
       activeRelay: string,
       relayed: boolean,
     ) => {
-      const { decimals } = mintLabel(inMint)
-      const routerInMint = inMint === NATIVE_SOL_MINT_STR ? WSOL_MINT : inMint
-      const rawAmt = parseUnits(amountStr, decimals)
-      if (!rawAmt || rawAmt <= 0n || routerInMint === outMint) {
+      if (inMint === NATIVE_SOL_MINT_STR || !isValidSolanaPubkey(outMint)) {
         setSwapQuoteOut(null)
         setSwapQuoteRaw(null)
+        setSwapQuoteProvider(null)
+        return
+      }
+      const rawAmt = parseUnits(amountStr, inDecimals)
+      if (!rawAmt || rawAmt <= 0n || inMint === outMint) {
+        setSwapQuoteOut(null)
+        setSwapQuoteRaw(null)
+        setSwapQuoteProvider(null)
         return
       }
       setSwapQuoteLoading(true)
@@ -588,12 +888,17 @@ export function LiveWalletVault() {
           const client = new AudrenRelayClient(activeRelay)
           const resp = (await client.quoteSwap({
             cluster: targetCluster,
-            inputMint: routerInMint,
+            inputMint: inMint,
             outputMint: outMint,
             amount: rawAmt.toString(),
             slippageBps: slippage,
             provider: 'auto',
-          })) as { quote?: { outAmount?: string; rawQuote?: unknown }; outAmount?: string }
+            includeFee: false,
+          })) as {
+            provider?: string
+            quote?: { provider?: string; outAmount?: string; rawQuote?: unknown }
+            outAmount?: string
+          }
           const outAmt =
             typeof resp.quote?.outAmount === 'string'
               ? resp.quote.outAmount
@@ -601,13 +906,14 @@ export function LiveWalletVault() {
                 ? resp.outAmount
                 : null
           setSwapQuoteOut(outAmt)
+          setSwapQuoteProvider(parseAggregatorId(resp.provider ?? resp.quote?.provider))
           setSwapQuoteRaw(resp.quote?.rawQuote ?? resp)
         } else {
           const res = await fetch('/api/jupiter/quote', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
-              inputMint: routerInMint,
+              inputMint: inMint,
               outputMint: outMint,
               amount: rawAmt.toString(),
               slippageBps: slippage,
@@ -617,11 +923,13 @@ export function LiveWalletVault() {
           if (!res.ok) throw new Error(String(quote.error ?? `Quote HTTP ${res.status}`))
           const outAmt = typeof quote.outAmount === 'string' ? quote.outAmount : null
           setSwapQuoteOut(outAmt)
+          setSwapQuoteProvider('jupiter')
           setSwapQuoteRaw(quote)
         }
       } catch {
         setSwapQuoteOut(null)
         setSwapQuoteRaw(null)
+        setSwapQuoteProvider(null)
       } finally {
         setSwapQuoteLoading(false)
       }
@@ -630,10 +938,11 @@ export function LiveWalletVault() {
   )
 
   useEffect(() => {
-    if (tab !== 'swap' || !swapAmount.trim()) return
+    if (tab !== 'swap' || !swapAmount.trim() || isSelectedNoteNativeSol) return
     const timer = setTimeout(() => {
-      fetchSwapQuote(
+      void fetchSwapQuote(
         selectedNoteMintStr,
+        selectedNoteDecimals,
         swapOutMint,
         swapAmount,
         swapSlippageBps,
@@ -643,11 +952,72 @@ export function LiveWalletVault() {
       )
     }, 350)
     return () => clearTimeout(timer)
-  }, [tab, selectedNoteMintStr, swapOutMint, swapAmount, swapSlippageBps, cluster, relayUrl, useRelayer, fetchSwapQuote])
+  }, [
+    tab,
+    selectedNoteMintStr,
+    selectedNoteDecimals,
+    swapOutMint,
+    swapAmount,
+    swapSlippageBps,
+    cluster,
+    relayUrl,
+    useRelayer,
+    isSelectedNoteNativeSol,
+    fetchSwapQuote,
+  ])
+
+  // Live withdraw relayer fee preview (primitive dependencies only!)
+  const selectedNoteAmountStr = selectedNote ? selectedNote.amount.toString() : ''
+  useEffect(() => {
+    if (tab !== 'withdraw' || !useRelayer || !selectedNoteAmountStr) {
+      return
+    }
+    let active = true
+    const rawAmt = parseUnits(withdrawAmount, selectedNoteDecimals) ?? BigInt(selectedNoteAmountStr)
+    if (rawAmt <= 0n) return
+    const timer = setTimeout(() => {
+      const client = new AudrenRelayClient(relayUrl)
+      client
+        .getFeeQuote({
+          cluster,
+          op: 'withdraw',
+          mint: selectedNoteMintStr === NATIVE_SOL_MINT_STR ? 'native' : selectedNoteMintStr,
+          amount: rawAmt.toString(),
+          unwrapWsol: unwrapWsol && selectedNoteMintStr === WSOL_MINT,
+          outputCount: rawAmt < BigInt(selectedNoteAmountStr) ? 1 : 0,
+        })
+        .then((fq) => {
+          if (!active) return
+          setWithdrawFeePreview({
+            relayerFee: BigInt(fq.relayerFee || '0'),
+            billingMode: fq.billingMode,
+            reason: fq.reason,
+          })
+        })
+        .catch(() => {
+          if (active) setWithdrawFeePreview(null)
+        })
+    }, 300)
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [
+    tab,
+    useRelayer,
+    selectedNoteAmountStr,
+    selectedNoteMintStr,
+    selectedNoteDecimals,
+    withdrawAmount,
+    unwrapWsol,
+    cluster,
+    relayUrl,
+  ])
 
   const signAndBroadcastDirect = async (
     ixs: AudrenInstruction[],
     computeUnitLimit: number,
+    lookupTables?: Record<string, string[]>,
   ): Promise<{ signature: string; slot: number }> => {
     if (!connected) throw new Error('Connect a Solana wallet to sign direct transactions')
     const bhRes = await fetch(`/api/rpc/blockhash?cluster=${cluster}`)
@@ -660,12 +1030,103 @@ export function LiveWalletVault() {
       lastValidBlockHeight: BigInt(bh.lastValidBlockHeight ?? '0'),
       instructions: ixs.map(audrenInstructionToSolana),
       computeUnitLimit,
+      lookupTables,
     })
+    if (unsigned.byteLength > 1232) {
+      throw new Error(
+        `Direct v0 transaction is ${unsigned.byteLength} B (> 1,232 B Solana packet limit). Enable Privacy Relayer (uses 4,096 B Solana Transaction v1 0x81) to execute this route in one transaction.`,
+      )
+    }
     const [signed] = await signCompiledTransactionsWithWallet(connected, cluster, [unsigned])
     if (!signed) throw new Error('Wallet returned no signed transaction')
     const [sent] = await sendAndConfirmSignedTransactions(cluster, [signed])
     if (!sent) throw new Error('Broadcast returned no signature')
     return { signature: sent.signature, slot: sent.slot }
+  }
+
+  const handlePublishCheckpoint = async () => {
+    setBusy(true)
+    setErrorMsg(null)
+    setStatusMsg('Publishing permissionless RootCheckpoint (Tag 5)…')
+    try {
+      if (cluster === 'devnet' && !connected) {
+        const res = await fetch('/api/devnet/checkpoint', { method: 'POST' })
+        const json = (await res.json()) as { signature?: string; slotIdx?: number; error?: string }
+        if (!res.ok || !json.signature) {
+          throw new Error(json.error ?? `Devnet checkpoint HTTP ${res.status}`)
+        }
+        setLastReceipt({
+          kind: 'PublishCheckpoint (Tag 5)',
+          signature: json.signature,
+          cluster: 'devnet',
+          relayed: true,
+          summary: `Published fresh RootCheckpoint at ring slot #${json.slotIdx ?? 0}`,
+        })
+      } else {
+        if (!connected) {
+          throw new Error('Connect a Solana wallet to publish a permissionless RootCheckpoint on Mainnet')
+        }
+        const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
+        if (!snap.initialized) throw new Error(`Pool #0 is not initialized on ${cluster}`)
+        const curSlot = BigInt(snap.currentSlot ?? '0')
+        const ckptInterval = BigInt(snap.ckptInterval ?? '50')
+        const slotIdx = Number((curSlot / (ckptInterval > 0n ? ckptInterval : 1n)) % BigInt(CHECKPOINT_RING_SLOTS))
+        const ix = buildPublishCheckpointInstruction({
+          poolId: 0,
+          slotIdx,
+          activeLanes: snap.activeLanes ?? 4,
+          payer: connected.address,
+        })
+        const res = await signAndBroadcastDirect([ix], 120_000)
+        setLastReceipt({
+          kind: 'PublishCheckpoint (Tag 5)',
+          signature: res.signature,
+          cluster,
+          relayed: false,
+          summary: `Published fresh RootCheckpoint at ring slot #${slotIdx}`,
+        })
+      }
+      await refreshPoolAndBalances(cluster, connected?.address ?? null)
+      setStatusMsg('RootCheckpoint published — shielded notes are ready to spend')
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const buildLocalOrRpcWitness = async (params: {
+    activeStore: CompactWalletStore
+    fetcher: AccountBatchFetcher
+    ckptSlotIdx: number
+    note: OwnedNote
+  }): Promise<{ ckpt: ReturnType<typeof decodeRootCheckpoint>; superRoot: bigint; path: MerklePath4Ary }> => {
+    const { activeStore, fetcher, ckptSlotIdx, note } = params
+    const ckptAddr = deriveCheckpointPdaSync(0, ckptSlotIdx, AUDREN_PROGRAM_ID).address
+    const [ckptRaw] = await fetcher([ckptAddr])
+    if (!ckptRaw) {
+      throw new Error(`RootCheckpoint #${ckptSlotIdx} not found — click Publish Checkpoint above`)
+    }
+    const ckpt = decodeRootCheckpoint(ckptRaw)
+    const laneCount = ckpt.laneCounts[note.laneId] ?? 0n
+    if (note.leafIndex >= laneCount) {
+      throw new Error(
+        `Note (Lane #${note.laneId}, Leaf #${note.leafIndex.toString()}) is newer than the latest RootCheckpoint (covers ${laneCount.toString()} leaves). Click "Publish Checkpoint" above, then retry.`,
+      )
+    }
+    // Zero-leak local witness first using frozen intra-subtree siblings + subroots in CompactWalletStore
+    const localWitness = activeStore.buildWitnessForNote(note, ckpt)
+    if (localWitness) {
+      return { ckpt, superRoot: localWitness.superRoot, path: localWitness.path }
+    }
+    // Fallback to ordinary batched RPC reconstruction if local store was cleared
+    return reconstructWitness({
+      fetchBatch: fetcher,
+      poolId: 0,
+      ckptSlotIdx,
+      laneId: note.laneId,
+      leafIdx: note.leafIndex,
+    })
   }
 
   const handleDeposit = async () => {
@@ -674,21 +1135,24 @@ export function LiveWalletVault() {
     setErrorMsg(null)
     setStatusMsg(null)
     try {
-      const isSol = depositMint === NATIVE_SOL_MINT_STR
-      const tok = pubTokens.find((t) => t.mint === depositMint)
-      const decimals = isSol ? 9 : tok?.decimals ?? 6
-      const amount = parseUnits(depositAmount, decimals)
-      if (!amount || amount <= 0n) throw new Error('Enter a valid positive amount')
+      const isNativeSelected = depositMint === NATIVE_SOL_MINT_STR
+      const wrapAsWsol = isNativeSelected && wrapSolToWsol
+      const isSolDeposit = isNativeSelected && !wrapAsWsol
+      const targetMint = wrapAsWsol ? WSOL_MINT : depositMint
 
       const fetcher = createWorkerBatchFetcher(cluster)
       const [poolRaw] = await fetcher([AUDREN.pool0Pda])
       if (!poolRaw) throw new Error(`Pool #0 is not initialized on ${cluster} yet`)
       const pool = decodePoolState(poolRaw)
-      const poolSnap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as {
-        totalNotes?: string
-        deterministicNoteRentFee?: string
-        lanes?: Array<{ laneId: number; nextLeaf: string } | null>
-      }
+      const poolSnap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
+      const currentEpoch = BigInt(poolSnap.currentEpoch ?? '0')
+
+      const tok = pubTokens.find((t) => t.mint === targetMint)
+      const mintInfo = isSolDeposit ? null : await resolveMintOnChain(cluster, targetMint, currentEpoch)
+      const decimals = isSolDeposit ? 9 : mintInfo?.decimals ?? tok?.decimals ?? getTokenMeta(targetMint).decimals
+      const amount = parseUnits(depositAmount, decimals)
+      if (!amount || amount <= 0n) throw new Error('Enter a valid positive amount')
+
       const laneId = Number(BigInt(poolSnap.totalNotes ?? '0') % BigInt(pool.activeLanes))
       const nextLeaf = BigInt(poolSnap.lanes?.[laneId]?.nextLeaf ?? '0')
       const subPageSeq = nextLeaf / BigInt(SUBTREE_LEAVES)
@@ -712,17 +1176,16 @@ export function LiveWalletVault() {
         ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_MEMO, pageSeq: memoPageSeq, payer: connected.address }))
       }
 
-      const mintBytes = isSol ? NATIVE_SOL_MINT_BYTES : base58Decode(depositMint)
+      const mintBytes = isSolDeposit ? NATIVE_SOL_MINT_BYTES : base58Decode(targetMint)
       const detNoteFee = BigInt(poolSnap.deterministicNoteRentFee ?? pool.noteRentFee.toString())
-      const mintInfo = isSol ? null : await resolveMintOnChain(cluster, depositMint)
-      const committedAmount = isSol
+      const committedAmount = isSolDeposit
         ? feeFromAmount
           ? amount - detNoteFee
           : amount
-        : computeNetAfterTransferFee(amount, mintInfo?.transferFee ?? null)
+        : computeToken2022NetAmount(amount, mintInfo?.transferFee ?? null)
       if (committedAmount <= 0n) {
         throw new Error(
-          isSol
+          isSolDeposit
             ? `Deposit amount must exceed deterministic note rent fee (${formatUnits(detNoteFee, 9)} SOL)`
             : 'Net deposit amount after Token-2022 TransferFee must be > 0',
         )
@@ -735,7 +1198,7 @@ export function LiveWalletVault() {
       )
       const stealthOwner = deriveStealthOwner(keys.spendPk, tweak)
 
-      if (isSol) {
+      if (isSolDeposit) {
         ixs.push(
           buildDepositSolInstruction({
             poolId: 0,
@@ -754,12 +1217,34 @@ export function LiveWalletVault() {
       } else {
         const tokenProgram = mintInfo?.tokenProgram ?? tok?.tokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID
         const vaultAuth = deriveVaultAuthPdaSync(0, AUDREN_PROGRAM_ID).address
-        const depositorAta = tok?.ata ?? deriveAssociatedTokenAddressSync(connected.address, depositMint, tokenProgram).address
-        const vaultAta = deriveAssociatedTokenAddressSync(vaultAuth, depositMint, tokenProgram).address
+        const depositorAta =
+          tok?.ata ?? deriveAssociatedTokenAddressSync(connected.address, targetMint, tokenProgram).address
+        const vaultAta = deriveAssociatedTokenAddressSync(vaultAuth, targetMint, tokenProgram).address
+
+        if (wrapAsWsol) {
+          ixs.push(
+            buildCreateAtaIdempotentInstruction({
+              payer: connected.address,
+              ata: depositorAta,
+              owner: connected.address,
+              mint: WSOL_MINT,
+              tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+            }),
+          )
+          ixs.push(buildSystemTransferIx(connected.address, depositorAta, amount))
+          ixs.push(buildSyncNativeIx(depositorAta))
+        }
+
         const [vaultAtaInfo] = await fetcher([vaultAta])
         if (!vaultAtaInfo) {
           ixs.push(
-            buildCreateAtaIdempotentIx(connected.address, vaultAta, vaultAuth, depositMint, tokenProgram),
+            buildCreateAtaIdempotentInstruction({
+              payer: connected.address,
+              ata: vaultAta,
+              owner: vaultAuth,
+              mint: targetMint,
+              tokenProgram,
+            }),
           )
         }
         ixs.push(
@@ -772,7 +1257,7 @@ export function LiveWalletVault() {
             depositor: connected.address,
             depositorAta,
             vaultAta,
-            mint: depositMint,
+            mint: targetMint,
             tokenProgram,
             amount,
             stealthOwner,
@@ -784,19 +1269,28 @@ export function LiveWalletVault() {
 
       setStatusMsg('Waiting for wallet approval…')
       const res = await signAndBroadcastDirect(ixs, 280_000)
+
+      // Best-effort Devnet checkpoint crank so freshly deposited Devnet notes become spendable right away
+      if (cluster === 'devnet') {
+        await fetch('/api/devnet/checkpoint', { method: 'POST' }).catch(() => {})
+      }
+
+      const sym = getTokenMeta(targetMint).symbol
       setLastReceipt({
-        kind: isSol
+        kind: isSolDeposit
           ? 'DepositSol (Tag 3)'
-          : mintInfo?.isToken2022
-            ? 'DepositSpl · Token-2022 (Tag 4)'
-            : 'DepositSpl · SPL (Tag 4)',
+          : wrapAsWsol
+            ? 'Wrap & DepositSpl · WSOL (Tag 4)'
+            : mintInfo?.isToken2022
+              ? 'DepositSpl · Token-2022 (Tag 4)'
+              : 'DepositSpl · SPL (Tag 4)',
         signature: res.signature,
         cluster,
         relayed: false,
-        summary: `Shielded ${depositAmount} ${mintLabel(depositMint).symbol}${mintInfo?.isToken2022 ? ' (Token-2022)' : ''} into Lane #${laneId}`,
+        summary: `Shielded ${depositAmount} ${sym}${mintInfo?.isToken2022 ? ' (Token-2022)' : ''} into Lane #${laneId}`,
       })
       setStatusMsg('Deposit confirmed — syncing CompactWalletStore…')
-      await syncVault(keys, cluster, store)
+      await syncVault(keys, cluster, store, walletScope)
       await refreshPoolAndBalances(cluster, connected.address)
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
@@ -809,32 +1303,30 @@ export function LiveWalletVault() {
     if (!keys || !store || !selectedNote) return
     setBusy(true)
     setErrorMsg(null)
-    setStatusMsg('Reconstructing 4-ary Depth-20 Merkle witness from ordinary RPC…')
+    setStatusMsg('Loading RootCheckpoint and building local 4-ary Depth-20 Merkle witness…')
     try {
       const mintStr = base58Encode(selectedNote.mint)
-      const { decimals, symbol } = mintLabel(mintStr)
+      const isNativeSol = mintStr === NATIVE_SOL_MINT_STR
+      const fetcher = createWorkerBatchFetcher(cluster)
+      const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
+      if (!snap.initialized || !snap.latestCheckpoint) {
+        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0 — click "Publish Checkpoint" above`)
+      }
+      const currentEpoch = BigInt(snap.currentEpoch ?? '0')
+      const mintInfo = isNativeSol ? null : await resolveMintOnChain(cluster, mintStr, currentEpoch)
+      const decimals = isNativeSol ? 9 : mintInfo?.decimals ?? getTokenMeta(mintStr).decimals
+      const symbol = getTokenMeta(mintStr).symbol
       const amount = parseUnits(mode === 'send' ? sendAmount : withdrawAmount, decimals)
       if (!amount || amount <= 0n || amount > selectedNote.amount) {
         throw new Error(`Amount must be between 0 and ${formatUnits(selectedNote.amount, decimals)} ${symbol}`)
       }
 
-      const fetcher = createWorkerBatchFetcher(cluster)
-      const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as {
-        initialized?: boolean
-        activeLanes?: number
-        latestCheckpoint?: { slotIndex: number } | null
-        lanes?: Array<{ laneId: number; nextLeaf: string; nfCount: string } | null>
-      }
-      if (!snap.initialized || !snap.latestCheckpoint) {
-        throw new Error(`No RootCheckpoint found on ${cluster} Pool #0`)
-      }
       const ckptSlotIdx = snap.latestCheckpoint.slotIndex
-      const { ckpt, superRoot, path } = await reconstructWitness({
-        fetchBatch: fetcher,
-        poolId: 0,
+      const { ckpt, superRoot, path } = await buildLocalOrRpcWitness({
+        activeStore: store,
+        fetcher,
         ckptSlotIdx,
-        laneId: selectedNote.laneId,
-        leafIdx: selectedNote.leafIndex,
+        note: selectedNote,
       })
 
       const outLaneId = (selectedNote.laneId + 1) % (snap.activeLanes ?? 4)
@@ -850,7 +1342,35 @@ export function LiveWalletVault() {
       let relayerFeeAmount = 0n
       let relayerFeeRecipient: string | null = null
       let feeShieldedAddr: string | null = null
+      let needsFeeAtaSetup = false
       const relayClient = new AudrenRelayClient(relayUrl)
+
+      const isWsolUnwrap = mode === 'withdraw' && mintStr === WSOL_MINT && unwrapWsol
+      const assetMode =
+        mode === 'send'
+          ? ASSET_MODE_PRIVATE
+          : isNativeSol
+            ? ASSET_MODE_SOL
+            : ASSET_MODE_SPL
+      const tokenProgram =
+        assetMode === ASSET_MODE_SPL
+          ? mintInfo?.tokenProgram ?? CLASSIC_TOKEN_PROGRAM_ID
+          : CLASSIC_TOKEN_PROGRAM_ID
+      const rawRecipient = mode === 'withdraw' ? withdrawRecipient.trim() : null
+      if (mode === 'withdraw' && (!rawRecipient || !isValidSolanaPubkey(rawRecipient))) {
+        throw new Error('Enter a valid public Solana recipient address')
+      }
+      const recipientPubkey =
+        rawRecipient && assetMode === ASSET_MODE_SPL && !isWsolUnwrap
+          ? deriveAssociatedTokenAddressSync(rawRecipient, mintStr, tokenProgram).address
+          : rawRecipient
+
+      // Check whether recipient ATA needs creation (used for both accurate fee quoting and setupAtas)
+      let missingRecipientAta = false
+      if (rawRecipient && recipientPubkey && assetMode === ASSET_MODE_SPL && !isWsolUnwrap) {
+        const [recAcc] = await fetcher([recipientPubkey])
+        missingRecipientAta = !recAcc
+      }
 
       if (useRelayer) {
         setStatusMsg('Querying Privacy Relayer fee quote…')
@@ -860,14 +1380,16 @@ export function LiveWalletVault() {
         const fq = await relayClient.getFeeQuote({
           cluster,
           op: mode === 'send' ? 'transfer' : 'withdraw',
-          mint: mintStr,
+          mint: isNativeSol ? 'native' : mintStr,
           amount: amount.toString(),
-          unwrapWsol: mode === 'withdraw' && unwrapWsol && mintStr === WSOL_MINT,
-          outputCount: mode === 'send' ? 3 : 2,
+          unwrapWsol: isWsolUnwrap,
+          outputCount: mode === 'send' ? 3 : amount < selectedNote.amount ? 1 : 0,
+          missingAtaCount: missingRecipientAta ? 1 : 0,
         })
         relayerFeeAmount = BigInt(fq.relayerFee || '0')
         relayerFeeRecipient = fq.feeRecipient
         feeShieldedAddr = fq.feeShieldedAddress
+        needsFeeAtaSetup = Boolean(fq.needsFeeAtaSetup)
       } else if (!connected) {
         throw new Error('Enable Privacy Relayer or connect a Solana wallet for Direct Self-Pay')
       }
@@ -895,7 +1417,11 @@ export function LiveWalletVault() {
         memos.push(mRec.memo90)
 
         const changeAmt = selectedNote.amount - amount - effectiveShieldedFee
-        if (changeAmt < 0n) throw new Error('Insufficient note balance to cover amount + relayer fee')
+        if (changeAmt < 0n) {
+          throw new Error(
+            `Insufficient note balance to cover send + relayer fee (${formatUnits(effectiveShieldedFee, decimals)} ${symbol}). Use "Max" to auto-fit.`,
+          )
+        }
         if (changeAmt > 0n) {
           const mCh = encryptNoteMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)), changeAmt, selectedNote.mint)
           const chOwner = deriveStealthOwner(keys.spendPk, mCh.tweak)
@@ -914,7 +1440,11 @@ export function LiveWalletVault() {
         }
       } else {
         const changeAmt = selectedNote.amount - amount - relayerFeeAmount
-        if (changeAmt < 0n) throw new Error('Insufficient note balance to cover withdrawal + relayer fee')
+        if (changeAmt < 0n) {
+          throw new Error(
+            `Insufficient note balance to cover withdrawal + relayer fee (${formatUnits(relayerFeeAmount, decimals)} ${symbol}). Click "Max (net of fee)" to auto-fit.`,
+          )
+        }
         if (changeAmt > 0n) {
           const mCh = encryptNoteMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)), changeAmt, selectedNote.mint)
           const chOwner = deriveStealthOwner(keys.spendPk, mCh.tweak)
@@ -931,26 +1461,9 @@ export function LiveWalletVault() {
         mOff += m.byteLength
       }
 
-      const isNativeSol = mintStr === NATIVE_SOL_MINT_STR
-      const isWsolUnwrap = mode === 'withdraw' && mintStr === WSOL_MINT && unwrapWsol
-      const assetMode =
-        mode === 'send'
-          ? ASSET_MODE_PRIVATE
-          : isNativeSol
-            ? ASSET_MODE_SOL
-            : ASSET_MODE_SPL
       const pubOutAmt = mode === 'withdraw' ? amount : 0n
       const pubFeeAmt = mode === 'withdraw' ? relayerFeeAmount : 0n
       const pubAssetIdBytes = mode === 'withdraw' ? frToBeBytes(assetId) : new Uint8Array(32)
-      const tokenProgram =
-        assetMode === ASSET_MODE_SPL
-          ? (await resolveMintOnChain(cluster, mintStr)).tokenProgram
-          : CLASSIC_TOKEN_PROGRAM_ID
-      const rawRecipient = mode === 'withdraw' ? withdrawRecipient.trim() : null
-      const recipientPubkey =
-        rawRecipient && assetMode === ASSET_MODE_SPL && !isWsolUnwrap
-          ? deriveAssociatedTokenAddressSync(rawRecipient, mintStr, tokenProgram).address
-          : rawRecipient
 
       const ctxHash = computeJoinsplitCtxHash({
         poolId: 0,
@@ -1026,28 +1539,44 @@ export function LiveWalletVault() {
 
       let signature: string
       if (useRelayer) {
+        const setupAtas: RelaySetupAta[] = []
+        if (assetMode === ASSET_MODE_SPL && !isWsolUnwrap) {
+          if (missingRecipientAta && rawRecipient) {
+            setupAtas.push({ owner: rawRecipient, mint: mintStr, tokenProgram })
+          }
+          if (pubFeeAmt > 0n && needsFeeAtaSetup) {
+            setupAtas.push({ owner: payerPubkey, mint: mintStr, tokenProgram })
+          }
+        }
         setStatusMsg('Submitting zero-signer proof to Privacy Relayer…')
         const sub = await relayClient.submitRelayedInstruction({
           cluster,
           instructionDataB64: toBase64(ix.data),
           accounts: ix.accounts,
+          ...(setupAtas.length > 0 ? { setupAtas } : {}),
           computeUnitLimit: 320_000,
         })
         signature = sub.signature
       } else {
-        const nfPageAddr = deriveNfPagePdaSync(0, outLaneId, outNfSeq, AUDREN_PROGRAM_ID).address
-        const checkAddrs =
-          rawRecipient && recipientPubkey && assetMode === ASSET_MODE_SPL && !isWsolUnwrap
-            ? [nfPageAddr, recipientPubkey]
-            : [nfPageAddr]
-        const prepPages = await fetcher(checkAddrs)
-        const preIxs: AudrenInstruction[] = []
-        if (!prepPages[0]) {
-          preIxs.push(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: outNfSeq, payer: payerPubkey }))
-        }
-        if (checkAddrs.length === 2 && !prepPages[1] && rawRecipient && recipientPubkey) {
+        const preIxs = await ensureLanePagesPreIxs({
+          fetcher,
+          payer: payerPubkey,
+          laneId: outLaneId,
+          subSeq: outSubSeq,
+          rootSeq: outRootSeq,
+          memoSeq: outMemoSeq,
+          nfSeq: outNfSeq,
+          includeOutputs: outputMask !== 0,
+        })
+        if (missingRecipientAta && rawRecipient && recipientPubkey) {
           preIxs.push(
-            buildCreateAtaIdempotentIx(payerPubkey, recipientPubkey, rawRecipient, mintStr, tokenProgram),
+            buildCreateAtaIdempotentInstruction({
+              payer: payerPubkey,
+              ata: recipientPubkey,
+              owner: rawRecipient,
+              mint: mintStr,
+              tokenProgram,
+            }),
           )
         }
         setStatusMsg('Waiting for wallet approval…')
@@ -1067,7 +1596,7 @@ export function LiveWalletVault() {
             : `Withdrew ${withdrawAmount} ${symbol}${isWsolUnwrap ? ' (atomic WSOL unwrap)' : ''}`,
       })
       setStatusMsg('Confirmed — syncing CompactWalletStore…')
-      await syncVault(keys, cluster, store)
+      await syncVault(keys, cluster, store, walletScope)
       await refreshPoolAndBalances(cluster, connected?.address ?? null)
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
@@ -1083,93 +1612,165 @@ export function LiveWalletVault() {
     setStatusMsg('Building isolated Escrow swap route…')
     try {
       const inMintStr = base58Encode(selectedNote.mint)
-      const isNativeSolIn = inMintStr === NATIVE_SOL_MINT_STR
-      const routerInMint = isNativeSolIn ? WSOL_MINT : inMintStr
-      const { decimals: inDec, symbol: inSym } = mintLabel(inMintStr)
+      if (inMintStr === NATIVE_SOL_MINT_STR) {
+        throw new Error(
+          'Jupiter CPI swaps spend shielded WSOL, Classic SPL, or Token-2022 notes. Shield WSOL from the Shield tab (check "Wrap SOL as WSOL") to swap SOL via ExecViaEscrow.',
+        )
+      }
+      if (!isValidSolanaPubkey(swapOutMint)) {
+        throw new Error('Enter a valid output Solana token mint')
+      }
+
+      const fetcher = createWorkerBatchFetcher(cluster)
+      const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
+      if (!snap.initialized || !snap.latestCheckpoint) {
+        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0 — click "Publish Checkpoint" above`)
+      }
+      const currentEpoch = BigInt(snap.currentEpoch ?? '0')
+      const [inMintInfo, outMintInfo] = await Promise.all([
+        resolveMintOnChain(cluster, inMintStr, currentEpoch),
+        resolveMintOnChain(cluster, swapOutMint, currentEpoch),
+      ])
+      const inTokenProgram = inMintInfo.tokenProgram
+      const outTokenProgram = outMintInfo.tokenProgram
+      const inDec = inMintInfo.decimals ?? getTokenMeta(inMintStr).decimals
+      const inSym = getTokenMeta(inMintStr).symbol
+
       const amountIn = parseUnits(swapAmount, inDec)
       if (!amountIn || amountIn <= 0n || amountIn > selectedNote.amount) {
-        throw new Error('Invalid swap input amount')
+        throw new Error(`Invalid swap input amount (max ${formatUnits(selectedNote.amount, inDec)} ${inSym})`)
       }
-      const minOut = (BigInt(swapQuoteOut) * BigInt(10_000 - swapSlippageBps)) / 10_000n
+
       const escrowShard = Number(selectedNote.leafIndex % BigInt(NUM_ESCROW_SHARDS))
+      const vaultAuth = deriveVaultAuthPdaSync(0, AUDREN_PROGRAM_ID).address
+      const escrowPda = deriveEscrowPdaSync(0, escrowShard, AUDREN_PROGRAM_ID).address
+      const inVaultAta = deriveAssociatedTokenAddressSync(vaultAuth, inMintStr, inTokenProgram).address
+      const inEscrowAta = deriveAssociatedTokenAddressSync(escrowPda, inMintStr, inTokenProgram).address
+      const outVaultAta = deriveAssociatedTokenAddressSync(vaultAuth, swapOutMint, outTokenProgram).address
+      const outEscrowAta = deriveAssociatedTokenAddressSync(escrowPda, swapOutMint, outTokenProgram).address
 
       const relayClient = new AudrenRelayClient(relayUrl)
       let routerProg: string
-      let routerAccounts: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>
+      let rawRouterAccounts: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>
       let routerIxData: Uint8Array
       let payerPubkey = connected?.address ?? ''
       let relayerFeeAmount = 0n
       let relayerFeeRecipient: string | null = null
-
-      const inTokenProgram = isNativeSolIn
-        ? CLASSIC_TOKEN_PROGRAM_ID
-        : (await resolveMintOnChain(cluster, inMintStr)).tokenProgram
-      const outTokenProgram = (await resolveMintOnChain(cluster, swapOutMint)).tokenProgram
+      let relaySetupAtas: RelaySetupAta[] = []
+      let directLookupTables: Record<string, string[]> | undefined
+      let swapCuLimit = 850_000
+      let winningProvider: RelayAggregatorId = swapQuoteProvider ?? 'jupiter'
 
       if (useRelayer) {
         const info = await relayClient.getInfo(cluster)
         if (!info.relayerPubkey) throw new Error(`Relayer missing fee payer for ${cluster}`)
         payerPubkey = info.relayerPubkey
-        const fq = await relayClient.getFeeQuote({
-          cluster,
-          op: 'exec_escrow',
-          mint: swapFeeOnOutput ? swapOutMint : routerInMint,
-          amount: swapFeeOnOutput ? swapQuoteOut : amountIn.toString(),
-          feeOnOutput: swapFeeOnOutput,
-        })
-        relayerFeeAmount = BigInt(fq.relayerFee || '0')
-        relayerFeeRecipient = fq.feeRecipient
+
         const built = await relayClient.buildSwapInstructions({
-          provider: 'jupiter',
+          provider: winningProvider,
           quoteResponse: swapQuoteRaw,
-          inputMint: routerInMint,
+          inputMint: inMintStr,
           outputMint: swapOutMint,
           cluster,
           shardId: escrowShard,
+          includeFee: false,
         })
+        winningProvider = built.provider
         routerProg = built.swapInstruction.programId
-        routerAccounts = built.swapInstruction.accounts
+        rawRouterAccounts = built.swapInstruction.accounts
         routerIxData = fromBase64(built.swapInstruction.data)
+        swapCuLimit = built.computeUnitLimit ?? 850_000
+        relaySetupAtas = (built.missingAtas ?? []).map((m) => ({
+          owner: m.owner,
+          mint: m.mint,
+          tokenProgram: m.tokenProgram,
+        }))
+
+        const fq = await relayClient.getFeeQuote({
+          cluster,
+          op: 'exec_escrow',
+          mint: swapFeeOnOutput ? swapOutMint : inMintStr,
+          amount: swapFeeOnOutput ? swapQuoteOut : amountIn.toString(),
+          feeOnOutput: swapFeeOnOutput,
+          missingAtaCount: relaySetupAtas.length,
+        })
+        relayerFeeAmount = BigInt(fq.relayerFee || '0')
+        relayerFeeRecipient = fq.feeRecipient
+        if (relayerFeeAmount > 0n && fq.needsFeeAtaSetup) {
+          const feeMint = swapFeeOnOutput ? swapOutMint : inMintStr
+          const feeTp = swapFeeOnOutput ? outTokenProgram : inTokenProgram
+          if (!relaySetupAtas.some((a) => a.owner === payerPubkey && a.mint === feeMint)) {
+            relaySetupAtas.push({ owner: payerPubkey, mint: feeMint, tokenProgram: feeTp })
+          }
+        }
       } else {
         if (!connected) throw new Error('Connect a wallet or enable Privacy Relayer')
         const res = await fetch('/api/jupiter/swap-instructions', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
+            cluster,
             quoteResponse: swapQuoteRaw,
             poolId: 0,
             shardId: escrowShard,
-            inputMint: routerInMint,
+            inputMint: inMintStr,
             outputMint: swapOutMint,
             tokenProgramIn: inTokenProgram,
             tokenProgramOut: outTokenProgram,
           }),
         })
         const built = (await res.json()) as {
-          swapInstruction?: { programId: string; accounts: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>; data: string }
+          swapInstruction?: {
+            programId: string
+            accounts: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>
+            data: string
+          }
+          lookupTables?: Record<string, string[]>
           error?: string
         }
         if (!res.ok || !built.swapInstruction) throw new Error(built.error ?? 'Failed to build swap route')
         routerProg = built.swapInstruction.programId
-        routerAccounts = built.swapInstruction.accounts
+        rawRouterAccounts = built.swapInstruction.accounts
         routerIxData = fromBase64(built.swapInstruction.data)
+        directLookupTables = built.lookupTables
       }
 
-      const fetcher = createWorkerBatchFetcher(cluster)
-      const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as {
-        initialized?: boolean
-        activeLanes?: number
-        latestCheckpoint?: { slotIndex: number } | null
-        lanes?: Array<{ laneId: number; nextLeaf: string; nfCount: string } | null>
-      }
-      if (!snap.initialized || !snap.latestCheckpoint) throw new Error('Pool checkpoint missing')
+      // CRITICAL: on-chain ExecViaEscrow forbids EXEC_FLAG_FEE_ON_OUTPUT when relayer_fee_amount == 0!
+      const effectiveFeeOnOutput = swapFeeOnOutput && relayerFeeAmount > 0n
+
+      // CRITICAL: strip escrowPda signer flag AND promote Solana transaction-wide writability union
+      // so ctx_hash matches runtime AccountView::is_writable() inside the on-chain program!
+      const extraWritablePubkeys = [
+        escrowPda,
+        payerPubkey,
+        inVaultAta,
+        inEscrowAta,
+        outVaultAta,
+        outEscrowAta,
+        ...(relayerFeeAmount > 0n && relayerFeeRecipient ? [relayerFeeRecipient] : []),
+      ]
+      const routerAccounts = prepareEscrowAccountsForAudren(
+        rawRouterAccounts,
+        escrowPda,
+        extraWritablePubkeys,
+      )
+
+      // Compute net slippage floor AFTER output relayer fee & output Token-2022 TransferFeeConfig
+      const grossMinOut = (BigInt(swapQuoteOut) * BigInt(10_000 - swapSlippageBps)) / 10_000n
+      const afterRelayerFee = effectiveFeeOnOutput
+        ? grossMinOut > relayerFeeAmount
+          ? grossMinOut - relayerFeeAmount
+          : 1n
+        : grossMinOut
+      const netMinOut = computeToken2022NetAmount(afterRelayerFee, outMintInfo.transferFee)
+      const minOut = netMinOut > 0n ? netMinOut : 1n
+
       const ckptSlotIdx = snap.latestCheckpoint.slotIndex
-      const { superRoot, path } = await reconstructWitness({
-        fetchBatch: fetcher,
-        poolId: 0,
+      const { superRoot, path } = await buildLocalOrRpcWitness({
+        activeStore: store,
+        fetcher,
         ckptSlotIdx,
-        laneId: selectedNote.laneId,
-        leafIdx: selectedNote.leafIndex,
+        note: selectedNote,
       })
 
       const outLaneId = (selectedNote.laneId + 1) % (snap.activeLanes ?? 4)
@@ -1187,9 +1788,13 @@ export function LiveWalletVault() {
       const noteTweak = frFromBeBytesStrict(selectedNote.tweak)
       const noteBlinding = frFromBeBytesStrict(selectedNote.blinding)
 
-      const inFee = swapFeeOnOutput ? 0n : relayerFeeAmount
+      const inFee = effectiveFeeOnOutput ? 0n : relayerFeeAmount
       const changeAmt = selectedNote.amount - amountIn - inFee
-      if (changeAmt < 0n) throw new Error('Insufficient note balance for swap + fee')
+      if (changeAmt < 0n) {
+        throw new Error(
+          `Insufficient note balance for swap + input fee (${formatUnits(inFee, inDec)} ${inSym})`,
+        )
+      }
 
       const outputs: [JoinSplitOutputWitness, JoinSplitOutputWitness, JoinSplitOutputWitness] = [
         dummyOutputWitness(assetIn, randomFr()),
@@ -1209,15 +1814,14 @@ export function LiveWalletVault() {
       const dyn = prepareDynamicSwapMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)))
       const outStealthOwner = deriveStealthOwner(keys.spendPk, dyn.tweak)
 
-      const inKind: 0 | 1 = isNativeSolIn ? 0 : 1
       const ctxHash = computeExecCtxHash({
         poolId: 0,
         outLaneId,
         escrowShard,
         changeMask,
-        inKind,
+        inKind: 1,
         outKind: 1,
-        feeOnOutput: swapFeeOnOutput,
+        feeOnOutput: effectiveFeeOnOutput,
         assetIn: frToBeBytes(assetIn),
         amountIn,
         relayerFeeAmount,
@@ -1258,8 +1862,6 @@ export function LiveWalletVault() {
         outputs,
       })
 
-      const vaultAuth = deriveVaultAuthPdaSync(0, AUDREN_PROGRAM_ID).address
-      const escrowPda = deriveEscrowPdaSync(0, escrowShard, AUDREN_PROGRAM_ID).address
       const ix = buildExecViaEscrowInstruction({
         poolId: 0,
         outLaneId,
@@ -1277,9 +1879,9 @@ export function LiveWalletVault() {
         cm1: result.cm1,
         cm2: result.cm2,
         changeMask,
-        inKind,
+        inKind: 1,
         outKind: 1,
-        feeOnOutput: swapFeeOnOutput,
+        feeOnOutput: effectiveFeeOnOutput,
         amountIn,
         relayerFeeAmount,
         minAmountOut: minOut,
@@ -1291,18 +1893,16 @@ export function LiveWalletVault() {
         routerProg,
         routerAccounts,
         routerIxData,
-        inSpl: isNativeSolIn
-          ? null
-          : {
-              mint: inMintStr,
-              vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, inMintStr, inTokenProgram).address,
-              escrowAta: deriveAssociatedTokenAddressSync(escrowPda, inMintStr, inTokenProgram).address,
-              tokenProgram: inTokenProgram,
-            },
+        inSpl: {
+          mint: inMintStr,
+          vaultAta: inVaultAta,
+          escrowAta: inEscrowAta,
+          tokenProgram: inTokenProgram,
+        },
         outSpl: {
           mint: swapOutMint,
-          vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, swapOutMint, outTokenProgram).address,
-          escrowAta: deriveAssociatedTokenAddressSync(escrowPda, swapOutMint, outTokenProgram).address,
+          vaultAta: outVaultAta,
+          escrowAta: outEscrowAta,
           tokenProgram: outTokenProgram,
         },
         relayerFeeRecipient: relayerFeeAmount > 0n ? relayerFeeRecipient : null,
@@ -1310,48 +1910,64 @@ export function LiveWalletVault() {
 
       let signature: string
       if (useRelayer) {
-        setStatusMsg('Relaying ExecViaEscrow (Tag 7)…')
+        setStatusMsg('Relaying ExecViaEscrow (Tag 7) via Transaction v1 (0x81)…')
         const sub = await relayClient.submitRelayedInstruction({
           cluster,
           instructionDataB64: toBase64(ix.data),
           accounts: ix.accounts,
-          computeUnitLimit: 600_000,
+          ...(relaySetupAtas.length > 0 ? { setupAtas: relaySetupAtas } : {}),
+          computeUnitLimit: swapCuLimit,
+          vaultOutAta: outVaultAta,
+          provider: winningProvider,
         })
         signature = sub.signature
       } else {
-        const nfPageAddr = deriveNfPagePdaSync(0, outLaneId, outNfSeq, AUDREN_PROGRAM_ID).address
-        const outVaultAta = deriveAssociatedTokenAddressSync(vaultAuth, swapOutMint, outTokenProgram).address
-        const outEscrowAta = deriveAssociatedTokenAddressSync(escrowPda, swapOutMint, outTokenProgram).address
-        const inEscrowAta = isNativeSolIn
-          ? null
-          : deriveAssociatedTokenAddressSync(escrowPda, inMintStr, inTokenProgram).address
-        const checkAddrs = inEscrowAta
-          ? [nfPageAddr, outVaultAta, outEscrowAta, inEscrowAta]
-          : [nfPageAddr, outVaultAta, outEscrowAta]
-        const prep = await fetcher(checkAddrs)
-        const preIxs: AudrenInstruction[] = []
-        if (!prep[0]) {
+        const preIxs = await ensureLanePagesPreIxs({
+          fetcher,
+          payer: payerPubkey,
+          laneId: outLaneId,
+          subSeq: outSubSeq,
+          rootSeq: outRootSeq,
+          memoSeq: outMemoSeq,
+          nfSeq: outNfSeq,
+          includeOutputs: true,
+        })
+        const ataPrep = await fetcher([outVaultAta, outEscrowAta, inEscrowAta])
+        if (!ataPrep[0]) {
           preIxs.push(
-            buildOpenPageInstruction({
-              poolId: 0,
-              laneId: outLaneId,
-              pageKind: OPEN_PAGE_KIND_NULLIFIER,
-              pageSeq: outNfSeq,
+            buildCreateAtaIdempotentInstruction({
               payer: payerPubkey,
+              ata: outVaultAta,
+              owner: vaultAuth,
+              mint: swapOutMint,
+              tokenProgram: outTokenProgram,
             }),
           )
         }
-        if (!prep[1]) {
-          preIxs.push(buildCreateAtaIdempotentIx(payerPubkey, outVaultAta, vaultAuth, swapOutMint, outTokenProgram))
+        if (!ataPrep[1]) {
+          preIxs.push(
+            buildCreateAtaIdempotentInstruction({
+              payer: payerPubkey,
+              ata: outEscrowAta,
+              owner: escrowPda,
+              mint: swapOutMint,
+              tokenProgram: outTokenProgram,
+            }),
+          )
         }
-        if (!prep[2]) {
-          preIxs.push(buildCreateAtaIdempotentIx(payerPubkey, outEscrowAta, escrowPda, swapOutMint, outTokenProgram))
-        }
-        if (inEscrowAta && !prep[3]) {
-          preIxs.push(buildCreateAtaIdempotentIx(payerPubkey, inEscrowAta, escrowPda, inMintStr, inTokenProgram))
+        if (!ataPrep[2]) {
+          preIxs.push(
+            buildCreateAtaIdempotentInstruction({
+              payer: payerPubkey,
+              ata: inEscrowAta,
+              owner: escrowPda,
+              mint: inMintStr,
+              tokenProgram: inTokenProgram,
+            }),
+          )
         }
         setStatusMsg('Waiting for wallet approval…')
-        const sent = await signAndBroadcastDirect([...preIxs, ix], 600_000)
+        const sent = await signAndBroadcastDirect([...preIxs, ix], swapCuLimit, directLookupTables)
         signature = sent.signature
       }
 
@@ -1361,9 +1977,11 @@ export function LiveWalletVault() {
         cluster,
         proverMs: elapsedMs,
         relayed: useRelayer,
-        summary: `Swapped ${swapAmount} ${inSym} → ${mintLabel(swapOutMint).symbol} via isolated Escrow #${escrowShard}`,
+        summary: `Swapped ${swapAmount} ${inSym} → ${getTokenMeta(swapOutMint).symbol} via isolated Escrow #${escrowShard} (${winningProvider})`,
       })
-      await syncVault(keys, cluster, store)
+      setStatusMsg('Swap confirmed — syncing CompactWalletStore…')
+      await syncVault(keys, cluster, store, walletScope)
+      await refreshPoolAndBalances(cluster, connected?.address ?? null)
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
     } finally {
@@ -1472,14 +2090,17 @@ export function LiveWalletVault() {
 
   const handleImportBackup = async (file: File) => {
     setBackupStatus(null)
+    setErrorMsg(null)
     try {
       const parsed = JSON.parse(await file.text()) as AudrenEncryptedBackupFile
       const restored = await importEncryptedVaultBackup(parsed, backupPassphrase)
       setCluster(restored.cluster)
-      await unlockFromSeed(restored.seed, restored.cluster)
+      await unlockFromSeed(restored.seed, restored.cluster, 'backup', walletScope)
       setBackupStatus(`Restored Audren vault on ${restored.cluster}`)
     } catch (err) {
-      setBackupStatus(err instanceof Error ? err.message : String(err))
+      const msg = err instanceof Error ? err.message : String(err)
+      setBackupStatus(msg)
+      setErrorMsg(msg)
     }
   }
 
@@ -1492,6 +2113,12 @@ export function LiveWalletVault() {
     return Array.from(map.entries())
   }, [unspentNotes])
 
+  const maxWithdrawNet = useMemo(() => {
+    if (!selectedNote) return 0n
+    const fee = useRelayer && withdrawFeePreview ? withdrawFeePreview.relayerFee : 0n
+    return selectedNote.amount > fee ? selectedNote.amount - fee : 0n
+  }, [selectedNote, useRelayer, withdrawFeePreview])
+
   return (
     <div className="lv-shell">
       <div className="lv-topbar">
@@ -1499,7 +2126,7 @@ export function LiveWalletVault() {
           <button
             type="button"
             className={`lv-cluster-btn ${cluster === 'devnet' ? 'is-active' : ''}`}
-            onClick={() => setCluster('devnet')}
+            onClick={() => handleClusterSwitch('devnet')}
           >
             <span className="lv-cluster-dot is-devnet" />
             Devnet
@@ -1507,7 +2134,7 @@ export function LiveWalletVault() {
           <button
             type="button"
             className={`lv-cluster-btn ${cluster === 'mainnet' ? 'is-active' : ''}`}
-            onClick={() => setCluster('mainnet')}
+            onClick={() => handleClusterSwitch('mainnet')}
           >
             <span className="lv-cluster-dot is-mainnet" />
             Mainnet
@@ -1559,7 +2186,7 @@ export function LiveWalletVault() {
                 <span className="lv-step-dot">1</span>
                 <div>
                   <strong>Connect any Wallet Standard extension</strong>
-                  <p>Sign one deterministic message to unlock your Audren vault keys, or spin up an ephemeral local vault.</p>
+                  <p>Sign one deterministic message to unlock your Audren vault keys, create an ephemeral local vault, or restore an encrypted backup.</p>
                 </div>
               </li>
               <li>
@@ -1599,7 +2226,7 @@ export function LiveWalletVault() {
                 ))
               ) : (
                 <div className="lv-empty-action">
-                  <p>No Solana browser extension detected (Phantom, Solflare, Backpack). You can still launch a local vault or run the no-wallet Sandbox.</p>
+                  <p>No Solana browser extension detected (Phantom, Solflare, Backpack). You can still launch a local vault, restore an encrypted backup, or run the no-wallet Sandbox.</p>
                 </div>
               )}
             </div>
@@ -1625,6 +2252,47 @@ export function LiveWalletVault() {
                 <Lock size={15} /> Create Ephemeral Local Vault
               </button>
             </div>
+
+            <div className="lv-backup-box" style={{ marginTop: '0.85rem' }}>
+              <strong>Restore Encrypted Backup</strong>
+              <p>Enter your backup passphrase and select an <code>audren-backup-*.json</code> file.</p>
+              <div className="lv-backup-row">
+                <input
+                  type="password"
+                  className="lv-input"
+                  value={backupPassphrase}
+                  onChange={(e) => setBackupPassphrase(e.target.value)}
+                  placeholder="Backup passphrase"
+                />
+                <button
+                  type="button"
+                  className="lv-mini-btn"
+                  disabled={busy || backupPassphrase.length < 8}
+                  onClick={() => lockedFileInputRef.current?.click()}
+                >
+                  <Upload size={13} /> Restore File
+                </button>
+                <input
+                  ref={lockedFileInputRef}
+                  type="file"
+                  accept="application/json"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    e.target.value = ''
+                    if (f) void handleImportBackup(f)
+                  }}
+                />
+              </div>
+              {backupStatus && <p className="lv-backup-status mono">{backupStatus}</p>}
+            </div>
+
+            {errorMsg && (
+              <div className="lv-error-bar" style={{ marginTop: '0.75rem' }}>
+                <AlertCircle size={14} />
+                <span>{errorMsg}</span>
+              </div>
+            )}
           </div>
         </div>
       ) : (
@@ -1649,13 +2317,35 @@ export function LiveWalletVault() {
                   type="button"
                   className="lv-mini-btn"
                   disabled={syncing}
-                  onClick={() => syncVault(keys, cluster, store)}
+                  onClick={() => {
+                    void syncVault(keys, cluster, store, walletScope)
+                    void refreshPoolAndBalances(cluster, connectedAddress)
+                  }}
                 >
                   <RefreshCw size={12} className={syncing ? 'spin' : ''} />
                   {syncing ? 'Syncing…' : 'Sync RPC'}
                 </button>
               </div>
             </div>
+
+            {noteNeedsCheckpoint && (
+              <div className="lv-notice-bar is-warn" style={{ marginBottom: '0.75rem' }}>
+                <AlertCircle size={14} />
+                <span style={{ flex: 1 }}>
+                  {slotsUntilNextCheckpoint > 0n
+                    ? `Recent deposit awaiting next checkpoint epoch (~${slotsUntilNextCheckpoint.toString()} slots). Refresh shortly to publish.`
+                    : 'A fresh RootCheckpoint is needed before spending your latest deposited note.'}
+                </span>
+                <button
+                  type="button"
+                  className="lv-mini-btn"
+                  disabled={busy || slotsUntilNextCheckpoint > 0n || (cluster === 'mainnet' && !connected)}
+                  onClick={handlePublishCheckpoint}
+                >
+                  Publish Checkpoint
+                </button>
+              </div>
+            )}
 
             <div className="lv-balance-list">
               {totalShieldedByMint.length === 0 ? (
@@ -1668,7 +2358,7 @@ export function LiveWalletVault() {
                 </div>
               ) : (
                 totalShieldedByMint.map(([m, total]) => {
-                  const info = mintLabel(m)
+                  const info = getTokenMeta(m)
                   return (
                     <div key={m} className="lv-balance-row">
                       <div>
@@ -1809,7 +2499,7 @@ export function LiveWalletVault() {
                       <option value={NATIVE_SOL_MINT_STR}>Native SOL ({formatUnits(pubSolLamports, 9)} available)</option>
                       {pubTokens.map((t) => (
                         <option key={t.mint} value={t.mint}>
-                          {mintLabel(t.mint).symbol}
+                          {getTokenMeta(t.mint).symbol}
                           {t.tokenProgram === TOKEN_2022_PROGRAM_ID ? ' [Token-2022]' : ' [SPL]'} ({t.uiAmountString} available)
                         </option>
                       ))}
@@ -1827,17 +2517,35 @@ export function LiveWalletVault() {
                     />
                   </div>
                   {depositMint === NATIVE_SOL_MINT_STR && (
-                    <label className="lv-checkbox-card">
-                      <input
-                        type="checkbox"
-                        checked={feeFromAmount}
-                        onChange={(e) => setFeeFromAmount(e.target.checked)}
-                      />
-                      <div>
-                        <strong>Zero-dust sweep (DEPOSIT_FLAG_FEE_FROM_AMOUNT)</strong>
-                        <span>Deducts amortized page rent from the shielded amount so ephemeral wallets sweep cleanly to 0 lamports.</span>
-                      </div>
-                    </label>
+                    <>
+                      <label className="lv-checkbox-card">
+                        <input
+                          type="checkbox"
+                          checked={wrapSolToWsol}
+                          onChange={(e) => {
+                            setWrapSolToWsol(e.target.checked)
+                            if (e.target.checked) setFeeFromAmount(false)
+                          }}
+                        />
+                        <div>
+                          <strong>Wrap SOL &amp; Shield as WSOL (Swap-Ready)</strong>
+                          <span>Wraps native SOL into SPL WSOL in the same transaction so the shielded note can execute Jupiter DeFi swaps (Tag 7) or unwrap back to SOL atomically.</span>
+                        </div>
+                      </label>
+                      {!wrapSolToWsol && (
+                        <label className="lv-checkbox-card">
+                          <input
+                            type="checkbox"
+                            checked={feeFromAmount}
+                            onChange={(e) => setFeeFromAmount(e.target.checked)}
+                          />
+                          <div>
+                            <strong>Zero-dust sweep (DEPOSIT_FLAG_FEE_FROM_AMOUNT)</strong>
+                            <span>Deducts amortized page rent from the shielded amount so ephemeral wallets sweep cleanly to 0 lamports.</span>
+                          </div>
+                        </label>
+                      )}
+                    </>
                   )}
                   <button
                     type="button"
@@ -1846,7 +2554,11 @@ export function LiveWalletVault() {
                     onClick={handleDeposit}
                   >
                     {busy ? <Loader2 size={15} className="spin" /> : <ArrowDownToLine size={15} />}
-                    {connected ? 'Shield into Global Pool' : 'Connect Wallet to Deposit'}
+                    {connected
+                      ? depositMint === NATIVE_SOL_MINT_STR && wrapSolToWsol
+                        ? 'Wrap SOL & Shield WSOL into Global Pool'
+                        : 'Shield into Global Pool'
+                      : 'Connect Wallet to Deposit'}
                   </button>
                 </>
               )}
@@ -1866,7 +2578,7 @@ export function LiveWalletVault() {
                       ) : (
                         unspentNotes.map((n) => {
                           const mStr = base58Encode(n.mint)
-                          const info = mintLabel(mStr)
+                          const info = getTokenMeta(mStr)
                           const k = `${n.laneId}:${n.leafIndex.toString()}`
                           return (
                             <option key={k} value={k}>
@@ -1891,7 +2603,20 @@ export function LiveWalletVault() {
                         />
                       </div>
                       <div className="lv-field-block">
-                        <label className="lv-label">Amount</label>
+                        <div className="lv-receipt-head">
+                          <label className="lv-label">Amount ({selectedNoteMeta.symbol})</label>
+                          {selectedNote && (
+                            <button
+                              type="button"
+                              className="lv-inline-link mono"
+                              onClick={() =>
+                                setSendAmount(formatUnitsExact(selectedNote.amount, selectedNoteMeta.decimals))
+                              }
+                            >
+                              Max ({formatUnits(selectedNote.amount, selectedNoteMeta.decimals)})
+                            </button>
+                          )}
+                        </div>
                         <input
                           type="text"
                           inputMode="decimal"
@@ -1915,8 +2640,17 @@ export function LiveWalletVault() {
 
                   {tab === 'swap' && (
                     <>
+                      {isSelectedNoteNativeSol && (
+                        <div className="lv-notice-bar is-warn">
+                          <AlertCircle size={14} />
+                          <span>
+                            Jupiter <code>ExecViaEscrow</code> routes SPL / WSOL / Token-2022 notes from isolated escrow ATAs.
+                            Select a shielded <strong>WSOL</strong>, <strong>SPL</strong>, or <strong>Token-2022</strong> note — or shield SOL as WSOL using <em>Wrap SOL &amp; Shield as WSOL</em> on the Shield tab.
+                          </span>
+                        </div>
+                      )}
                       <div className="lv-field-block">
-                        <label className="lv-label">Output Token Mint</label>
+                        <label className="lv-label">Output Token Mint ({swapOutMeta.symbol})</label>
                         <input
                           type="text"
                           className="lv-input mono"
@@ -1925,7 +2659,20 @@ export function LiveWalletVault() {
                         />
                       </div>
                       <div className="lv-field-block">
-                        <label className="lv-label">Swap Input Amount</label>
+                        <div className="lv-receipt-head">
+                          <label className="lv-label">Swap Input Amount ({selectedNoteMeta.symbol})</label>
+                          {selectedNote && !isSelectedNoteNativeSol && (
+                            <button
+                              type="button"
+                              className="lv-inline-link mono"
+                              onClick={() =>
+                                setSwapAmount(formatUnitsExact(selectedNote.amount, selectedNoteMeta.decimals))
+                              }
+                            >
+                              Max ({formatUnits(selectedNote.amount, selectedNoteMeta.decimals)})
+                            </button>
+                          )}
+                        </div>
                         <input
                           type="text"
                           inputMode="decimal"
@@ -1933,6 +2680,7 @@ export function LiveWalletVault() {
                           value={swapAmount}
                           onChange={(e) => setSwapAmount(e.target.value)}
                           placeholder="0.05"
+                          disabled={isSelectedNoteNativeSol}
                         />
                       </div>
                       <div className="lv-field-block">
@@ -1954,12 +2702,15 @@ export function LiveWalletVault() {
                         />
                         <div>
                           <strong>Pay relayer from swap output (EXEC_FLAG_FEE_ON_OUTPUT)</strong>
-                          <span>Atomic post-CPI deduction from received output tokens — zero upfront SOL needed.</span>
+                          <span>Atomic post-CPI deduction from received output tokens when relayed with a non-zero relayer fee — zero upfront SOL needed.</span>
                         </div>
                       </label>
                       <div className="lv-quote-card">
                         <div className="lv-quote-head">
-                          <span>LIVE ESCROW QUOTE</span>
+                          <span>
+                            LIVE ESCROW QUOTE
+                            {swapQuoteProvider ? ` · ${swapQuoteProvider.toUpperCase()}` : ''}
+                          </span>
                           {swapQuoteLoading && <Loader2 size={13} className="spin" />}
                         </div>
                         {swapQuoteOut ? (
@@ -1967,19 +2718,23 @@ export function LiveWalletVault() {
                             <div>
                               <span>Estimated Output</span>
                               <strong className="is-pine mono">
-                                {formatUnits(BigInt(swapQuoteOut), mintLabel(swapOutMint).decimals)}{' '}
-                                {mintLabel(swapOutMint).symbol}
+                                {formatUnits(BigInt(swapQuoteOut), swapOutMeta.decimals)}{' '}
+                                {swapOutMeta.symbol}
                               </strong>
                             </div>
                           </div>
                         ) : (
-                          <p className="lv-quote-loading">Enter an amount to fetch a live PDA-safe route.</p>
+                          <p className="lv-quote-loading">
+                            {isSelectedNoteNativeSol
+                              ? 'Select a shielded WSOL / SPL / Token-2022 note to quote a PDA-safe route.'
+                              : 'Enter an amount to fetch a live PDA-safe route.'}
+                          </p>
                         )}
                       </div>
                       <button
                         type="button"
                         className="btn-primary lv-submit-btn"
-                        disabled={busy || !selectedNote || !swapQuoteOut}
+                        disabled={busy || !selectedNote || isSelectedNoteNativeSol || !swapQuoteOut}
                         onClick={handleShieldedSwap}
                       >
                         {busy ? <Loader2 size={15} className="spin" /> : <ArrowLeftRight size={15} />}
@@ -2001,7 +2756,20 @@ export function LiveWalletVault() {
                         />
                       </div>
                       <div className="lv-field-block">
-                        <label className="lv-label">Withdraw Amount</label>
+                        <div className="lv-receipt-head">
+                          <label className="lv-label">Withdraw Amount ({selectedNoteMeta.symbol})</label>
+                          {selectedNote && (
+                            <button
+                              type="button"
+                              className="lv-inline-link mono"
+                              onClick={() =>
+                                setWithdrawAmount(formatUnitsExact(maxWithdrawNet, selectedNoteMeta.decimals))
+                              }
+                            >
+                              Max (net of fee: {formatUnits(maxWithdrawNet, selectedNoteMeta.decimals)})
+                            </button>
+                          )}
+                        </div>
                         <input
                           type="text"
                           inputMode="decimal"
@@ -2011,6 +2779,17 @@ export function LiveWalletVault() {
                           placeholder="0.01"
                         />
                       </div>
+                      {useRelayer && withdrawFeePreview && (
+                        <div className="lv-quote-card">
+                          <div className="lv-quote-head">
+                            <span>RELAYER FEE PREVIEW · {withdrawFeePreview.billingMode.toUpperCase()}</span>
+                          </div>
+                          <p className="lv-quote-loading mono">
+                            Fee: {formatUnits(withdrawFeePreview.relayerFee, selectedNoteMeta.decimals)}{' '}
+                            {selectedNoteMeta.symbol} · {withdrawFeePreview.reason}
+                          </p>
+                        </div>
+                      )}
                       {selectedNoteMintStr === WSOL_MINT && (
                         <label className="lv-checkbox-card">
                           <input
@@ -2163,14 +2942,15 @@ export function LiveWalletVault() {
                         style={{ display: 'none' }}
                         onChange={(e) => {
                           const f = e.target.files?.[0]
-                          if (f) handleImportBackup(f)
+                          e.target.value = ''
+                          if (f) void handleImportBackup(f)
                         }}
                       />
                       <button
                         type="button"
                         className="lv-mini-btn"
                         onClick={async () => {
-                          await clearEncryptedCompactStore(keys.spendPkBytes, cluster, 0)
+                          await clearEncryptedCompactStore(keys.spendPkBytes, cluster, 0, walletScope)
                           setBackupStatus('Cleared local encrypted IndexedDB CompactWalletStore cache')
                         }}
                       >

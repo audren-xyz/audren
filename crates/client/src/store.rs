@@ -269,8 +269,49 @@ impl CompactWalletStore {
             self.lanes[l].next_memo_leaf += 1;
         }
 
-        // 3. Advance finalized subroots & freeze intra-subtree siblings for owned notes in sealed pages!
+        // 3. Advance finalized subroots & freeze intra-subtree siblings for owned notes in sealed pages.
+        //    Hold a full 256-leaf page in `frontier_leaves` until `next_memo_leaf` finishes scanning all
+        //    256 leaves (spanning 3 MemoPages) so lagged MemoPage batches never stall sync.
+        let freeze_notes_in_page = |notes: &mut [OwnedNote], seq: u64, fr_leaves: &[Fr]| {
+            for note in notes.iter_mut() {
+                if note.lane_id == lane_id
+                    && note.leaf_index / SUBTREE_LEAVES as u64 == seq
+                    && note.frozen_intra_siblings.is_none()
+                {
+                    let offset = (note.leaf_index % SUBTREE_LEAVES as u64) as usize;
+                    let (sibs, pos) =
+                        extract_intra_subtree_siblings(fr_leaves, SUBTREE_LEAVES, offset);
+                    let mut sibs_be = [[[0u8; 32]; 3]; SUBTREE_LEVELS_4ARY];
+                    for h in 0..SUBTREE_LEVELS_4ARY {
+                        for k in 0..3 {
+                            sibs_be[h][k] = fr_to_be_bytes(&sibs[h][k]);
+                        }
+                    }
+                    note.frozen_intra_siblings = Some(sibs_be);
+                    note.frozen_intra_positions = Some(pos);
+                }
+            }
+        };
+
+        if self.lanes[l].frontier_leaves.len() == SUBTREE_LEAVES
+            && !page_leaves_map.contains_key(&self.lanes[l].frontier_sub_seq)
+        {
+            let held_seq = self.lanes[l].frontier_sub_seq;
+            let fr_leaves: Vec<Fr> = self.lanes[l]
+                .frontier_leaves
+                .iter()
+                .map(|b| fr_from_be_bytes_strict(b).ok_or(ClientError::InvalidFieldElement))
+                .collect::<Result<_, _>>()?;
+            freeze_notes_in_page(&mut self.notes, held_seq, &fr_leaves);
+            let page_end_leaf = (held_seq + 1) * SUBTREE_LEAVES as u64;
+            if self.lanes[l].next_memo_leaf >= page_end_leaf {
+                self.lanes[l].frontier_sub_seq = held_seq + 1;
+                self.lanes[l].frontier_leaves.clear();
+            }
+        }
+
         for (&seq, leaves) in &page_leaves_map {
+            let memo_sub_seq = self.lanes[l].next_memo_leaf / SUBTREE_LEAVES as u64;
             if leaves.len() == SUBTREE_LEAVES {
                 let fr_leaves: Vec<Fr> = leaves
                     .iter()
@@ -286,38 +327,29 @@ impl CompactWalletStore {
                     self.lanes[l].finalized_subroots[seq as usize] = subroot;
                 }
 
-                // Freeze 12 siblings for every owned note residing in this newly-sealed 256-leaf page
-                for note in &mut self.notes {
-                    if note.lane_id == lane_id
-                        && note.leaf_index / SUBTREE_LEAVES as u64 == seq
-                        && note.frozen_intra_siblings.is_none()
-                    {
-                        let offset = (note.leaf_index % SUBTREE_LEAVES as u64) as usize;
-                        let (sibs, pos) =
-                            extract_intra_subtree_siblings(&fr_leaves, SUBTREE_LEAVES, offset);
-                        let mut sibs_be = [[[0u8; 32]; 3]; SUBTREE_LEVELS_4ARY];
-                        for h in 0..SUBTREE_LEVELS_4ARY {
-                            for k in 0..3 {
-                                sibs_be[h][k] = fr_to_be_bytes(&sibs[h][k]);
-                            }
-                        }
-                        note.frozen_intra_siblings = Some(sibs_be);
-                        note.frozen_intra_positions = Some(pos);
-                    }
-                }
+                freeze_notes_in_page(&mut self.notes, seq, &fr_leaves);
 
-                if seq >= self.lanes[l].frontier_sub_seq {
-                    self.lanes[l].frontier_sub_seq = seq + 1;
-                    self.lanes[l].frontier_leaves.clear();
+                let page_end_leaf = (seq + 1) * SUBTREE_LEAVES as u64;
+                if self.lanes[l].next_memo_leaf >= page_end_leaf {
+                    if seq >= self.lanes[l].frontier_sub_seq {
+                        self.lanes[l].frontier_sub_seq = seq + 1;
+                        self.lanes[l].frontier_leaves.clear();
+                    }
+                } else if seq == memo_sub_seq {
+                    self.lanes[l].frontier_sub_seq = seq;
+                    self.lanes[l].frontier_leaves = leaves.clone();
                 }
-            } else if seq >= self.lanes[l].frontier_sub_seq {
+            } else if seq >= self.lanes[l].frontier_sub_seq && seq <= memo_sub_seq {
                 self.lanes[l].frontier_sub_seq = seq;
                 self.lanes[l].frontier_leaves = leaves.clone();
             }
         }
 
-        // 4. Scan NullifierPages sequentially and mark spent notes locally (0 individual NullifierPDA RPCs!)
-        for &(seq, raw) in nf_pages {
+        // 4. Scan NullifierPages in ascending sequence order and mark spent notes locally
+        //    (0 individual NullifierPDA RPCs!)
+        let mut sorted_nf_pages: Vec<(u64, &[u8])> = nf_pages.to_vec();
+        sorted_nf_pages.sort_by_key(|&(seq, _)| seq);
+        for (seq, raw) in sorted_nf_pages {
             if raw.len() != NF_PAGE_LEN || raw[0..8] != NF_PAGE_MAGIC {
                 return Err(ClientError::InvalidEncoding("invalid NullifierPage"));
             }
@@ -393,9 +425,8 @@ impl CompactWalletStore {
         };
 
         let mut ckpt_roots_fr = [Fr::from(0u64); NUM_LANES];
-        for i in 0..NUM_LANES {
-            ckpt_roots_fr[i] = fr_from_be_bytes_strict(&ckpt.lane_roots[i])
-                .ok_or(ClientError::InvalidFieldElement)?;
+        for (dst, src) in ckpt_roots_fr.iter_mut().zip(ckpt.lane_roots.iter()) {
+            *dst = fr_from_be_bytes_strict(src).ok_or(ClientError::InvalidFieldElement)?;
         }
 
         if self.lanes[l].finalized_subroots.len() < frontier_page as usize {
@@ -445,5 +476,110 @@ impl CompactWalletStore {
     pub fn subroot_pages_for_lane(&self, lane_id: u8) -> u64 {
         let n = self.lanes[lane_id as usize].finalized_subroots.len();
         (n.div_ceil(SUBROOTS_PER_PAGE).max(1)) as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::{encrypt_note_memo, AudrenKeys};
+    use audren_circuits::note::derive_stealth_owner;
+    use audren_core::NATIVE_SOL_MINT;
+
+    fn make_memo_page(count: u16) -> Vec<u8> {
+        let mut buf = vec![0u8; MEMO_PAGE_LEN];
+        buf[0..8].copy_from_slice(&MEMO_MAGIC);
+        buf[MM_OFF_COUNT..MM_OFF_COUNT + 2].copy_from_slice(&count.to_le_bytes());
+        buf
+    }
+
+    fn write_memo_slot(buf: &mut [u8], slot: usize, memo_90: &[u8; 90]) {
+        buf[MM_OFF_VIEW_TAGS + slot * 2..MM_OFF_VIEW_TAGS + (slot + 1) * 2]
+            .copy_from_slice(&memo_90[0..2]);
+        buf[MM_OFF_EPHEMERAL_PKS + slot * 32..MM_OFF_EPHEMERAL_PKS + (slot + 1) * 32]
+            .copy_from_slice(&memo_90[2..34]);
+        buf[MM_OFF_CIPHERTEXTS + slot * MEMO_CT_LEN..MM_OFF_CIPHERTEXTS + (slot + 1) * MEMO_CT_LEN]
+            .copy_from_slice(&memo_90[34..90]);
+    }
+
+    #[test]
+    fn sealed_subtree_holds_frontier_until_lagged_memos_arrive_and_sorts_nf_pages() {
+        let alice = AudrenKeys::from_seed(&[0x55u8; 32]);
+        let fvk = alice.full_viewing_key();
+        let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+
+        let mut sub_raw = vec![0u8; SUBTREE_PAGE_LEN];
+        sub_raw[0..8].copy_from_slice(&SUBTREE_MAGIC);
+        sub_raw[SB_OFF_COUNT..SB_OFF_COUNT + 2]
+            .copy_from_slice(&(SUBTREE_LEAVES as u16).to_le_bytes());
+
+        let memo0 = make_memo_page(MEMO_NOTES_PER_PAGE as u16);
+        let mut memo1 = make_memo_page(MEMO_NOTES_PER_PAGE as u16);
+        let memo2 = make_memo_page((SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE) as u16);
+
+        for i in 0..SUBTREE_LEAVES {
+            if i == 150 {
+                let (tw, bl, memo_90) =
+                    encrypt_note_memo(&alice.view_pk, [0x66u8; 32], 5_000_000, &NATIVE_SOL_MINT);
+                let cm = compute_note_commitment(
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    sol_asset,
+                    5_000_000,
+                    bl,
+                );
+                sub_raw[SB_OFF_LEAVES + i * 32..SB_OFF_LEAVES + (i + 1) * 32]
+                    .copy_from_slice(&fr_to_be_bytes(&cm));
+                write_memo_slot(&mut memo1, i - MEMO_NOTES_PER_PAGE, &memo_90);
+            } else {
+                let leaf = Fr::from((i + 1) as u64);
+                sub_raw[SB_OFF_LEAVES + i * 32..SB_OFF_LEAVES + (i + 1) * 32]
+                    .copy_from_slice(&fr_to_be_bytes(&leaf));
+            }
+        }
+
+        let mut store = CompactWalletStore::new(0, 0);
+        // Batch 1: sealed SubtreePage #0 + MemoPage #0 only (MemoPage #1 lags)
+        let d1 = store
+            .ingest_lane_pages(&fvk, 0, &[(0, &sub_raw)], &[(0, &memo0)], &[])
+            .unwrap();
+        assert_eq!(d1, 0);
+        assert_eq!(store.lanes[0].next_memo_leaf, 112);
+        assert_eq!(store.lanes[0].frontier_sub_seq, 0);
+        assert_eq!(store.lanes[0].frontier_leaves.len(), SUBTREE_LEAVES);
+
+        // Batch 2: MemoPage #1 arrives without re-passing SubtreePage #0
+        let d2 = store
+            .ingest_lane_pages(&fvk, 0, &[], &[(1, &memo1)], &[])
+            .unwrap();
+        assert_eq!(d2, 1);
+        assert_eq!(store.lanes[0].next_memo_leaf, 224);
+        assert_eq!(store.notes[0].amount, 5_000_000);
+        assert!(store.notes[0].frozen_intra_siblings.is_some());
+
+        // Batch 3: MemoPage #2 completes all 256 leaves -> frontier advances & clears
+        let d3 = store
+            .ingest_lane_pages(&fvk, 0, &[], &[(2, &memo2)], &[])
+            .unwrap();
+        assert_eq!(d3, 0);
+        assert_eq!(store.lanes[0].next_memo_leaf, 256);
+        assert_eq!(store.lanes[0].frontier_sub_seq, 1);
+        assert!(store.lanes[0].frontier_leaves.is_empty());
+
+        // Out-of-order NullifierPages (page 1 before page 0) must not skip page 0
+        let mut nf0 = vec![0u8; NF_PAGE_LEN];
+        nf0[0..8].copy_from_slice(&NF_PAGE_MAGIC);
+        nf0[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+        nf0[NF_OFF_PREFIXES..NF_OFF_PREFIXES + NF_PREFIX_LEN]
+            .copy_from_slice(&store.notes[0].nullifier[0..NF_PREFIX_LEN]);
+
+        let mut nf1 = vec![0u8; NF_PAGE_LEN];
+        nf1[0..8].copy_from_slice(&NF_PAGE_MAGIC);
+        nf1[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+        nf1[NF_OFF_PREFIXES..NF_OFF_PREFIXES + NF_PREFIX_LEN].fill(0xee);
+
+        store
+            .ingest_lane_pages(&fvk, 0, &[], &[], &[(1, &nf1), (0, &nf0)])
+            .unwrap();
+        assert_eq!(store.unspent_notes(None).len(), 0);
     }
 }

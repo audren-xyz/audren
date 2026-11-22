@@ -44,6 +44,7 @@ use audren_client::{
         derive_unwrap_pda, derive_vault_auth_pda,
     },
     prover::{asset_id_bytes_for_mint, asset_id_for_mint, AudrenProver},
+    router::prepare_escrow_accounts_for_audren,
     scanner::{decode_root_checkpoint, reconstruct_witness_with},
     store::CompactWalletStore,
 };
@@ -153,6 +154,7 @@ fn new_svm(
     svm
 }
 
+#[allow(clippy::result_large_err)]
 fn send_v1(
     svm: &mut LiteSVM,
     payer: &Keypair,
@@ -1685,8 +1687,12 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
     let ost2 = fr_to_be_bytes(&derive_stealth_owner(alice.spend_pk, dtw2));
     let obl2 = fr_to_be_bytes(&dbl2);
     let s2t_data = dex_swap_sol_to_spl_data(100_000_000, 100_000_000, 6, 0);
-    let s2t_accs = vec![
-        AudrenAccountMeta::writable(esc0, false),
+    // Regression test for live Mainnet Jupiter ZeroFi behavior: router returns `escrow` with
+    // `is_signer: true, is_writable: false` (Solana promotes `escrow` writable tx-wide because
+    // `ExecViaEscrow` accounts[11] is writable). Both raw & prepared accounts must yield identical
+    // `ctx_hash` and pass on-chain BN254 Groth16 verification.
+    let s2t_accs_raw = vec![
+        AudrenAccountMeta::readonly(esc0, true),
         AudrenAccountMeta::writable(dex_pool, false),
         AudrenAccountMeta::writable(dex_t22, false),
         AudrenAccountMeta::writable(esc0_t22, false),
@@ -1695,7 +1701,34 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
         AudrenAccountMeta::readonly(Address::new_from_array([0u8; 32]), false),
         AudrenAccountMeta::readonly(router_id, false),
     ];
+    let s2t_accs = prepare_escrow_accounts_for_audren(&s2t_accs_raw, &esc0, &[relayer.pubkey(), esc0_t22]);
+    assert!(!s2t_accs[0].is_signer, "escrow signer bit must be stripped");
+    assert!(s2t_accs[0].is_writable, "escrow must be promoted writable tx-wide");
     let ctx_s2t = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        3,
+        0,
+        0,
+        0,
+        1,
+        true,
+        &asset_id_bytes_for_mint(None),
+        100_000_000,
+        5_000_000,
+        Some(&relayer_t22),
+        &fr_to_be_bytes(&asset_t22),
+        90_187_500,
+        &router_id,
+        &s2t_accs_raw,
+        &ost2,
+        &obl2,
+        &dhead2,
+        &dmask2,
+        &s2t_data,
+        &[],
+    );
+    let ctx_s2t_norm = compute_exec_ctx_hash(
         &program_id,
         POOL_ID,
         3,
@@ -1719,6 +1752,7 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
         &s2t_data,
         &[],
     );
+    assert_eq!(ctx_s2t, ctx_s2t_norm, "compute_exec_ctx_hash must apply tx-wide writability union");
     let b_s2t = prover.build_and_prove(
         sr_s,
         asset_sol,

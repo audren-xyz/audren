@@ -48,7 +48,8 @@ use crate::{
         CK_OFF_LANE_ROOTS, CK_OFF_MAGIC, CK_OFF_POOL_ID, CK_OFF_PUBLISHED_SLOT, CK_OFF_SLOT_IDX,
         CK_OFF_SUPER_ROOT, CK_OFF_VERSION, CTX_DOMAIN_EXEC_VIA_ESCROW, CTX_DOMAIN_JOINSPLIT,
         CTX_DOMAIN_ROUTER_ACCOUNTS, DEPOSIT_FLAG_FEE_FROM_AMOUNT, DYN_MEMO_HEAD_LEN,
-        DYN_MEMO_MAGIC, ESCROW_SEED, EXEC_FLAG_FEE_ON_OUTPUT, GROTH16_PROOF_LEN, LANE_MAGIC,
+        DYN_MEMO_MAGIC, ESCROW_SEED, EXEC_FLAG_FEE_ON_OUTPUT, EXEC_KIND_SOL, EXEC_KIND_SPL,
+        GROTH16_PROOF_LEN, LANE_MAGIC,
         LANE_RENT_MAGIC, LANE_RENT_SEED, LANE_SEED, LANE_STATE_LEN, LN_OFF_BUMP,
         LN_OFF_CURRENT_ROOT, LN_OFF_LANE_ID, LN_OFF_MAGIC, LN_OFF_NEXT_LEAF, LN_OFF_NF_COUNT,
         LN_OFF_POOL_ID, LN_OFF_RENT_BUMP, LN_OFF_VERSION, MAX_CPI_ACCOUNT_ALLOC, MEMO_CT_LEN,
@@ -407,7 +408,6 @@ fn invoke_router_cpi_arena<'account>(
 
 // =============================================================================
 // Classic SPL Token & Token-2022 TLV Verification + TransferHook-Safe CPI
-// (Ported verbatim from hardened Audren v0.3.0)
 // =============================================================================
 
 #[derive(Clone, Copy)]
@@ -480,7 +480,7 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
         || (len > SPL_ACCOUNT_LEN
             && len != SPL_MULTISIG_LEN
             && data[SPL_ACCOUNT_LEN] == TOKEN_2022_ACCOUNT_TYPE_ACCOUNT))
-        && data[108] != 0;
+        && data[108] == 1;
     if !valid {
         return None;
     }
@@ -517,11 +517,11 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
                 has_restrictive_ext = true;
                 break;
             }
-            if ext_type == TOKEN_2022_EXT_MEMO_TRANSFER || ext_type == TOKEN_2022_EXT_CPI_GUARD {
-                if ext_len < 1 || tlv[val_start] != 0 {
-                    has_restrictive_ext = true;
-                    break;
-                }
+            if (ext_type == TOKEN_2022_EXT_MEMO_TRANSFER || ext_type == TOKEN_2022_EXT_CPI_GUARD)
+                && (ext_len < 1 || tlv[val_start] != 0)
+            {
+                has_restrictive_ext = true;
+                break;
             }
             pos = val_end;
         }
@@ -610,7 +610,7 @@ fn invoke_token_transfer_checked_with_hook<'a>(
             {
                 continue;
             }
-            if blocked_keys.iter().any(|k| *k == key) {
+            if blocked_keys.contains(&key) {
                 continue;
             }
             if let Some(snap) = token_account_security(acc) {
@@ -1106,7 +1106,7 @@ fn append_leaf_and_memo(
         ensure(
             subtree_acc.owned_by(program_id)
                 && d.len() == SUBTREE_PAGE_LEN
-                && &d[0..8] == &SUBTREE_MAGIC
+                && d[0..8] == SUBTREE_MAGIC
                 && d[SB_OFF_LANE_ID] == lane_id
                 && read_u32(&d, SB_OFF_POOL_ID) == pool_id,
             AudrenError::SubtreePageMismatch,
@@ -1122,7 +1122,7 @@ fn append_leaf_and_memo(
             ensure(
                 next_sub.owned_by(program_id)
                     && d.len() == SUBTREE_PAGE_LEN
-                    && &d[0..8] == &SUBTREE_MAGIC
+                    && d[0..8] == SUBTREE_MAGIC
                     && d[SB_OFF_LANE_ID] == lane_id
                     && read_u32(&d, SB_OFF_POOL_ID) == pool_id
                     && read_u64(&d, SB_OFF_PAGE_SEQ) == page_seq,
@@ -1150,7 +1150,7 @@ fn append_leaf_and_memo(
         let mut srd = subroot_acc.try_borrow_mut()?;
         ensure(
             srd.len() == SUBROOT_PAGE_LEN
-                && &srd[0..8] == &SUBROOT_MAGIC
+                && srd[0..8] == SUBROOT_MAGIC
                 && srd[SR_OFF_LANE_ID] == lane_id
                 && read_u32(&srd, SR_OFF_POOL_ID) == pool_id
                 && read_u64(&srd, SR_OFF_ROOT_PAGE_SEQ) == root_page_seq,
@@ -1174,7 +1174,7 @@ fn append_leaf_and_memo(
         ensure(
             memo_acc.owned_by(program_id)
                 && d.len() == MEMO_PAGE_LEN
-                && &d[0..8] == &MEMO_MAGIC
+                && d[0..8] == MEMO_MAGIC
                 && d[MM_OFF_LANE_ID] == lane_id
                 && read_u32(&d, MM_OFF_POOL_ID) == pool_id,
             AudrenError::MemoPageMismatch,
@@ -1190,7 +1190,7 @@ fn append_leaf_and_memo(
             ensure(
                 next_memo.owned_by(program_id)
                     && d.len() == MEMO_PAGE_LEN
-                    && &d[0..8] == &MEMO_MAGIC
+                    && d[0..8] == MEMO_MAGIC
                     && d[MM_OFF_LANE_ID] == lane_id
                     && read_u32(&d, MM_OFF_POOL_ID) == pool_id
                     && read_u64(&d, MM_OFF_PAGE_SEQ) == memo_seq,
@@ -1276,7 +1276,7 @@ fn append_nullifier_prefix(
         ensure(
             nf_page_acc.owned_by(program_id)
                 && d.len() == NF_PAGE_LEN
-                && &d[0..8] == &NF_PAGE_MAGIC
+                && d[0..8] == NF_PAGE_MAGIC
                 && d[NF_OFF_LANE_ID] == lane_id
                 && read_u32(&d, NF_OFF_POOL_ID) == pool_id,
             AudrenError::NullifierPageMismatch,
@@ -1292,7 +1292,7 @@ fn append_nullifier_prefix(
             ensure(
                 next_nf.owned_by(program_id)
                     && d.len() == NF_PAGE_LEN
-                    && &d[0..8] == &NF_PAGE_MAGIC
+                    && d[0..8] == NF_PAGE_MAGIC
                     && d[NF_OFF_LANE_ID] == lane_id
                     && read_u32(&d, NF_OFF_POOL_ID) == pool_id
                     && read_u64(&d, NF_OFF_PAGE_SEQ) == page_seq,
@@ -1688,7 +1688,7 @@ fn ix_open_page(
         let d = page_acc.try_borrow()?;
         ensure(
             d.len() == space
-                && &d[0..8] == &magic
+                && d[0..8] == magic
                 && d[8] == lane_id
                 && read_u32(&d, 12) == pool_id
                 && read_u64(&d, 16) == page_seq,
@@ -2247,7 +2247,7 @@ fn ix_joinsplit(
             ([0u8; 32], [0u8; 32], [0u8; 32], None)
         }
         ASSET_MODE_SOL => {
-            // Finding 8 fix: public outflow mode REQUIRES `public_amount_out > 0`!
+            // Public outflow mode requires `public_amount_out > 0`.
             ensure(public_amount_out > 0, AudrenError::InvalidInstruction)?;
             let [sol_vault, recipient, relayer_fee_recip] = outflow_tail else {
                 return Err(err(AudrenError::InvalidInstruction));
@@ -2276,7 +2276,7 @@ fn ix_joinsplit(
             (derive_asset_id(&NATIVE_SOL_MINT), rk, fk, None)
         }
         ASSET_MODE_SPL => {
-            // Finding 8 fix: public outflow mode REQUIRES `public_amount_out > 0`!
+            // Public outflow mode requires `public_amount_out > 0`.
             ensure(public_amount_out > 0, AudrenError::InvalidInstruction)?;
             let vault_auth = &outflow_tail[0];
             let mint_acc = &outflow_tail[1];
@@ -2587,8 +2587,8 @@ fn ix_exec_via_escrow(
     let out_lane_id = data[5];
     let escrow_shard = data[6];
     let change_mask = data[7];
-    let in_kind = data[8]; // 0 = Native SOL, 1 = SPL / Token-2022
-    let out_kind = data[9]; // 0 = Native SOL, 1 = SPL / Token-2022
+    let in_kind = data[8]; // EXEC_KIND_SOL (0) or EXEC_KIND_SPL (1)
+    let out_kind = data[9]; // EXEC_KIND_SOL (0) or EXEC_KIND_SPL (1)
     let rollover_flags = data[10];
     let proof_192: &[u8; GROTH16_PROOF_LEN] =
         data[11..11 + GROTH16_PROOF_LEN].try_into().unwrap();
@@ -2615,8 +2615,8 @@ fn ix_exec_via_escrow(
             && (change_mask & !0b11) == 0
             && (rollover_flags & !(0b111 | EXEC_FLAG_FEE_ON_OUTPUT)) == 0
             && (!fee_on_output || relayer_fee_amount > 0)
-            && (in_kind == 0 || in_kind == 1)
-            && (out_kind == 0 || out_kind == 1)
+            && (in_kind == EXEC_KIND_SOL || in_kind == EXEC_KIND_SPL)
+            && (out_kind == EXEC_KIND_SOL || out_kind == EXEC_KIND_SPL)
             && amount_in > 0
             && nf0 != [0u8; 32]
             && out_blinding != [0u8; 32]
@@ -2645,7 +2645,7 @@ fn ix_exec_via_escrow(
     verify_lane_rent_vault(program_id, pool_id, out_lane_id, rent_bump, lane_rent_vault)?;
     let pool_le = pool_id.to_le_bytes();
 
-    // Strict escrow PDA & target program denylist (ported from Audren v0.3.0)
+    // Strict escrow PDA & target program denylist
     let (exp_escrow, escrow_bump) = escrow_pda(program_id, pool_id, escrow_shard);
     ensure(escrow_acc.address() == &exp_escrow, AudrenError::InvalidPda)?;
     ensure(
@@ -2677,13 +2677,13 @@ fn ix_exec_via_escrow(
     let has_fee = relayer_fee_amount > 0;
     let has_in_fee = has_fee && !fee_on_output;
     let has_out_fee = has_fee && fee_on_output;
-    let in_cnt = (if in_kind == 0 { 1 } else { 5 }) + usize::from(has_in_fee);
-    let out_cnt = (if out_kind == 0 { 1 } else { 5 }) + usize::from(has_out_fee);
+    let in_cnt = (if in_kind == EXEC_KIND_SOL { 1 } else { 5 }) + usize::from(has_in_fee);
+    let out_cnt = (if out_kind == EXEC_KIND_SOL { 1 } else { 5 }) + usize::from(has_out_fee);
     let has_next_sub = (rollover_flags & 1) != 0;
     let has_next_memo = (rollover_flags & 2) != 0;
     let has_next_nf = (rollover_flags & 4) != 0;
     let roll_cnt = usize::from(has_next_sub) + usize::from(has_next_memo) + usize::from(has_next_nf);
-    ensure(rest.len() >= in_cnt + out_cnt + roll_cnt + 1, AudrenError::InvalidInstruction)?;
+    ensure(rest.len() > in_cnt + out_cnt + roll_cnt, AudrenError::InvalidInstruction)?;
 
     let (in_leg, rest2) = rest.split_at_mut(in_cnt);
     let (out_leg, rest3) = rest2.split_at_mut(out_cnt);
@@ -2704,7 +2704,7 @@ fn ix_exec_via_escrow(
 
     // Validate input leg and derive `asset_in` strictly ON-CHAIN
     let mut relayer_fee_key = [0u8; 32];
-    let (asset_in, in_mint_info, pre_escrow_in_spl) = if in_kind == 0 {
+    let (asset_in, in_mint_info, pre_escrow_in_spl) = if in_kind == EXEC_KIND_SOL {
         let sol_vault = &in_leg[0];
         verify_sol_vault(program_id, pool_id, cfg.sol_vault_bump, sol_vault)?;
         ensure(
@@ -2751,8 +2751,15 @@ fn ix_exec_via_escrow(
         forbidden_len += 1;
         if has_in_fee {
             let fee_ata = &in_leg[5];
+            let fee_snap = token_account_security(fee_ata)
+                .ok_or_else(|| err(AudrenError::InvalidTokenAccount))?;
             ensure(
-                fee_ata.address() != vault_in_ata.address()
+                fee_ata.is_writable()
+                    && fee_snap.token_program == *token_prog_in.address()
+                    && fee_snap.mint == *mint_in.address()
+                    && fee_snap.owner != exp_va
+                    && fee_snap.owner != exp_escrow
+                    && fee_ata.address() != vault_in_ata.address()
                     && fee_ata.address() != escrow_in_ata.address(),
                 AudrenError::InvalidAccount,
             )?;
@@ -2766,7 +2773,7 @@ fn ix_exec_via_escrow(
     };
 
     // Validate output leg and derive `asset_out` strictly ON-CHAIN
-    let (asset_out, mint_out_32, out_mint_info, pre_escrow_out_spl) = if out_kind == 0 {
+    let (asset_out, mint_out_32, out_mint_info, pre_escrow_out_spl) = if out_kind == EXEC_KIND_SOL {
         let sol_vault = &out_leg[0];
         verify_sol_vault(program_id, pool_id, cfg.sol_vault_bump, sol_vault)?;
         if has_out_fee {
@@ -2834,7 +2841,7 @@ fn ix_exec_via_escrow(
     // Forbid self-swaps (SOL -> SOL or Mint X -> Mint X)
     ensure(asset_in != asset_out, AudrenError::InvalidInstruction)?;
 
-    // Finding 3 fix: cryptographically bind EVERY router account pubkey, order, & writable flag!
+    // Cryptographically bind every router account pubkey, order, & writable flag inside ctx_hash.
     let router_accs_hash = hash_router_accounts_arena(router_accounts)?;
 
     let raw_ctx = sha256_v(&[
@@ -2958,7 +2965,7 @@ fn ix_exec_via_escrow(
     let total_nfs = if has_nf1 { 2u64 } else { 1u64 };
     collect_lane_rent_fee(payer, lane_rent_vault, &cfg, total_notes, total_nfs)?;
 
-    // Full Audren v0.3.0 WatchedEscrowBuf firewall + escrow funding + router CPI + post-CPI audit
+    // WatchedEscrowBuf firewall + escrow funding + router CPI + post-CPI audit
     let shard_b = [escrow_shard];
     let eb_b = [escrow_bump];
     let escrow_seeds = [
@@ -3019,7 +3026,7 @@ fn ix_exec_via_escrow(
         }
 
         // Fund isolated escrow (+ optional relayer fee) via CPI so Agave CPI lamport invariants hold!
-        if in_kind == 0 {
+        if in_kind == EXEC_KIND_SOL {
             let svb = [cfg.sol_vault_bump];
             let sv_seeds = [
                 Seed::from(SOL_VAULT_SEED),
@@ -3088,7 +3095,7 @@ fn ix_exec_via_escrow(
             &[Signer::from(&escrow_seeds)],
         )?;
 
-        // Findings 1 & 4 fix: UNCONDITIONAL post-CPI `escrow_acc` ownership, data, and lamport check across ALL modes!
+        // Unconditional post-CPI `escrow_acc` ownership, data, and lamport check across all modes.
         ensure(
             escrow_acc.owned_by(&SYSTEM_PROGRAM_ID)
                 && escrow_acc.is_data_empty()
@@ -3096,7 +3103,7 @@ fn ix_exec_via_escrow(
             AudrenError::EscrowAuthorityAltered,
         )?;
 
-        // Finding 2 & Token-2022 fix: verify EVERY pre-existing writable escrow-owned token account!
+        // Verify every pre-existing writable escrow-owned token account against tampering & TLV edits.
         for entry in watched_escrow_accs.as_slice() {
             let acc = &router_accounts[entry.idx as usize];
             let Some(snap) = token_account_security(acc) else {
@@ -3137,7 +3144,7 @@ fn ix_exec_via_escrow(
     })?;
 
     // Exact input drain check on BOTH SOL and SPL/T22 (ZERO trapped input dust!)
-    if in_kind == 0 {
+    if in_kind == EXEC_KIND_SOL {
         ensure(escrow_acc.lamports() == escrow_sol_baseline, AudrenError::EscrowNotDrained)?;
     } else {
         let post_escrow_in = validate_token_account(
@@ -3152,7 +3159,7 @@ fn ix_exec_via_escrow(
 
     // Sweep actual output from isolated escrow -> unified output vault (& optional output-side
     // relayer fee directly from escrow) & measure exact net user vault delta!
-    let actual_out = if out_kind == 0 {
+    let actual_out = if out_kind == EXEC_KIND_SOL {
         let sol_vault = &out_leg[0];
         let escrow_after = escrow_acc.lamports();
         ensure(escrow_after >= escrow_sol_baseline, AudrenError::CustodyInvariantViolated)?;
@@ -3273,9 +3280,8 @@ fn ix_exec_via_escrow(
         net_out
     };
 
-    // Finding 9 fix: commit dynamic output using user's ECDH `out_blinding` (saves 1 Poseidon & 32 B)
-    // and XOR-mask the 56 B dynamic payload with `dyn_mask_56` so ZERO plaintext magic/amount/mint
-    // ever sits at rest in `MemoPage`!
+    // Commit dynamic output using user's ECDH `out_blinding` and XOR-mask the 56 B dynamic
+    // payload with `dyn_mask_56` so zero plaintext magic/amount/mint sits at rest in `MemoPage`.
     let dynamic_cm =
         compute_note_commitment(&out_stealth_owner, &asset_out, actual_out, &out_blinding)?;
 
@@ -3358,7 +3364,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_pda_derivation_is_deterministic() {
+    fn canonical_pda_derivation_is_deterministic() {
         let prog = Address::new_from_array(audren_core::AUDREN_PROGRAM_ID);
         let (p0, _) = pool_pda(&prog, 0);
         let (sv0, _) = sol_vault_pda(&prog, 0);

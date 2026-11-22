@@ -14,17 +14,17 @@ All accounts use `audren_v2_*` PDA seeds, fixed offsets, little-endian integers,
 |---|---|---:|---|
 | `PoolState` | `["audren_v2_pool", pool_id_le4]` | `128 B` | Pool authority, pause flag, `active_lanes` (`4 -> 8 -> 16`), checkpoint cadence/max-age, rent caps |
 | `sol_vault` | `["audren_v2_sol", pool_id_le4]` | `0 B` | Unified custody PDA holding native SOL across all lanes |
-| `vault_auth` | `["audren_v2_vauth", pool_id_le4]` | `0 B` | Unified PDA owner of all SPL / Token-2022 custody ATAs |
+| `vault_auth` | `["audren_v2_vault", pool_id_le4]` | `0 B` | Unified PDA owner of all SPL / Token-2022 custody ATAs |
 | `LaneTreeState` | `["audren_v2_lane", pool_id_le4, lane_u8]` | `1,824 B` | Per-lane (`0..15`) incremental 4-ary Poseidon Merkle frontier (`next_leaf`, `nf_count`, `current_root`) |
 | `LaneRentVault` | `["audren_v2_lrent", pool_id_le4, lane_u8]` | `16 B` | Self-funding rent reserve paying permissionless `OpenPage` allocations |
 | `SubtreePage` | `["audren_v2_sub", pool_id_le4, lane_u8, seq_le8]` | `8,256 B` | `256` BN254 Fr note commitments (`256 * 32 B`) forming one level-4 4-ary subtree |
-| `SubtreeRootPage` | `["audren_v2_sr", pool_id_le4, lane_u8, seq_le8]` | `9,664 B` | `300` finalized level-4 subtree roots (`300 * 32 B`) for stateless witness reconstruction |
+| `SubtreeRootPage` | `["audren_v2_sroot", pool_id_le4, lane_u8, seq_le8]` | `9,664 B` | `300` finalized level-4 subtree roots (`300 * 32 B`) for stateless witness reconstruction |
 | `MemoPage` | `["audren_v2_memo", pool_id_le4, lane_u8, seq_le8]` | `10,144 B` | `112` Structure-of-Arrays encrypted note memos (`2 B` view tags, `32 B` epks, `56 B` AEAD ciphertexts) |
-| `NullifierPage` | `["audren_v2_nfpg", pool_id_le4, lane_u8, seq_le8]` | `9,664 B` | `600` sequential `16 B` nullifier prefixes for zero-indexer outbound spend detection |
-| `RootCheckpoint` | `["audren_v2_ckpt", pool_id_le4, slot_idx_u8]` | `704 B` | 256-slot bounded ring storing `super_root`, `lane_roots[16]`, `lane_counts[16]`, `epoch_id`, `published_slot` |
-| `NullifierPDA` | `["audren_v2_nf", pool_id_le4, nf_32]` | `0 B` | Permanent anti-double-spend marker (account existence = spent) |
+| `NullifierPage` | `["audren_v2_nfpage", pool_id_le4, lane_u8, seq_le8]` | `9,664 B` | `600` sequential `16 B` nullifier prefixes for zero-indexer outbound spend detection |
+| `RootCheckpoint` | `["audren_v2_ckpt", pool_id_le4, slot_idx_le2]` | `704 B` | 256-slot bounded ring storing `super_root`, `lane_roots[16]`, `lane_counts[16]`, `epoch_id`, `published_slot` |
+| `NullifierPDA` | `["audren_v2_null", pool_id_le4, nf_32]` | `0 B` | Permanent anti-double-spend marker (account existence = spent) |
 | `escrow` | `["audren_v2_escrow", pool_id_le4, shard_u8]` | `0 B` | Isolated CPI signer shard (`0..16`) for `ExecViaEscrow` |
-| `unwrap_pda` | `["audren_v2_unwrap", pool_id_le4, nf0_32]` | `165 B` (ephemeral) | 1-shot WSOL token account created & closed atomically to `recipient` during `JoinSplit(unwrap_wsol=true)` |
+| `unwrap_pda` | `["audren_v2_unwrap", pool_id_le4, nf0_32]` | `165 B` (ephemeral) | 1-shot WSOL token account created & closed atomically to `payer` (refunding rent + WSOL) while transferring `amount_out` SOL to `recipient` and optional `relayer_fee` SOL to `fee_recipient` during `JoinSplit(unwrap_wsol=true)` |
 
 ---
 
@@ -34,16 +34,16 @@ Audren uses a single frozen BN254 Groth16 circuit (`JoinSplit4AryCircuit`, `vk_i
 
 - **Key derivation:**
   - `spend_sk = HKDF-SHA256(seed, "audren/v2/root", "audren/v2/spend_sk")` (masked to 253-bit BN254 Fr)
-  - `spend_pk = Poseidon2(DOMAIN_SPEND_PK, spend_sk)`
-  - `nk = Poseidon2(DOMAIN_NULLIFIER_KEY, spend_sk)` (read-only nullifier key shared in Mode 2 `FullViewingKey`)
+  - `spend_pk = Poseidon2(DOMAIN_PK, spend_sk)` (`DOMAIN_PK = 1`)
+  - `nk = Poseidon2(DOMAIN_NK, spend_sk)` (`DOMAIN_NK = 10`; read-only nullifier key shared in Mode 2 `FullViewingKey`)
   - `view_sk = HKDF-SHA256(seed, "audren/v2/root", "audren/v2/view_sk")`, `view_pk = X25519(view_sk)`
 - **Stealth ownership & note commitment:**
-  - `stealth_owner = Poseidon2(spend_pk, tweak)`
-  - `asset_id = Poseidon2(DOMAIN_ASSET_ID, mint_lo16, mint_hi16)`
-  - `cm = Poseidon5(DOMAIN_COMMITMENT, stealth_owner, asset_id, amount, blinding)`
+  - `stealth_owner = Poseidon3(DOMAIN_STEALTH, spend_pk, tweak)` (`DOMAIN_STEALTH = 2`)
+  - `asset_id = mask_to_fr_be(SHA-256("audren/v2/asset" || mint_32))`
+  - `cm = Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, amount, blinding)` (`DOMAIN_NOTE = 3`)
 - **Key-separated nullifiers:**
-  - Real input: `nf = Poseidon4(DOMAIN_NULLIFIER, nk, leaf_idx, tweak)`
-  - Dummy input (when spending 1 real note in a 2-in proof): deterministic domain-separated dummy nullifier with optional `omit_nf1` economic 1-input format
+  - Real input: `nf = Poseidon4(DOMAIN_NULLIFIER, nk, cm, (lane_id << 36) | leaf_idx)` (`DOMAIN_NULLIFIER = 4`, global leaf index across the 16-lane 4-ary Depth-20 tree)
+  - Dummy input (when spending 1 real note in a 2-in proof): `nf = Poseidon3(DOMAIN_DUMMY_NF, nk, blinding)` (`DOMAIN_DUMMY_NF = 5`, with optional `omit_nf1` economic 1-input format)
 - **Global 4-ary Depth-20 MASP tree (`4^20` notes):**
   - 16 parallel lanes occupy the top 2 levels (`4^2 = 16`); each lane owns a Depth-18 4-ary subtree (`4^18` notes).
   - `PublishCheckpoint` (`Tag 5`) hashes all 16 lane roots (empty uninitialized lanes hash deterministically via `ZERO_HASHES_4ARY[18]`) into one `super_root` stored in `RootCheckpoint`.

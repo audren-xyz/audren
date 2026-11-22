@@ -10,9 +10,11 @@ import {
   deriveMemoPda,
   deriveNfPagePda,
   derivePoolPda,
+  deriveSubrootPda,
   deriveSubtreePda,
   OPEN_PAGE_KIND_MEMO,
   OPEN_PAGE_KIND_NULLIFIER,
+  OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
 } from '../solana/audren'
 import {
@@ -100,7 +102,8 @@ export async function runV2MaintenanceCrank(
     notes.push(`Published RootCheckpoint slotIdx=${slotIdx} (${sig})`)
   }
 
-  // Pre-open next SubtreePage / MemoPage / NullifierPage for any lane >= 80% full
+  // Ensure current pages exist AND pre-open next SubtreePage / SubtreeRootPage / MemoPage / NullifierPage
+  // for any lane approaching page boundaries (>= 80% full).
   const lanePdas = Array.from({ length: pool.activeLanes }, (_, l) =>
     base58Encode(deriveLanePda(0, l).address),
   )
@@ -110,59 +113,88 @@ export async function runV2MaintenanceCrank(
     const raw = laneAccs[l]?.bytes
     if (!raw) continue
     const hdr = decodeLaneHeader(raw)
+
+    const curSub = hdr.nextLeaf / 256n
+    const curSubroot = curSub / 300n
+    const curMemo = hdr.nextLeaf / 112n
+    const curNf = hdr.nfCount / 600n
+
+    const candidates: Array<{ pageKind: number; pageSeq: bigint; pda: string }> = [
+      {
+        pageKind: OPEN_PAGE_KIND_SUBTREE,
+        pageSeq: curSub,
+        pda: base58Encode(deriveSubtreePda(0, l, curSub).address),
+      },
+      {
+        pageKind: OPEN_PAGE_KIND_SUBROOT,
+        pageSeq: curSubroot,
+        pda: base58Encode(deriveSubrootPda(0, l, curSubroot).address),
+      },
+      {
+        pageKind: OPEN_PAGE_KIND_MEMO,
+        pageSeq: curMemo,
+        pda: base58Encode(deriveMemoPda(0, l, curMemo).address),
+      },
+      {
+        pageKind: OPEN_PAGE_KIND_NULLIFIER,
+        pageSeq: curNf,
+        pda: base58Encode(deriveNfPagePda(0, l, curNf).address),
+      },
+    ]
+
     if (Number(hdr.nextLeaf % 256n) >= 200) {
-      const nextSub = hdr.nextLeaf / 256n + 1n
-      const [exists] = await fetchMultipleAccounts(rpcUrl, [
-        base58Encode(deriveSubtreePda(0, l, nextSub).address),
-      ])
-      if (!exists) {
-        openIxs.push(
-          buildOpenPageSolanaIx({
-            payer: relayerB58,
-            pageKind: OPEN_PAGE_KIND_SUBTREE,
-            poolId: 0,
-            laneId: l,
-            pageSeq: nextSub,
-          }),
-        )
-      }
+      const nextSub = curSub + 1n
+      candidates.push({
+        pageKind: OPEN_PAGE_KIND_SUBTREE,
+        pageSeq: nextSub,
+        pda: base58Encode(deriveSubtreePda(0, l, nextSub).address),
+      })
+    }
+    if (Number(curSub % 300n) >= 240) {
+      const nextSubroot = curSubroot + 1n
+      candidates.push({
+        pageKind: OPEN_PAGE_KIND_SUBROOT,
+        pageSeq: nextSubroot,
+        pda: base58Encode(deriveSubrootPda(0, l, nextSubroot).address),
+      })
     }
     if (Number(hdr.nextLeaf % 112n) >= 90) {
-      const nextMemo = hdr.nextLeaf / 112n + 1n
-      const [exists] = await fetchMultipleAccounts(rpcUrl, [
-        base58Encode(deriveMemoPda(0, l, nextMemo).address),
-      ])
-      if (!exists) {
-        openIxs.push(
-          buildOpenPageSolanaIx({
-            payer: relayerB58,
-            pageKind: OPEN_PAGE_KIND_MEMO,
-            poolId: 0,
-            laneId: l,
-            pageSeq: nextMemo,
-          }),
-        )
-      }
+      const nextMemo = curMemo + 1n
+      candidates.push({
+        pageKind: OPEN_PAGE_KIND_MEMO,
+        pageSeq: nextMemo,
+        pda: base58Encode(deriveMemoPda(0, l, nextMemo).address),
+      })
     }
     if (Number(hdr.nfCount % 600n) >= 500) {
-      const nextNf = hdr.nfCount / 600n + 1n
-      const [exists] = await fetchMultipleAccounts(rpcUrl, [
-        base58Encode(deriveNfPagePda(0, l, nextNf).address),
-      ])
-      if (!exists) {
+      const nextNf = curNf + 1n
+      candidates.push({
+        pageKind: OPEN_PAGE_KIND_NULLIFIER,
+        pageSeq: nextNf,
+        pda: base58Encode(deriveNfPagePda(0, l, nextNf).address),
+      })
+    }
+
+    const existing = await fetchMultipleAccounts(
+      rpcUrl,
+      candidates.map((c) => c.pda),
+      { dataSlice: { offset: 0, length: 0 } },
+    )
+    candidates.forEach((cand, idx) => {
+      if (!existing[idx]) {
         openIxs.push(
           buildOpenPageSolanaIx({
             payer: relayerB58,
-            pageKind: OPEN_PAGE_KIND_NULLIFIER,
+            pageKind: cand.pageKind,
             poolId: 0,
             laneId: l,
-            pageSeq: nextNf,
+            pageSeq: cand.pageSeq,
           }),
         )
       }
-    }
+    })
   }
-  for (const ix of openIxs.slice(0, 4)) {
+  for (const ix of openIxs.slice(0, 6)) {
     const bh2 = await rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
       { commitment: 'confirmed' },
     ])
@@ -192,33 +224,16 @@ export interface RefillReport {
   action: 'healthy' | 'unwrapped_wsol' | 'swapped_fees' | 'no_fees_to_swap' | 'skipped_unconfigured'
   signatures: string[]
   details: string[]
+  payers?: RefillReport[]
 }
 
-/**
- * Self-sustaining Treasury Auto-Refill job (invoked by 15-minute Cron Trigger or admin endpoint).
- *
- * Dynamically scans all Classic SPL & Token-2022 accounts owned by the
- * relayer via Solana RPC `getTokenAccountsByOwner`:
- *   1. Unwraps any accumulated WSOL fee balance into native SOL (and re-opens WSOL ATA).
- *   2. Converts ANY accumulated fee token worth >= `REFILL_MIN_TOKEN_USD` into WSOL via the
- *      active aggregator, then unwraps into native SOL.
- */
-export async function runAutoRefill(env: Env, cfg: RelayPolicyConfig): Promise<RefillReport> {
-  const checkedAt = new Date().toISOString()
-  const secret32 = decodeRelayerSecret(env.MAINNET_RELAYER_SECRET_B64 ?? null)
-  const rpcUrl = env.MAINNET_RPC_URL
-  if (!secret32 || !rpcUrl) {
-    return {
-      checkedAt,
-      relayerPubkey: '',
-      solBefore: 0,
-      solAfter: 0,
-      minSolThreshold: cfg.refillMinSol,
-      action: 'skipped_unconfigured',
-      signatures: [],
-      details: ['Mainnet relayer secret or RPC URL not configured'],
-    }
-  }
+async function refillSinglePayer(
+  env: Env,
+  cfg: RelayPolicyConfig,
+  rpcUrl: string,
+  secret32: Uint8Array,
+  checkedAt: string,
+): Promise<RefillReport> {
 
   const relayerPubkey = ed25519.getPublicKey(secret32)
   const relayerB58 = base58Encode(relayerPubkey)
@@ -418,5 +433,68 @@ export async function runAutoRefill(env: Env, cfg: RelayPolicyConfig): Promise<R
     action: signatures.length > 0 ? 'swapped_fees' : 'no_fees_to_swap',
     signatures,
     details,
+  }
+}
+
+/**
+ * Self-sustaining Treasury Auto-Refill job (invoked by 15-minute Cron Trigger or admin endpoint).
+ *
+ * Iterates over ALL configured Mainnet relayer payers (`MAINNET_RELAYER_SECRETS_JSON` or
+ * `MAINNET_RELAYER_SECRET_B64`), scanning every Classic SPL & Token-2022 account owned by each
+ * payer via Solana RPC `getTokenAccountsByOwner`:
+ *   1. Unwraps any accumulated WSOL fee balance into native SOL (and re-opens WSOL ATA).
+ *   2. Converts ANY accumulated fee token worth >= `REFILL_MIN_TOKEN_USD` into WSOL via the
+ *      active aggregator, then unwraps into native SOL.
+ */
+export async function runAutoRefill(env: Env, cfg: RelayPolicyConfig): Promise<RefillReport> {
+  const checkedAt = new Date().toISOString()
+  const rpcUrl = env.MAINNET_RPC_URL
+  const secrets = getRelayerSecretsB64(env, 'mainnet')
+    .map((s) => decodeRelayerSecret(s))
+    .filter((s): s is Uint8Array => s !== null)
+
+  if (secrets.length === 0 || !rpcUrl) {
+    return {
+      checkedAt,
+      relayerPubkey: '',
+      solBefore: 0,
+      solAfter: 0,
+      minSolThreshold: cfg.refillMinSol,
+      action: 'skipped_unconfigured',
+      signatures: [],
+      details: ['Mainnet relayer secret(s) or RPC URL not configured'],
+    }
+  }
+
+  const reports: RefillReport[] = []
+  for (const secret32 of secrets) {
+    reports.push(await refillSinglePayer(env, cfg, rpcUrl, secret32, checkedAt))
+  }
+
+  if (reports.length === 1) return reports[0]!
+
+  const actionPriority: Record<RefillReport['action'], number> = {
+    swapped_fees: 4,
+    unwrapped_wsol: 3,
+    no_fees_to_swap: 2,
+    healthy: 1,
+    skipped_unconfigured: 0,
+  }
+  const topAction = reports.reduce<RefillReport['action']>(
+    (best, r) => (actionPriority[r.action] > actionPriority[best] ? r.action : best),
+    'healthy',
+  )
+  return {
+    checkedAt,
+    relayerPubkey: reports[0]!.relayerPubkey,
+    solBefore: reports[0]!.solBefore,
+    solAfter: reports[0]!.solAfter,
+    minSolThreshold: cfg.refillMinSol,
+    action: topAction,
+    signatures: reports.flatMap((r) => r.signatures),
+    details: reports.flatMap((r) =>
+      r.details.map((d) => `[${r.relayerPubkey.slice(0, 6)}] ${d}`),
+    ),
+    payers: reports,
   }
 }

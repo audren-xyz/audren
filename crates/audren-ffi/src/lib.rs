@@ -4,7 +4,7 @@
 //! and `audren-client` with zero duplicated cryptography and zero transcript drift:
 //! 1. Keys, `aud1...` stealth addresses, Mode 2 `FullViewingKey` (`spend_pk, nk, view_sk, view_pk`),
 //!    and deterministic `DefiSessionKeypair`
-//! 2. Canonical V2 PDAs (`audren_v2_*`) and zero-copy account decoders
+//! 2. Canonical PDAs (`audren_v2_*`) and zero-copy account decoders
 //! 3. Zero-indexer `CompactWalletStore` & authenticated `90 B` memo encryption/decryption
 //! 4. Local BN254 Groth16 proving (`17,861` R1CS) and 9-instruction wire builders
 //! 5. Mode 1 `SelectiveDisclosureProof` verification (1 Poseidon check, zero keys revealed)
@@ -1017,7 +1017,12 @@ pub fn build_joinsplit_ix(params: FfiJoinSplitParams) -> Result<FfiInstruction, 
             parse_addr(&v, "spl_vault_ata")?,
             parse_addr(&t, "spl_token_prog")?,
         )),
-        _ => None,
+        (None, None, None) => None,
+        _ => {
+            return Err(AudrenFfiError::InvalidInput {
+                reason: "spl_mint, spl_vault_ata, and spl_token_prog must either all be Some or all be None".to_string(),
+            });
+        }
     };
     Ok(from_audren_ix(build_joinsplit(
         parse_addr(&params.program_id, "program_id")?,

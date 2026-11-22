@@ -419,9 +419,42 @@ export class CompactWalletStore {
       lane.nextMemoLeaf = leafIdx + 1n;
     }
 
+    const freezeNotesInPage = (seq: bigint, frLeaves: readonly bigint[]) => {
+      for (const note of this.notes) {
+        if (
+          note.laneId === laneId &&
+          note.leafIndex / BigInt(SUBTREE_LEAVES) === seq &&
+          !note.frozenIntraSiblings
+        ) {
+          const offset = Number(note.leafIndex % BigInt(SUBTREE_LEAVES));
+          const { siblings, positions } = extractIntraSubtreeSiblings(
+            frLeaves,
+            SUBTREE_LEAVES,
+            offset,
+          );
+          note.frozenIntraSiblings = siblings.map((lvl) => lvl.map((x) => frToBeBytes(x)));
+          note.frozenIntraPositions = positions;
+        }
+      }
+    };
+
+    if (
+      lane.frontierLeaves.length === SUBTREE_LEAVES &&
+      !pageLeavesMap.has(lane.frontierSubSeq)
+    ) {
+      const frLeaves = lane.frontierLeaves.map((b) => frFromBeBytesStrict(b));
+      freezeNotesInPage(lane.frontierSubSeq, frLeaves);
+      const pageEndLeaf = (lane.frontierSubSeq + 1n) * BigInt(SUBTREE_LEAVES);
+      if (lane.nextMemoLeaf >= pageEndLeaf) {
+        lane.frontierSubSeq = lane.frontierSubSeq + 1n;
+        lane.frontierLeaves = [];
+      }
+    }
+
     const sortedSeqs = [...pageLeavesMap.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (const seq of sortedSeqs) {
       const leaves = pageLeavesMap.get(seq)!;
+      const memoSubSeq = lane.nextMemoLeaf / BigInt(SUBTREE_LEAVES);
       if (leaves.length === SUBTREE_LEAVES) {
         const frLeaves = leaves.map((b) => frFromBeBytesStrict(b));
         const subroot = frToBeBytes(computeSubtree256Root(frLeaves, SUBTREE_LEAVES));
@@ -430,35 +463,29 @@ export class CompactWalletStore {
           lane.finalizedSubroots.push(new Uint8Array(32));
         }
         lane.finalizedSubroots[seqNum] = subroot;
+        freezeNotesInPage(seq, frLeaves);
 
-        for (const note of this.notes) {
-          if (
-            note.laneId === laneId &&
-            note.leafIndex / BigInt(SUBTREE_LEAVES) === seq &&
-            !note.frozenIntraSiblings
-          ) {
-            const offset = Number(note.leafIndex % BigInt(SUBTREE_LEAVES));
-            const { siblings, positions } = extractIntraSubtreeSiblings(
-              frLeaves,
-              SUBTREE_LEAVES,
-              offset,
-            );
-            note.frozenIntraSiblings = siblings.map((lvl) => lvl.map((x) => frToBeBytes(x)));
-            note.frozenIntraPositions = positions;
+        const pageEndLeaf = (seq + 1n) * BigInt(SUBTREE_LEAVES);
+        if (lane.nextMemoLeaf >= pageEndLeaf) {
+          if (seq >= lane.frontierSubSeq) {
+            lane.frontierSubSeq = seq + 1n;
+            lane.frontierLeaves = [];
           }
+        } else if (seq === memoSubSeq) {
+          // Hold sealed page leaves until MemoPages finish scanning all 256 leaves in this page
+          lane.frontierSubSeq = seq;
+          lane.frontierLeaves = leaves.map((b) => new Uint8Array(b));
         }
-
-        if (seq >= lane.frontierSubSeq) {
-          lane.frontierSubSeq = seq + 1n;
-          lane.frontierLeaves = [];
-        }
-      } else if (seq >= lane.frontierSubSeq) {
+      } else if (seq >= lane.frontierSubSeq && seq <= memoSubSeq) {
         lane.frontierSubSeq = seq;
         lane.frontierLeaves = leaves.map((b) => new Uint8Array(b));
       }
     }
 
-    for (const { pageSeq, raw } of nfPages) {
+    const sortedNfPages = [...nfPages].sort((a, b) =>
+      a.pageSeq < b.pageSeq ? -1 : a.pageSeq > b.pageSeq ? 1 : 0,
+    );
+    for (const { pageSeq, raw } of sortedNfPages) {
       const nfPage = decodeNullifierPage(raw);
       const pageBase = pageSeq * BigInt(NF_PER_PAGE);
       const startSlot =
@@ -513,13 +540,19 @@ export class CompactWalletStore {
     }
 
     const ckptRootsFr = ckpt.laneRoots.map((b) => frFromBeBytesStrict(b));
+    if (lane.finalizedSubroots.length < Number(frontierPage)) {
+      throw new Error('Missing finalized subroots');
+    }
     const finalizedFr = lane.finalizedSubroots
       .slice(0, Number(frontierPage))
       .map((b) => frFromBeBytesStrict(b));
-    const frontierFr =
-      frontierRem > 0
-        ? lane.frontierLeaves.slice(0, frontierRem).map((b) => frFromBeBytesStrict(b))
-        : undefined;
+    let frontierFr: bigint[] | undefined;
+    if (frontierRem > 0) {
+      if (lane.frontierSubSeq !== frontierPage || lane.frontierLeaves.length < frontierRem) {
+        throw new Error('Missing frontier SubtreePage leaves');
+      }
+      frontierFr = lane.frontierLeaves.slice(0, frontierRem).map((b) => frFromBeBytesStrict(b));
+    }
 
     const path = buildWitnessFromFrozenSubsiblings({
       laneId: note.laneId,

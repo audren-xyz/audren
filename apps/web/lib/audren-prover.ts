@@ -29,7 +29,7 @@ let cachedProverPromise: Promise<AudrenWasmProver> | null = null
  * verified ceremony proving key (`/wasm/audren_joinsplit.pk`, SHA-256 pinned in `@audren/sdk`).
  */
 export function getBrowserWasmProver(
-  wasmUrl = '/wasm/audren_circuits.wasm?v=1.1.0',
+  wasmUrl = '/wasm/audren_circuits.wasm?v=1.1.1',
   pkUrl = '/wasm/audren_joinsplit.pk?v=2b22603e',
 ): Promise<AudrenWasmProver> {
   if (!cachedProverPromise) {

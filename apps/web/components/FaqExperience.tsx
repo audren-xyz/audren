@@ -45,7 +45,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'custody',
     catLabel: 'Custody, MPC & audits',
     q: 'Do public vault balances prove solvency?',
-    a: 'No. Inspectable SOL and SPL vault accounts show held assets, not all private liabilities. The 17,861-R1CS Groth16 conservation/range constraints and net-receipt accounting enforce on-chain accounting rules under the circuit and implementation assumptions, but are not a substitute for independent review and a public Phase-2 MPC ceremony.',
+    a: 'No. Inspectable SOL and SPL vault accounts show held assets, not all private liabilities. The 17,861-R1CS Groth16 conservation/range constraints and net-receipt accounting enforce on-chain accounting rules under the circuit and implementation assumptions, but are not a substitute for an independent third-party audit and broader community Phase-2 ceremony contributions.',
   },
   {
     id: 'solscan',
@@ -165,7 +165,7 @@ export function FaqExperience() {
             </div>
             <div className={styles.heroMetaCell}>
               <span>Ceremony &amp; audit</span>
-              <strong>Apache-2.0 · Pre-audit &amp; MPC pending</strong>
+              <strong>Apache-2.0 · PPoT + BGM17 · Pre-audit</strong>
             </div>
           </div>
         </section>

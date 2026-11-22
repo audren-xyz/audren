@@ -111,7 +111,7 @@ def main() -> None:
     assert len(ix_tags) == 9, f"Expected 9 instructions, found {len(ix_tags)}"
     assert len(expected_anchor["instructions"]) == len(core["tags"])
 
-    # 3. Verify all 33 error codes 1..=33
+    # 3. Verify all 33 error codes 6000..=6032
     codama_errs = [(e["code"], e["name"].lower()) for e in prog["errors"]]
     core_errs = [(code, name.lower()) for name, code in core["errors"]]
     assert codama_errs == core_errs, "Codama errors do not match AudrenError"
@@ -121,22 +121,25 @@ def main() -> None:
     # 4. Verify every fixed-size account's field sum matches crates/audren-core/src/layout.rs
     expected_sizes = {
         "poolState": core["lengths"]["POOL_STATE_LEN"],
+        "laneRentVault": core["lengths"]["SENTINEL_LEN"],
         "laneTreeState": core["lengths"]["LANE_STATE_LEN"],
         "subtreePage": core["lengths"]["SUBTREE_PAGE_LEN"],
         "subtreeRootPage": core["lengths"]["SUBROOT_PAGE_LEN"],
         "memoPage": core["lengths"]["MEMO_PAGE_LEN"],
         "nullifierPage": core["lengths"]["NF_PAGE_LEN"],
         "rootCheckpoint": core["lengths"]["CKPT_LEN"],
-        "nullifierPda": 0,
     }
+    actual_account_names = {acc["name"] for acc in prog["accounts"]}
+    assert actual_account_names == set(expected_sizes.keys()), (
+        f"IDL accounts {actual_account_names} != expected {set(expected_sizes.keys())}"
+    )
     for acc in prog["accounts"]:
         name = acc["name"]
-        if name in expected_sizes:
-            computed = sum(fixed_type_size(f["type"], defined) for f in acc["data"]["fields"])
-            assert computed == expected_sizes[name], (
-                f"Account {name} field sum {computed} != layout.rs {expected_sizes[name]}"
-            )
-            assert acc["size"] == expected_sizes[name]
+        computed = sum(fixed_type_size(f["type"], defined) for f in acc["data"]["fields"])
+        assert computed == expected_sizes[name], (
+            f"Account {name} field sum {computed} != layout.rs {expected_sizes[name]}"
+        )
+        assert acc["size"] == expected_sizes[name]
 
     # 5. Verify all 13 PDA constant seeds match crates/audren-core/src/lib.rs
     pda_names = {p["name"] for p in prog["pdas"]}
@@ -227,11 +230,10 @@ def main() -> None:
         assert lib_name == expected_lib, (
             f"{rel_manifest} must declare explicit [lib] name = \"{expected_lib}\" (got {lib_name})"
         )
-        if rel_manifest != "tests/mock-hook/Cargo.toml":
-            cli_solana = gen.read_toml_value(manifest_path, "workspace.metadata.cli", "solana")
-            assert cli_solana == builder_ver, (
-                f"{rel_manifest} [workspace.metadata.cli] solana ({cli_solana}) must match build-sbf.py BUILDER_VERSION ({builder_ver})"
-            )
+        cli_solana = gen.read_toml_value(manifest_path, "workspace.metadata.cli", "solana")
+        assert cli_solana == builder_ver, (
+            f"{rel_manifest} [workspace.metadata.cli] solana ({cli_solana}) must match build-sbf.py BUILDER_VERSION ({builder_ver})"
+        )
 
     sh_agave = re.search(r'^AGAVE_VERSION="([^"]+)"', upgrade_sh, re.M).group(1)
     sh_tools = re.search(r'^TOOLS_VERSION="([^"]+)"', upgrade_sh, re.M).group(1)
@@ -251,6 +253,12 @@ def main() -> None:
     ci_rust_all = re.findall(r"toolchain:\s*'([^']+)'", ci_yml)
     assert ci_rust_all and all(t == rust_channel for t in ci_rust_all), (
         f".github/workflows/ci.yml Rust toolchains ({ci_rust_all}) != rust-toolchain.toml ({rust_channel})"
+    )
+    assert sh_img in ci_yml, (
+        f".github/workflows/ci.yml Docker verifiable-build image drifted from scripts/upgrade-program.sh ({sh_img})"
+    )
+    assert f"--arch {sbf_arch}" in ci_yml and f"--tools-version {tools_ver}" in ci_yml, (
+        f".github/workflows/ci.yml sBPF arch/tools pins drifted from scripts/build-sbf.py ({sbf_arch}, {tools_ver})"
     )
 
     # 11. Verify cross-layer JUPITER_CPI_EXCLUDED_DEXES parity across Rust, SDK, Relayer, and Web Worker
@@ -274,6 +282,7 @@ def main() -> None:
         assert f"'{seed_val}'" in sdk_consts, f"SDK constants.ts missing PDA seed '{seed_val}'"
     for len_key in (
         "POOL_STATE_LEN",
+        "SENTINEL_LEN",
         "LANE_STATE_LEN",
         "SUBTREE_PAGE_LEN",
         "SUBROOT_PAGE_LEN",
@@ -284,6 +293,15 @@ def main() -> None:
         m = re.search(rf"export const {len_key} = ([0-9_]+);", sdk_consts)
         assert m and int(m.group(1).replace("_", "")) == core["lengths"][len_key], (
             f"SDK constants.ts {len_key} drifted from crates/audren-core"
+        )
+    for tag_name, tag_val in core["tags"].items():
+        m = re.search(rf"export const {tag_name} = (0x[0-9a-fA-F]+|\d+);", sdk_consts)
+        assert m and int(m.group(1), 0) == tag_val, (
+            f"SDK constants.ts {tag_name} drifted from crates/audren-core ({tag_val})"
+        )
+    for magic_name, magic_val in core["magics"].items():
+        assert f"export const {magic_name} = '{magic_val}';" in sdk_consts, (
+            f"SDK constants.ts {magic_name} drifted from crates/audren-core ('{magic_val}')"
         )
     for err_name, err_code in core["errors"]:
         assert re.search(rf"\b{err_code}:\s*'{err_name}'", sdk_consts), (
@@ -297,6 +315,14 @@ def main() -> None:
         + "\n"
         + (ROOT / "crates" / "audren-core" / "src" / "lib.rs").read_text()
     )
+    for dom_name, dom_val in re.findall(r"pub const (DOMAIN_[A-Z0-9_]+):\s*u64\s*=\s*(\d+);", core_ix_src):
+        assert f"export const {dom_name} = {dom_val}n;" in sdk_consts, (
+            f"SDK constants.ts {dom_name} drifted from crates/audren-core ({dom_val}n)"
+        )
+    for ctx_name, ctx_val in re.findall(r'pub const ((?:ASSET_ID|CTX)_DOMAIN[A-Z0-9_]*):\s*&\[u8\]\s*=\s*b"([^"]+)";', core_ix_src):
+        assert f"export const {ctx_name} = '{ctx_val}';" in sdk_consts, (
+            f"SDK constants.ts {ctx_name} drifted from crates/audren-core ('{ctx_val}')"
+        )
 
     def eval_int_expr(expr: str) -> int:
         expr = expr.strip().replace("_", "")
@@ -345,17 +371,29 @@ def main() -> None:
     assert sdk_pk.read_bytes() == pk_bytes, "packages/sdk/wasm/audren_joinsplit.pk drifted from Rust ceremony PK"
     assert web_pk.read_bytes() == pk_bytes, "apps/web/public/wasm/audren_joinsplit.pk drifted from Rust ceremony PK"
     pk_sha256 = hashlib.sha256(pk_bytes).hexdigest()
-    vk_gen = (ROOT / "program" / "src" / "vk_generated.rs").read_text(encoding="utf-8")
+    vk_gen_path = ROOT / "program" / "src" / "vk_generated.rs"
+    vk_gen_bytes = vk_gen_path.read_bytes()
+    vk_gen = vk_gen_bytes.decode("utf-8")
+    vk_gen_sha256 = hashlib.sha256(vk_gen_bytes).hexdigest()
     assert pk_sha256 in vk_gen, "program/src/vk_generated.rs PK_COMPRESSED_SHA256 drifted from audren_joinsplit.pk"
     circuits_lib = (ROOT / "crates" / "audren-circuits" / "src" / "lib.rs").read_text(encoding="utf-8")
     assert pk_sha256 in circuits_lib, "crates/audren-circuits/src/lib.rs CANONICAL_PK_SHA256 drifted"
+    assert parse_const_val(circuits_lib, "CANONICAL_PK_BYTES", "rust") == len(pk_bytes), (
+        "crates/audren-circuits/src/lib.rs CANONICAL_PK_BYTES drifted from audren_joinsplit.pk"
+    )
     assert pk_sha256 in sdk_consts, "packages/sdk/src/constants.ts CANONICAL_PK_SHA256 drifted"
+    assert parse_const_val(sdk_consts, "CANONICAL_PK_BYTES", "ts") == len(pk_bytes), (
+        "packages/sdk/src/constants.ts CANONICAL_PK_BYTES drifted from audren_joinsplit.pk"
+    )
     transcript = json.loads((ROOT / "ceremony" / "transcript.json").read_text(encoding="utf-8"))
     assert transcript["final_artifacts"]["proving_key_sha256"] == pk_sha256, (
         "ceremony/transcript.json proving_key_sha256 drifted"
     )
     assert transcript["final_artifacts"]["proving_key_bytes"] == len(pk_bytes), (
         "ceremony/transcript.json proving_key_bytes drifted"
+    )
+    assert transcript["final_artifacts"]["vk_generated_rs_sha256"] == vk_gen_sha256, (
+        f"ceremony/transcript.json vk_generated_rs_sha256 drifted ({vk_gen_sha256})"
     )
 
     # 14. Verify apps/web/lib/protocol.ts & docs/DEPLOYMENTS.md parity
@@ -371,7 +409,14 @@ def main() -> None:
     assert parse_ts_const_str(web_proto, "githubRelease").endswith(f"/releases/tag/v{prog_version}"), (
         "apps/web/lib/protocol.ts githubRelease does not match releaseTag"
     )
-    assert re.fullmatch(r"[0-9a-f]{64}", parse_ts_const_str(web_proto, "elfSha256")), "Invalid elfSha256 in protocol.ts"
+    proto_elf_sha = parse_ts_const_str(web_proto, "elfSha256")
+    proto_exec_hash = parse_ts_const_str(web_proto, "executableHash")
+    proto_verified_commit = parse_ts_const_str(web_proto, "verifiedCommit")
+    proto_pk_sha = parse_ts_const_str(web_proto, "pkCompressedSha256")
+    assert re.fullmatch(r"[0-9a-f]{64}", proto_elf_sha), "Invalid elfSha256 in protocol.ts"
+    assert re.fullmatch(r"[0-9a-f]{64}", proto_exec_hash), "Invalid executableHash in protocol.ts"
+    assert re.fullmatch(r"[0-9a-f]{40}", proto_verified_commit), "Invalid verifiedCommit in protocol.ts"
+    assert proto_pk_sha == pk_sha256, "apps/web/lib/protocol.ts pkCompressedSha256 drifted"
 
     deployments_md = (ROOT / "docs" / "DEPLOYMENTS.md").read_text()
     for must_have in (
@@ -381,6 +426,10 @@ def main() -> None:
         CANONICAL_IDL_PDA,
         CANONICAL_SECURITY_PDA,
         CANONICAL_OTTER_VERIFY_PDA,
+        proto_elf_sha,
+        proto_exec_hash,
+        proto_verified_commit,
+        pk_sha256,
         sh_img,
         builder_ver,
         tools_ver,
@@ -418,7 +467,9 @@ def main() -> None:
             assert target.exists(), f"Broken relative markdown link in {md.relative_to(ROOT)}: {href}"
 
     stale_re = re.compile(r"programs/audren/|apps/audren-web/|apps/audren-relay/|quicknode-monorepo")
-    forbidden_re = re.compile(r"api\.mainnet-beta\.solana\.com|api\.devnet\.solana\.com|Mainnet-Beta|eslint-disable|\bTODO:|\bFIXME:")
+    forbidden_re = re.compile(
+        r"api\.mainnet-beta\.solana\.com|api\.devnet\.solana\.com|Mainnet-Beta|eslint-disable|\bTODO:|\bFIXME:|\bDEV_DETERMINISTIC_VK\b|\bsetup_joinsplit_dev\b"
+    )
     scan_exts = {".rs", ".ts", ".tsx", ".mjs", ".js", ".py", ".sh", ".md", ".json", ".jsonc", ".toml"}
     for path in ROOT.rglob("*"):
         if not path.is_file() or path.suffix not in scan_exts:

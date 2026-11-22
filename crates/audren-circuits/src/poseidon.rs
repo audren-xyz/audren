@@ -34,14 +34,6 @@ pub fn fr_from_be_bytes_strict(bytes: &[u8; 32]) -> Option<Fr> {
     Some(Fr::from_be_bytes_mod_order(bytes))
 }
 
-/// Map arbitrary 32 bytes (e.g. a SHA-256 `ctx_hash` or Solana mint digest) into `Fr`
-/// by masking the top 3 bits to guarantee `< r`, matching on-chain `mask_to_fr_be` bit-for-bit.
-#[inline]
-pub fn bytes32_to_fr_masked(bytes: &[u8; 32]) -> Fr {
-    let masked = audren_core::mask_to_fr_be(*bytes);
-    Fr::from_be_bytes_mod_order(&masked)
-}
-
 /// Native Poseidon hash over `inputs` (1..=12 inputs), matching `sol_poseidon` bit-for-bit.
 pub fn poseidon_hash(inputs: &[Fr]) -> Fr {
     assert!(
@@ -102,11 +94,10 @@ pub fn poseidon_hash_var(
 
     let apply_mds = |st: &[FpVar<Fr>]| -> Vec<FpVar<Fr>> {
         let mut next = Vec::with_capacity(width);
-        for row in 0..width {
+        for mds_row in params.mds.iter().take(width) {
             let mut acc = FpVar::Constant(Fr::from(0u64));
-            for col in 0..width {
-                let coeff = params.mds[row][col];
-                acc += &st[col] * coeff;
+            for (st_col, &coeff) in st.iter().zip(mds_row.iter()).take(width) {
+                acc += st_col * coeff;
             }
             next.push(acc);
         }
@@ -114,9 +105,9 @@ pub fn poseidon_hash_var(
     };
 
     for round in 0..all_rounds {
-        for i in 0..width {
+        for (i, slot) in state.iter_mut().enumerate().take(width) {
             let c = params.ark[round * width + i];
-            state[i] += FpVar::Constant(c);
+            *slot += FpVar::Constant(c);
         }
 
         if round < half_rounds || round >= half_rounds + params.partial_rounds {

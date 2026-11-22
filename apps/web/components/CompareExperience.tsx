@@ -183,7 +183,7 @@ const PEER_PROTOCOLS = [
       'Monero makes ordinary payments private by default using ring signatures, stealth recipients, and confidential amounts.',
       'Zcash shielded proofs prove pool-tree membership without publishing a small ring; modern Halo 2 proofs need no trusted setup.',
       'Transparent legs and pool transitions remain important boundaries.',
-      'Neither a larger Audren ring nor Solana compatibility establishes stronger privacy or assurance than these systems.',
+      'Neither a larger Audren global pool nor Solana compatibility establishes stronger privacy or assurance than these systems.',
     ],
     sources: [
       { label: 'Monero specs', href: 'https://docs.getmonero.org/technical-specs/' },
@@ -441,10 +441,11 @@ export function CompareExperience() {
             </div>
             <div className={styles.ledgerCell}>
               <span className={styles.cellIndex}>ASSURANCE</span>
-              <h3>MPC ceremony &amp; audit</h3>
+              <h3>Ceremony &amp; audit</h3>
               <p className={styles.cellLead}>
-                Audren freezes one minimal 17,861-R1CS circuit; a public Phase-2 MPC ceremony
-                and independent program + circuit audit are planned before production custody.
+                Audren freezes one minimal 17,861-R1CS circuit anchored to Perpetual Powers of Tau
+                (71+ contributors) and Audren’s verifiable BGM17 Phase-2 ceremony; additional
+                community contributions remain open and an independent audit is pending.
               </p>
             </div>
           </div>

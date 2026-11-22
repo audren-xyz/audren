@@ -65,6 +65,8 @@ interface TitanQuoteResponseJson extends Record<string, unknown> {
 const COMPUTE_BUDGET_PROGRAM = 'ComputeBudget111111111111111111111111111111'
 const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
 const SYSTEM_PROGRAM = '11111111111111111111111111111111'
+const CLASSIC_TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
 
 function normalizeTitanInstruction(ix: TitanInstructionJson): EncodedRouterInstruction | null {
   const programId = ix.programId ?? ix.p
@@ -224,12 +226,14 @@ export const titanAdapter: AggregatorAdapter = {
       .map(normalizeTitanInstruction)
       .filter((x): x is EncodedRouterInstruction => x !== null)
 
-    // Pick the primary router swap instruction (exclude ComputeBudget / ATA / System wrappers)
+    // Pick the primary router swap instruction (exclude ComputeBudget / ATA / System / Token wrappers)
     const swapIx = ixs.find(
       (ix) =>
         ix.programId !== COMPUTE_BUDGET_PROGRAM &&
         ix.programId !== ATA_PROGRAM &&
         ix.programId !== SYSTEM_PROGRAM &&
+        ix.programId !== CLASSIC_TOKEN_PROGRAM &&
+        ix.programId !== TOKEN_2022_PROGRAM &&
         ix.accounts.some((a) => a.pubkey === req.escrowPubkey),
     )
     if (!swapIx) {

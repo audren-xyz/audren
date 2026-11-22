@@ -116,10 +116,10 @@ impl JoinSplit4AryCircuit {
 
         let mut s_shared = [[Fr::from(0u64); 3]; TOTAL_DEPTH_4ARY];
         let mut pos_shared = [0u8; TOTAL_DEPTH_4ARY];
-        for h in 0..TOTAL_DEPTH_4ARY {
-            pos_shared[h] = ((h * 3 + 1) % 4) as u8;
-            for k in 0..3 {
-                s_shared[h][k] = poseidon2(Fr::from((h as u64 + 1) * 100 + k as u64), asset_id);
+        for (h, (row, pos)) in s_shared.iter_mut().zip(pos_shared.iter_mut()).enumerate() {
+            *pos = ((h * 3 + 1) % 4) as u8;
+            for (k, slot) in row.iter_mut().enumerate() {
+                *slot = poseidon2(Fr::from((h as u64 + 1) * 100 + k as u64), asset_id);
             }
         }
         let mut path0 = MerklePath4Ary {

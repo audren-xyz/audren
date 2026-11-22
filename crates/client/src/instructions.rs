@@ -19,11 +19,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_address::Address;
 
-use crate::pda::{
-    derive_checkpoint_pda, derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda,
-    derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda,
-    derive_sol_vault_pda, derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda,
-    derive_vault_auth_pda,
+use crate::{
+    pda::{
+        derive_checkpoint_pda, derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda,
+        derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda,
+        derive_sol_vault_pda, derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda,
+        derive_vault_auth_pda,
+    },
+    router::prepare_escrow_accounts_for_audren,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +133,10 @@ pub fn compute_router_accounts_hash(router_accounts: &[AudrenAccountMeta]) -> [u
 }
 
 /// Exact `ExecViaEscrow` `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
+///
+/// Applies Solana's transaction-wide writability promotion across `escrow_pda`, `sol_vault`,
+/// `relayer_fee_recipient`, and duplicate writable `router_accounts` before hashing
+/// `router_accounts` so on-chain `hash_router_accounts_arena` matches identically.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_exec_ctx_hash(
     program_id: &Address,
@@ -155,7 +162,19 @@ pub fn compute_exec_ctx_hash(
     router_ix_data: &[u8],
     change_memos: &[u8],
 ) -> Fr {
-    let router_accs_hash = compute_router_accounts_hash(router_accounts);
+    let (escrow_pda, _) = derive_escrow_pda(program_id, pool_id, escrow_shard);
+    let mut extra_writable = Vec::with_capacity(2);
+    if in_kind == 0 || out_kind == 0 {
+        extra_writable.push(derive_sol_vault_pda(program_id, pool_id).0);
+    }
+    if relayer_fee_amount > 0 {
+        if let Some(fee_r) = relayer_fee_recipient {
+            extra_writable.push(*fee_r);
+        }
+    }
+    let normalized_router_accs =
+        prepare_escrow_accounts_for_audren(router_accounts, &escrow_pda, &extra_writable);
+    let router_accs_hash = compute_router_accounts_hash(&normalized_router_accs);
     let mut h = Sha256::new();
     h.update(CTX_DOMAIN_EXEC_VIA_ESCROW);
     h.update(program_id.as_ref());
@@ -192,7 +211,7 @@ pub fn compute_exec_ctx_hash(
 }
 
 // =============================================================================
-// 9 Canonical V2 Instruction Builders (0x00..=0x08)
+// 9 Canonical Audren Instruction Builders (0x00..=0x08)
 // =============================================================================
 
 pub fn build_init_pool(
@@ -704,6 +723,7 @@ pub fn build_exec_via_escrow(
         AudrenAccountMeta::writable(derive_nullifier_pda(&program_id, pool_id, nf1).0, false)
     };
 
+    let (escrow_pda, _) = derive_escrow_pda(&program_id, pool_id, escrow_shard);
     let mut accounts = vec![
         AudrenAccountMeta::writable(payer, true),
         AudrenAccountMeta::readonly(derive_pool_pda(&program_id, pool_id).0, false),
@@ -734,7 +754,7 @@ pub fn build_exec_via_escrow(
             derive_nf_page_pda(&program_id, pool_id, out_lane_id, out_nf_seq).0,
             false,
         ),
-        AudrenAccountMeta::writable(derive_escrow_pda(&program_id, pool_id, escrow_shard).0, false),
+        AudrenAccountMeta::writable(escrow_pda, false),
         AudrenAccountMeta::readonly(router_prog, false),
         AudrenAccountMeta::readonly(sys_id(), false),
     ];
@@ -757,9 +777,7 @@ pub fn build_exec_via_escrow(
     }
     if relayer_fee_amount > 0 && !fee_on_output {
         accounts.push(AudrenAccountMeta::writable(
-            relayer_fee_recipient
-                .clone()
-                .expect("relayer_fee_recipient required"),
+            relayer_fee_recipient.expect("relayer_fee_recipient required"),
             false,
         ));
     }
@@ -806,7 +824,14 @@ pub fn build_exec_via_escrow(
         ));
     }
 
-    accounts.extend(router_accounts);
+    let preceding_writable: Vec<Address> = accounts
+        .iter()
+        .filter(|a| a.is_writable)
+        .map(|a| Address::new_from_array(a.pubkey))
+        .collect();
+    let normalized_router_accs =
+        prepare_escrow_accounts_for_audren(&router_accounts, &escrow_pda, &preceding_writable);
+    accounts.extend(normalized_router_accs);
     AudrenInstruction {
         program_id: program_id.to_bytes(),
         accounts,
