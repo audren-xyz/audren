@@ -10,7 +10,7 @@ export const AUDREN = {
   version: '1.1.0',
   protocolVersion: 2,
   releaseTag: 'v1.1.0',
-  verifiedCommit: '6bf007ea99eb72de5f19504ddf9d45084156cecc',
+  verifiedCommit: '62b5bdb44ce4fdacdac588f0d194802a7e625155',
   vkProvenance:
     'Perpetual Powers of Tau (71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand #34194203 · Solana slot 472705896 · pre-audit)',
   circuitConstraints: 17_861,
@@ -43,19 +43,19 @@ export const AUDREN = {
   mainnetRelayer: 'H2JcTKgrP5Hqj7v2hTuz5u6Tt1VB8yrznotT62hhp3vY',
   devnetRelayer: 'G3tGgntjaDAcamZX2Jcgn616PrjArKYdGXv5C13MzMP',
   mainnet: {
-    slot: '472,698,949',
-    deployTx: '3cwstWFBwDnCev8to6kcifdUpfJno1HW5qWLs3RnuYdHum6NreWPf3ePV4gD6eYypSMufcF6zUFYgw9UXwC5jE5S',
+    slot: '472,711,630',
+    deployTx: 'nRkkTCQ3uNJT9amtqNjEbuifJr3RjjtSNjmEL4FQHAug8zHJcka3PPpaCw9ZPJEqHWoEBkFgMb7iUdZV54zy8DW',
     initPoolTx: '28pu7RhUpAgb93tBpjp8yRnhBKrGgDNKWJnRY2hXaF2n44fuetUvUtvfaoQm7c2iqxtf5i6kFpWCkkaxexZmEnWK',
-    depositTx: '29dK2ka1oEyrs9xHbLa3GVQk6hAvhF1f38MX8CbfTpBdoQr2unVc9xTtk5vaKPCmwyjrCDSRnivAUtnVEFuLsnYg',
-    transferTx: 'xrVdnaXV74skysxBHrnmQzwFq6DuZdtruuwFifqpCH3W7oj9qUZ34TXAVaFwtkpT4fpYekJYWwMt5WxmmVRULYX',
+    depositTx: '3wig4kVwvqv9JLPVFSPyg3x2fXK9c1SxhHDGt93qGPrQp9SoskB2jDvKJqCwyXJ9squiTm25ieBXKgCL92TJXmGv',
+    transferTx: '49zM3ztG8GGTYEPuob8FwMppD5j3KM1tutdnDdiZ4BUqeEvRidAzKY86HLFmQKyKh5hEgiaLbxn5M6aX7ZngYSqv',
     swapTx: '2SzCHoaUiJNA6HgSM6FidVt1r5gM8PSMvMddBkT7xdfXtbwN3TqeXzjbW4JkL1RmcoZ41vopDXnPtDqzWWJ7DoNv',
-    withdrawTx: '24VK3QHFiY9MBuhFMNJQ4mEEGKwYmXexFD5i7ZMfdn2aDbCnvp1SfurVkJjw2YcdtscxysFCLzdmRWmTEfBEHWe8',
+    withdrawTx: '4f7sceCnFQbRe1axhjBfnBSRmPxGErqLgLSfsipZDhujmnR8489TTgZ97eK4aUs43Gg1GeAQEGxdfgpBpyPo7UKK',
   },
   devnet: {
-    slot: '525,212,038',
-    deployTx: '5uKonrmFD9k91o2JE6LSJUC26eZ2EitfAPQCWno873k9TCHNXF66MBqkP4RurRSQCBTkkQrALPLTkMNqAHGRnk7y',
-    transferTx: '41qkgrLnS3X1A8bhpnzvgFfKVEsCZavrUZCct34ncVbepRRnSEbMMJRZYCLD71y2n1quePhvCJ5pCMjp6BBWYWmT',
-    withdrawTx: '1zBjkjHS4ffoJcioTvpxTQQPJ29ViN4sdW5tNaHeiiNefSvCX4LgwtSacxc374rbobuzi7z7MXY81Bd9yboWkKy',
+    slot: '525,223,275',
+    deployTx: '2TxWyayJxhpHo3ytZ3cnri86Uf8QpRaE2giApju9d7MfGMdVWk7opq1ymeV4Eu21LnCpqHMgFCpSfrfNtZZLXqgL',
+    transferTx: '3VMGXCx28Ap6SYtsC5HtXRSmcNqNgBXLRRLKoRvAFNptYT9CiJmTdC6Nd87kurD9UZURyXmi878yyekCpX2MYLxi',
+    withdrawTx: '66iDmmakWu9iuPGhXWaJZs8c53bc6Bm7gALhbcdZfGPuwxcxSmsGYta7zXhchpYcQhwqAHhx3trycPcUfQvXTf4m',
   },
 } as const
 

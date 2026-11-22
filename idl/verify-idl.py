@@ -400,6 +400,7 @@ def main() -> None:
         ".swiftpm",
         ".gradle",
         "build",
+        ".wrangler",
     }
     md_files = sorted(
         p for p in ROOT.rglob("*.md") if not any(part in skip_dirs for part in p.parts)
