@@ -2911,8 +2911,8 @@ pre,
 }
 
 .btn-primary {
-  background: var(--forest);
-  border-color: var(--forest);
+  background: var(--vault);
+  border-color: var(--vault);
   color: var(--paper);
 }
 
