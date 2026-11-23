@@ -2,7 +2,7 @@
 
 Native Swift Package for **Audren** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting **iOS 15+** and **macOS 13+**.
 
-Backed by the canonical Rust core (`crates/client` + `crates/audren-circuits` via `crates/audren-ffi` + UniFFI) so mobile apps run native local BN254 Groth16 proving (`17,861` R1CS, 4-ary Depth-20 global MASP, 16-lane-capable architecture) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
+Backed by the canonical Rust core (`crates/client` + `crates/audren-circuits` via `crates/audren-ffi` + UniFFI) with a zero-panic `Result`/`throws` API across all `46` exports (typed `AudrenFfiError`, Bech32m low-order X25519 `view_pk` rejection, and `extraWritablePubkeys` on `FfiExecCtxHashParams` / `FfiExecViaEscrowParams`) so mobile apps run native local BN254 Groth16 proving (`17,861` R1CS, 4-ary Depth-20 global MASP, 16-lane-capable architecture) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
 
 ## Core Building Blocks
 

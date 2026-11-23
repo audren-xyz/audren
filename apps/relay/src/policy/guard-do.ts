@@ -84,15 +84,29 @@ const CHECKPOINT_MAX_PER_IP_PER_MIN = 30
 const CHECKPOINT_LOCK_TTL_MS = 15_000
 const CHECKPOINT_RECENT_PUBLISH_GRACE_MS = 10_000
 
+export type IpHashDomain = 'relay' | 'ckpt'
+
+const IP_HASH_DOMAIN_SEP: Record<IpHashDomain, string> = {
+  relay: 'audren/relay/ip-salt',
+  ckpt: 'audren/ckpt/ip-salt',
+}
+
 function utcDayKey(nowMs: number): string {
   return new Date(nowMs).toISOString().slice(0, 10)
+}
+
+function nextUtcMidnightMs(nowMs: number): number {
+  const d = new Date(nowMs)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 1)
 }
 
 /**
  * Strongly consistent SQLite Durable Object protecting `relay.audren.xyz`
  * against rent-drain / ping-pong / simulation-spam abuse:
- *   - Ephemeral per-day random 32-byte secret IP-hash salt persisted strictly inside DO storage
- *     (never derived from any public key or env constant; rotated & purged daily at UTC midnight)
+ *   - Ephemeral per-day random 32-byte secret IP-hash salt held STRICTLY in DO memory
+ *     (never written to SQLite disk; auto-purged on UTC day rollover and via UTC midnight `alarm()`)
+ *   - Domain-separated IP hashing between relay submissions (`audren/relay/ip-salt`) and
+ *     checkpoint requests (`audren/ckpt/ip-salt`)
  *   - Zero IP-hash linkage on `inflight_nullifiers` (stores only `(nullifier, expires_at)`)
  *   - Global daily sponsored SOL budget cap per cluster
  *   - Per-IP sliding-window hourly & daily sponsored tx limits
@@ -102,16 +116,16 @@ function utcDayKey(nowMs: number): string {
  */
 export class RelayGuard extends DurableObject<Env> {
   private readonly sql: SqlStorage
+  /** Ephemeral UTC-day-keyed 32-byte random secret salts kept strictly in memory (never on disk). */
+  private readonly dailySalts = new Map<string, string>()
+  private scheduledAlarmAt = 0
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     this.sql = ctx.storage.sql
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`
-        CREATE TABLE IF NOT EXISTS daily_ip_salts (
-          day TEXT PRIMARY KEY,
-          salt_hex TEXT NOT NULL
-        );
+        DROP TABLE IF EXISTS daily_ip_salts;
 
         CREATE TABLE IF NOT EXISTS ip_events (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,45 +197,73 @@ export class RelayGuard extends DurableObject<Env> {
           );
         `)
       }
+
+      await this.scheduleNextUtcMidnightAlarm(Date.now())
     })
   }
 
+  private async scheduleNextUtcMidnightAlarm(now: number): Promise<void> {
+    const target = nextUtcMidnightMs(now)
+    if (this.scheduledAlarmAt === target) return
+    const storage = this.ctx?.storage as { setAlarm?: (scheduledTime: number | Date) => Promise<void> } | undefined
+    if (typeof storage?.setAlarm === 'function') {
+      this.scheduledAlarmAt = target
+      await storage.setAlarm(target).catch(() => {
+        this.scheduledAlarmAt = 0
+      })
+    }
+  }
+
+  private purgeStaleSalts(day: string): void {
+    for (const k of this.dailySalts.keys()) {
+      if (k < day) this.dailySalts.delete(k)
+    }
+  }
+
   /**
-   * Load or generate the current UTC day's random 32-byte secret salt inside DO storage,
-   * purging salts from prior UTC days so historical IP hashes cannot be inverted.
+   * UTC midnight Durable Object alarm: purges prior-day in-memory IP salts, prunes expired
+   * rate-limit rows, and reschedules itself for the next UTC midnight.
+   */
+  async alarm(nowMs: number = Date.now()): Promise<void> {
+    const day = utcDayKey(nowMs)
+    this.purgeStaleSalts(day)
+    this.prune(nowMs)
+    this.scheduledAlarmAt = 0
+    await this.scheduleNextUtcMidnightAlarm(nowMs)
+  }
+
+  /**
+   * Load or generate the current UTC day's random 32-byte secret salt strictly in DO memory
+   * (zero SQLite persistence), purging salts from prior UTC days so historical IP hashes
+   * cannot be inverted even from a DO storage snapshot.
    */
   private getOrCreateDailySaltHex(now: number): string {
     const day = utcDayKey(now)
-    this.sql.exec('DELETE FROM daily_ip_salts WHERE day < ?', day)
-    const rows = this.sql
-      .exec('SELECT salt_hex FROM daily_ip_salts WHERE day = ?', day)
-      .toArray()
-    const existing = rows[0]?.salt_hex
-    if (typeof existing === 'string' && existing.length === 64) {
+    this.purgeStaleSalts(day)
+    const existing = this.dailySalts.get(day)
+    if (existing && existing.length === 64) {
       return existing
     }
     const randomSalt = new Uint8Array(32)
     crypto.getRandomValues(randomSalt)
     const saltHex = toHex(randomSalt)
-    this.sql.exec(
-      'INSERT OR IGNORE INTO daily_ip_salts (day, salt_hex) VALUES (?, ?)',
-      day,
-      saltHex,
-    )
-    const persisted = this.sql
-      .exec('SELECT salt_hex FROM daily_ip_salts WHERE day = ?', day)
-      .one().salt_hex
-    return String(persisted)
+    this.dailySalts.set(day, saltHex)
+    void this.scheduleNextUtcMidnightAlarm(now)
+    return saltHex
   }
 
-  private computeDailyIpHash(clientIp: string, now: number): string {
+  private computeDailyIpHash(
+    clientIp: string,
+    now: number,
+    domain: IpHashDomain = 'relay',
+  ): string {
     const saltHex = this.getOrCreateDailySaltHex(now)
-    return toHex(sha256(utf8(`${saltHex}|${clientIp}`))).slice(0, 32)
+    return toHex(sha256(utf8(`${IP_HASH_DOMAIN_SEP[domain]}|${saltHex}|${clientIp}`))).slice(0, 32)
   }
 
   private prune(now: number): void {
     const day = utcDayKey(now)
-    this.sql.exec('DELETE FROM daily_ip_salts WHERE day < ?', day)
+    this.purgeStaleSalts(day)
     this.sql.exec('DELETE FROM inflight_nullifiers WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM pending_reservations WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM ip_events WHERE created_at < ?', now - DAY_MS - HOUR_MS)
@@ -229,11 +271,15 @@ export class RelayGuard extends DurableObject<Env> {
   }
 
   /**
-   * Hash a client IP inside `RelayGuard` using the current UTC day's ephemeral 32-byte random salt.
-   * The secret salt never leaves Durable Object storage.
+   * Hash a client IP inside `RelayGuard` using the current UTC day's ephemeral in-memory
+   * 32-byte random salt and domain separator (`relay` vs `ckpt`).
    */
-  async hashClientIp(clientIp: string, nowMs: number = Date.now()): Promise<string> {
-    return this.computeDailyIpHash(clientIp || 'unknown', nowMs)
+  async hashClientIp(
+    clientIp: string,
+    nowMs: number = Date.now(),
+    domain: IpHashDomain = 'relay',
+  ): Promise<string> {
+    return this.computeDailyIpHash(clientIp || 'unknown', nowMs, domain)
   }
 
   /**
@@ -244,7 +290,7 @@ export class RelayGuard extends DurableObject<Env> {
   async begin(req: GuardBeginRequest): Promise<GuardDecision> {
     const now = Date.now()
     this.prune(now)
-    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now)
+    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now, 'relay')
 
     const seenInReq = new Set<string>()
     for (const nf of req.nullifiers) {
@@ -572,7 +618,7 @@ export class RelayGuard extends DurableObject<Env> {
     maxPerMinute?: number
   }): Promise<GuardDecision> {
     const now = Date.now()
-    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now)
+    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now, 'ckpt')
     const limit = req.maxPerMinute ?? CHECKPOINT_MAX_PER_IP_PER_MIN
     this.sql.exec('DELETE FROM checkpoint_ip_hits WHERE created_at < ?', now - CHECKPOINT_IP_WINDOW_MS)
     const cnt = Number(

@@ -17,7 +17,7 @@ fn pool0_pda_and_keys_smoke() {
     assert_eq!(vault_auth.to_string(), "3aMtBvVMatfBvoBWQaTxCPwQ2SWyW5ejceVgLFTtk2WF");
     assert_eq!(va_bump, 255);
     let keys = AudrenKeys::from_seed(&[0xAB; 32]);
-    let encoded = keys.address().encode();
+    let encoded = keys.address().encode().unwrap();
     assert!(encoded.starts_with("aud1"));
     assert_eq!(encoded.len(), 114);
     assert_eq!(AudrenAddress::decode(&encoded).unwrap(), keys.address());

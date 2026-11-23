@@ -9,7 +9,7 @@ export const AUDREN_CODAMA_IDL = {
     "kind": "programNode",
     "name": "audren",
     "publicKey": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "origin": "shank",
     "docs": [
       "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16, 4-ary Depth-20 MASP) and Protocol-Agnostic DeFi Execution Program on Solana."
@@ -2662,7 +2662,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "updatePool",
         "docs": [
-          "Update pool governance parameters or execute two-step authority transfer / renounce (renounce requires !paused)."
+          "Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."
         ],
         "discriminators": [
           {
@@ -2747,7 +2747,7 @@ export const AUDREN_CODAMA_IDL = {
               "kind": "bytesTypeNode"
             },
             "docs": [
-              "UpdateParams: ckpt_interval(8)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."
+              "UpdateParams: ckpt_interval(8, immutable \u2014 must equal PoolState.ckpt_interval)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."
             ]
           }
         ]
@@ -3350,9 +3350,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "checkpointTooSoon",
         "code": 6007,
-        "message": "Checkpoint epoch is not strictly greater than the existing slot epoch.",
+        "message": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots.",
         "docs": [
-          "Checkpoint epoch is not strictly greater than the existing slot epoch."
+          "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots."
         ]
       },
       {
@@ -3589,7 +3589,7 @@ export const AUDREN_ANCHOR_IDL = {
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "spec": "0.1.0",
     "description": "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
@@ -4348,7 +4348,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "update_pool",
       "docs": [
-        "Update pool governance parameters or execute two-step authority transfer / renounce (renounce requires !paused)."
+        "Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."
       ],
       "discriminator": [
         8
@@ -5107,7 +5107,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6007,
       "name": "CheckpointTooSoon",
-      "msg": "Checkpoint epoch is not strictly greater than the existing slot epoch."
+      "msg": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots."
     },
     {
       "code": 6008,

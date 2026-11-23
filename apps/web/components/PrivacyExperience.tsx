@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import styles from '@/components/SubpageShell.module.css'
+import { DataBoundaryMap } from '@/components/motion/DataBoundaryMap'
 
 export function PrivacyExperience() {
   return (
@@ -45,113 +46,7 @@ export function PrivacyExperience() {
               </span>
               <span className={styles.stageMeta}>Spending keys never leave your device</span>
             </div>
-            <svg
-              className={styles.stageSvg}
-              viewBox="0 0 920 212"
-              role="img"
-              aria-label="Three privacy boundaries: Your Device holds spend keys, view keys, session keypairs, local note decryption, and proof generation; RPC, Web Host and Optional Relay sees IP/connection metadata, RPC lookups, quotes, and anti-abuse hashes without spend keys; Solana Public Ledger records deposits, withdrawals, ExecViaEscrow DeFi CPI legs, session wallet activity, fee payers, and blinded transfer commitments"
-            >
-              {/* Connecting dashed tracks + animated data pulses */}
-              <line x1="286" y1="106" x2="322" y2="106" stroke="#c8d4c8" strokeWidth="1.5" />
-              <line x1="286" y1="106" x2="322" y2="106" stroke="#184433" strokeWidth="1.6" className={styles.flowDash} />
-              <polygon points="326,106 318,101 318,111" fill="#184433" />
-              <circle r="3.2" fill="#184433" opacity="0">
-                <animateMotion dur="2.4s" repeatCount="indefinite" path="M 286,106 L 322,106" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1" />
-                <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.82;1" dur="2.4s" repeatCount="indefinite" />
-              </circle>
-
-              <line x1="600" y1="106" x2="636" y2="106" stroke="#dfd3c0" strokeWidth="1.5" />
-              <line x1="600" y1="106" x2="636" y2="106" stroke="#6e4928" strokeWidth="1.6" className={styles.flowDash} />
-              <polygon points="640,106 632,101 632,111" fill="#6e4928" />
-              <circle r="3.2" fill="#6e4928" opacity="0">
-                <animateMotion dur="2.4s" begin="1.1s" repeatCount="indefinite" path="M 600,106 L 636,106" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1" />
-                <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.82;1" dur="2.4s" begin="1.1s" repeatCount="indefinite" />
-              </circle>
-
-              {/* Your Device */}
-              <rect x="12" y="16" width="274" height="180" rx="6" fill="#184433" />
-              <text x="28" y="40" fill="#cfe0d4" fontSize="11.5" fontWeight="500" fontFamily="var(--font-sans), sans-serif">
-                Stays on your device
-              </text>
-              <text x="28" y="64" fill="#faf8f3" fontSize="16" fontWeight="500" fontFamily="var(--font-serif), Georgia, serif">
-                Local keys &amp; prover
-              </text>
-              <circle cx="31" cy="87.5" r="2" fill="#9bc0a8" />
-              <text x="41" y="91" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Spend, nk &amp; view key derivation
-              </text>
-              <circle cx="31" cy="108.5" r="2" fill="#9bc0a8" />
-              <text x="41" y="112" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                ChaCha20-Poly1305 memo scan
-              </text>
-              <circle cx="31" cy="129.5" r="2" fill="#9bc0a8" />
-              <text x="41" y="133" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                BN254 Groth16 Worker proving
-              </text>
-              <circle cx="31" cy="150.5" r="2" fill="#9bc0a8" />
-              <text x="41" y="154" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                CompactWalletStore &amp; receipts
-              </text>
-              <text x="28" y="180" fill="#cfe0d4" fontSize="10.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Never sent in ordinary RPC or relay calls
-              </text>
-
-              {/* Web Host / RPC / Relay */}
-              <rect x="326" y="16" width="274" height="180" rx="6" fill="#faf8f3" />
-              <text x="342" y="40" fill="#696b61" fontSize="11.5" fontWeight="500" fontFamily="var(--font-sans), sans-serif">
-                Infrastructure operators
-              </text>
-              <text x="342" y="64" fill="#161614" fontSize="16" fontWeight="500" fontFamily="var(--font-serif), Georgia, serif">
-                Web host, RPC &amp; relay
-              </text>
-              <circle cx="345" cy="87.5" r="2" fill="#696b61" />
-              <text x="355" y="91" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Connection &amp; IP request metadata
-              </text>
-              <circle cx="345" cy="108.5" r="2" fill="#696b61" />
-              <text x="355" y="112" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Account lookups &amp; swap quotes
-              </text>
-              <circle cx="345" cy="129.5" r="2" fill="#696b61" />
-              <text x="355" y="133" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Ephemeral daily salted rate limits
-              </text>
-              <circle cx="345" cy="150.5" r="2" fill="#696b61" />
-              <text x="355" y="154" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Zero user spend or view keys
-              </text>
-              <text x="342" y="180" fill="#696b61" fontSize="10.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Switchable RPC &amp; pluggable relay URL
-              </text>
-
-              {/* Solana Ledger */}
-              <rect x="640" y="16" width="268" height="180" rx="6" fill="#f0ebe0" />
-              <text x="656" y="40" fill="#6e4928" fontSize="11.5" fontWeight="500" fontFamily="var(--font-sans), sans-serif">
-                Public Solana chain
-              </text>
-              <text x="656" y="64" fill="#161614" fontSize="16" fontWeight="500" fontFamily="var(--font-serif), Georgia, serif">
-                On-chain visibility
-              </text>
-              <circle cx="659" cy="87.5" r="2" fill="#6e4928" />
-              <text x="669" y="91" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Transact: hidden mint, amt &amp; key
-              </text>
-              <circle cx="659" cy="108.5" r="2" fill="#6e4928" />
-              <text x="669" y="112" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Deposit / Exit: public amounts
-              </text>
-              <circle cx="659" cy="129.5" r="2" fill="#6e4928" />
-              <text x="669" y="133" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                DeFi CPI &amp; Bᵢ: public protocol legs
-              </text>
-              <circle cx="659" cy="150.5" r="2" fill="#6e4928" />
-              <text x="669" y="154" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Checkpoint, lane, fee payer &amp; timing
-              </text>
-              <text x="656" y="180" fill="#6e4928" fontSize="10.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Permanent public blockchain record
-              </text>
-            </svg>
+            <DataBoundaryMap />
           </div>
         </section>
 

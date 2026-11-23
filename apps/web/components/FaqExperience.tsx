@@ -207,6 +207,7 @@ export function FaqExperience() {
                     type="button"
                     className={styles.faqQ}
                     aria-expanded={isOpen}
+                    aria-controls={`faq-a-${item.id}`}
                     onClick={() => toggle(item.id)}
                   >
                     <span>
@@ -218,12 +219,21 @@ export function FaqExperience() {
                       style={{
                         flexShrink: 0,
                         transform: isOpen ? 'rotate(180deg)' : 'none',
-                        transition: 'transform 160ms ease',
+                        transition: 'transform 280ms cubic-bezier(0.22, 1, 0.36, 1)',
                         color: '#696b61',
                       }}
                     />
                   </button>
-                  {isOpen && <div className={styles.faqA}>{item.a}</div>}
+                  <div
+                    id={`faq-a-${item.id}`}
+                    className={styles.faqPanel}
+                    data-open={isOpen ? 'true' : 'false'}
+                    inert={!isOpen}
+                  >
+                    <div className={styles.faqPanelInner}>
+                      <div className={styles.faqA}>{item.a}</div>
+                    </div>
+                  </div>
                 </div>
               )
             })}

@@ -2,7 +2,7 @@
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "spec": "0.1.0",
     "description": "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
@@ -761,7 +761,7 @@
     {
       "name": "update_pool",
       "docs": [
-        "Update pool governance parameters or execute two-step authority transfer / renounce (renounce requires !paused)."
+        "Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."
       ],
       "discriminator": [
         8
@@ -1520,7 +1520,7 @@
     {
       "code": 6007,
       "name": "CheckpointTooSoon",
-      "msg": "Checkpoint epoch is not strictly greater than the existing slot epoch."
+      "msg": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots."
     },
     {
       "code": 6008,

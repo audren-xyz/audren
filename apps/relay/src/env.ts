@@ -47,6 +47,8 @@ export interface Env {
   DEFAULT_AGGREGATOR?: string
   ENABLED_AGGREGATORS?: string
   ALLOWED_PRE_IX_PROGRAMS?: string
+  AUDITED_SWAP_ROUTER_PROGRAMS?: string
+  SELF_PAY_FEE_MINTS?: string
   BASE_SWAP_FEE_BPS?: string
   MAX_SELF_PAY_BPS?: string
   MICRO_SWAP_FEE_BPS?: string
@@ -68,6 +70,16 @@ export interface RelayPolicyConfig {
   enabledAggregators: Set<AggregatorId>
   /** Strictly allowlisted zero-signer crank programs permitted in `preInstructions` before Tag 6. */
   allowedPreIxPrograms: Set<string>
+  /**
+   * Audited Solana DEX aggregator router programs allowed to settle zero-protocol-fee
+   * (`relayerFee === 0`) `ExecViaEscrow` platformFee swaps and auto-refill swaps.
+   */
+  auditedSwapRouterPrograms: Set<string>
+  /**
+   * Liquid, vetted SPL / Token-2022 mints permitted to earn `isSelfPaying = true` fee credit
+   * and eligible for automated treasury refill.
+   */
+  selfPayFeeMints: Set<string>
   baseSwapFeeBps: number
   maxSelfPayBps: number
   microSwapFeeBps: number
@@ -101,6 +113,54 @@ export const DEFAULT_ALLOWED_PRE_IX_PROGRAMS: readonly string[] = [
   '5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx',
 ]
 
+/**
+ * Audited Solana mainnet DEX aggregator router programs permitted for zero-protocol-fee
+ * (`relayerFee === 0`) `ExecViaEscrow` platformFee credit and automated treasury refill swaps:
+ *   - Jupiter v6 Aggregator (`JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`)
+ *   - DFlow Aggregator v4 (`DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH`)
+ *   - OKX DEX Router (`6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma`)
+ *   - Titan Meta-Aggregator (`T1TANpTeScyeqVzzgNViGDNrkQ6qHz9KrSBS4aNXvGT`)
+ *
+ * Operators adding a custom audited router (e.g. Bedrock) may override via `AUDITED_SWAP_ROUTER_PROGRAMS`.
+ */
+export const DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS: readonly string[] = [
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',
+  'DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH',
+  '6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma',
+  'T1TANpTeScyeqVzzgNViGDNrkQ6qHz9KrSBS4aNXvGT',
+]
+
+/**
+ * Default liquid, oracle-vetted SPL / Token-2022 mints permitted to earn relayer `self_paying`
+ * fee credit and eligible for automated treasury refill (overrideable via `SELF_PAY_FEE_MINTS`):
+ *   WSOL, USDC, USDT, JitoSOL, mSOL, bSOL, JUP, PYUSD, EURC, cbBTC, WBTC, WETH.
+ */
+export const DEFAULT_SELF_PAY_FEE_MINTS: readonly string[] = [
+  'So11111111111111111111111111111111111111112', // WSOL
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn', // JitoSOL
+  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So', // mSOL
+  'bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1', // bSOL
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN', // JUP
+  '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // PYUSD
+  'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXdi3ragP28x6W36', // EURC
+  'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', // cbBTC
+  '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', // WBTC
+  '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', // WETH
+]
+
+/**
+ * Known regulated fiat-backed stablecoins permitted to carry an on-chain SPL `FreezeAuthority`
+ * while remaining eligible for self-pay fee settlement (USDC, USDT, PYUSD, EURC).
+ */
+export const TRUSTED_FREEZE_AUTHORITY_MINTS: ReadonlySet<string> = new Set([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // PYUSD
+  'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXdi3ragP28x6W36', // EURC
+])
+
 function parseNum(raw: string | undefined, fallback: number, min: number, max: number): number {
   const n = Number(raw)
   if (!Number.isFinite(n)) return fallback
@@ -128,6 +188,24 @@ export function loadPolicyConfig(env: Env): RelayPolicyConfig {
     .map((s) => s.trim())
     .filter(Boolean)
 
+  const rawAuditedRouters = (
+    env.AUDITED_SWAP_ROUTER_PROGRAMS !== undefined
+      ? env.AUDITED_SWAP_ROUTER_PROGRAMS
+      : DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS.join(',')
+  )
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
+  const rawSelfPayMints = (
+    env.SELF_PAY_FEE_MINTS !== undefined
+      ? env.SELF_PAY_FEE_MINTS
+      : DEFAULT_SELF_PAY_FEE_MINTS.join(',')
+  )
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
   const corsOrigins = (env.CORS_ORIGINS ?? '*')
     .split(',')
     .map((s) => s.trim())
@@ -137,6 +215,8 @@ export function loadPolicyConfig(env: Env): RelayPolicyConfig {
     defaultAggregator,
     enabledAggregators: new Set(rawEnabled.length > 0 ? rawEnabled : ['jupiter']),
     allowedPreIxPrograms: new Set(rawPreIx),
+    auditedSwapRouterPrograms: new Set(rawAuditedRouters),
+    selfPayFeeMints: new Set(rawSelfPayMints),
     baseSwapFeeBps: Math.trunc(parseNum(env.BASE_SWAP_FEE_BPS, 25, 0, 1000)),
     maxSelfPayBps: Math.trunc(parseNum(env.MAX_SELF_PAY_BPS, 450, 25, 2000)),
     microSwapFeeBps: Math.trunc(parseNum(env.MICRO_SWAP_FEE_BPS, 50, 0, 1000)),

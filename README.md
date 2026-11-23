@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/audren-xyz/audren/actions/workflows/ci.yml"><img src="https://github.com/audren-xyz/audren/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/audren-xyz/audren/releases/tag/v1.2.0"><img src="https://img.shields.io/badge/release-v1.2.0-121210" alt="Release v1.2.0" /></a>
+  <a href="https://github.com/audren-xyz/audren/releases/tag/v1.2.1"><img src="https://img.shields.io/badge/release-v1.2.1-121210" alt="Release v1.2.1" /></a>
   <a href="https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build"><img src="https://img.shields.io/badge/Solana%20Verified%20Build-sBPFv3-184433" alt="Solana Verified Build" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-434039" alt="Apache-2.0 License" /></a>
   <a href="https://audren.xyz"><img src="https://img.shields.io/badge/app-audren.xyz-C83E2B" alt="audren.xyz" /></a>
@@ -90,11 +90,11 @@ CONTRIBUTING.md         Contributor workflow and zero-drift verification checkli
 | `0x01` | `InitLane` | Initialize append lane `0..15` (`LaneTreeState` `1,824 B` + `LaneRentVault`); monotonically expands `active_lanes` (`4 -> 8 -> 16`) |
 | `0x02` | `OpenPage` | Permissionlessly allocate next `SubtreePage`, `SubtreeRootPage`, `MemoPage`, or `NullifierPage` funded by `LaneRentVault` |
 | `0x03` | `Deposit` | Unified Native SOL (`DEPOSIT_FLAG_NATIVE_SOL` + atomic `SyncNative` WSOL, optional `DEPOSIT_FLAG_FEE_FROM_AMOUNT`) and SPL / Token-2022 net vault delta solvency + safe `TransferHook` execution (`0` ZK proof) |
-| `0x04` | `PublishCheckpoint` | Permissionless 256-slot `RootCheckpoint` ring update across all active lanes (`16.8k`–`44.5k` CU) |
+| `0x04` | `PublishCheckpoint` | Permissionless 256-slot `RootCheckpoint` ring update across all active lanes enforcing strict slot monotonicity and `max_ckpt_age` expiry (`16.8k`–`44.5k` CU) |
 | `0x05` | `Transact` | 2-in/3-out global MASP private transfer (`ASSET_MODE_PRIVATE`) or public withdrawal (`ASSET_MODE_PUBLIC`, `192 B` Groth16, `WITHDRAW_FLAG_UNWRAP_WSOL`, pause bypass for full exits) |
 | `0x06` | `ExecViaEscrow` | Protocol-agnostic SPL / Token-2022 DeFi CPI via isolated `escrow` shard (`0..16`) with `EXEC_FLAG_FEE_ON_OUTPUT` & `72 B` `AUD1DYN1` dynamic XOR-masked memo |
 | `0x07` | `SetPaused` | Emergency pause toggle by pool authority (zero vault custody; full exits remain enabled) |
-| `0x08` | `UpdatePool` | Update checkpoint/rent parameters, execute 2-step authority transfer (`propose` -> `accept`), or permanently renounce pool authority (forbidden while paused) |
+| `0x08` | `UpdatePool` | Update mutable pool parameters (`max_ckpt_age`, `note_rent_fee`, `nf_rent_fee`; `ckpt_interval` is immutable after `InitPool`), execute 2-step authority transfer (`propose` -> `accept`), or permanently renounce pool authority (forbidden while paused) |
 
 ## Quickstart: Verification, Build & Testing
 

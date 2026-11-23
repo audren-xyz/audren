@@ -1,11 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, type CSSProperties } from 'react'
 import Link from 'next/link'
-import { ArrowLeft, ArrowRight, ArrowUpRight } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ArrowUpRight, Eye, EyeOff } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import styles from '@/components/SubpageShell.module.css'
+import m from '@/components/motion/motion.module.css'
 
 type ModeId = 'transfer' | 'entry-exit' | 'swap'
 
@@ -283,8 +284,41 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
   },
 ] as const
 
+type Visibility = ComparisonRow['token']
+
+const VIS_CLASS = {
+  hidden: styles.visHidden,
+  public: styles.visPublic,
+  partial: styles.visPartial,
+} as const
+
+/**
+ * A field cell. In observer view an ink bar covers what a chain explorer
+ * cannot read (hatched where it depends on the mode or ring).
+ */
+function VisCell({ cell, observer, delayMs }: { cell: Visibility; observer: boolean; delayMs: number }) {
+  return (
+    <span className={VIS_CLASS[cell.state]}>
+      <span
+        className={m.redact}
+        data-on={observer && cell.state !== 'public' ? 'true' : 'false'}
+        data-partial={cell.state === 'partial' ? 'true' : 'false'}
+        style={{ '--redact-delay': `${delayMs}ms` } as CSSProperties}
+      >
+        {cell.text}
+      </span>
+      {observer && cell.state !== 'public' ? (
+        <span className={m.visuallyHidden}>
+          {cell.state === 'hidden' ? ' (hidden from observers)' : ' (partly hidden)'}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
 export function CompareExperience() {
   const [mode, setMode] = useState<ModeId>('transfer')
+  const [observer, setObserver] = useState(false)
   const active = MODE_META[mode]
 
   return (
@@ -359,8 +393,24 @@ export function CompareExperience() {
             })}
           </div>
 
+          <div className={styles.observerBar}>
+            <button
+              type="button"
+              className={styles.observerToggle}
+              aria-pressed={observer}
+              onClick={() => setObserver((o) => !o)}
+            >
+              {observer ? <EyeOff size={14} aria-hidden="true" /> : <Eye size={14} aria-hidden="true" />}
+              {observer ? 'Back to field details' : 'See it as a chain observer'}
+            </button>
+            <span className={styles.observerLegend} aria-hidden="true">
+              <i data-kind="solid" /> hidden
+              <i data-kind="hatch" /> partly hidden
+            </span>
+          </div>
+
           <div className={styles.tableWrap}>
-            <table className={styles.table}>
+            <table className={styles.table} data-observer={observer ? 'true' : 'false'}>
               <thead>
                 <tr>
                   <th>Model</th>
@@ -370,11 +420,17 @@ export function CompareExperience() {
                   <th>{active.col5Header}</th>
                 </tr>
               </thead>
-              <tbody>
-                {active.rows.map((row) => (
+              <tbody key={mode}>
+                {active.rows.map((row, rowIdx) => (
                   <tr
                     key={row.method}
-                    style={row.highlight ? { background: '#e8efe8' } : undefined}
+                    className={styles.matrixRow}
+                    style={
+                      {
+                        ...(row.highlight ? { background: '#e8efe8' } : {}),
+                        animationDelay: `${rowIdx * 60}ms`,
+                      } as CSSProperties
+                    }
                   >
                     <td>
                       <span className={styles.tableLead} style={{ display: 'block' }}>
@@ -383,39 +439,13 @@ export function CompareExperience() {
                       <span style={{ fontSize: 13, color: '#5d6056' }}>{row.sub}</span>
                     </td>
                     <td>
-                      <span
-                        className={
-                          row.senderRecipient.state === 'hidden'
-                            ? styles.visHidden
-                            : row.senderRecipient.state === 'public'
-                              ? styles.visPublic
-                              : styles.visPartial
-                        }
-                      >
-                        {row.senderRecipient.text}
-                      </span>
+                      <VisCell cell={row.senderRecipient} observer={observer} delayMs={rowIdx * 90} />
                     </td>
-                    <td
-                      className={
-                        row.token.state === 'hidden'
-                          ? styles.visHidden
-                          : row.token.state === 'public'
-                            ? styles.visPublic
-                            : styles.visPartial
-                      }
-                    >
-                      {row.token.text}
+                    <td>
+                      <VisCell cell={row.token} observer={observer} delayMs={rowIdx * 90 + 70} />
                     </td>
-                    <td
-                      className={
-                        row.amount.state === 'hidden'
-                          ? styles.visHidden
-                          : row.amount.state === 'public'
-                            ? styles.visPublic
-                            : styles.visPartial
-                      }
-                    >
-                      {row.amount.text}
+                    <td>
+                      <VisCell cell={row.amount} observer={observer} delayMs={rowIdx * 90 + 140} />
                     </td>
                     <td>{row.assets}</td>
                   </tr>

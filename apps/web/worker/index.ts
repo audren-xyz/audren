@@ -83,6 +83,219 @@ const RATE_WINDOW_MS = 10 * 60 * 1000
 const RATE_MAX_REQUESTS = 8
 const RELAY_RATE_MAX = 8
 
+const RPC_SEND_ALLOWED_COMPANION_PROGRAMS = new Set<string>([
+  AUDREN_PROGRAM_ID,
+  'ComputeBudget111111111111111111111111111111',
+  '11111111111111111111111111111111',
+  CLASSIC_TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+  'AddressLookupTab1e1111111111111111111111111',
+])
+
+class TxConfirmationTimeoutError extends Error {
+  readonly signature: string
+  constructor(signature: string) {
+    super('Transaction confirmation timed out')
+    this.name = 'TxConfirmationTimeoutError'
+    this.signature = signature
+  }
+}
+
+function readShortVec(bytes: Uint8Array, start: number): [number, number] {
+  let len = 0
+  let size = 0
+  let off = start
+  for (;;) {
+    if (off >= bytes.byteLength || size >= 3) {
+      throw new Error('Malformed compact-u16 in transaction')
+    }
+    const elem = bytes[off++]!
+    if (size === 2 && (elem & 0xfc) !== 0) {
+      throw new Error('Overflow in compact-u16')
+    }
+    len |= (elem & 0x7f) << (size * 7)
+    size += 1
+    if ((elem & 0x80) === 0) break
+  }
+  return [len, off]
+}
+
+/**
+ * Decode a signed Solana legacy, v0 (`0x80`), or v1 (`0x81`) wire transaction and return
+ * the ordered list of top-level instruction program IDs.
+ */
+function extractTransactionProgramIds(wire: Uint8Array): string[] {
+  if (wire.byteLength < 42 || wire.byteLength > 4_096) {
+    throw new Error(`Invalid transaction byte length (${wire.byteLength})`)
+  }
+  const programIds: string[] = []
+
+  // Solana Transaction v1 (SIMD-0385, `0x81`): messageBytes || signatures
+  if (wire[0] === 0x81) {
+    const numReqSigs = wire[1]!
+    const numRoSigned = wire[2]!
+    const numRoUnsigned = wire[3]!
+    if (numReqSigs === 0 || numReqSigs > 64) {
+      throw new Error('Invalid v1 transaction signature count')
+    }
+    const dv = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
+    const configMask = dv.getUint32(4, true)
+    const numInstructions = wire[40]!
+    const numAddresses = wire[41]!
+    if (
+      numInstructions === 0 ||
+      numInstructions > 64 ||
+      numAddresses === 0 ||
+      numAddresses > 64 ||
+      numRoSigned > numReqSigs ||
+      numReqSigs + numRoUnsigned > numAddresses
+    ) {
+      throw new Error('Invalid v1 transaction header counts')
+    }
+    let off = 42
+    if (off + numAddresses * 32 > wire.byteLength) {
+      throw new Error('Truncated v1 account keys')
+    }
+    const keys: string[] = []
+    for (let i = 0; i < numAddresses; i++) {
+      keys.push(base58Encode(wire.subarray(off, off + 32)))
+      off += 32
+    }
+    let mask = configMask >>> 0
+    let configSlots = 0
+    while (mask !== 0) {
+      configSlots += mask & 1
+      mask >>>= 1
+    }
+    off += configSlots * 4
+    if (off + numInstructions * 4 > wire.byteLength) {
+      throw new Error('Truncated v1 instruction headers')
+    }
+    let payloadBytes = 0
+    for (let i = 0; i < numInstructions; i++) {
+      const programIdx = wire[off]!
+      const numAccs = wire[off + 1]!
+      const dataLen = dv.getUint16(off + 2, true)
+      if (programIdx === 0 || programIdx >= numAddresses) {
+        throw new Error('Invalid v1 instruction program index')
+      }
+      programIds.push(keys[programIdx]!)
+      payloadBytes += numAccs + dataLen
+      off += 4
+    }
+    if (off + payloadBytes + numReqSigs * 64 !== wire.byteLength) {
+      throw new Error('Malformed v1 transaction payload or signature length')
+    }
+    return programIds
+  }
+
+  // Solana legacy or v0 (`0x80`) wire transaction: short_vec(sigs) || message
+  if (wire.byteLength < 64 || wire.byteLength > 1_232) {
+    throw new Error(`Invalid legacy/v0 transaction byte length (${wire.byteLength})`)
+  }
+  const [numSigs, afterSigsLen] = readShortVec(wire, 0)
+  if (numSigs === 0 || numSigs > 64) {
+    throw new Error('Invalid transaction signature count')
+  }
+  let off = afterSigsLen + numSigs * 64
+  if (off >= wire.byteLength) {
+    throw new Error('Truncated transaction signatures')
+  }
+  let isV0 = false
+  if ((wire[off]! & 0x80) !== 0) {
+    if (wire[off]! !== 0x80) {
+      throw new Error(`Unsupported Solana transaction version (${wire[off]! & 0x7f})`)
+    }
+    isV0 = true
+    off += 1
+  }
+  if (off + 3 > wire.byteLength) {
+    throw new Error('Truncated message header')
+  }
+  const numReqSigs = wire[off]!
+  if (numReqSigs !== numSigs) {
+    throw new Error('Transaction signature count does not match message header')
+  }
+  off += 3
+  const [numStaticKeys, afterKeysLen] = readShortVec(wire, off)
+  off = afterKeysLen
+  if (numStaticKeys === 0 || off + numStaticKeys * 32 + 32 > wire.byteLength) {
+    throw new Error('Truncated transaction static account keys')
+  }
+  const staticKeys: string[] = []
+  for (let i = 0; i < numStaticKeys; i++) {
+    staticKeys.push(base58Encode(wire.subarray(off, off + 32)))
+    off += 32
+  }
+  // Skip 32-byte recentBlockhash
+  off += 32
+
+  const [numIxs, afterIxLen] = readShortVec(wire, off)
+  off = afterIxLen
+  if (numIxs === 0 || numIxs > 64) {
+    throw new Error('Invalid transaction instruction count')
+  }
+  for (let i = 0; i < numIxs; i++) {
+    if (off >= wire.byteLength) throw new Error('Truncated transaction instruction')
+    const programIdx = wire[off++]!
+    if (programIdx >= numStaticKeys) {
+      throw new Error('Invalid transaction instruction program index')
+    }
+    programIds.push(staticKeys[programIdx]!)
+    const [accLen, afterAccLen] = readShortVec(wire, off)
+    off = afterAccLen + accLen
+    if (off > wire.byteLength) throw new Error('Truncated instruction account indices')
+    const [dataLen, afterDataLen] = readShortVec(wire, off)
+    off = afterDataLen + dataLen
+    if (off > wire.byteLength) throw new Error('Truncated instruction data')
+  }
+
+  if (isV0) {
+    const [numLookups, afterLookupsLen] = readShortVec(wire, off)
+    off = afterLookupsLen
+    for (let i = 0; i < numLookups; i++) {
+      off += 32
+      if (off > wire.byteLength) throw new Error('Truncated ALT lookup table address')
+      const [wLen, afterW] = readShortVec(wire, off)
+      off = afterW + wLen
+      const [rLen, afterR] = readShortVec(wire, off)
+      off = afterR + rLen
+      if (off > wire.byteLength) throw new Error('Truncated ALT lookup indices')
+    }
+  }
+
+  if (off !== wire.byteLength) {
+    throw new Error('Unexpected trailing bytes in serialized transaction')
+  }
+  return programIds
+}
+
+function resolveSafeJupiterBaseUrl(env: Env): string {
+  const raw = env.JUPITER_API_URL?.trim() || 'https://api.jup.ag'
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    throw new Error('Invalid JUPITER_API_URL configuration')
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error('JUPITER_API_URL must be an HTTPS URL without credentials')
+  }
+  const host = parsed.hostname.toLowerCase()
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)
+  ) {
+    throw new Error('JUPITER_API_URL must point to a public HTTPS host')
+  }
+  return raw.replace(/\/+$/, '').replace(/\/swap\/v1$/, '')
+}
+
 // Kept byte-for-byte in sync with crates/client/src/router.rs,
 // packages/sdk/src/swap.ts, and apps/relay/src/aggregators/jupiter.ts.
 const JUPITER_CPI_EXCLUDED_DEXES = [
@@ -272,7 +485,9 @@ async function sendAndConfirmV1(
   signer: { secretSeed: Uint8Array; pubkeyBytes: Uint8Array },
   instructions: V1Instruction[],
   computeUnitLimit: number,
+  options?: { preflightCommitment?: 'processed' | 'confirmed' },
 ): Promise<{ signature: string; slot: number; wireBytes: number }> {
+  const preflightCommitment = options?.preflightCommitment ?? 'confirmed'
   const bh = await solanaRpc<{ value: { blockhash: string } }>(env, cluster, 'getLatestBlockhash', [
     { commitment: 'confirmed' },
   ])
@@ -286,10 +501,11 @@ async function sendAndConfirmV1(
   const wire = serializeV1Transaction(compiled, [sig])
   const txSig = await solanaRpc<string>(env, cluster, 'sendTransaction', [
     toBase64(wire),
-    { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
+    { encoding: 'base64', preflightCommitment, maxRetries: 3 },
   ])
 
   let slot = 0
+  let confirmed = false
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 800))
     const st = await solanaRpc<{
@@ -299,8 +515,12 @@ async function sendAndConfirmV1(
     if (cur?.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(cur.err)}`)
     if (cur?.confirmationStatus === 'confirmed' || cur?.confirmationStatus === 'finalized') {
       slot = cur.slot ?? 0
+      confirmed = true
       break
     }
+  }
+  if (!confirmed) {
+    throw new TxConfirmationTimeoutError(txSig)
   }
   return { signature: txSig, slot, wireBytes: wire.byteLength }
 }
@@ -622,13 +842,45 @@ async function handleRpcSend(request: Request, env: Env): Promise<Response> {
     cluster?: string
     transactionB64?: string
   } | null
-  if (!body?.transactionB64) return jsonResponse({ error: 'transactionB64 is required' }, 400)
+  if (
+    !body?.transactionB64 ||
+    typeof body.transactionB64 !== 'string' ||
+    body.transactionB64.length > 6_000
+  ) {
+    return jsonResponse({ error: 'Valid transactionB64 is required' }, 400)
+  }
+  let wire: Uint8Array
+  let programIds: string[]
+  try {
+    wire = fromBase64(body.transactionB64)
+    programIds = extractTransactionProgramIds(wire)
+  } catch (err) {
+    return jsonResponse(
+      { error: err instanceof Error ? err.message : 'Malformed Solana transaction wire payload' },
+      400,
+    )
+  }
+  if (!programIds.includes(AUDREN_PROGRAM_ID)) {
+    return jsonResponse(
+      { error: 'RPC broadcast proxy only accepts transactions targeting the Audren program' },
+      403,
+    )
+  }
+  const disallowed = programIds.find((pid) => !RPC_SEND_ALLOWED_COMPANION_PROGRAMS.has(pid))
+  if (disallowed) {
+    return jsonResponse(
+      { error: `Disallowed companion program in RPC broadcast proxy: ${disallowed}` },
+      403,
+    )
+  }
+
   const cluster = parseCluster(body.cluster)
   const signature = await solanaRpc<string>(env, cluster, 'sendTransaction', [
     body.transactionB64,
     { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
   ])
   let slot = 0
+  let confirmed = false
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 800))
     const st = await solanaRpc<{
@@ -638,8 +890,15 @@ async function handleRpcSend(request: Request, env: Env): Promise<Response> {
     if (cur?.err) return jsonResponse({ error: `On-chain error: ${JSON.stringify(cur.err)}`, signature }, 400)
     if (cur?.confirmationStatus === 'confirmed' || cur?.confirmationStatus === 'finalized') {
       slot = cur.slot ?? 0
+      confirmed = true
       break
     }
+  }
+  if (!confirmed) {
+    return jsonResponse(
+      { error: 'Transaction confirmation timed out', signature, timedOut: true },
+      504,
+    )
   }
   return jsonResponse({ cluster, signature, slot })
 }
@@ -679,11 +938,17 @@ function normalizeJupiterToken(tok: JupiterTokenV2): ResolvedTokenInfo {
 }
 
 async function fetchJupiterTokens(env: Env, pathAndQuery: string): Promise<JupiterTokenV2[]> {
-  if (!env.JUPITER_API_KEY?.trim() && !env.JUPITER_API_URL?.trim()) return []
-  const base = (env.JUPITER_API_URL?.trim() || 'https://api.jup.ag').replace(/\/+$/, '').replace(/\/swap\/v1$/, '')
+  const apiKey = env.JUPITER_API_KEY?.trim()
+  if (!apiKey) return []
+  let base: string
+  try {
+    base = resolveSafeJupiterBaseUrl(env)
+  } catch {
+    return []
+  }
   const headers: Record<string, string> = {
     accept: 'application/json',
-    ...(env.JUPITER_API_KEY?.trim() ? { 'x-api-key': env.JUPITER_API_KEY.trim() } : {}),
+    'x-api-key': apiKey,
   }
   try {
     const res = await fetch(`${base}/tokens/v2/${pathAndQuery}`, { headers })
@@ -808,7 +1073,16 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
     }
   }
 
-  const base = (env.JUPITER_API_URL?.trim() || 'https://api.jup.ag').replace(/\/+$/, '').replace(/\/swap\/v1$/, '')
+  const apiKey = env.JUPITER_API_KEY?.trim()
+  if (!apiKey) {
+    return jsonResponse({ error: 'JUPITER_API_KEY is not configured on this Worker' }, 503)
+  }
+  let base: string
+  try {
+    base = resolveSafeJupiterBaseUrl(env)
+  } catch (err) {
+    return jsonResponse({ error: err instanceof Error ? err.message : 'Invalid JUPITER_API_URL' }, 503)
+  }
   const qs = new URLSearchParams({
     inputMint: body.inputMint,
     outputMint: body.outputMint,
@@ -820,7 +1094,7 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
   })
   const headers: Record<string, string> = {
     accept: 'application/json',
-    ...(env.JUPITER_API_KEY?.trim() ? { 'x-api-key': env.JUPITER_API_KEY.trim() } : {}),
+    'x-api-key': apiKey,
   }
   const res = await fetch(`${base}/swap/v1/quote?${qs.toString()}`, { headers })
   const data = await res.json().catch(() => ({ error: `Jupiter HTTP ${res.status}` }))
@@ -831,6 +1105,16 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
 }
 
 async function handleJupiterSwapInstructions(request: Request, env: Env): Promise<Response> {
+  const apiKey = env.JUPITER_API_KEY?.trim()
+  if (!apiKey) {
+    return jsonResponse({ error: 'JUPITER_API_KEY is not configured on this Worker' }, 503)
+  }
+  let base: string
+  try {
+    base = resolveSafeJupiterBaseUrl(env)
+  } catch (err) {
+    return jsonResponse({ error: err instanceof Error ? err.message : 'Invalid JUPITER_API_URL' }, 503)
+  }
   const body = (await request.json().catch(() => null)) as {
     cluster?: string
     quoteResponse?: unknown
@@ -856,11 +1140,10 @@ async function handleJupiterSwapInstructions(request: Request, env: Env): Promis
   const vaultInAta = deriveAssociatedTokenAddressSync(vaultAuth, body.inputMint, tpIn).address
   const vaultOutAta = deriveAssociatedTokenAddressSync(vaultAuth, body.outputMint, tpOut).address
 
-  const base = (env.JUPITER_API_URL?.trim() || 'https://api.jup.ag').replace(/\/+$/, '').replace(/\/swap\/v1$/, '')
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     accept: 'application/json',
-    ...(env.JUPITER_API_KEY?.trim() ? { 'x-api-key': env.JUPITER_API_KEY.trim() } : {}),
+    'x-api-key': apiKey,
   }
   const res = await fetch(`${base}/swap/v1/swap-instructions`, {
     method: 'POST',
@@ -920,6 +1203,47 @@ async function handleJupiterSwapInstructions(request: Request, env: Env): Promis
     lookupTables,
     excludedDexes: JUPITER_CPI_EXCLUDED_DEXES,
   })
+}
+
+async function publishDevnetCheckpointWithRetry(
+  env: Env,
+  demo: { secretSeed: Uint8Array; pubkeyBytes: Uint8Array; pubkeyStr: string },
+  poolId: number,
+  activeLanes: number,
+  ckptInterval: bigint,
+): Promise<{ slotIdx: number; signature: string; slot: number; wireBytes: number }> {
+  const interval = ckptInterval > 0n ? ckptInterval : 1n
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
+    if (interval <= 16n && BigInt(curSlot) % interval >= interval - 3n) {
+      const waitSlots = Number(interval - (BigInt(curSlot) % interval))
+      await new Promise((r) => setTimeout(r, waitSlots * 420 + 150))
+      curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
+    }
+    const slotIdx = Number((BigInt(curSlot) / interval) % BigInt(CHECKPOINT_RING_SLOTS))
+    const ckIx = toV1Ix(
+      buildPublishCheckpointInstruction({
+        poolId,
+        slotIdx,
+        activeLanes,
+        payer: demo.pubkeyStr,
+      }),
+    )
+    try {
+      const ckTx = await sendAndConfirmV1(env, 'devnet', demo, [ckIx], 120_000, {
+        preflightCommitment: 'processed',
+      })
+      return { slotIdx, ...ckTx }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const isInvalidPda = msg.includes('6001') || msg.includes('0x1771')
+      if (attempt === 0 && isInvalidPda) {
+        continue
+      }
+      throw err
+    }
+  }
+  throw new Error('Failed to publish Devnet checkpoint')
 }
 
 async function handleDevnetDeposit(request: Request, env: Env): Promise<Response> {
@@ -1063,25 +1387,15 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
   let checkpointSignature: string | null = null
   let checkpointSlotIndex: number | null = null
   try {
-    let curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
-    const ckptInterval = BigInt(snap.ckptInterval) > 0n ? BigInt(snap.ckptInterval) : 1n
-    if (ckptInterval <= 16n && BigInt(curSlot) % ckptInterval >= ckptInterval - 3n) {
-      const waitSlots = Number(ckptInterval - (BigInt(curSlot) % ckptInterval))
-      await new Promise((r) => setTimeout(r, waitSlots * 420 + 150))
-      curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
-    }
-    const slotIdx = Number((BigInt(curSlot) / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
-    const ckIx = toV1Ix(
-      buildPublishCheckpointInstruction({
-        poolId,
-        slotIdx,
-        activeLanes: snap.activeLanes,
-        payer: demo.pubkeyStr,
-      }),
+    const ck = await publishDevnetCheckpointWithRetry(
+      env,
+      demo,
+      poolId,
+      snap.activeLanes,
+      BigInt(snap.ckptInterval),
     )
-    const ckTx = await sendAndConfirmV1(env, 'devnet', demo, [ckIx], 120_000)
-    checkpointSignature = ckTx.signature
-    checkpointSlotIndex = slotIdx
+    checkpointSignature = ck.signature
+    checkpointSlotIndex = ck.slotIdx
   } catch {
     // Checkpoint already published in this epoch or slot advanced; deposit succeeded cleanly.
   }
@@ -1110,27 +1424,16 @@ async function handleDevnetCheckpoint(request: Request, env: Env): Promise<Respo
   if (!snap.initialized) {
     return jsonResponse({ error: 'Devnet Pool #0 is not initialized yet' }, 503)
   }
-  let curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
-  const ckptInterval = BigInt(snap.ckptInterval) > 0n ? BigInt(snap.ckptInterval) : 1n
-  if (ckptInterval <= 16n && BigInt(curSlot) % ckptInterval >= ckptInterval - 3n) {
-    const waitSlots = Number(ckptInterval - (BigInt(curSlot) % ckptInterval))
-    await new Promise((r) => setTimeout(r, waitSlots * 420 + 150))
-    curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
-  }
-  const slotIdx = Number((BigInt(curSlot) / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
-  const ckIx = toV1Ix(
-    buildPublishCheckpointInstruction({
-      poolId: 0,
-      slotIdx,
-      activeLanes: snap.activeLanes,
-      payer: demo.pubkeyStr,
-    }),
+  const ck = await publishDevnetCheckpointWithRetry(
+    env,
+    demo,
+    0,
+    snap.activeLanes,
+    BigInt(snap.ckptInterval),
   )
-  const ckTx = await sendAndConfirmV1(env, 'devnet', demo, [ckIx], 120_000)
   return jsonResponse({
     cluster: 'devnet',
-    slotIdx,
-    ...ckTx,
+    ...ck,
   })
 }
 
@@ -1172,11 +1475,67 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
     return jsonResponse({ error: 'Only Audren Transact (Tag 5) and ExecViaEscrow (Tag 6) may be relayed' }, 400)
   }
   const minDataLen = tag === TAG_TRANSACT ? 378 : 558
-  if (ixData.byteLength < minDataLen) {
-    return jsonResponse({ error: `Instruction data too short (${ixData.byteLength} < ${minDataLen})` }, 400)
+  if (ixData.byteLength < minDataLen || ixData.byteLength > 4_000) {
+    return jsonResponse(
+      { error: `Instruction data length out of bounds (${ixData.byteLength}; expected ${minDataLen}..4000)` },
+      400,
+    )
+  }
+  const dv = new DataView(ixData.buffer, ixData.byteOffset, ixData.byteLength)
+  const poolId = dv.getUint32(1, true)
+  if (poolId !== 0) {
+    return jsonResponse({ error: `Only canonical Pool #0 is permitted (got pool_id=${poolId})` }, 400)
   }
   if (ixData[5] !== 0) {
     return jsonResponse({ error: `Unsupported vk_id (${ixData[5]}); only vk_id=0 is permitted` }, 400)
+  }
+  const outLaneId = ixData[6]!
+  const maskByte = tag === TAG_TRANSACT ? ixData[7]! : ixData[8]!
+  if ((maskByte & ~0b111) !== 0) {
+    return jsonResponse({ error: `Invalid output/change mask byte (${maskByte})` }, 400)
+  }
+  const maskPopcount =
+    ((maskByte & 1) !== 0 ? 1 : 0) +
+    ((maskByte & 2) !== 0 ? 1 : 0) +
+    ((maskByte & 4) !== 0 ? 1 : 0)
+  if (tag === TAG_TRANSACT) {
+    const assetMode = ixData[8]!
+    if (assetMode !== 0 && assetMode !== 1) {
+      return jsonResponse({ error: `Invalid Transact asset_mode (${assetMode})` }, 400)
+    }
+    const expectedLen = 378 + maskPopcount * 106
+    if (ixData.byteLength !== expectedLen) {
+      return jsonResponse(
+        { error: `Invalid Transact instruction length (${ixData.byteLength} != ${expectedLen})` },
+        400,
+      )
+    }
+    const minAccounts = assetMode === 1 ? 18 : 12
+    if (body.accounts.length < minAccounts) {
+      return jsonResponse(
+        { error: `Transact requires at least ${minAccounts} accounts (got ${body.accounts.length})` },
+        400,
+      )
+    }
+  } else {
+    const escrowShard = ixData[7]!
+    if (escrowShard >= NUM_ESCROW_SHARDS) {
+      return jsonResponse({ error: `Invalid escrow_shard (${escrowShard})` }, 400)
+    }
+    const routerIxLen = dv.getUint16(556, true)
+    const expectedLen = 558 + routerIxLen + maskPopcount * 106
+    if (ixData.byteLength !== expectedLen) {
+      return jsonResponse(
+        { error: `Invalid ExecViaEscrow instruction length (${ixData.byteLength} != ${expectedLen})` },
+        400,
+      )
+    }
+    if (body.accounts.length < 23) {
+      return jsonResponse(
+        { error: `ExecViaEscrow requires at least 23 accounts (got ${body.accounts.length})` },
+        400,
+      )
+    }
   }
 
   const payerAcc = body.accounts[0]
@@ -1189,6 +1548,24 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
   const pool0Pda = derivePoolPdaSync(0, AUDREN_PROGRAM_ID).address
   if (body.accounts[1]?.pubkey !== pool0Pda) {
     return jsonResponse({ error: `accounts[1] must be canonical Pool #0 (${pool0Pda})` }, 400)
+  }
+
+  const snap = await fetchPoolSnapshot(env, 'devnet', 0)
+  if (!snap.initialized) {
+    return jsonResponse({ error: 'Devnet Pool #0 is not initialized yet' }, 503)
+  }
+  if (outLaneId >= snap.activeLanes) {
+    return jsonResponse(
+      { error: `out_lane_id ${outLaneId} out of bounds (active_lanes=${snap.activeLanes})` },
+      400,
+    )
+  }
+  const expectedLanePda = deriveLanePdaSync(0, outLaneId, AUDREN_PROGRAM_ID).address
+  if (body.accounts[5]?.pubkey !== expectedLanePda) {
+    return jsonResponse(
+      { error: `accounts[5] must match lane #${outLaneId} PDA (${expectedLanePda})` },
+      400,
+    )
   }
 
   const decodedAccounts: V1Instruction['accounts'] = []
@@ -1214,114 +1591,105 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
 
   // Ensure primary and atomic rollover output/nullifier pages exist on Devnet Pool #0 outLaneId
   const preIxs: V1Instruction[] = []
-  if (tag === TAG_TRANSACT || tag === TAG_EXEC_VIA_ESCROW) {
-    const outLaneId = ixData[6]!
-    const maskByte = tag === TAG_TRANSACT ? ixData[7]! : ixData[8]!
-    const maskPopcount =
-      ((maskByte & 1) !== 0 ? 1 : 0) +
-      ((maskByte & 2) !== 0 ? 1 : 0) +
-      ((maskByte & 4) !== 0 ? 1 : 0)
-    const outputCount = tag === TAG_TRANSACT ? maskPopcount : 1 + maskPopcount
-    const nf1Off = 234
-    let hasNf1 = false
-    for (let i = 0; i < 32; i++) {
-      if (ixData[nf1Off + i] !== 0) {
-        hasNf1 = true
-        break
-      }
+  const outputCount = tag === TAG_TRANSACT ? maskPopcount : 1 + maskPopcount
+  const nf1Off = 234
+  let hasNf1 = false
+  for (let i = 0; i < 32; i++) {
+    if (ixData[nf1Off + i] !== 0) {
+      hasNf1 = true
+      break
     }
-    const spentNullifiers = hasNf1 ? 2 : 1
-    const lanePda = deriveLanePdaSync(0, outLaneId, AUDREN_PROGRAM_ID).address
-    const laneRes = await solanaRpc<{ value: Array<{ data: [string, string] } | null> }>(
+  }
+  const spentNullifiers = hasNf1 ? 2 : 1
+  const laneRes = await solanaRpc<{ value: Array<{ data: [string, string] } | null> }>(
+    env,
+    'devnet',
+    'getMultipleAccounts',
+    [[expectedLanePda], { encoding: 'base64', commitment: 'confirmed' }],
+  )
+  const laneRaw = laneRes.value[0]?.data?.[0]
+  if (laneRaw) {
+    const hdr = decodeLaneHeader(fromBase64(laneRaw))
+    const roll = computePageRollovers({
+      leafCount: hdr.nextLeaf,
+      outputCount,
+      nfCount: hdr.nfCount,
+      spentNullifiers,
+    })
+    const neededPages: Array<{ kind: number; seq: bigint; pda: string }> = [
+      {
+        kind: OPEN_PAGE_KIND_SUBTREE,
+        seq: BigInt(roll.outSubSeq),
+        pda: deriveSubtreePdaSync(0, outLaneId, BigInt(roll.outSubSeq), AUDREN_PROGRAM_ID).address,
+      },
+      {
+        kind: OPEN_PAGE_KIND_SUBROOT,
+        seq: BigInt(roll.outRootSeq),
+        pda: deriveSubrootPdaSync(0, outLaneId, BigInt(roll.outRootSeq), AUDREN_PROGRAM_ID).address,
+      },
+      {
+        kind: OPEN_PAGE_KIND_MEMO,
+        seq: BigInt(roll.outMemoSeq),
+        pda: deriveMemoPdaSync(0, outLaneId, BigInt(roll.outMemoSeq), AUDREN_PROGRAM_ID).address,
+      },
+      {
+        kind: OPEN_PAGE_KIND_NULLIFIER,
+        seq: BigInt(roll.nfPageSeq),
+        pda: deriveNfPagePdaSync(0, outLaneId, BigInt(roll.nfPageSeq), AUDREN_PROGRAM_ID).address,
+      },
+    ]
+    if (roll.nextSubSeq !== undefined) {
+      const s = BigInt(roll.nextSubSeq)
+      neededPages.push({
+        kind: OPEN_PAGE_KIND_SUBTREE,
+        seq: s,
+        pda: deriveSubtreePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+      })
+    }
+    if (roll.nextRootSeq !== undefined) {
+      const s = BigInt(roll.nextRootSeq)
+      neededPages.push({
+        kind: OPEN_PAGE_KIND_SUBROOT,
+        seq: s,
+        pda: deriveSubrootPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+      })
+    }
+    if (roll.nextMemoSeq !== undefined) {
+      const s = BigInt(roll.nextMemoSeq)
+      neededPages.push({
+        kind: OPEN_PAGE_KIND_MEMO,
+        seq: s,
+        pda: deriveMemoPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+      })
+    }
+    if (roll.nextNfSeq !== undefined) {
+      const s = BigInt(roll.nextNfSeq)
+      neededPages.push({
+        kind: OPEN_PAGE_KIND_NULLIFIER,
+        seq: s,
+        pda: deriveNfPagePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+      })
+    }
+    const pageCheck = await solanaRpc<{ value: Array<unknown | null> }>(
       env,
       'devnet',
       'getMultipleAccounts',
-      [[lanePda], { encoding: 'base64', commitment: 'confirmed' }],
+      [neededPages.map((p) => p.pda), { encoding: 'base64', commitment: 'confirmed' }],
     )
-    const laneRaw = laneRes.value[0]?.data?.[0]
-    if (laneRaw) {
-      const hdr = decodeLaneHeader(fromBase64(laneRaw))
-      const roll = computePageRollovers({
-        leafCount: hdr.nextLeaf,
-        outputCount,
-        nfCount: hdr.nfCount,
-        spentNullifiers,
-      })
-      const neededPages: Array<{ kind: number; seq: bigint; pda: string }> = [
-        {
-          kind: OPEN_PAGE_KIND_SUBTREE,
-          seq: BigInt(roll.outSubSeq),
-          pda: deriveSubtreePdaSync(0, outLaneId, BigInt(roll.outSubSeq), AUDREN_PROGRAM_ID).address,
-        },
-        {
-          kind: OPEN_PAGE_KIND_SUBROOT,
-          seq: BigInt(roll.outRootSeq),
-          pda: deriveSubrootPdaSync(0, outLaneId, BigInt(roll.outRootSeq), AUDREN_PROGRAM_ID).address,
-        },
-        {
-          kind: OPEN_PAGE_KIND_MEMO,
-          seq: BigInt(roll.outMemoSeq),
-          pda: deriveMemoPdaSync(0, outLaneId, BigInt(roll.outMemoSeq), AUDREN_PROGRAM_ID).address,
-        },
-        {
-          kind: OPEN_PAGE_KIND_NULLIFIER,
-          seq: BigInt(roll.nfPageSeq),
-          pda: deriveNfPagePdaSync(0, outLaneId, BigInt(roll.nfPageSeq), AUDREN_PROGRAM_ID).address,
-        },
-      ]
-      if (roll.nextSubSeq !== undefined) {
-        const s = BigInt(roll.nextSubSeq)
-        neededPages.push({
-          kind: OPEN_PAGE_KIND_SUBTREE,
-          seq: s,
-          pda: deriveSubtreePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
-        })
-      }
-      if (roll.nextRootSeq !== undefined) {
-        const s = BigInt(roll.nextRootSeq)
-        neededPages.push({
-          kind: OPEN_PAGE_KIND_SUBROOT,
-          seq: s,
-          pda: deriveSubrootPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
-        })
-      }
-      if (roll.nextMemoSeq !== undefined) {
-        const s = BigInt(roll.nextMemoSeq)
-        neededPages.push({
-          kind: OPEN_PAGE_KIND_MEMO,
-          seq: s,
-          pda: deriveMemoPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
-        })
-      }
-      if (roll.nextNfSeq !== undefined) {
-        const s = BigInt(roll.nextNfSeq)
-        neededPages.push({
-          kind: OPEN_PAGE_KIND_NULLIFIER,
-          seq: s,
-          pda: deriveNfPagePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
-        })
-      }
-      const pageCheck = await solanaRpc<{ value: Array<unknown | null> }>(
-        env,
-        'devnet',
-        'getMultipleAccounts',
-        [neededPages.map((p) => p.pda), { encoding: 'base64', commitment: 'confirmed' }],
-      )
-      for (let i = 0; i < neededPages.length; i++) {
-        if (!pageCheck.value[i]) {
-          const p = neededPages[i]!
-          preIxs.push(
-            toV1Ix(
-              buildOpenPageInstruction({
-                poolId: 0,
-                laneId: outLaneId,
-                pageKind: p.kind,
-                pageSeq: p.seq,
-                payer: demo.pubkeyStr,
-              }),
-            ),
-          )
-        }
+    for (let i = 0; i < neededPages.length; i++) {
+      if (!pageCheck.value[i]) {
+        const p = neededPages[i]!
+        preIxs.push(
+          toV1Ix(
+            buildOpenPageInstruction({
+              poolId: 0,
+              laneId: outLaneId,
+              pageKind: p.kind,
+              pageSeq: p.seq,
+              payer: demo.pubkeyStr,
+            }),
+          ),
+        )
       }
     }
   }
@@ -1331,7 +1699,10 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
     accounts: decodedAccounts,
     data: ixData,
   }
-  const cuLimit = Math.min(1_200_000, Math.max(200_000, body.computeUnitLimit ?? 400_000))
+  const rawCu = typeof body.computeUnitLimit === 'number' && Number.isFinite(body.computeUnitLimit)
+    ? Math.trunc(body.computeUnitLimit)
+    : 400_000
+  const cuLimit = Math.min(1_200_000, Math.max(200_000, rawCu))
   const tx = await sendAndConfirmV1(env, 'devnet', demo, [...preIxs, ix], cuLimit)
   return jsonResponse({ cluster: 'devnet', relayerPubkey: demo.pubkeyStr, ...tx })
 }
@@ -1414,6 +1785,12 @@ const worker = {
 
       return env.ASSETS.fetch(request)
     } catch (err) {
+      if (err instanceof TxConfirmationTimeoutError) {
+        return jsonResponse(
+          { error: err.message, signature: err.signature, timedOut: true },
+          504,
+        )
+      }
       const msg = err instanceof Error ? err.message : String(err)
       return jsonResponse({ error: msg }, 500)
     }

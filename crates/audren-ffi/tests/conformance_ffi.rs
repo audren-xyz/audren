@@ -3,17 +3,18 @@
 use std::path::PathBuf;
 
 use audren_ffi::{
-    build_transact_ix, build_update_pool_ix, canonical_program_id, check_memo_view_tag,
-    compute_exec_ctx_hash_ffi, compute_page_rollovers_ffi, compute_transact_ctx_hash_ffi,
-    decode_audren_address, decode_pool_state_account, decode_root_checkpoint_account,
-    decrypt_and_verify_memo_entry, derive_asset_id_bytes, derive_checkpoint_pda,
-    derive_defi_session_keypair, derive_escrow_pda, derive_keys_from_seed, derive_lane_pda,
-    derive_lane_rent_pda, derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda,
-    derive_pool_pda, derive_subaccount_keys, derive_subroot_pda, derive_subtree_pda,
-    derive_unwrap_pda, derive_vault_auth_pda, encrypt_note_memo, export_full_viewing_key,
-    prepare_dynamic_swap_memo, protocol_version, prove_joinsplit_witness_bytes,
-    verify_selective_disclosure_proof, FfiAccountMeta, FfiExecCtxHashParams,
-    FfiSelectiveDisclosureProof, FfiTransactCtxHashParams, FfiTransactParams, FfiUpdatePoolAction,
+    build_exec_via_escrow_ix, build_open_page_ix, build_transact_ix, build_update_pool_ix,
+    canonical_program_id, check_memo_view_tag, compute_exec_ctx_hash_ffi,
+    compute_page_rollovers_ffi, compute_transact_ctx_hash_ffi, decode_audren_address,
+    decode_pool_state_account, decode_root_checkpoint_account, decrypt_and_verify_memo_entry,
+    derive_asset_id_bytes, derive_checkpoint_pda, derive_defi_session_keypair, derive_escrow_pda,
+    derive_keys_from_seed, derive_lane_pda, derive_lane_rent_pda, derive_memo_pda,
+    derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda, derive_subaccount_keys,
+    derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda,
+    encrypt_note_memo, export_full_viewing_key, prepare_dynamic_swap_memo, protocol_version,
+    prove_joinsplit_witness_bytes, verify_selective_disclosure_proof, FfiAccountMeta,
+    FfiExecCtxHashParams, FfiExecViaEscrowParams, FfiSelectiveDisclosureProof,
+    FfiTransactCtxHashParams, FfiTransactParams, FfiUpdatePoolAction,
 };
 use serde_json::Value;
 
@@ -222,6 +223,7 @@ fn ffi_conformance_matches_spec_vectors() {
                 is_writable: false,
             },
         ],
+        extra_writable_pubkeys: vec![],
         out_stealth_owner: enc.stealth_owner,
         out_blinding: enc.blinding.clone(),
         dyn_memo_head: dyn_m.dyn_head_34,
@@ -336,9 +338,9 @@ fn ffi_conformance_matches_spec_vectors() {
     assert_eq!(to_hex(&proved.public_input_hash), v["groth16"]["public_input_hash_hex"]);
     assert_eq!(to_hex(&proved.proof_192), v["groth16"]["proof_192_hex"]);
 
-    // 9. Partial public withdraw accounts in `build_transact_ix` must return InvalidInput
+    // 9. Zero-panic UniFFI hardening (Finding #17) + extra_writable_pubkeys parity + Finding #14/#18
     let partial_err = build_transact_ix(FfiTransactParams {
-        program_id: pid,
+        program_id: pid.clone(),
         payer: s0.pubkey_b58.clone(),
         pool_id: 0,
         vk_id: 0,
@@ -357,18 +359,219 @@ fn ffi_conformance_matches_spec_vectors() {
         public_mint: Some(v["asset_ids"]["usdc_mint_b58"].as_str().unwrap().to_string()),
         public_vault_ata: None,
         public_token_prog: None,
+        proof_192: proved.proof_192.clone(),
+        nf0: proved.nf0.clone(),
+        nf1: proved.nf1.clone(),
+        cm0: proved.cm0.clone(),
+        cm1: proved.cm1.clone(),
+        cm2: proved.cm2.clone(),
+        public_amount_out: 1,
+        relayer_fee_amount: 0,
+        recipient: s0.pubkey_b58.clone(),
+        relayer_fee_recipient: s0.pubkey_b58.clone(),
+        memos_bytes: vec![],
+        transfer_hook_accounts: vec![],
+    });
+    assert!(partial_err.is_err(), "partial public withdraw accounts must return InvalidInput");
+
+    // asset_mode == 1 with ALL None public accounts MUST return Err (zero panic!)
+    let all_none_public_err = build_transact_ix(FfiTransactParams {
+        program_id: pid.clone(),
+        payer: s0.pubkey_b58.clone(),
+        pool_id: 0,
+        vk_id: 0,
+        ckpt_slot_idx: 13,
+        out_lane_id: 2,
+        out_sub_seq: 0,
+        out_root_seq: 0,
+        out_memo_seq: 0,
+        out_nf_seq: 0,
+        next_sub_seq: None,
+        next_memo_seq: None,
+        next_nf_seq: None,
+        output_mask: 0,
+        asset_mode: 1,
+        unwrap_wsol: false,
+        public_mint: None,
+        public_vault_ata: None,
+        public_token_prog: None,
+        proof_192: proved.proof_192.clone(),
+        nf0: proved.nf0.clone(),
+        nf1: proved.nf1.clone(),
+        cm0: proved.cm0.clone(),
+        cm1: proved.cm1.clone(),
+        cm2: proved.cm2.clone(),
+        public_amount_out: 1,
+        relayer_fee_amount: 0,
+        recipient: s0.pubkey_b58.clone(),
+        relayer_fee_recipient: s0.pubkey_b58.clone(),
+        memos_bytes: vec![],
+        transfer_hook_accounts: vec![],
+    });
+    assert!(all_none_public_err.is_err(), "ASSET_MODE_PUBLIC with None accs must not panic");
+
+    // page_kind > 3 & out-of-range PDA indices MUST return Err (zero panic!)
+    assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 4, 0, 0, 0).is_err());
+    assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 0, 16, 0).is_err());
+    assert!(derive_lane_pda(pid.clone(), 0, 16).is_err());
+    assert!(derive_checkpoint_pda(pid.clone(), 0, 256).is_err());
+    assert!(derive_escrow_pda(pid.clone(), 0, 16).is_err());
+
+    // Missing recipient / relayer_fee_recipient in ctx_hash MUST return Err (zero panic!)
+    assert!(compute_transact_ctx_hash_ffi(FfiTransactCtxHashParams {
+        program_id: pid.clone(),
+        pool_id: 0,
+        vk_id: 0,
+        out_lane_id: 0,
+        output_mask: 0,
+        asset_mode: 1,
+        unwrap_wsol: false,
+        recipient: None,
+        relayer_fee_recipient: None,
+        public_asset_id: vec![0u8; 32],
+        public_amount_out: 1,
+        relayer_fee_amount: 0,
+        memos_bytes: vec![],
+    })
+    .is_err());
+    assert!(compute_exec_ctx_hash_ffi(FfiExecCtxHashParams {
+        program_id: pid.clone(),
+        pool_id: 0,
+        vk_id: 0,
+        out_lane_id: 0,
+        escrow_shard: 0,
+        change_mask: 0,
+        fee_on_output: false,
+        asset_in: vec![0u8; 32],
+        amount_in: 100,
+        relayer_fee_amount: 10,
+        relayer_fee_recipient: None,
+        asset_out: vec![0u8; 32],
+        min_amount_out: 1,
+        router_prog: s0.pubkey_b58.clone(),
+        router_accounts: vec![],
+        extra_writable_pubkeys: vec![],
+        out_stealth_owner: vec![0u8; 32],
+        out_blinding: vec![0u8; 32],
+        dyn_memo_head: vec![0u8; 34],
+        dyn_mask_72: vec![0u8; 72],
+        router_ix_data: vec![],
+        change_memos: vec![],
+    })
+    .is_err());
+
+    // extra_writable_pubkeys promotes aliased readonly router account in both ctx_hash & ix builder
+    let sibling_b58 = bs58::encode([0x99u8; 32]).into_string();
+    let h_promoted = compute_exec_ctx_hash_ffi(FfiExecCtxHashParams {
+        program_id: pid.clone(),
+        pool_id: 0,
+        vk_id: 0,
+        out_lane_id: 1,
+        escrow_shard: 3,
+        change_mask: 0,
+        fee_on_output: false,
+        asset_in: vec![1u8; 32],
+        amount_in: 100,
+        relayer_fee_amount: 0,
+        relayer_fee_recipient: None,
+        asset_out: vec![2u8; 32],
+        min_amount_out: 50,
+        router_prog: bs58::encode([0x77u8; 32]).into_string(),
+        router_accounts: vec![FfiAccountMeta {
+            pubkey_b58: sibling_b58.clone(),
+            is_signer: false,
+            is_writable: false,
+        }],
+        extra_writable_pubkeys: vec![sibling_b58.clone()],
+        out_stealth_owner: vec![3u8; 32],
+        out_blinding: vec![4u8; 32],
+        dyn_memo_head: vec![5u8; 34],
+        dyn_mask_72: vec![6u8; 72],
+        router_ix_data: vec![1, 2],
+        change_memos: vec![],
+    })
+    .unwrap();
+    let h_explicit = compute_exec_ctx_hash_ffi(FfiExecCtxHashParams {
+        program_id: pid.clone(),
+        pool_id: 0,
+        vk_id: 0,
+        out_lane_id: 1,
+        escrow_shard: 3,
+        change_mask: 0,
+        fee_on_output: false,
+        asset_in: vec![1u8; 32],
+        amount_in: 100,
+        relayer_fee_amount: 0,
+        relayer_fee_recipient: None,
+        asset_out: vec![2u8; 32],
+        min_amount_out: 50,
+        router_prog: bs58::encode([0x77u8; 32]).into_string(),
+        router_accounts: vec![FfiAccountMeta {
+            pubkey_b58: sibling_b58.clone(),
+            is_signer: false,
+            is_writable: true,
+        }],
+        extra_writable_pubkeys: vec![],
+        out_stealth_owner: vec![3u8; 32],
+        out_blinding: vec![4u8; 32],
+        dyn_memo_head: vec![5u8; 34],
+        dyn_mask_72: vec![6u8; 72],
+        router_ix_data: vec![1, 2],
+        change_memos: vec![],
+    })
+    .unwrap();
+    assert_eq!(h_promoted, h_explicit);
+    let exec_ix = build_exec_via_escrow_ix(FfiExecViaEscrowParams {
+        program_id: pid.clone(),
+        payer: s0.pubkey_b58.clone(),
+        pool_id: 0,
+        vk_id: 0,
+        ckpt_slot_idx: 13,
+        out_lane_id: 1,
+        out_sub_seq: 0,
+        out_root_seq: 0,
+        out_memo_seq: 0,
+        out_nf_seq: 0,
+        next_sub_seq: None,
+        next_memo_seq: None,
+        next_nf_seq: None,
+        escrow_shard: 3,
+        change_mask: 0,
+        fee_on_output: false,
+        in_leg: vec![s0.pubkey_b58.clone(); 4],
+        out_leg: vec![s0.pubkey_b58.clone(); 4],
+        relayer_fee_amount: 0,
+        relayer_fee_recipient: None,
         proof_192: proved.proof_192,
         nf0: proved.nf0,
         nf1: proved.nf1,
         cm0: proved.cm0,
         cm1: proved.cm1,
         cm2: proved.cm2,
-        public_amount_out: 1,
-        relayer_fee_amount: 0,
-        recipient: s0.pubkey_b58.clone(),
-        relayer_fee_recipient: s0.pubkey_b58,
-        memos_bytes: vec![],
-        transfer_hook_accounts: vec![],
-    });
-    assert!(partial_err.is_err(), "partial public withdraw accounts must return InvalidInput");
+        amount_in: 100,
+        min_amount_out: 50,
+        out_stealth_owner: vec![3u8; 32],
+        out_blinding: vec![4u8; 32],
+        dyn_memo_head: vec![5u8; 34],
+        dyn_mask_72: vec![6u8; 72],
+        router_prog: bs58::encode([0x77u8; 32]).into_string(),
+        router_ix_data: vec![1, 2],
+        router_accounts: vec![FfiAccountMeta {
+            pubkey_b58: sibling_b58.clone(),
+            is_signer: false,
+            is_writable: false,
+        }],
+        extra_writable_pubkeys: vec![sibling_b58],
+        change_memos: vec![],
+    })
+    .unwrap();
+    assert!(exec_ix.accounts.last().unwrap().is_writable);
+
+    // Leading/trailing whitespace rejected in decode_audren_address
+    assert!(decode_audren_address(format!(" {}", alice.address)).is_err());
+    assert!(decode_audren_address(format!("{} ", alice.address)).is_err());
+
+    // Unsatisfied Groth16 witness returns Err cleanly instead of panicking!
+    let bad_witness = vec![0u8; 4_611];
+    assert!(prove_joinsplit_witness_bytes(bad_witness, vec![0x99u8; 32]).is_err());
 }

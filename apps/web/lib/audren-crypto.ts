@@ -90,7 +90,7 @@ export function toHex(bytes: Uint8Array): string {
 
 export function fromHex(hex: string): Uint8Array {
   const clean = hex.trim().replace(/^0x/i, '')
-  if (clean.length % 2 !== 0) throw new Error('Invalid hex length')
+  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) throw new Error('Invalid hex')
   const out = new Uint8Array(clean.length / 2)
   for (let i = 0; i < out.byteLength; i++) {
     out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16)

@@ -7,6 +7,7 @@ import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import { AUDREN, explorerAddress } from '@/lib/protocol'
 import styles from '@/components/SubpageShell.module.css'
+import { IntegrationPipeline } from '@/components/motion/IntegrationPipeline'
 
 type SnippetId = 'ts' | 'rust' | 'swift' | 'kotlin'
 
@@ -137,40 +138,32 @@ val proof     = proveJoinsplitWitnessBytes(witness4611, rngSeed32)`,
 
 const PIPELINE_STEPS = [
   {
-    x: 12,
     tag: '1. Sync',
     title: 'CompactWalletStore',
     line1: 'getMultipleAccounts RPC',
     line2: 'Freeze sealed siblings, drop pages',
     foot: '1.28 MB @ 10M notes',
-    fill: '#faf8f3',
   },
   {
-    x: 247,
     tag: '2. Prove',
     title: 'BN254 Groth16 locally',
     line1: '17,861 R1CS · 192 B proof',
     line2: 'Bind ctx_hash and router accounts',
     foot: 'spend_sk stays on device',
-    fill: '#f0ebe0',
   },
   {
-    x: 482,
     tag: '3. Submit',
     title: '1 Solana v1 tx (0x81)',
     line1: 'Direct wallet fee payer',
     line2: 'or pluggable privacy relay',
     foot: '~103k–158k CU · 1 Tx v1',
-    fill: '#faf8f3',
   },
   {
-    x: 717,
     tag: '4. Settle',
     title: 'Confirm and verify',
     line1: 'NullifierPage marks spends',
     line2: 'Mode 1 receipt / Mode 2 FVK',
     foot: 'Encrypted seed backup',
-    fill: '#faf8f3',
   },
 ] as const
 
@@ -259,104 +252,7 @@ export function DevelopersExperience() {
               <div className={styles.stageTitle}>End-to-end client integration pipeline</div>
               <span>Ordinary Solana RPC · Local Groth16 proving · Optional relay</span>
             </div>
-            <svg
-              className={styles.stageSvg}
-              viewBox="0 0 920 172"
-              role="img"
-              aria-label="Audren client integration pipeline: Sync CompactWalletStore via ordinary getMultipleAccounts, Generate 192 B BN254 Groth16 proof locally, Submit single Solana Transaction v1 directly or via pluggable relayer, Confirm settlement and freeze sealed siblings"
-            >
-              {[
-                { x1: 209, x2: 243 },
-                { x1: 444, x2: 478 },
-                { x1: 679, x2: 713 },
-              ].map((conn) => (
-                <g key={conn.x1}>
-                  <line
-                    x1={conn.x1}
-                    y1="86"
-                    x2={conn.x2 - 4}
-                    y2="86"
-                    stroke="#b5b1a5"
-                    strokeWidth="1"
-                  />
-                  <path
-                    d={`M ${conn.x2 - 6} 82 L ${conn.x2 - 1} 86 L ${conn.x2 - 6} 90`}
-                    fill="none"
-                    stroke="#184433"
-                    strokeWidth="1.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </g>
-              ))}
-
-              {PIPELINE_STEPS.map((step) => (
-                <g key={step.tag}>
-                  <rect
-                    x={step.x}
-                    y="14"
-                    width="193"
-                    height="144"
-                    rx="6"
-                    fill={step.fill}
-                    stroke="none"
-                  />
-                  <text
-                    x={step.x + 14}
-                    y="38"
-                    fill="#184433"
-                    fontSize="11"
-                    fontWeight="500"
-                  >
-                    {step.tag}
-                  </text>
-                  <text
-                    x={step.x + 14}
-                    y="60"
-                    fill="#161614"
-                    fontSize="14"
-                    fontWeight="500"
-                  >
-                    {step.title}
-                  </text>
-                  <text
-                    x={step.x + 14}
-                    y="82"
-                    fill="#4f5148"
-                    fontSize="10.5"
-                    fontWeight="400"
-                  >
-                    {step.line1}
-                  </text>
-                  <text
-                    x={step.x + 14}
-                    y="99"
-                    fill="#4f5148"
-                    fontSize="10.5"
-                    fontWeight="400"
-                  >
-                    {step.line2}
-                  </text>
-                  <line
-                    x1={step.x + 14}
-                    y1="118"
-                    x2={step.x + 179}
-                    y2="118"
-                    stroke="rgba(22, 22, 20, 0.1)"
-                    strokeWidth="1"
-                  />
-                  <text
-                    x={step.x + 14}
-                    y="138"
-                    fill="#184433"
-                    fontSize="10.5"
-                    fontWeight="500"
-                  >
-                    {step.foot}
-                  </text>
-                </g>
-              ))}
-            </svg>
+            <IntegrationPipeline steps={PIPELINE_STEPS} />
           </div>
         </section>
 

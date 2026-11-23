@@ -2797,3 +2797,72 @@ pre,
   margin: 0;
   line-height: 1.5;
 }
+
+/* ============================================================================
+   HOW-IT-WORKS MOTION: address anatomy focus, flow theater transitions
+   ============================================================================ */
+
+.aud-seg,
+.aud-legend-item {
+  transition: opacity 0.35s ease, box-shadow 0.35s ease;
+}
+
+.aud-addr-card[data-focus='prefix'] .aud-seg:not([data-part='prefix']),
+.aud-addr-card[data-focus='spend'] .aud-seg:not([data-part='spend']),
+.aud-addr-card[data-focus='view'] .aud-seg:not([data-part='view']) {
+  opacity: 0.32;
+}
+
+.aud-addr-card[data-focus='prefix'] .aud-seg[data-part='prefix'],
+.aud-addr-card[data-focus='spend'] .aud-seg[data-part='spend'],
+.aud-addr-card[data-focus='view'] .aud-seg[data-part='view'] {
+  box-shadow: 0 0 0 1px rgba(244, 241, 234, 0.55);
+}
+
+.aud-addr-card[data-focus='prefix'] .aud-legend-item:not([data-part='prefix']),
+.aud-addr-card[data-focus='spend'] .aud-legend-item:not([data-part='spend']),
+.aud-addr-card[data-focus='view'] .aud-legend-item:not([data-part='view']) {
+  opacity: 0.45;
+}
+
+.flow-node > span:first-child {
+  align-self: stretch;
+  margin-bottom: 12px;
+}
+
+.flow-packet-label {
+  display: inline-block;
+  animation: flowLabelIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.flow-detail-swap {
+  animation: flowLabelIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.flow-solscan-row {
+  animation: flowLabelIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes flowLabelIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aud-seg,
+  .aud-legend-item {
+    transition: none;
+  }
+
+  .flow-packet-label,
+  .flow-detail-swap,
+  .flow-solscan-row {
+    animation: none;
+  }
+}

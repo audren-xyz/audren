@@ -1149,6 +1149,7 @@ public struct FfiExecCtxHashParams: Equatable, Hashable {
     public var minAmountOut: UInt64
     public var routerProg: String
     public var routerAccounts: [FfiAccountMeta]
+    public var extraWritablePubkeys: [String]
     public var outStealthOwner: Data
     public var outBlinding: Data
     public var dynMemoHead: Data
@@ -1158,7 +1159,7 @@ public struct FfiExecCtxHashParams: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, poolId: UInt32, vkId: UInt8, outLaneId: UInt8, escrowShard: UInt8, changeMask: UInt8, feeOnOutput: Bool, assetIn: Data, amountIn: UInt64, relayerFeeAmount: UInt64, relayerFeeRecipient: String?, assetOut: Data, minAmountOut: UInt64, routerProg: String, routerAccounts: [FfiAccountMeta], outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask72: Data, routerIxData: Data, changeMemos: Data) {
+    public init(programId: String, poolId: UInt32, vkId: UInt8, outLaneId: UInt8, escrowShard: UInt8, changeMask: UInt8, feeOnOutput: Bool, assetIn: Data, amountIn: UInt64, relayerFeeAmount: UInt64, relayerFeeRecipient: String?, assetOut: Data, minAmountOut: UInt64, routerProg: String, routerAccounts: [FfiAccountMeta], extraWritablePubkeys: [String], outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask72: Data, routerIxData: Data, changeMemos: Data) {
         self.programId = programId
         self.poolId = poolId
         self.vkId = vkId
@@ -1174,6 +1175,7 @@ public struct FfiExecCtxHashParams: Equatable, Hashable {
         self.minAmountOut = minAmountOut
         self.routerProg = routerProg
         self.routerAccounts = routerAccounts
+        self.extraWritablePubkeys = extraWritablePubkeys
         self.outStealthOwner = outStealthOwner
         self.outBlinding = outBlinding
         self.dynMemoHead = dynMemoHead
@@ -1213,6 +1215,7 @@ public struct FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer {
                 minAmountOut: FfiConverterUInt64.read(from: &buf), 
                 routerProg: FfiConverterString.read(from: &buf), 
                 routerAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf), 
+                extraWritablePubkeys: FfiConverterSequenceString.read(from: &buf), 
                 outStealthOwner: FfiConverterData.read(from: &buf), 
                 outBlinding: FfiConverterData.read(from: &buf), 
                 dynMemoHead: FfiConverterData.read(from: &buf), 
@@ -1238,6 +1241,7 @@ public struct FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.minAmountOut, into: &buf)
         FfiConverterString.write(value.routerProg, into: &buf)
         FfiConverterSequenceTypeFfiAccountMeta.write(value.routerAccounts, into: &buf)
+        FfiConverterSequenceString.write(value.extraWritablePubkeys, into: &buf)
         FfiConverterData.write(value.outStealthOwner, into: &buf)
         FfiConverterData.write(value.outBlinding, into: &buf)
         FfiConverterData.write(value.dynMemoHead, into: &buf)
@@ -1299,11 +1303,12 @@ public struct FfiExecViaEscrowParams: Equatable, Hashable {
     public var routerProg: String
     public var routerIxData: Data
     public var routerAccounts: [FfiAccountMeta]
+    public var extraWritablePubkeys: [String]
     public var changeMemos: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, payer: String, poolId: UInt32, vkId: UInt8, ckptSlotIdx: UInt16, outLaneId: UInt8, outSubSeq: UInt64, outRootSeq: UInt64, outMemoSeq: UInt64, outNfSeq: UInt64, nextSubSeq: UInt64?, nextMemoSeq: UInt64?, nextNfSeq: UInt64?, escrowShard: UInt8, changeMask: UInt8, feeOnOutput: Bool, inLeg: [String], outLeg: [String], relayerFeeAmount: UInt64, relayerFeeRecipient: String?, proof192: Data, nf0: Data, nf1: Data, cm0: Data, cm1: Data, cm2: Data, amountIn: UInt64, minAmountOut: UInt64, outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask72: Data, routerProg: String, routerIxData: Data, routerAccounts: [FfiAccountMeta], changeMemos: Data) {
+    public init(programId: String, payer: String, poolId: UInt32, vkId: UInt8, ckptSlotIdx: UInt16, outLaneId: UInt8, outSubSeq: UInt64, outRootSeq: UInt64, outMemoSeq: UInt64, outNfSeq: UInt64, nextSubSeq: UInt64?, nextMemoSeq: UInt64?, nextNfSeq: UInt64?, escrowShard: UInt8, changeMask: UInt8, feeOnOutput: Bool, inLeg: [String], outLeg: [String], relayerFeeAmount: UInt64, relayerFeeRecipient: String?, proof192: Data, nf0: Data, nf1: Data, cm0: Data, cm1: Data, cm2: Data, amountIn: UInt64, minAmountOut: UInt64, outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask72: Data, routerProg: String, routerIxData: Data, routerAccounts: [FfiAccountMeta], extraWritablePubkeys: [String], changeMemos: Data) {
         self.programId = programId
         self.payer = payer
         self.poolId = poolId
@@ -1339,6 +1344,7 @@ public struct FfiExecViaEscrowParams: Equatable, Hashable {
         self.routerProg = routerProg
         self.routerIxData = routerIxData
         self.routerAccounts = routerAccounts
+        self.extraWritablePubkeys = extraWritablePubkeys
         self.changeMemos = changeMemos
     }
 
@@ -1393,6 +1399,7 @@ public struct FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer {
                 routerProg: FfiConverterString.read(from: &buf), 
                 routerIxData: FfiConverterData.read(from: &buf), 
                 routerAccounts: FfiConverterSequenceTypeFfiAccountMeta.read(from: &buf), 
+                extraWritablePubkeys: FfiConverterSequenceString.read(from: &buf), 
                 changeMemos: FfiConverterData.read(from: &buf)
         )
     }
@@ -1433,6 +1440,7 @@ public struct FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer {
         FfiConverterString.write(value.routerProg, into: &buf)
         FfiConverterData.write(value.routerIxData, into: &buf)
         FfiConverterSequenceTypeFfiAccountMeta.write(value.routerAccounts, into: &buf)
+        FfiConverterSequenceString.write(value.extraWritablePubkeys, into: &buf)
         FfiConverterData.write(value.changeMemos, into: &buf)
     }
 }

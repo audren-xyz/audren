@@ -55,6 +55,7 @@ import {
   deriveUnwrapPdaSync,
   deriveVaultAuthPdaSync,
   deterministicNoteRentFee,
+  inspectToken2022UnsafeSelfPay,
   pickRandomEscrowShard,
   tryDecryptAndVerifyMemo,
   type DecodedLaneHeader,
@@ -62,6 +63,7 @@ import {
   type DecodedRootCheckpoint,
   type FullViewingKey,
 } from '@audren/sdk'
+import { TRUSTED_FREEZE_AUTHORITY_MINTS } from '../env'
 import {
   SYSTEM_PROGRAM_ID,
   base58Decode,
@@ -177,6 +179,152 @@ function isAllZero32(b: Uint8Array): boolean {
 
 function isSupportedTokenProgram(programB58: string): boolean {
   return programB58 === CLASSIC_TOKEN_PROGRAM_ID_STR || programB58 === TOKEN_2022_PROGRAM_ID_STR
+}
+
+const TOKEN_2022_ACCOUNT_TYPE_OFFSET = 165
+const TOKEN_2022_ACCOUNT_TYPE_MINT = 1
+const TOKEN_2022_TLV_START = 166
+const TOKEN_2022_EXT_TRANSFER_FEE_CONFIG = 1
+const TOKEN_2022_EXT_PAUSABLE = 26
+
+export interface MintSafetyInfo {
+  safeForSelfPay: boolean
+  hasFreezeAuthority: boolean
+  hasUntrustedFreezeAuthority: boolean
+  hasPausableExt: boolean
+  hasMutableTransferFeeAuthority: boolean
+  hasUnsafeToken2022Ext: boolean
+  reason: string | null
+}
+
+/**
+ * Inspect raw on-chain SPL / Token-2022 mint account bytes to verify whether a non-WSOL mint
+ * is safe for relayer self-pay fee settlement:
+ *   - Rejects untrusted `FreezeAuthority` (permits only known regulated stablecoins in
+ *     `trustedFreezeMints`, defaulting to USDC / USDT / PYUSD / EURC).
+ *   - Rejects Token-2022 `Pausable` extension (TLV type `26`).
+ *   - Rejects Token-2022 `TransferFeeConfig` (TLV type `1`) with a non-zero (mutable)
+ *     `transfer_fee_config_authority`.
+ *   - Rejects Token-2022 `PermanentDelegate`, `NonTransferable`, active `TransferHook`,
+ *     `TransferFeeConfig > 500 bps`, or malformed TLV headers via `inspectToken2022UnsafeSelfPay`.
+ */
+export function parseMintSafetyInfo(
+  mint: string,
+  tokenProgram: string,
+  mintBytes: Uint8Array | null | undefined,
+  trustedFreezeMints: ReadonlySet<string> = TRUSTED_FREEZE_AUTHORITY_MINTS,
+): MintSafetyInfo {
+  if (mint === WSOL_MINT_STR) {
+    return {
+      safeForSelfPay: true,
+      hasFreezeAuthority: false,
+      hasUntrustedFreezeAuthority: false,
+      hasPausableExt: false,
+      hasMutableTransferFeeAuthority: false,
+      hasUnsafeToken2022Ext: false,
+      reason: null,
+    }
+  }
+  if (!isSupportedTokenProgram(tokenProgram) || !mintBytes || mintBytes.byteLength < 82 || mintBytes[45] !== 1) {
+    return {
+      safeForSelfPay: false,
+      hasFreezeAuthority: false,
+      hasUntrustedFreezeAuthority: false,
+      hasPausableExt: false,
+      hasMutableTransferFeeAuthority: false,
+      hasUnsafeToken2022Ext: true,
+      reason: 'Invalid or uninitialized mint account',
+    }
+  }
+  if (tokenProgram === CLASSIC_TOKEN_PROGRAM_ID_STR && mintBytes.byteLength !== 82) {
+    return {
+      safeForSelfPay: false,
+      hasFreezeAuthority: false,
+      hasUntrustedFreezeAuthority: false,
+      hasPausableExt: false,
+      hasMutableTransferFeeAuthority: false,
+      hasUnsafeToken2022Ext: true,
+      reason: 'Invalid classic SPL mint account length',
+    }
+  }
+
+  // SPL Mint COption<Pubkey> freeze_authority sits at bytes [46..50] (option tag) + [50..82] (pubkey)
+  const freezeOpt = readU32le(mintBytes, 46)
+  if (freezeOpt !== 0 && freezeOpt !== 1) {
+    return {
+      safeForSelfPay: false,
+      hasFreezeAuthority: true,
+      hasUntrustedFreezeAuthority: true,
+      hasPausableExt: false,
+      hasMutableTransferFeeAuthority: false,
+      hasUnsafeToken2022Ext: true,
+      reason: 'Malformed SPL freeze_authority option tag',
+    }
+  }
+  const hasFreezeAuthority = freezeOpt === 1
+  const hasUntrustedFreezeAuthority = hasFreezeAuthority && !trustedFreezeMints.has(mint)
+
+  let hasPausableExt = false
+  let hasMutableTransferFeeAuthority = false
+  let hasUnsafeToken2022Ext = false
+
+  if (tokenProgram === TOKEN_2022_PROGRAM_ID_STR && mintBytes.byteLength !== 82) {
+    if (
+      mintBytes.byteLength <= TOKEN_2022_ACCOUNT_TYPE_OFFSET ||
+      mintBytes[TOKEN_2022_ACCOUNT_TYPE_OFFSET] !== TOKEN_2022_ACCOUNT_TYPE_MINT ||
+      !mintBytes.subarray(82, TOKEN_2022_ACCOUNT_TYPE_OFFSET).every((b) => b === 0)
+    ) {
+      hasUnsafeToken2022Ext = true
+    } else {
+      hasUnsafeToken2022Ext = inspectToken2022UnsafeSelfPay(mintBytes)
+      const dv = new DataView(mintBytes.buffer, mintBytes.byteOffset, mintBytes.byteLength)
+      let pos = TOKEN_2022_TLV_START
+      while (pos + 4 <= mintBytes.byteLength) {
+        const extType = dv.getUint16(pos, true)
+        if (extType === 0) break
+        const extLen = dv.getUint16(pos + 2, true)
+        const valStart = pos + 4
+        const valEnd = valStart + extLen
+        if (valEnd > mintBytes.byteLength) {
+          hasUnsafeToken2022Ext = true
+          break
+        }
+        if (extType === TOKEN_2022_EXT_PAUSABLE) {
+          hasPausableExt = true
+        } else if (extType === TOKEN_2022_EXT_TRANSFER_FEE_CONFIG && extLen >= 108) {
+          // Bytes [0..32] of TransferFeeConfig = OptionalNonZeroPubkey transfer_fee_config_authority
+          for (let i = 0; i < 32; i++) {
+            if (mintBytes[valStart + i] !== 0) {
+              hasMutableTransferFeeAuthority = true
+              break
+            }
+          }
+        }
+        pos = valEnd
+      }
+    }
+  }
+
+  let reason: string | null = null
+  if (hasPausableExt) {
+    reason = 'Token-2022 mint carries Pausable extension'
+  } else if (hasMutableTransferFeeAuthority) {
+    reason = 'Token-2022 mint carries mutable transfer_fee_config_authority'
+  } else if (hasUntrustedFreezeAuthority) {
+    reason = 'Mint carries untrusted FreezeAuthority'
+  } else if (hasUnsafeToken2022Ext) {
+    reason = 'Token-2022 mint carries extensions excluded from self-pay fee credit'
+  }
+
+  return {
+    safeForSelfPay: reason === null,
+    hasFreezeAuthority,
+    hasUntrustedFreezeAuthority,
+    hasPausableExt,
+    hasMutableTransferFeeAuthority,
+    hasUnsafeToken2022Ext,
+    reason,
+  }
 }
 
 export function toSolanaInstruction(ix: {
@@ -689,6 +837,10 @@ export function planMissingOpenPageIxs(params: {
   pages: ParsedPageAccounts
   pageSlots: PageSlotEntry[]
   pageAccs: Array<FetchedAccountMeta | null | undefined>
+  /** Number of output notes appended by this instruction (used to gate premature `cur + 1` rollover opens). */
+  outputCount?: number
+  /** Number of nullifiers spent by this instruction (used to gate premature `cur + 1` rollover opens). */
+  nullifierCount?: number
   /** Optional running `(nextLeaf, nfCount)` counters for sequential instructions in a batch. */
   laneCounters?: { nextLeaf: bigint; nfCount: bigint }
   /** Optional shared set of page PDAs already scheduled for `OpenPage` in an earlier batch entry. */
@@ -702,6 +854,8 @@ export function planMissingOpenPageIxs(params: {
     pages,
     pageSlots,
     pageAccs,
+    outputCount = 3,
+    nullifierCount = 2,
     laneCounters,
     alreadyScheduledPdas,
   } = params
@@ -813,6 +967,44 @@ export function planMissingOpenPageIxs(params: {
       }
     }
 
+    // Gate `cur + 1` rollover opens strictly to lanes genuinely within rollover distance
+    // so an attacker setting `flags = 0x07` at leaf 0 / nf 0 can never trigger premature OpenPage rent drain.
+    const clampedOut = Math.max(0, Math.min(3, Math.trunc(outputCount)))
+    const clampedNf = Math.max(0, Math.min(2, Math.trunc(nullifierCount)))
+    if (item.slot === 'nextSub' && expectedSeq > curSub) {
+      const subSlot = Number(nextLeaf % BigInt(SUBTREE_LEAVES))
+      if (subSlot + clampedOut < SUBTREE_LEAVES - 12) {
+        return {
+          ok: false,
+          error: `Premature rollover OpenPage rejected for nextSub (lane ${outLaneId} leaf offset ${subSlot}/${SUBTREE_LEAVES})`,
+        }
+      }
+    } else if (item.slot === 'nextMemo' && expectedSeq > curMemo) {
+      const memoSlot = Number(nextLeaf % BigInt(MEMO_NOTES_PER_PAGE))
+      if (memoSlot + clampedOut < MEMO_NOTES_PER_PAGE - 12) {
+        return {
+          ok: false,
+          error: `Premature rollover OpenPage rejected for nextMemo (lane ${outLaneId} memo offset ${memoSlot}/${MEMO_NOTES_PER_PAGE})`,
+        }
+      }
+    } else if (item.slot === 'nextNf' && expectedSeq > curNf) {
+      const nfSlot = Number(nfCount % BigInt(NF_PER_PAGE))
+      if (nfSlot + clampedNf < NF_PER_PAGE - 8) {
+        return {
+          ok: false,
+          error: `Premature rollover OpenPage rejected for nextNf (lane ${outLaneId} nf offset ${nfSlot}/${NF_PER_PAGE})`,
+        }
+      }
+    } else if (pageKind === OPEN_PAGE_KIND_SUBROOT && expectedSeq > curRoot) {
+      const subrootSlot = Number(curSub % BigInt(SUBROOTS_PER_PAGE))
+      if (subrootSlot < 280) {
+        return {
+          ok: false,
+          error: `Premature OpenPage rejected for outRoot (lane ${outLaneId} subroot slot ${subrootSlot}/${SUBROOTS_PER_PAGE})`,
+        }
+      }
+    }
+
     if (!seenOpened.has(expectedPda)) {
       seenOpened.add(expectedPda)
       openPageIxs.push(
@@ -878,6 +1070,8 @@ export function planBatchMissingOpenPageIxs(params: {
       pages: entry.pages,
       pageSlots,
       pageAccs,
+      outputCount: entry.outputCount,
+      nullifierCount: entry.nullifierCount,
       laneCounters: counters,
       alreadyScheduledPdas,
     })

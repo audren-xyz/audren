@@ -45,6 +45,7 @@ export interface RelayFeeQuoteRequest {
   outputCount?: number;
   omitNf1?: boolean;
   missingAtaCount?: number;
+  relayerPubkey?: string;
 }
 
 export interface RelayCheckpointResponse {
@@ -62,6 +63,7 @@ export interface RelayFeeQuoteResponse {
   ok: boolean;
   cluster: RelayCluster;
   op: RelayOperation;
+  relayerPubkey?: string | null;
   billingMode: 'self_paying' | 'sponsored';
   feeSide: 'in' | 'out' | 'shielded_cm2';
   feeMint: string;
@@ -89,6 +91,7 @@ export interface RelaySwapQuoteRequest {
   onlyDirectRoutes?: boolean;
   maxAccounts?: number;
   includeFee?: boolean;
+  relayerPubkey?: string;
 }
 
 export interface RelaySwapInstructionsRequest {
@@ -99,6 +102,7 @@ export interface RelaySwapInstructionsRequest {
   cluster?: RelayCluster;
   shardId?: number;
   includeFee?: boolean;
+  relayerPubkey?: string;
 }
 
 export interface RelayMissingAtaPlan {
@@ -111,6 +115,7 @@ export interface RelayMissingAtaPlan {
 
 export interface RelaySwapInstructionsResponse {
   provider: RelayAggregatorId;
+  relayerPubkey?: string | null;
   swapInstruction: RouterSwapInstruction;
   missingAtas: RelayMissingAtaPlan[];
   addressLookupTableAddresses?: string[];
@@ -224,6 +229,9 @@ export class AudrenRelayClient {
     if (params.missingAtaCount !== undefined) {
       query.missingAtaCount = String(params.missingAtaCount);
     }
+    if (params.relayerPubkey) {
+      query.relayerPubkey = params.relayerPubkey;
+    }
     const qs = new URLSearchParams(query);
     return this.requestJson<RelayFeeQuoteResponse>(`/v1/fee-quote?${qs.toString()}`);
   }
@@ -256,6 +264,7 @@ export class AudrenRelayClient {
         : {}),
       ...(params.maxAccounts !== undefined ? { maxAccounts: String(params.maxAccounts) } : {}),
       ...(params.includeFee !== undefined ? { includeFee: String(params.includeFee) } : {}),
+      ...(params.relayerPubkey ? { relayerPubkey: params.relayerPubkey } : {}),
     });
     return this.requestJson<Record<string, unknown>>(`/v1/swap/quote?${qs.toString()}`);
   }

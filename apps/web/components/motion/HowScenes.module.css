@@ -1,0 +1,792 @@
+/* ============================================================================
+   HOW-IT-WORKS SCENES: stealth owners, view-tag scanning, attack simulator
+   ============================================================================ */
+
+/* ---- Stealth owners ------------------------------------------------------ */
+
+.stealth {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-bottom: 28px;
+  padding: 26px 28px;
+  border-radius: 6px;
+  background: var(--sheet);
+}
+
+.stealthHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 18px;
+}
+
+.stealthHead h3 {
+  margin: 0;
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--ink);
+}
+
+.addrChip {
+  font-size: 12px;
+}
+
+.stealthRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stealthRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  border-radius: 5px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  transition: opacity 0.35s ease, border-color 0.35s ease, background 0.35s ease;
+}
+
+.stealthRow[data-state='todo'] {
+  background: transparent;
+  border-style: dashed;
+}
+
+.stealthRow[data-state='todo'] * {
+  color: var(--muted);
+}
+
+.stealthRow[data-state='active'] {
+  border-color: var(--carbon);
+  background: var(--sheet);
+}
+
+.stealthPayer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.payerName {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.payerAmt {
+  font-size: 12.5px;
+  color: #7a5324;
+}
+
+.mixer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  border: 1px dashed var(--rule);
+  min-width: 0;
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+
+.mixer[data-on='true'] {
+  border-style: solid;
+  border-color: var(--vault);
+  background: var(--vault-tint);
+  animation: mixerBusy 0.9s ease-in-out both;
+}
+
+@keyframes mixerBusy {
+  0%,
+  100% {
+    transform: none;
+  }
+  30% {
+    transform: translateX(-2px);
+  }
+  60% {
+    transform: translateX(2px);
+  }
+}
+
+.mixerTop {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.mixerFn {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--vault);
+  overflow-wrap: anywhere;
+}
+
+.stealthArrow {
+  color: var(--muted);
+}
+
+.ownerCell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ownerLabel {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.ownerHex {
+  position: relative;
+  align-self: flex-start;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* the owner key is "printed": an ink bar wipes across, then lifts off it */
+.ownerHex::after {
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
+  border-radius: 1px;
+  background: var(--carbon);
+  transform-origin: right center;
+  transform: scaleX(0);
+}
+
+.ownerHex[data-printed='false'] {
+  color: transparent;
+}
+
+.ownerHex[data-printed='false']::after {
+  transform: scaleX(1);
+  background: var(--bone);
+  transform-origin: left center;
+}
+
+.ownerHex[data-printed='true']::after {
+  animation: liftOff 0.6s cubic-bezier(0.7, 0, 0.3, 1) both;
+}
+
+@keyframes liftOff {
+  0% {
+    transform: scaleX(1);
+    background: var(--carbon);
+  }
+  100% {
+    transform: scaleX(0);
+    background: var(--carbon);
+  }
+}
+
+.foundStamp {
+  position: absolute;
+  right: 12px;
+  top: 8px;
+}
+
+/* ---- View-tag scanner ---------------------------------------------------- */
+
+.scanner {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 28px 40px;
+  padding: 28px;
+  border-radius: 6px;
+  background: var(--sheet);
+}
+
+.scanGridWrap {
+  min-width: 0;
+}
+
+.scanGridHead {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 14px;
+  margin-bottom: 12px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scanLegend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scanLegend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-left: 6px;
+}
+
+.scanLegend i[data-kind='skip'] {
+  background: var(--bone);
+  border: 1px solid var(--rule);
+}
+
+.scanLegend i[data-kind='hit'] {
+  background: var(--vault);
+}
+
+.scanGrid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.memo {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1.35;
+  border-radius: 2px;
+  background: #2b2a25;
+  color: var(--paper);
+}
+
+/* step 0: the page arrives row by row */
+.scanGrid[data-step='0'] .memo {
+  animation: memoArrive 0.42s ease both;
+  animation-delay: calc(var(--row) * 120ms);
+}
+
+/* step 1: each tag is compared in turn */
+.scanGrid[data-step='1'] .memo {
+  animation: memoSkip 0.5s ease both;
+  animation-delay: calc(var(--i) * 46ms);
+}
+
+.scanGrid[data-step='1'] .memo[data-hit='true'] {
+  animation-name: memoHit;
+}
+
+/* steps 2+: settled */
+.scanGrid:not([data-step='0']):not([data-step='1']) .memo {
+  background: var(--bone);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+
+.scanGrid:not([data-step='0']):not([data-step='1']) .memo[data-hit='true'] {
+  background: var(--vault);
+  box-shadow: none;
+}
+
+@keyframes memoArrive {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes memoSkip {
+  0% {
+    background: #2b2a25;
+  }
+  35% {
+    background: #d9c39a;
+  }
+  100% {
+    background: var(--bone);
+    box-shadow: inset 0 0 0 1px var(--rule);
+  }
+}
+
+@keyframes memoHit {
+  0% {
+    background: #2b2a25;
+  }
+  35% {
+    background: var(--vault);
+  }
+  100% {
+    background: var(--vault-tint);
+    box-shadow: inset 0 0 0 2px var(--vault);
+  }
+}
+
+.scanSide {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.scanSteps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scanSteps li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14.5px;
+  color: var(--muted);
+  transition: color 0.25s ease;
+}
+
+.scanSteps li[data-state='active'],
+.scanSteps li[data-state='done'] {
+  color: var(--ink);
+}
+
+.scanStepNum {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 10.5px;
+  transition: background 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+}
+
+.scanSteps li[data-state='active'] .scanStepNum {
+  border-color: var(--carbon);
+  background: var(--carbon);
+  color: var(--paper);
+}
+
+.scanSteps li[data-state='done'] .scanStepNum {
+  border-color: var(--vault);
+  background: var(--vault);
+  color: var(--paper);
+}
+
+.found {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 92px;
+}
+
+.foundRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 12px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: var(--vault-tint);
+  border: 1px solid var(--vault-rule);
+}
+
+/* reserved slots read as empty result lines until the wallet opens its memos */
+.found[data-show='false'] .foundRow {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--rule);
+}
+
+.found[data-show='false'] .foundRow > * {
+  visibility: hidden;
+}
+
+.found[data-show='true'] .foundRow {
+  animation: foundIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.found[data-show='true'] .foundRow:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+@keyframes foundIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.foundAmt {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--vault);
+}
+
+.foundSrc {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ink-secondary);
+}
+
+.scanTally {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-secondary);
+}
+
+.scanTally strong {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.scanFoot {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+}
+
+/* ---- Attack simulator ---------------------------------------------------- */
+
+.attack {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: 0;
+  margin-bottom: 36px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--sheet);
+}
+
+.attackPicker {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 24px;
+  background: var(--carbon);
+  color: var(--paper);
+}
+
+.attackPicker {
+  --c-ink: var(--paper);
+  --c-track: rgba(244, 241, 234, 0.3);
+}
+
+.attackPickerHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 19px;
+}
+
+.attackTabs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.attackTab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #c9c5ba;
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.attackTab:hover {
+  background: rgba(244, 241, 234, 0.07);
+  color: var(--paper);
+}
+
+.attackTab[data-selected='true'] {
+  background: rgba(244, 241, 234, 0.12);
+  color: var(--paper);
+}
+
+.attackTab:focus-visible {
+  outline: 2px solid var(--paper);
+  outline-offset: 1px;
+}
+
+.attackTabDot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.attackTabDot[data-kind='ok'] {
+  background: #9bc0a8;
+}
+
+.attackTabDot[data-kind='bad'] {
+  background: #e08a80;
+}
+
+.attackRun {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 28px;
+  min-width: 0;
+}
+
+.checkList {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.check {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--muted);
+  transition: color 0.25s ease, background 0.25s ease, opacity 0.25s ease;
+}
+
+.check[data-state='pass'] {
+  color: var(--ink);
+}
+
+.check[data-state='fail'] {
+  color: var(--ink);
+  background: var(--vermilion-tint);
+}
+
+.check[data-state='skip'] {
+  color: var(--muted);
+}
+
+.check[data-state='unreached'] {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--rule);
+}
+
+.check em {
+  font-style: normal;
+  color: var(--muted);
+}
+
+.checkIcon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  color: var(--paper);
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+.check[data-state='pass'] .checkIcon {
+  background: var(--vault);
+  border-color: var(--vault);
+  animation: iconPop 0.3s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+.check[data-state='fail'] .checkIcon {
+  background: var(--vermilion);
+  border-color: var(--vermilion);
+  animation: iconPop 0.3s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+.check[data-state='skip'] .checkIcon {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+@keyframes iconPop {
+  from {
+    transform: scale(0.5);
+  }
+  to {
+    transform: none;
+  }
+}
+
+.checkLabel {
+  min-width: 0;
+}
+
+.verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  min-height: 92px;
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
+  align-content: flex-start;
+}
+
+.errCode {
+  font-size: 12px;
+  color: var(--vermilion);
+}
+
+.verdictText {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  animation: foundIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.verdictWaiting {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---- Responsive ---------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .scanner,
+  .attack {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stealthRow {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-areas:
+      'payer payer payer'
+      'mixer arrow owner';
+    row-gap: 10px;
+  }
+
+  .stealthPayer {
+    grid-area: payer;
+    padding-right: 64px;
+  }
+
+  .mixer {
+    grid-area: mixer;
+  }
+
+  .stealthArrow {
+    grid-area: arrow;
+  }
+
+  .ownerCell {
+    grid-area: owner;
+  }
+}
+
+@media (max-width: 560px) {
+  .stealth,
+  .scanner {
+    padding: 18px 16px;
+  }
+
+  .stealthRow {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .mixerTop {
+    display: none;
+  }
+
+  .ownerHex {
+    font-size: 13px;
+  }
+
+  .scanGrid {
+    gap: 3px;
+  }
+
+  .attackPicker,
+  .attackRun {
+    padding: 18px 16px;
+  }
+
+  .attackTabs {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .attackTab {
+    width: auto;
+    padding: 7px 10px;
+    font-size: 13px;
+    border: 1px solid rgba(244, 241, 234, 0.18);
+    border-radius: 999px;
+  }
+
+  .check {
+    font-size: 13.5px;
+    padding: 7px 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stealthRow,
+  .check,
+  .checkIcon,
+  .mixer {
+    transition: none;
+    animation: none;
+  }
+
+  .mixer[data-on='true'],
+  .ownerHex[data-printed='true']::after,
+  .scanGrid .memo,
+  .found[data-show='true'] .foundRow,
+  .verdictText,
+  .check[data-state='pass'] .checkIcon,
+  .check[data-state='fail'] .checkIcon {
+    animation: none;
+  }
+
+  .scanGrid[data-step='1'] .memo {
+    background: var(--bone);
+    box-shadow: inset 0 0 0 1px var(--rule);
+  }
+
+  .scanGrid[data-step='1'] .memo[data-hit='true'] {
+    background: var(--vault-tint);
+    box-shadow: inset 0 0 0 2px var(--vault);
+  }
+}

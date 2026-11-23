@@ -7,6 +7,7 @@
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { NUM_LANES } from './constants.ts';
 import { base58Encode, formatAudrenAddress } from './pda.ts';
 import {
   bytes32ToFrMasked,
@@ -168,15 +169,41 @@ export function fvkRealNullifier(
   return frToBeBytes(computeRealNullifier(frFromBeBytesStrict(fvk.nk), noteCm, globalLeafIndex));
 }
 
+const U32_MAX = 0xffff_ffff;
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
+
 /**
  * Verify a Mode 1 per-transaction `SelectiveDisclosureProof` against an on-chain
  * `SubtreePage` leaf commitment in 1 Poseidon hash (reveals zero keys).
+ * Enforces strict field bounds (`0 <= amount <= u64::MAX`, `0 <= leafIndex <= u64::MAX`,
+ * valid `u32` `poolId`, `0 <= laneId < NUM_LANES`, exact 32-byte arrays) so modular
+ * field aliasing (`amount + k * r`) is unconditionally rejected.
  */
 export function verifySelectiveDisclosureProof(
   proof: SelectiveDisclosureProof,
   onchainSubtreeLeaf: Uint8Array,
 ): boolean {
-  if (onchainSubtreeLeaf.byteLength !== 32) return false;
+  if (
+    onchainSubtreeLeaf.byteLength !== 32 ||
+    proof.stealthOwner.byteLength !== 32 ||
+    proof.mint.byteLength !== 32 ||
+    proof.blinding.byteLength !== 32 ||
+    proof.commitment.byteLength !== 32
+  ) {
+    return false;
+  }
+  if (!Number.isInteger(proof.poolId) || proof.poolId < 0 || proof.poolId > U32_MAX) {
+    return false;
+  }
+  if (!Number.isInteger(proof.laneId) || proof.laneId < 0 || proof.laneId >= NUM_LANES) {
+    return false;
+  }
+  if (typeof proof.leafIndex !== 'bigint' || proof.leafIndex < 0n || proof.leafIndex > U64_MAX) {
+    return false;
+  }
+  if (typeof proof.amount !== 'bigint' || proof.amount < 0n || proof.amount > U64_MAX) {
+    return false;
+  }
   try {
     const stealth = frFromBeBytesStrict(proof.stealthOwner);
     const blinding = frFromBeBytesStrict(proof.blinding);

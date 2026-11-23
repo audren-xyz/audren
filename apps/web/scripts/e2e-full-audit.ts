@@ -10,12 +10,15 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
   ASSET_MODE_PRIVATE,
+  AUDREN_PROGRAM_ID,
   MEMO_ENTRY_WIRE_LEN,
   NUM_LANES,
   VK_ID_DEFAULT,
   WSOL_MINT,
   ZERO_HASHES_4ARY,
+  audrenInstructionToSolana,
   base58Decode,
+  buildTransactInstruction,
   buildWitnessFromFrozenSubsiblings,
   computeMerkleRoot4Ary,
   computeNoteCommitment,
@@ -34,6 +37,8 @@ import {
   verifySelectiveDisclosureProof,
 } from '../lib/audren-crypto'
 import { AudrenWasmProver, dummyInputWitness, dummyOutputWitness } from '../lib/audren-prover'
+import { AUDREN, getPool0LookupTable } from '../lib/protocol'
+import { compileKitV0Transaction } from '../lib/solana-wallet'
 
 async function main() {
   const seed = new Uint8Array(32).fill(7)
@@ -164,8 +169,82 @@ async function main() {
   )
   if (!sdpOk) throw new Error('SelectiveDisclosureProof failed')
 
+  // Reject forged u64::MAX + 1 amount in Mode 1 SelectiveDisclosureProof
+  const forgedAmountOk = verifySelectiveDisclosureProof(
+    {
+      poolId: 0,
+      laneId: 0,
+      leafIndex: 0n,
+      stealthOwner: frToBeBytes(stealthOwner),
+      mint,
+      amount: 0x1_0000_0000_0000_0000n,
+      blinding: frToBeBytes(blinding),
+      commitment: frToBeBytes(commitment),
+    },
+    frToBeBytes(commitment),
+  )
+  if (forgedAmountOk) throw new Error('SelectiveDisclosureProof failed to reject amount > u64::MAX')
+
+  // Verify v1.2.1 register, frozen Pool #0 ALTs (40 entries each), prover-worker.js, & v0 ALT compression <= 1,232 B
+  if (AUDREN.version !== '1.2.1' || AUDREN.releaseTag !== 'v1.2.1') {
+    throw new Error(`Expected AUDREN version 1.2.1 / v1.2.1, got ${AUDREN.version} / ${AUDREN.releaseTag}`)
+  }
+  for (const cluster of ['mainnet', 'devnet'] as const) {
+    const alt = AUDREN[cluster].pool0Alt
+    if (alt.entries.length !== 40 || alt.entries[0] !== AUDREN_PROGRAM_ID) {
+      throw new Error(`Invalid ${cluster} Pool #0 ALT register`)
+    }
+    for (const addr of alt.entries) {
+      if (base58Decode(addr).byteLength !== 32) {
+        throw new Error(`Invalid pubkey in ${cluster} Pool #0 ALT: ${addr}`)
+      }
+    }
+  }
+  const workerSrc = await readFile(resolve(process.cwd(), 'public/wasm/prover-worker.js'), 'utf8')
+  if (!workerSrc.includes('?v=1.2.1') || !workerSrc.includes('WebAssembly.RuntimeError')) {
+    throw new Error('prover-worker.js missing v1.2.1 cache-buster or RuntimeError reset')
+  }
+  const sampleMemos = new Uint8Array(MEMO_ENTRY_WIRE_LEN * 3)
+  sampleMemos.set(memo, 0)
+  sampleMemos.set(memo, MEMO_ENTRY_WIRE_LEN)
+  sampleMemos.set(memo, MEMO_ENTRY_WIRE_LEN * 2)
+  const sampleIx = buildTransactInstruction({
+    poolId: 0,
+    vkId: VK_ID_DEFAULT,
+    outLaneId: 0,
+    ckptSlotIdx: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    payer: AUDREN.mainnetRelayer,
+    proof192: proved.proof192,
+    nf0: proved.nf0,
+    nf1: proved.nf1,
+    cm0: proved.cm0,
+    cm1: proved.cm1,
+    cm2: proved.cm2,
+    outputMask: 0b111,
+    assetMode: ASSET_MODE_PRIVATE,
+    unwrapWsol: false,
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: sampleMemos,
+  })
+  const v0Wire = compileKitV0Transaction({
+    feePayer: AUDREN.mainnetRelayer,
+    recentBlockhash: '11111111111111111111111111111111',
+    lastValidBlockHeight: 1n,
+    instructions: [audrenInstructionToSolana(sampleIx)],
+    computeUnitLimit: 350_000,
+    lookupTables: getPool0LookupTable('mainnet'),
+  })
+  if (v0Wire.byteLength > 1232) {
+    throw new Error(`Direct Self-Pay v0 Transact with Pool #0 ALT exceeded 1,232 B (${v0Wire.byteLength} B)`)
+  }
+
   console.log(
-    `Audren v1.2.0 full crypto + Bech32m + WASM prover audit PASSED (192 B Groth16 in ${ms} ms)`,
+    `Audren v1.2.1 full crypto + Bech32m + Pool #0 ALT (${v0Wire.byteLength} B v0) + WASM prover audit PASSED (192 B Groth16 in ${ms} ms)`,
   )
 }
 

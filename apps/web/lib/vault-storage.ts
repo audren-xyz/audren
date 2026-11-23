@@ -211,6 +211,7 @@ export interface AudrenEncryptedBackupFile {
   cluster: 'devnet' | 'mainnet'
   audrenAddress: string
   birthdaySlot?: string
+  birthdaySlots?: Partial<Record<'devnet' | 'mainnet', string>>
 }
 
 const BACKUP_PBKDF2_ITERATIONS = 600_000
@@ -242,6 +243,7 @@ export async function exportEncryptedVaultBackup(params: {
   cluster: 'devnet' | 'mainnet'
   passphrase: string
   birthdaySlot?: bigint
+  birthdaySlots?: Partial<Record<'devnet' | 'mainnet', bigint>>
 }): Promise<AudrenEncryptedBackupFile> {
   if (params.passphrase.length < 8) {
     throw new Error('Backup passphrase must be at least 8 characters')
@@ -249,12 +251,17 @@ export async function exportEncryptedVaultBackup(params: {
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const aesKey = await deriveBackupAesKey(params.passphrase, salt, BACKUP_PBKDF2_ITERATIONS)
-  const birthdaySlotStr = (params.birthdaySlot ?? 0n).toString()
+  const birthdaySlotStr = (params.birthdaySlot ?? params.birthdaySlots?.[params.cluster] ?? 0n).toString()
+  const serializedSlots: Partial<Record<'devnet' | 'mainnet', string>> = {
+    devnet: (params.birthdaySlots?.devnet ?? (params.cluster === 'devnet' ? params.birthdaySlot ?? 0n : 0n)).toString(),
+    mainnet: (params.birthdaySlots?.mainnet ?? (params.cluster === 'mainnet' ? params.birthdaySlot ?? 0n : 0n)).toString(),
+  }
   const payload = {
     version: 1,
     cluster: params.cluster,
     seedB64: toBase64(params.seed),
     birthdaySlot: birthdaySlotStr,
+    birthdaySlots: serializedSlots,
   }
   const aad = encoder.encode(`audren-vault-backup-v1:${params.cluster}:${params.audrenAddress}`)
   const ct = await crypto.subtle.encrypt(
@@ -273,13 +280,19 @@ export async function exportEncryptedVaultBackup(params: {
     cluster: params.cluster,
     audrenAddress: params.audrenAddress,
     birthdaySlot: birthdaySlotStr,
+    birthdaySlots: serializedSlots,
   }
 }
 
 export async function importEncryptedVaultBackup(
   backup: AudrenEncryptedBackupFile,
   passphrase: string,
-): Promise<{ seed: Uint8Array; cluster: 'devnet' | 'mainnet'; birthdaySlot: bigint }> {
+): Promise<{
+  seed: Uint8Array
+  cluster: 'devnet' | 'mainnet'
+  birthdaySlot: bigint
+  birthdaySlots: Record<'devnet' | 'mainnet', bigint>
+}> {
   if (backup.format !== 'audren-vault-backup-v1' || backup.kdf !== 'PBKDF2-SHA256') {
     throw new Error('Unsupported Audren vault backup format')
   }
@@ -301,17 +314,25 @@ export async function importEncryptedVaultBackup(
     cluster: 'devnet' | 'mainnet'
     seedB64: string
     birthdaySlot?: string
+    birthdaySlots?: Partial<Record<'devnet' | 'mainnet', string>>
   }
   if (parsed.version !== 1 || !parsed.seedB64) {
     throw new Error('Malformed decrypted vault backup payload')
   }
   const seed = fromBase64(parsed.seedB64)
   if (seed.byteLength !== 32) throw new Error('Invalid vault seed length in backup')
+  const parseSlot = (v: unknown): bigint => (typeof v === 'string' && /^\d+$/.test(v) ? BigInt(v) : 0n)
   const rawSlot = parsed.birthdaySlot ?? backup.birthdaySlot ?? '0'
-  const birthdaySlot = /^\d+$/.test(rawSlot) ? BigInt(rawSlot) : 0n
+  const birthdaySlot = parseSlot(rawSlot)
+  const rawMap = parsed.birthdaySlots ?? backup.birthdaySlots
+  const birthdaySlots: Record<'devnet' | 'mainnet', bigint> = {
+    devnet: rawMap?.devnet !== undefined ? parseSlot(rawMap.devnet) : parsed.cluster === 'devnet' ? birthdaySlot : 0n,
+    mainnet: rawMap?.mainnet !== undefined ? parseSlot(rawMap.mainnet) : parsed.cluster === 'mainnet' ? birthdaySlot : 0n,
+  }
   return {
     seed,
     cluster: parsed.cluster,
-    birthdaySlot,
+    birthdaySlot: birthdaySlots[parsed.cluster],
+    birthdaySlots,
   }
 }

@@ -28,6 +28,13 @@ async function main() {
   if ('solVaultPda' in AUDREN) {
     throw new Error('AUDREN protocol register must not contain removed solVaultPda')
   }
+  if (
+    AUDREN.version !== '1.2.1' ||
+    AUDREN.mainnet.pool0Alt.entries.length !== 40 ||
+    AUDREN.devnet.pool0Alt.entries.length !== 40
+  ) {
+    throw new Error('AUDREN protocol register missing v1.2.1 version or 40-entry frozen Pool #0 ALTs')
+  }
 
   const pool = await assertOkJson('/api/pool?cluster=devnet&poolId=0')
   if (

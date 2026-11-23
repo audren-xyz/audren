@@ -193,7 +193,12 @@ function toV1Ix(ix) {
   };
 }
 
-async function sendV1(ixs, computeUnitLimit = 300_000, priorityFeeLamports = 25_000n) {
+async function sendV1(
+  ixs,
+  computeUnitLimit = 300_000,
+  priorityFeeLamports = 25_000n,
+  preflightCommitment = 'confirmed',
+) {
   const bh = await rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
   const compiled = compileV1Message({
     feePayer: payerPubkey,
@@ -205,7 +210,7 @@ async function sendV1(ixs, computeUnitLimit = 300_000, priorityFeeLamports = 25_
   const wire = serializeV1Transaction(compiled, [sigBytes]);
   const sig = await rpc('sendTransaction', [
     toBase64(wire),
-    { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 4 },
+    { encoding: 'base64', preflightCommitment, maxRetries: 4 },
   ]);
 
   let slot = 0;
@@ -269,9 +274,10 @@ async function publishFreshCheckpoint(poolId, pool) {
     const [existingRaw] = await fetchBatch([ckptPda]);
     if (existingRaw) {
       const existing = decodeRootCheckpoint(existingRaw);
-      if (existing.epochId >= epoch) {
+      const curSlotBig = BigInt(curSlot);
+      if (existing.epochId >= epoch || curSlotBig <= existing.publishedSlot + pool.maxCkptAge) {
         const nextEpochSlot = (epoch + 1n) * pool.ckptInterval;
-        const waitSlots = Number(nextEpochSlot - BigInt(curSlot)) + 1;
+        const waitSlots = Number(nextEpochSlot - curSlotBig) + 1;
         await sleep(Math.max(800, waitSlots * 420));
         continue;
       }
@@ -283,10 +289,16 @@ async function publishFreshCheckpoint(poolId, pool) {
         slotIdx,
         activeLanes: pool.activeLanes,
       });
-      const res = await sendV1([ix], 120_000, 50_000n);
+      // Match the `processed` slot used to derive `slotIdx` so preflight never lags across an 8-slot boundary.
+      const res = await sendV1([ix], 120_000, 50_000n, 'processed');
       return { ...res, slotIdx, epoch };
     } catch (err) {
-      if (String(err).includes('Custom') || String(err).includes('InvalidPda') || String(err).includes('custom program error')) {
+      if (
+        String(err).includes('Custom') ||
+        String(err).includes('InvalidPda') ||
+        String(err).includes('CheckpointTooSoon') ||
+        String(err).includes('custom program error')
+      ) {
         await sleep(700);
         continue;
       }
@@ -457,6 +469,7 @@ async function main() {
   }
 
   // Optional UpdatePool (Tag 8) no-op params verification if signer is pool authority
+  // (`ckpt_interval` is immutable after InitPool and MUST remain equal to `pool.ckptInterval`).
   if (pool.authority === payerStr && !INIT_ONLY) {
     console.log('\n[1b] Verifying UpdatePool (Tag 8, params no-op)...');
     const updIx = buildUpdatePoolInstruction({

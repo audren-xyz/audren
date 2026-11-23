@@ -10,7 +10,7 @@
 //!   6: ExecViaEscrow     — SPL / Token-2022 DeFi CPI behind `WatchedEscrowBuf` firewall,
 //!                          `router_accounts` bound in `ctx_hash`, Token-2022 TLV checks, and XOR-masked 72 B `MemoPage`
 //!   7: SetPaused         — Authority-only pause/unpause (never locks full withdrawals, checkpoints, or `OpenPage`)
-//!   8: UpdatePool        — Governance parameter updates and two-step authority transfer / renounce (`!paused`)
+//!   8: UpdatePool        — Governance parameter updates (`ckpt_interval` immutable after `InitPool`) and two-step authority transfer / renounce (`!paused`)
 
 #![no_std]
 #![allow(unexpected_cfgs)]
@@ -178,80 +178,112 @@ impl RentParams {
     }
 }
 
-/// Pure-integer (`u128`) exact IEEE-754 `f64` rent-exemption calculation supporting arbitrary
-/// positive `exemption_threshold` values (including SIMD-0194 / SIMD-0437 fractional thresholds)
-/// with zero floating-point instructions:
-/// `ceil(lamports_per_byte_year * (data_len + 128) * exemption_threshold)`.
+/// Pure-integer (`u128`) exact IEEE-754 binary64 emulation of Agave's `Rent::minimum_balance`:
+/// `((lamports_per_byte_year * (data_len + 128)) as f64 * exemption_threshold) as u64`,
+/// supporting arbitrary positive normal/subnormal `exemption_threshold` values (including
+/// SIMD-0194 / SIMD-0437 fractional thresholds) with zero floating-point instructions on sBPFv3.
 fn compute_rent_minimum_balance(
     lamports_per_byte_year: u64,
     threshold_bits: u64,
     data_len: usize,
 ) -> Result<u64, ProgramError> {
-    const ACCOUNT_STORAGE_OVERHEAD: u128 = 128;
+    const ACCOUNT_STORAGE_OVERHEAD: u64 = 128;
 
     let sign = threshold_bits >> 63;
     let exp = ((threshold_bits >> 52) & 0x7ff) as i32;
     let frac = threshold_bits & ((1u64 << 52) - 1);
 
-    // +0.0 or -0.0
-    if exp == 0 && frac == 0 {
-        return Ok(0);
-    }
     // Negative non-zero, NaN, or +/-Inf
-    if sign != 0 || exp == 0x7ff {
+    let is_zero = exp == 0 && frac == 0;
+    if (!is_zero && sign != 0) || exp == 0x7ff {
         return Err(ProgramError::UnsupportedSysvar);
     }
 
+    let data_len_u64 = u64::try_from(data_len).map_err(|_| err(AudrenError::Overflow))?;
     let total_bytes = ACCOUNT_STORAGE_OVERHEAD
-        .checked_add(data_len as u128)
+        .checked_add(data_len_u64)
         .ok_or_else(|| err(AudrenError::Overflow))?;
     let base = total_bytes
-        .checked_mul(lamports_per_byte_year as u128)
+        .checked_mul(lamports_per_byte_year)
         .ok_or_else(|| err(AudrenError::Overflow))?;
-    if base == 0 {
+    if is_zero || base == 0 {
         return Ok(0);
     }
 
-    let (raw_mantissa, raw_shift): (u128, i32) = if exp == 0 {
-        // Subnormal: frac * 2^(1 - 1023 - 52) = frac * 2^-1074
-        (frac as u128, -1074)
+    // 1. Convert `base: u64` (`1 <= base <= u64::MAX`) to exact IEEE-754 binary64 `(base_m, base_e)`
+    //    with `2^52 <= base_m < 2^53` and `(base as f64) == base_m * 2^base_e`.
+    let base_bits = 64 - base.leading_zeros();
+    let (base_m, base_e): (u128, i32) = if base_bits <= 53 {
+        let s = 53 - base_bits;
+        ((base as u128) << s, -(s as i32))
     } else {
-        // Normal: (2^52 + frac) * 2^(exp - 1023 - 52)
+        let s = base_bits - 53;
+        let base_u128 = base as u128;
+        let mut q = base_u128 >> s;
+        let rem = base_u128 & ((1u128 << s) - 1);
+        let half = 1u128 << (s - 1);
+        if rem > half || (rem == half && (q & 1) != 0) {
+            q += 1;
+        }
+        if q == (1u128 << 53) {
+            (q >> 1, (s as i32) + 1)
+        } else {
+            (q, s as i32)
+        }
+    };
+
+    // 2. Normalize `threshold` (normal or subnormal) to `(thresh_m, thresh_e)`
+    //    with `2^52 <= thresh_m < 2^53` and `threshold == thresh_m * 2^thresh_e`.
+    let (thresh_m, thresh_e): (u128, i32) = if exp == 0 {
+        // Subnormal: `frac * 2^-1074` (`1 <= frac < 2^52`)
+        let frac_bits = 64 - frac.leading_zeros();
+        let s = 53 - frac_bits;
+        ((frac as u128) << s, -1074 - (s as i32))
+    } else {
+        // Normal: `(2^52 + frac) * 2^(exp - 1075)`
         (((1u64 << 52) | frac) as u128, exp - 1075)
     };
-    let tz = raw_mantissa.trailing_zeros();
-    let mantissa = raw_mantissa >> tz;
-    let shift = raw_shift + (tz as i32);
 
-    let prod = base
-        .checked_mul(mantissa)
-        .ok_or_else(|| err(AudrenError::Overflow))?;
-
-    let scaled: u128 = if shift == 0 {
-        prod
-    } else if shift > 0 {
-        let s = shift as u32;
-        if s >= 64 || prod.leading_zeros() < s {
-            return Err(err(AudrenError::Overflow));
-        }
-        prod << s
-    } else {
-        let r = (-shift) as u32;
-        if r >= 128 {
-            // prod > 0 and prod < 2^128 <= 2^r => 0 < prod / 2^r < 1 => ceil == 1
-            1
+    // 3. Exact 53x53 -> 105..106 bit product, rounded to 53-bit binary64 significand
+    //    using IEEE-754 round-to-nearest-even.
+    let prod = base_m * thresh_m;
+    let (mut sig, mut exp_lsb) = if prod >= (1u128 << 105) {
+        let q = prod >> 53;
+        let rem = prod & ((1u128 << 53) - 1);
+        let half = 1u128 << 52;
+        let rounded = if rem > half || (rem == half && (q & 1) != 0) {
+            q + 1
         } else {
-            let q = prod >> r;
-            let rem_mask = (1u128 << r) - 1;
-            if (prod & rem_mask) != 0 {
-                q + 1
-            } else {
-                q
-            }
-        }
+            q
+        };
+        (rounded, base_e + thresh_e + 53)
+    } else {
+        let q = prod >> 52;
+        let rem = prod & ((1u128 << 52) - 1);
+        let half = 1u128 << 51;
+        let rounded = if rem > half || (rem == half && (q & 1) != 0) {
+            q + 1
+        } else {
+            q
+        };
+        (rounded, base_e + thresh_e + 52)
     };
 
-    u64::try_from(scaled).map_err(|_| err(AudrenError::Overflow))
+    if sig == (1u128 << 53) {
+        sig >>= 1;
+        exp_lsb += 1;
+    }
+
+    // 4. Truncate toward zero (`as u64`): `sig * 2^exp_lsb in [2^(exp_lsb + 52), 2^(exp_lsb + 53))`.
+    if exp_lsb < -52 {
+        Ok(0)
+    } else if exp_lsb >= 12 {
+        Err(err(AudrenError::Overflow))
+    } else if exp_lsb >= 0 {
+        Ok((sig as u64) << (exp_lsb as u32))
+    } else {
+        Ok((sig as u64) >> ((-exp_lsb) as u32))
+    }
 }
 
 /// Exact live `SysvarRent` minimum balance calculation with zero floating-point instructions.
@@ -260,7 +292,8 @@ fn rent_minimum_balance(data_len: usize) -> Result<u64, ProgramError> {
     RentParams::get()?.minimum_balance(data_len)
 }
 
-/// Create a PDA safely even if an attacker pre-funded lamports to it (immune to 1-lamport DoS).
+/// Create a PDA safely even if an attacker pre-funded lamports to it (immune to 1-lamport DoS)
+/// and clamp to at least `1` lamport so no Audren PDA can ever be reaped on a zero-rent cluster.
 fn create_pda_safe<'a>(
     payer: &'a AccountView,
     pda: &'a AccountView,
@@ -276,7 +309,7 @@ fn create_pda_safe<'a>(
             && pda.is_data_empty(),
         AudrenError::InvalidAccount,
     )?;
-    let required = rent_minimum_balance(space)?;
+    let required = rent_minimum_balance(space)?.max(1);
     if pda.lamports() == 0 {
         let signer = Signer::from(seeds);
         CreateAccount {
@@ -560,7 +593,8 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
     let data = account.try_borrow().ok()?;
     let len = data.len();
     let valid = (len == SPL_ACCOUNT_LEN
-        || (len > SPL_ACCOUNT_LEN
+        || (owner_prog == &TOKEN_2022_ID
+            && len > SPL_ACCOUNT_LEN
             && len != SPL_MULTISIG_LEN
             && data[SPL_ACCOUNT_LEN] == TOKEN_2022_ACCOUNT_TYPE_ACCOUNT))
         && data[108] == 1;
@@ -585,7 +619,7 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
         _ => return None,
     };
     let mut has_restrictive_ext = false;
-    if len > SPL_ACCOUNT_LEN + 1 {
+    if owner_prog == &TOKEN_2022_ID && len > SPL_ACCOUNT_LEN + 1 {
         let tlv = &data[SPL_ACCOUNT_LEN + 1..];
         let mut pos = 0usize;
         while pos + 4 <= tlv.len() {
@@ -1355,7 +1389,8 @@ fn append_nullifier_prefix(
     let nf_idx = {
         let mut ld = lane_acc.try_borrow_mut()?;
         let cur = read_u64(&ld, LN_OFF_NF_COUNT);
-        ld[LN_OFF_NF_COUNT..LN_OFF_NF_COUNT + 8].copy_from_slice(&(cur + 1).to_le_bytes());
+        let next = cur.checked_add(1).ok_or_else(|| err(AudrenError::Overflow))?;
+        ld[LN_OFF_NF_COUNT..LN_OFF_NF_COUNT + 8].copy_from_slice(&next.to_le_bytes());
         cur
     };
     let page_seq = nf_idx / (NF_PER_PAGE as u64);
@@ -1758,7 +1793,7 @@ fn ix_open_page(
 
     if page_kind == PAGE_KIND_SUBROOT {
         let subroot_slot = (next_leaf / (SUBTREE_LEAVES as u64)) % (SUBROOTS_PER_PAGE as u64);
-        let allowed = page_seq == cur_seq
+        let allowed = page_seq <= cur_seq
             || (cur_seq.checked_add(1) == Some(page_seq) && subroot_slot >= 280);
         ensure(allowed, AudrenError::PageSeqOutOfRange)?;
     } else {
@@ -1787,9 +1822,11 @@ fn ix_open_page(
 
     // Self-funding via `LaneRentVault`: Allocate & Assign BEFORE direct lamport debit
     // so a 0-SOL cranker can open pages once `LaneRentVault` is funded.
+    // Clamp both the sentinel floor and required page rent to `>= 1` lamport so zero-rent
+    // clusters can never drain `LaneRentVault` or create a 0-lamport page subject to reaping.
     let rent = RentParams::get()?;
-    let min_vault = rent.minimum_balance(SENTINEL_LEN)?;
-    let page_rent = rent.minimum_balance(space)?;
+    let min_vault = rent.minimum_balance(SENTINEL_LEN)?.max(1);
+    let page_rent = rent.minimum_balance(space)?.max(1);
     let available = lane_rent_vault.lamports().saturating_sub(min_vault);
     let needed = page_rent.saturating_sub(page_acc.lamports());
     let subsidy = available.min(needed);
@@ -2133,11 +2170,9 @@ fn ix_publish_checkpoint(
     } else {
         check_owned_and_magic(ckpt_acc, program_id, CKPT_LEN, &CKPT_MAGIC)?;
         let cd = ckpt_acc.try_borrow()?;
-        let prev_epoch = read_u64(&cd, CK_OFF_EPOCH_ID);
         let prev_slot = read_u64(&cd, CK_OFF_PUBLISHED_SLOT);
-        ensure(epoch_id > prev_epoch, AudrenError::CheckpointTooSoon)?;
         ensure(
-            slot.saturating_sub(prev_slot) > cfg.max_ckpt_age,
+            slot > prev_slot && slot.saturating_sub(prev_slot) > cfg.max_ckpt_age,
             AudrenError::CheckpointTooSoon,
         )?;
     }
@@ -2266,18 +2301,21 @@ fn ix_transact(
     let total_outflow = public_amount_out
         .checked_add(relayer_fee_amount)
         .ok_or_else(|| err(AudrenError::Overflow))?;
+    // Economy mode: `nf1 == [0;32]` is ONLY provable when `is_dummy[1] == true && amount[1] == 0`.
+    let has_nf1 = nf1 != [0u8; 32];
 
-    let (public_asset_id, recipient_key, relayer_fee_key, spl_mint_info): (
+    let (public_asset_id, recipient_key, relayer_fee_key, spl_mint_info, vault_before): (
         [u8; 32],
         [u8; 32],
         [u8; 32],
         Option<MintInfo>,
+        u64,
     ) = match asset_mode {
         ASSET_MODE_PRIVATE => {
             // Pure private transfers MUST NOT pay a public asset-disclosing relayer fee!
             // Relayers are compensated privately via shielded output `cm2`.
             ensure(total_outflow == 0, AudrenError::InvalidInstruction)?;
-            ([0u8; 32], [0u8; 32], [0u8; 32], None)
+            ([0u8; 32], [0u8; 32], [0u8; 32], None, 0)
         }
         ASSET_MODE_PUBLIC => {
             // Public outflow mode requires `public_amount_out > 0`.
@@ -2305,6 +2343,8 @@ fn ix_transact(
             ensure(
                 recipient_acc.address() != vault_ata.address()
                     && recipient_acc.address() != vault_auth.address()
+                    && recipient_acc.address() != nf0_acc.address()
+                    && (!has_nf1 || recipient_acc.address() != nf1_acc.address())
                     && recipient_acc.address() != program_id
                     && !recipient_acc.owned_by(program_id),
                 AudrenError::InvalidAccount,
@@ -2327,25 +2367,61 @@ fn ix_transact(
                     recipient_acc.is_writable() && recipient_acc.address() != unwrap_acc.address(),
                     AudrenError::InvalidAccount,
                 )?;
+                if let Some(rec_snap) = token_account_security(recipient_acc) {
+                    ensure(
+                        rec_snap.owner != *vault_auth.address(),
+                        AudrenError::InvalidAccount,
+                    )?;
+                }
                 if relayer_fee_amount > 0 {
                     ensure(
                         relayer_fee_acc.is_writable()
                             && relayer_fee_acc.address() != unwrap_acc.address()
                             && relayer_fee_acc.address() != vault_auth.address()
                             && relayer_fee_acc.address() != vault_ata.address()
+                            && relayer_fee_acc.address() != nf0_acc.address()
+                            && (!has_nf1 || relayer_fee_acc.address() != nf1_acc.address())
                             && relayer_fee_acc.address() != program_id
                             && !relayer_fee_acc.owned_by(program_id),
                         AudrenError::InvalidAccount,
                     )?;
+                    if let Some(fee_snap) = token_account_security(relayer_fee_acc) {
+                        ensure(
+                            fee_snap.owner != *vault_auth.address(),
+                            AudrenError::InvalidAccount,
+                        )?;
+                    }
                 }
-            } else if relayer_fee_amount > 0 {
+            } else {
+                let rec_snap = token_account_security(recipient_acc)
+                    .ok_or_else(|| err(AudrenError::InvalidTokenAccount))?;
                 ensure(
-                    relayer_fee_acc.address() != vault_ata.address()
-                        && relayer_fee_acc.address() != vault_auth.address()
-                        && relayer_fee_acc.address() != program_id
-                        && !relayer_fee_acc.owned_by(program_id),
+                    recipient_acc.is_writable()
+                        && rec_snap.token_program == *token_prog.address()
+                        && rec_snap.mint == *mint_acc.address()
+                        && rec_snap.owner != *vault_auth.address(),
                     AudrenError::InvalidAccount,
                 )?;
+                if relayer_fee_amount > 0 {
+                    ensure(
+                        relayer_fee_acc.address() != vault_ata.address()
+                            && relayer_fee_acc.address() != vault_auth.address()
+                            && relayer_fee_acc.address() != nf0_acc.address()
+                            && (!has_nf1 || relayer_fee_acc.address() != nf1_acc.address())
+                            && relayer_fee_acc.address() != program_id
+                            && !relayer_fee_acc.owned_by(program_id),
+                        AudrenError::InvalidAccount,
+                    )?;
+                    let fee_snap = token_account_security(relayer_fee_acc)
+                        .ok_or_else(|| err(AudrenError::InvalidTokenAccount))?;
+                    ensure(
+                        relayer_fee_acc.is_writable()
+                            && fee_snap.token_program == *token_prog.address()
+                            && fee_snap.mint == *mint_acc.address()
+                            && fee_snap.owner != *vault_auth.address(),
+                        AudrenError::InvalidAccount,
+                    )?;
+                }
             }
             let mut m32 = [0u8; 32];
             m32.copy_from_slice(mint_acc.address().as_ref());
@@ -2355,7 +2431,7 @@ fn ix_transact(
             if relayer_fee_amount > 0 {
                 fk.copy_from_slice(relayer_fee_acc.address().as_ref());
             }
-            (derive_asset_id(&m32), rk, fk, Some(mi))
+            (derive_asset_id(&m32), rk, fk, Some(mi), bal)
         }
         _ => return Err(err(AudrenError::InvalidInstruction)),
     };
@@ -2389,8 +2465,6 @@ fn ix_transact(
 
     verify_joinsplit_proof_192(vk_id, proof_192, pub_hash)?;
 
-    // Economy mode: `nf1 == [0;32]` is ONLY provable when `is_dummy[1] == true && amount[1] == 0`.
-    let has_nf1 = nf1 != [0u8; 32];
     create_nullifier_pda(program_id, payer, nf0_acc, sys_prog, pool_id, &nf0)?;
     if has_nf1 {
         create_nullifier_pda(program_id, payer, nf1_acc, sys_prog, pool_id, &nf1)?;
@@ -2485,7 +2559,7 @@ fn ix_transact(
                 pool_acc.address(),
                 ckpt_acc.address(),
                 nf0_acc.address(),
-                nf1_acc.address(),
+                if has_nf1 { nf1_acc.address() } else { nf0_acc.address() },
                 lane_acc.address(),
                 lane_rent_vault.address(),
                 subtree_acc.address(),
@@ -2524,6 +2598,17 @@ fn ix_transact(
                     &[Signer::from(&va_seeds)],
                 )?;
             }
+            let vault_after = validate_token_account(
+                vault_ata,
+                token_prog.address(),
+                mint_acc.address(),
+                vault_auth.address(),
+                true,
+            )?;
+            ensure(
+                vault_before.checked_sub(vault_after) == Some(total_outflow),
+                AudrenError::CustodyInvariantViolated,
+            )?;
         }
     }
 
@@ -2664,6 +2749,8 @@ fn ix_exec_via_escrow(
     let total_in_outflow = amount_in
         .checked_add(circuit_relayer_fee)
         .ok_or_else(|| err(AudrenError::Overflow))?;
+    // Economy mode: `nf1 == [0;32]` is ONLY provable when `is_dummy[1] == true && amount[1] == 0`.
+    let has_nf1 = nf1 != [0u8; 32];
 
     let mut forbidden_keys: [Address; 6] = [ZERO_ADDRESS; 6];
     let mut forbidden_len = 0usize;
@@ -2672,7 +2759,7 @@ fn ix_exec_via_escrow(
 
     // Validate SPL/Token-2022 input leg (enforcing canonical vault & escrow ATAs) and derive `asset_in`
     let mut relayer_fee_key = [0u8; 32];
-    let (asset_in, in_mint_info, pre_escrow_in_spl) = {
+    let (asset_in, in_mint_info, pre_vault_in_spl, pre_escrow_in_spl) = {
         let va_in = &in_leg[0];
         let mint_in = &in_leg[1];
         let vault_in_ata = &in_leg[2];
@@ -2697,6 +2784,17 @@ fn ix_exec_via_escrow(
         forbidden_len += 1;
         if has_in_fee {
             let fee_ata = &in_leg[5];
+            ensure(
+                fee_ata.address() != vault_in_ata.address()
+                    && fee_ata.address() != escrow_in_ata.address()
+                    && fee_ata.address() != &exp_va
+                    && fee_ata.address() != &exp_escrow
+                    && fee_ata.address() != nf0_acc.address()
+                    && (!has_nf1 || fee_ata.address() != nf1_acc.address())
+                    && fee_ata.address() != program_id
+                    && !fee_ata.owned_by(program_id),
+                AudrenError::InvalidAccount,
+            )?;
             let fee_snap = token_account_security(fee_ata)
                 .ok_or_else(|| err(AudrenError::InvalidTokenAccount))?;
             ensure(
@@ -2704,11 +2802,7 @@ fn ix_exec_via_escrow(
                     && fee_snap.token_program == *token_prog_in.address()
                     && fee_snap.mint == *mint_in.address()
                     && fee_snap.owner != exp_va
-                    && fee_snap.owner != exp_escrow
-                    && fee_ata.address() != vault_in_ata.address()
-                    && fee_ata.address() != escrow_in_ata.address()
-                    && fee_ata.address() != program_id
-                    && !fee_ata.owned_by(program_id),
+                    && fee_snap.owner != exp_escrow,
                 AudrenError::InvalidAccount,
             )?;
             forbidden_keys[forbidden_len] = *fee_ata.address();
@@ -2717,7 +2811,7 @@ fn ix_exec_via_escrow(
         }
         let mut m32 = [0u8; 32];
         m32.copy_from_slice(mint_in.address().as_ref());
-        (derive_asset_id(&m32), mi, e_bal)
+        (derive_asset_id(&m32), mi, v_bal, e_bal)
     };
 
     // Validate SPL/Token-2022 output leg (enforcing canonical vault & escrow ATAs) and derive `asset_out`
@@ -2745,6 +2839,17 @@ fn ix_exec_via_escrow(
         forbidden_len += 1;
         if has_out_fee {
             let fee_ata = &out_leg[5];
+            ensure(
+                fee_ata.address() != vault_out_ata.address()
+                    && fee_ata.address() != escrow_out_ata.address()
+                    && fee_ata.address() != &exp_va
+                    && fee_ata.address() != &exp_escrow
+                    && fee_ata.address() != nf0_acc.address()
+                    && (!has_nf1 || fee_ata.address() != nf1_acc.address())
+                    && fee_ata.address() != program_id
+                    && !fee_ata.owned_by(program_id),
+                AudrenError::InvalidAccount,
+            )?;
             let fee_snap = token_account_security(fee_ata)
                 .ok_or_else(|| err(AudrenError::InvalidTokenAccount))?;
             ensure(
@@ -2752,11 +2857,7 @@ fn ix_exec_via_escrow(
                     && fee_snap.token_program == *token_prog_out.address()
                     && fee_snap.mint == *mint_out.address()
                     && fee_snap.owner != exp_va
-                    && fee_snap.owner != exp_escrow
-                    && fee_ata.address() != vault_out_ata.address()
-                    && fee_ata.address() != escrow_out_ata.address()
-                    && fee_ata.address() != program_id
-                    && !fee_ata.owned_by(program_id),
+                    && fee_snap.owner != exp_escrow,
                 AudrenError::InvalidAccount,
             )?;
             forbidden_keys[forbidden_len] = *fee_ata.address();
@@ -2819,7 +2920,6 @@ fn ix_exec_via_escrow(
     verify_joinsplit_proof_192(vk_id, proof_192, pub_hash)?;
 
     // Nullifier-first ordering (prevents re-entrancy / replay) + economy `nf1 == 0` support
-    let has_nf1 = nf1 != [0u8; 32];
     create_nullifier_pda(program_id, payer, nf0_acc, sys_prog, pool_id, &nf0)?;
     if has_nf1 {
         create_nullifier_pda(program_id, payer, nf1_acc, sys_prog, pool_id, &nf1)?;
@@ -2910,7 +3010,7 @@ fn ix_exec_via_escrow(
         pool_acc.address(),
         ckpt_acc.address(),
         nf0_acc.address(),
-        nf1_acc.address(),
+        if has_nf1 { nf1_acc.address() } else { nf0_acc.address() },
         lane_acc.address(),
         lane_rent_vault.address(),
         subtree_acc.address(),
@@ -2989,6 +3089,17 @@ fn ix_exec_via_escrow(
                 &[Signer::from(&va_seeds)],
             )?;
         }
+        let vault_in_after = validate_token_account(
+            vault_in_ata,
+            token_prog_in.address(),
+            mint_in.address(),
+            va_in.address(),
+            true,
+        )?;
+        ensure(
+            pre_vault_in_spl.checked_sub(vault_in_after) == Some(total_in_outflow),
+            AudrenError::CustodyInvariantViolated,
+        )?;
 
         // Invoke external DeFi router CPI via zero-alloc 64-account arena, signed ONLY by `escrow_acc`
         invoke_router_cpi_arena(
@@ -3233,6 +3344,7 @@ fn ix_update_pool(
     match action {
         UPDATE_POOL_PARAMS => {
             // pool_id(4) + action(1) + ckpt_interval(8) + max_ckpt_age(8) + note_rent_fee(8) + nf_rent_fee(8) = 37 B
+            // `ckpt_interval` is immutable after `InitPool` so cyclic ring slot assignments cannot alias or regress.
             ensure(data.len() == 37, AudrenError::InvalidInstruction)?;
             ensure(
                 cfg.authority != ZERO_ADDRESS && signer.address() == &cfg.authority,
@@ -3242,14 +3354,15 @@ fn ix_update_pool(
             let max_ckpt_age = read_u64(data, 13);
             let note_rent_fee = read_u64(data, 21);
             let nf_rent_fee = read_u64(data, 29);
-            let max_safe_age = (CHECKPOINT_RING_SLOTS - 1).saturating_mul(ckpt_interval);
+            let max_safe_age = (CHECKPOINT_RING_SLOTS - 1).saturating_mul(cfg.ckpt_interval);
             ensure(
-                ckpt_interval > 0 && max_ckpt_age >= ckpt_interval && max_ckpt_age < max_safe_age,
+                cfg.ckpt_interval > 0
+                    && ckpt_interval == cfg.ckpt_interval
+                    && max_ckpt_age >= cfg.ckpt_interval
+                    && max_ckpt_age < max_safe_age,
                 AudrenError::InvalidInstruction,
             )?;
             let mut pd = pool_acc.try_borrow_mut()?;
-            pd[PL_OFF_CKPT_INTERVAL..PL_OFF_CKPT_INTERVAL + 8]
-                .copy_from_slice(&ckpt_interval.to_le_bytes());
             pd[PL_OFF_MAX_CKPT_AGE..PL_OFF_MAX_CKPT_AGE + 8]
                 .copy_from_slice(&max_ckpt_age.to_le_bytes());
             pd[PL_OFF_NOTE_RENT_FEE..PL_OFF_NOTE_RENT_FEE + 8]
@@ -3274,7 +3387,8 @@ fn ix_update_pool(
             // pool_id(4) + action(1) = 5 B
             ensure(data.len() == 5, AudrenError::InvalidInstruction)?;
             ensure(
-                cfg.pending_authority != ZERO_ADDRESS
+                cfg.authority != ZERO_ADDRESS
+                    && cfg.pending_authority != ZERO_ADDRESS
                     && signer.address() == &cfg.pending_authority,
                 AudrenError::Unauthorized,
             )?;
@@ -3346,8 +3460,37 @@ mod tests {
     #[test]
     fn rent_minimum_balance_pure_integer_ieee754() {
         const LPBY: u64 = 3_480;
+        const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0; // exact 2^64 in binary64
 
-        // 2.0 (classic Solana cluster)
+        // Reference Agave `Rent::minimum_balance` formula on host (`f64` -> `u64` truncation).
+        let check_matches_agave = |lpby: u64, threshold: f64, data_len: usize| {
+            let total_bytes = 128u64.checked_add(u64::try_from(data_len).unwrap());
+            let base = total_bytes.and_then(|b| b.checked_mul(lpby));
+            let actual = compute_rent_minimum_balance(lpby, threshold.to_bits(), data_len);
+            match base {
+                None => assert_eq!(actual, Err(err(AudrenError::Overflow))),
+                Some(base_u64) => {
+                    let prod = (base_u64 as f64) * threshold;
+                    if prod >= TWO_POW_64 {
+                        assert_eq!(
+                            actual,
+                            Err(err(AudrenError::Overflow)),
+                            "expected Overflow for lpby={lpby} data_len={data_len} thresh={threshold:e}"
+                        );
+                    } else {
+                        let expected = prod as u64;
+                        assert_eq!(
+                            actual,
+                            Ok(expected),
+                            "mismatch for lpby={lpby} data_len={data_len} thresh={threshold} (bits={:#018x})",
+                            threshold.to_bits()
+                        );
+                    }
+                }
+            }
+        };
+
+        // 1. Canonical cluster spot checks (classic 2.0, SIMD-0194 1.0, fractional thresholds)
         assert_eq!(
             compute_rent_minimum_balance(LPBY, 2.0f64.to_bits(), 0).unwrap(),
             890_880
@@ -3356,8 +3499,6 @@ mod tests {
             compute_rent_minimum_balance(LPBY, 2.0f64.to_bits(), POOL_STATE_LEN).unwrap(),
             1_781_760
         );
-
-        // 1.0 (SIMD-0194)
         assert_eq!(
             compute_rent_minimum_balance(LPBY, 1.0f64.to_bits(), 0).unwrap(),
             445_440
@@ -3366,79 +3507,162 @@ mod tests {
             compute_rent_minimum_balance(LPBY, 1.0f64.to_bits(), MEMO_PAGE_LEN).unwrap(),
             36_080_640
         );
-
-        // 0.5 (exact & odd-base ceiling)
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, 0.5f64.to_bits(), 0).unwrap(),
-            222_720
-        );
+        // Fractional truncation matches Agave bit-for-bit (never off-by-1 ceiling)
         assert_eq!(
             compute_rent_minimum_balance(3, 0.5f64.to_bits(), 1).unwrap(),
-            194 // ceil(129 * 3 * 0.5) = ceil(193.5) = 194
-        );
-
-        // 0.25 (exact & fractional ceiling)
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, 0.25f64.to_bits(), 0).unwrap(),
-            111_360
+            193 // (129 * 3) as f64 * 0.5 = 193.5 -> 193
         );
         assert_eq!(
             compute_rent_minimum_balance(1, 0.25f64.to_bits(), 1).unwrap(),
-            33 // ceil(129 * 0.25) = ceil(32.25) = 33
+            32 // 129.0 * 0.25 = 32.25 -> 32
         );
-
-        // 0.1 (non-dyadic binary64: 0.1f64 > 1/10 by ~5.55e-18, so exact ceil is +1 over 44544)
         assert_eq!(
             compute_rent_minimum_balance(LPBY, 0.1f64.to_bits(), 0).unwrap(),
-            44_545
+            44_544
         );
         assert_eq!(
             compute_rent_minimum_balance(LPBY, 0.1f64.to_bits(), MEMO_PAGE_LEN).unwrap(),
-            3_608_065
+            3_608_064
         );
 
-        // 0.0 and -0.0 -> Ok(0)
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, 0.0f64.to_bits(), MEMO_PAGE_LEN).unwrap(),
-            0
-        );
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, (-0.0f64).to_bits(), MEMO_PAGE_LEN).unwrap(),
-            0
-        );
+        // 2. Exhaustive Cartesian matrix over all Audren account sizes, lpby values, and thresholds
+        let data_lens: &[usize] = &[
+            0,
+            1,
+            SENTINEL_LEN,
+            128,
+            SPL_ACCOUNT_LEN,
+            CKPT_LEN,
+            LANE_STATE_LEN,
+            SUBTREE_PAGE_LEN,
+            SUBROOT_PAGE_LEN,
+            NF_PAGE_LEN,
+            MEMO_PAGE_LEN,
+        ];
+        let lpbys: &[u64] = &[
+            0,
+            1,
+            3,
+            1_000,
+            1_740,
+            3_480,
+            10_000,
+            100_000,
+            // Large >53-bit `base` cases (128 * lpby in 2^53 .. 2^64 - 1, testing ties & carry!)
+            (1u64 << 46) + 1,                 // base for data_len=0 is 2^53 + 128
+            (1u64 << 47) - 1,                 // base ~ 2^54
+            (1u64 << 55) + 1,                 // base ~ 2^62
+            (1u64 << 56) - 8,                 // base for data_len=0 is 2^63 - 1024 (exact max < 2^63)
+            (1u64 << 56) - 4,                 // base for data_len=0 is 2^63 - 512 (tie rounds UP to 2^63!)
+            (1u64 << 56),                     // base for data_len=0 is 2^63
+            u64::MAX / 128,                   // base for data_len=0 is 2^64 - 128 (rounds UP to 2^64!)
+            u64::MAX / (128 + MEMO_PAGE_LEN as u64), // near u64::MAX for 10 KiB page
+        ];
+        let thresholds: &[f64] = &[
+            2.0,
+            1.5,
+            1.0,
+            0.7,
+            0.5,
+            0.3,
+            0.25,
+            0.1,
+            0.01,
+            1.9999999999999998,
+            f64::from_bits(1.0f64.to_bits() - 1),
+            f64::from_bits(1.0f64.to_bits() + 1),
+            1.0 / 128.0,
+            f64::from_bits((1.0f64 / 128.0f64).to_bits() - 1),
+            f64::from_bits((1.0f64 / 128.0f64).to_bits() + 1),
+            1.0 / 384.0,
+            f64::from_bits((1.0f64 / 384.0f64).to_bits() - 1),
+            f64::from_bits((1.0f64 / 384.0f64).to_bits() + 1),
+            0.0,
+            -0.0,
+            // Subnormals
+            f64::from_bits(1),
+            f64::from_bits(1u64 << 25),
+            f64::from_bits(1u64 << 51),
+            f64::from_bits(0x000f_ffff_ffff_ffff),
+            // Smallest normal
+            f64::MIN_POSITIVE,
+            // Large normal (overflow boundary)
+            1e30,
+            f64::MAX,
+        ];
 
-        // Smallest positive subnormal -> ceil(base * 2^-1074) = 1
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, 1u64, 0).unwrap(),
-            1
-        );
-        assert_eq!(
-            compute_rent_minimum_balance(0, 1u64, 0).unwrap(),
-            0
-        );
+        for &data_len in data_lens {
+            for &lpby in lpbys {
+                for &thresh in thresholds {
+                    check_matches_agave(lpby, thresh, data_len);
+                }
+            }
+        }
 
-        // Negative, NaN, +Inf, -Inf -> UnsupportedSysvar
+        // 3. Explicit round-to-nearest-even >53-bit `base` tie-breaking & `2^64` boundary checks
+        //    `data_len = 0` => `total_bytes = 128 = 2^7`.
+        //    - `(1 << 46) * 128 = 2^53`. Add `data_len` offsets with `lpby = 1` to hit EVERY bit of `2^53 + k`!
+        let base_2_53 = 1usize << 53; // valid on 64-bit host
+        for delta in 0usize..16 {
+            let dl = base_2_53 - 128 + delta;
+            for &thresh in &[1.0, 0.5, 1.5, 0.7, 0.3, 1.9999999999999998] {
+                check_matches_agave(1, thresh, dl);
+            }
+        }
+        // `2^63 - 1024` * 2.0 == `2^64 - 2048` (exact max representable binary64 < 2^64)
         assert_eq!(
-            compute_rent_minimum_balance(LPBY, (-1.0f64).to_bits(), 0),
-            Err(ProgramError::UnsupportedSysvar)
+            compute_rent_minimum_balance((1u64 << 56) - 8, 2.0f64.to_bits(), 0),
+            Ok(0xffff_ffff_ffff_f800)
         );
+        // `2^63 - 512` rounds UP to `2^63` in binary64 -> `* 2.0 == 2^64` -> Overflow!
         assert_eq!(
-            compute_rent_minimum_balance(LPBY, f64::NAN.to_bits(), 0),
-            Err(ProgramError::UnsupportedSysvar)
-        );
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, f64::INFINITY.to_bits(), 0),
-            Err(ProgramError::UnsupportedSysvar)
-        );
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, f64::NEG_INFINITY.to_bits(), 0),
-            Err(ProgramError::UnsupportedSysvar)
-        );
-
-        // Extreme positive exponent -> Overflow
-        assert_eq!(
-            compute_rent_minimum_balance(LPBY, 1e30f64.to_bits(), 0),
+            compute_rent_minimum_balance((1u64 << 56) - 4, 2.0f64.to_bits(), 0),
             Err(err(AudrenError::Overflow))
         );
+        // `2^64 - 128` rounds UP to `2^64` in binary64 -> `* 1.0 == 2^64` -> Overflow, `* 0.5 == 2^63` -> Ok!
+        assert_eq!(
+            compute_rent_minimum_balance(u64::MAX / 128, 1.0f64.to_bits(), 0),
+            Err(err(AudrenError::Overflow))
+        );
+        assert_eq!(
+            compute_rent_minimum_balance(u64::MAX / 128, 0.5f64.to_bits(), 0),
+            Ok(1u64 << 63)
+        );
+
+        // 4. Deterministic fuzz sweep over >53-bit bases & arbitrary positive binary64 exponents
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next_u64 = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for _ in 0..4_000 {
+            let dl = (next_u64() & 0x3fff) as usize;
+            let shift = (next_u64() % 56) as u32;
+            let lpby = next_u64() >> shift;
+            // Construct valid positive finite binary64 (exp in 0..=2046)
+            let exp = next_u64() % 2047;
+            let frac = next_u64() & ((1u64 << 52) - 1);
+            let thresh = f64::from_bits((exp << 52) | frac);
+            check_matches_agave(lpby, thresh, dl);
+        }
+
+        // 5. Negative (normal & subnormal), NaN, +Inf, -Inf -> UnsupportedSysvar
+        for bad_bits in [
+            (-1.0f64).to_bits(),
+            (-0.0001f64).to_bits(),
+            0x8000_0000_0000_0001u64, // negative subnormal
+            f64::NAN.to_bits(),
+            0x7ff8_0000_0000_0001u64, // quiet NaN payload
+            0xfff0_0000_0000_0001u64, // negative signaling NaN
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+        ] {
+            assert_eq!(
+                compute_rent_minimum_balance(LPBY, bad_bits, 0),
+                Err(ProgramError::UnsupportedSysvar)
+            );
+        }
     }
 }

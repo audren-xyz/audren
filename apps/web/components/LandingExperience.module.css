@@ -133,6 +133,10 @@
 }
 
 .figureHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 22px;
 }
 
@@ -461,8 +465,8 @@
 }
 
 .traceStep {
-  padding: 2px 0 2px 16px;
-  border-left: 1px solid var(--divider);
+  padding: 0;
+  border-left: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -784,7 +788,7 @@
 
 .chain li {
   position: relative;
-  padding-left: 14px;
+  padding-left: 26px;
   font-size: var(--text-card);
   font-weight: 400;
   line-height: 1.52;
@@ -792,14 +796,7 @@
 }
 
 .chain li::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0.62em;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--green);
+  content: none;
 }
 
 .vaultLinks {
@@ -1019,7 +1016,7 @@
     padding: 4px 0;
   }
 
-  .proofLink svg {
+  .proofArrow {
     transform: rotate(90deg);
   }
 
@@ -1134,14 +1131,8 @@
   }
 
   .traceStep {
-    padding: 12px 0 0;
-    border-left: 0;
-    border-top: 1px solid var(--divider);
-  }
-
-  .traceStep:first-child {
-    padding-top: 0;
-    border-top: 0;
+    padding: 0;
+    border: 0;
   }
 
   .boundaryLedger {
@@ -1158,5 +1149,544 @@
 
   .closing .actions {
     margin-top: 28px;
+  }
+}
+
+/* ============================================================================
+   EXPLANATORY MOTION
+   ============================================================================ */
+
+/* ---- Hero ledger: ink bars land on exactly what each model hides --------- */
+.replayBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  padding: 4px 9px;
+  border: 1px solid var(--divider);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.replayBtn:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.comparisonRow {
+  position: relative;
+}
+
+/* a hairline "print head" passes under each row as it is processed */
+.comparisonRow::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -1px;
+  height: 1px;
+  background: var(--ink);
+  transform-origin: left center;
+  transform: scaleX(0);
+  opacity: 0;
+  animation: printHead 0.9s cubic-bezier(0.65, 0, 0.35, 1) var(--d, 0s) both paused;
+}
+
+.audrenRow::after {
+  background: var(--surface);
+  bottom: 6px;
+}
+
+@keyframes printHead {
+  0% {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  70% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}
+
+.inkBar {
+  position: relative;
+  display: inline-block;
+}
+
+.inkBar::after {
+  content: '';
+  position: absolute;
+  inset: 0.14em -0.2em;
+  border-radius: 1px;
+  background: var(--carbon);
+  transform-origin: left center;
+  transform: scaleX(0);
+  animation: inkCover 0.46s cubic-bezier(0.7, 0, 0.3, 1) var(--d, 0s) both paused;
+}
+
+.inkBarPartial::after {
+  background: repeating-linear-gradient(-45deg, var(--carbon) 0 2.5px, transparent 2.5px 5px);
+}
+
+@keyframes inkCover {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* wallet names are replaced by what the chain records instead */
+.swap {
+  position: relative;
+  display: inline-grid;
+}
+
+.swapFrom,
+.swapTo {
+  grid-area: 1 / 1;
+}
+
+.swapFrom {
+  animation: swapOut 0.01s linear calc(var(--d, 0s) + 0.45s) both paused;
+}
+
+.swapTo {
+  opacity: 0;
+  animation: swapIn 0.01s linear calc(var(--d, 0s) + 0.45s) both paused;
+}
+
+.swap::after {
+  content: '';
+  position: absolute;
+  inset: 0.1em -0.2em;
+  border-radius: 1px;
+  background: var(--carbon);
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: inkPass 0.95s cubic-bezier(0.7, 0, 0.3, 1) var(--d, 0s) both paused;
+}
+
+@keyframes inkPass {
+  0% {
+    transform: scaleX(0);
+    transform-origin: left center;
+  }
+  46% {
+    transform: scaleX(1);
+    transform-origin: left center;
+  }
+  54% {
+    transform: scaleX(1);
+    transform-origin: right center;
+  }
+  100% {
+    transform: scaleX(0);
+    transform-origin: right center;
+  }
+}
+
+@keyframes swapOut {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes swapIn {
+  to {
+    opacity: 1;
+  }
+}
+
+.comparison[data-play='on'] .comparisonRow::after,
+.comparison[data-play='on'] .inkBar::after,
+.comparison[data-play='on'] .swapFrom,
+.comparison[data-play='on'] .swapTo,
+.comparison[data-play='on'] .swap::after {
+  animation-play-state: running;
+}
+
+.ledgerLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--ink-subtle);
+}
+
+.ledgerLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ledgerLegend i {
+  display: inline-block;
+  width: 18px;
+  height: 9px;
+  border-radius: 1px;
+}
+
+.legendSolid {
+  background: var(--carbon);
+}
+
+.legendHatch {
+  background: repeating-linear-gradient(-45deg, var(--carbon) 0 2.5px, transparent 2.5px 5px);
+}
+
+/* ---- Use-case trace panel ------------------------------------------------ */
+.traceMetaRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.traceMetaRow .traceMeta {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.traceCaption {
+  margin: 16px 0 20px;
+  font-size: var(--text-card);
+}
+
+.traceStepBtn {
+  gap: 5px;
+}
+
+.traceStepBtn[data-state='todo'] *,
+.traceStepBtn[data-state='done'] * {
+  color: var(--ink-subtle);
+}
+
+.traceStepBtn:hover * {
+  color: var(--ink);
+}
+
+.traceStepBtn > span:first-child {
+  margin-bottom: 6px;
+}
+
+/* ---- DeFi: highlight the card that the rail is playing -------------------- */
+.defiCell {
+  transition: border-color 0.3s ease;
+  border-top-width: 2px;
+  border-top-color: transparent;
+  box-shadow: inset 0 1px 0 var(--divider);
+}
+
+.defiCell h3 {
+  transition: color 0.3s ease;
+}
+
+.defiSection:has([data-active-flow='dex']) .defiCell[data-flow='dex'],
+.defiSection:has([data-active-flow='lend']) .defiCell[data-flow='lend'],
+.defiSection:has([data-active-flow='vault']) .defiCell[data-flow='vault'],
+.defiSection:has([data-active-flow='stake']) .defiCell[data-flow='stake'],
+.defiSection:has([data-active-flow='lp']) .defiCell[data-flow='lp'],
+.defiSection:has([data-active-flow='session']) .defiCell[data-flow='session'] {
+  border-top-color: var(--green);
+  box-shadow: none;
+}
+
+.defiSection:has([data-active-flow='session']) .defiCell[data-flow='session'] {
+  border-top-color: #6e4928;
+}
+
+/* ---- Mechanism: proof leaves the device, the key does not --------------- */
+.deviceWork {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 0 18px;
+}
+
+.deviceKey {
+  grid-row: 1 / span 2;
+}
+
+.proveTrack {
+  position: relative;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--divider);
+  overflow: hidden;
+}
+
+.proveFill {
+  position: absolute;
+  inset: 0;
+  background: var(--green);
+  transform-origin: left center;
+  transform: scaleX(1);
+}
+
+.proveFill[data-state='proving'] {
+  animation: inkCover 1.5s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.proveLabel {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--green);
+}
+
+.proofTrack {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 72px;
+  height: 18px;
+}
+
+.proofTrack::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 10px;
+  top: 50%;
+  border-top: 1px dashed var(--green);
+}
+
+.proofArrow {
+  position: relative;
+}
+
+.proofPacket {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 14px;
+  height: 10px;
+  margin-top: -5px;
+  border-radius: 2px;
+  background: var(--green);
+  opacity: 0;
+}
+
+.proofPacket[data-state='sending'] {
+  animation: packetRun 1.05s cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+
+@keyframes packetRun {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(52px);
+    opacity: 0;
+  }
+}
+
+.checkMark {
+  position: absolute;
+  left: 0;
+  top: 0.18em;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--vault-rule);
+  color: transparent;
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+
+.chain li[data-state='ok'] .checkMark {
+  background: var(--green);
+  border-color: var(--green);
+  color: var(--surface);
+  animation: checkPop 0.34s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+.chain li {
+  transition: color 0.25s ease;
+}
+
+.chain li[data-state='ok'] {
+  color: var(--ink);
+}
+
+@keyframes checkPop {
+  from {
+    transform: scale(0.6);
+  }
+  to {
+    transform: none;
+  }
+}
+
+.chainVerdict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 26px;
+  margin: -6px 0 16px;
+}
+
+.chainWaiting {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--ink-subtle);
+}
+
+.handoffToggle {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--vault-rule);
+  background: transparent;
+  color: var(--green);
+  cursor: pointer;
+}
+
+.handoffToggle:hover {
+  border-color: var(--green);
+}
+
+@media (max-width: 1040px) {
+  .proofTrack {
+    width: 18px;
+    height: 44px;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
+
+  .proofTrack::before {
+    left: 50%;
+    right: auto;
+    top: 0;
+    bottom: 12px;
+    border-top: 0;
+    border-left: 1px dashed var(--green);
+  }
+
+  .proofPacket {
+    left: 50%;
+    top: 0;
+    width: 10px;
+    height: 14px;
+    margin: 0 0 0 -5px;
+  }
+
+  @keyframes packetRun {
+    0% {
+      transform: translateY(0);
+      opacity: 0;
+    }
+    15% {
+      opacity: 1;
+    }
+    85% {
+      opacity: 1;
+    }
+    100% {
+      transform: translateY(28px);
+      opacity: 0;
+    }
+  }
+}
+
+@media (max-width: 760px) {
+  .figureHeader {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+}
+
+/* Before scripts run (static HTML, crawlers, link previews, no-JS), show
+   the finished ledger: what each model actually hides. */
+.comparison[data-play='static'] .comparisonRow::after {
+  animation: none;
+  opacity: 0;
+}
+
+.comparison[data-play='static'] .inkBar::after {
+  animation: none;
+  transform: scaleX(1);
+}
+
+.comparison[data-play='static'] .swap::after {
+  animation: none;
+  transform: scaleX(0);
+}
+
+.comparison[data-play='static'] .swapFrom {
+  animation: none;
+  opacity: 0;
+}
+
+.comparison[data-play='static'] .swapTo {
+  animation: none;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .comparisonRow::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  .inkBar::after {
+    animation: none;
+    transform: scaleX(1);
+  }
+
+  .swap::after {
+    animation: none;
+    transform: scaleX(0);
+  }
+
+  .swapFrom {
+    animation: none;
+    opacity: 0;
+  }
+
+  .swapTo {
+    animation: none;
+    opacity: 1;
+  }
+
+  .proveFill[data-state='proving'],
+  .proofPacket[data-state='sending'],
+  .chain li[data-state='ok'] .checkMark {
+    animation: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .defiGrid {
+    gap: 30px;
   }
 }

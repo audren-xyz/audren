@@ -57,11 +57,16 @@ async function main() {
     throw new Error(`/wasm/prover-worker.js returned HTTP ${workerRes.status}`)
   }
   const workerJs = await workerRes.text()
-  if (!workerJs.includes('wasm_prove_joinsplit') || !workerJs.includes('wasm_load_pk_compressed')) {
-    throw new Error('Invalid /wasm/prover-worker.js payload')
+  if (
+    !workerJs.includes('wasm_prove_joinsplit') ||
+    !workerJs.includes('wasm_load_pk_compressed') ||
+    !workerJs.includes('?v=1.2.1') ||
+    !workerJs.includes('WebAssembly.RuntimeError')
+  ) {
+    throw new Error('Invalid or stale /wasm/prover-worker.js payload')
   }
   console.log(
-    `Audren v1.2.0 Web UI route, WASM (${wasmBytes.byteLength} B), & Web Worker check PASSED (${ROUTES.length} routes)`,
+    `Audren v1.2.1 Web UI route, WASM (${wasmBytes.byteLength} B), & Web Worker check PASSED (${ROUTES.length} routes)`,
   )
 }
 

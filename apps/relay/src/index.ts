@@ -16,6 +16,7 @@ import {
 import {
   FirewallError,
   MAX_BATCH_INSTRUCTIONS,
+  resolveShieldedCm2Fees,
   validateRelaySubmission,
 } from './policy/firewall'
 import { RelayGuard } from './policy/guard-do'
@@ -25,15 +26,27 @@ import {
   ASSET_MODE_PUBLIC,
   AUDREN_PROGRAM_ID,
   AUDREN_PROGRAM_ID_STR,
+  MEMO_NOTES_PER_PAGE,
+  NF_PER_PAGE,
   NUM_ESCROW_SHARDS,
+  OPEN_PAGE_KIND_MEMO,
+  OPEN_PAGE_KIND_NULLIFIER,
+  OPEN_PAGE_KIND_SUBROOT,
+  OPEN_PAGE_KIND_SUBTREE,
   PROTOCOL_VERSION,
+  SUBROOTS_PER_PAGE,
+  SUBTREE_LEAVES,
   TAG_DEPOSIT,
   TAG_EXEC_VIA_ESCROW,
   TAG_PUBLISH_CHECKPOINT,
   TAG_TRANSACT,
+  decodePoolState,
   deriveEscrowPda,
   deriveLanePda,
+  deriveLaneRentVaultPda,
+  derivePoolPda,
   deriveVaultAuthPda,
+  deterministicNoteRentFee,
   listReferencedPageSlots,
   pickRandomEscrowShard,
   planBatchMissingOpenPageIxs,
@@ -46,6 +59,7 @@ import {
 } from './solana/checkpoint'
 import {
   CLASSIC_TOKEN_PROGRAM_ID_STR,
+  TOKEN_2022_PROGRAM_ID_STR,
   WSOL_MINT_STR,
   base58Decode,
   base58Encode,
@@ -59,12 +73,16 @@ import {
   utf8,
 } from './solana/codec'
 import {
+  applyToken2022FeeHaircut,
   explorerTxUrl,
   fetchBalance,
+  fetchCurrentEpoch,
   fetchLiveRentSchedule,
   fetchMintMetas,
   fetchMintMetasWithData,
   fetchMultipleAccounts,
+  fetchMultipleAccountsWithContext,
+  getCachedLiveRentSchedule,
   resolveLookupTables,
   resolveSwapInputTransferFee,
   resolveVaultOutDelta,
@@ -212,7 +230,6 @@ function getRelayerPubkeyForCluster(
   if (requestedPubkeyB58) {
     const matched = pool.find((r) => r.pubkeyB58 === requestedPubkeyB58)
     if (matched) return matched
-    return pool[0]!
   }
   return pool[pickUniformIndex(pool.length)]!
 }
@@ -323,6 +340,8 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
       },
     },
     allowedPreIxPrograms: Array.from(cfg.allowedPreIxPrograms),
+    auditedSwapRouterPrograms: Array.from(cfg.auditedSwapRouterPrograms),
+    selfPayFeeMints: Array.from(cfg.selfPayFeeMints),
     aggregators: listAggregators(env, cfg),
     policy: {
       defaultAggregator: cfg.defaultAggregator,
@@ -700,20 +719,30 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       )
     }
 
+    // Check canonical vault/escrow ATAs AND relayer fee ATA in one batched RPC call so
+    // missing vault/escrow ATA rent is accurately priced into `/v1/swap/quote`.
+    const vaultAuthBytes = deriveVaultAuthPda(0).address
+    const escrowBytes = deriveEscrowPda(0, shardId).address
+    const inMintBytes = base58Decode(inputMint)
+    const outMintBytes = base58Decode(outputMint)
+    const inTpBytes = base58Decode(inMeta.tokenProgram)
+    const outTpBytes = base58Decode(outMeta.tokenProgram)
+    const vaultInAta = base58Encode(deriveAta(vaultAuthBytes, inTpBytes, inMintBytes))
+    const vaultOutAta = base58Encode(deriveAta(vaultAuthBytes, outTpBytes, outMintBytes))
+    const escrowInAta = base58Encode(deriveAta(escrowBytes, inTpBytes, inMintBytes))
+    const escrowOutAta = base58Encode(deriveAta(escrowBytes, outTpBytes, outMintBytes))
+
     let relayerFeeAtaB58: string | null = null
-    let feeAccountExists = false
     if (includeFee && relayer) {
-      const feeAtaBytes = deriveAta(
-        relayer.pubkey,
-        base58Decode(outMeta.tokenProgram),
-        base58Decode(outputMint),
-      )
-      relayerFeeAtaB58 = base58Encode(feeAtaBytes)
-      const [feeAcc] = await fetchMultipleAccounts(rpcUrl, [relayerFeeAtaB58], {
-        dataSlice: { offset: 0, length: 0 },
-      })
-      feeAccountExists = feeAcc !== null
+      relayerFeeAtaB58 = base58Encode(deriveAta(relayer.pubkey, outTpBytes, outMintBytes))
     }
+    const ataCheckList = [vaultInAta, vaultOutAta, escrowInAta, escrowOutAta]
+    if (relayerFeeAtaB58) ataCheckList.push(relayerFeeAtaB58)
+    const ataInfos = await fetchMultipleAccounts(rpcUrl, ataCheckList, {
+      dataSlice: { offset: 0, length: 0 },
+    })
+    const missingVaultEscrowAtaCount = [0, 1, 2, 3].filter((i) => !ataInfos[i]).length
+    const feeAccountExists = relayerFeeAtaB58 !== null && ataInfos[4] !== null
 
     const solPriceUsd = prices[WSOL_MINT_STR] ?? null
     const inPriceUsd = prices[inputMint] ?? null
@@ -740,6 +769,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       feeAccount: includeFee ? relayerFeeAtaB58 : null,
       feeAccountExists,
       hasUnsafeSelfPayExt: outMeta.hasUnsafeSelfPayExt,
+      extraAtaCount: missingVaultEscrowAtaCount,
     })
 
     // If USD prices weren't available before quoting, fetch a baseline quote first to know real outAmount
@@ -766,6 +796,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
         feeAccount: includeFee ? relayerFeeAtaB58 : null,
         feeAccountExists,
         hasUnsafeSelfPayExt: outMeta.hasUnsafeSelfPayExt,
+        extraAtaCount: missingVaultEscrowAtaCount,
       })
       if (feePlan.platformFeeBps > 0 && includeFee && relayer) {
         quoteResult = await quoteWithSelection(env, cfg, baseline.winner.provider, {

@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -248,5 +249,102 @@ class ConformanceTest {
         assertEquals(g16.getString("cm2_hex"), bytesToHex(proved.cm2))
         assertEquals(g16.getString("public_input_hash_hex"), bytesToHex(proved.publicInputHash))
         assertEquals(g16.getString("proof_192_hex"), bytesToHex(proved.proof192))
+
+        // 6. v1.2.1 UniFFI zero-panic & extraWritablePubkeys & strict address/bounds checks
+        assertFailsWith<AudrenFfiException> { decodeAudrenAddress(" " + alice.address) }
+        assertFailsWith<AudrenFfiException> { buildOpenPageIx(pid, s0.pubkeyB58, 4u, 0u, 0u, 0uL) }
+        assertFailsWith<AudrenFfiException> { deriveLanePda(pid, 0u, 16u) }
+        assertFailsWith<AudrenFfiException> {
+            buildTransactIx(
+                FfiTransactParams(
+                    programId = pid,
+                    payer = s0.pubkeyB58,
+                    poolId = 0u,
+                    vkId = 0u,
+                    ckptSlotIdx = 13u,
+                    outLaneId = 2u,
+                    outSubSeq = 0uL,
+                    outRootSeq = 0uL,
+                    outMemoSeq = 0uL,
+                    outNfSeq = 0uL,
+                    nextSubSeq = null,
+                    nextMemoSeq = null,
+                    nextNfSeq = null,
+                    outputMask = 0u,
+                    assetMode = 1u,
+                    unwrapWsol = false,
+                    publicMint = null,
+                    publicVaultAta = null,
+                    publicTokenProg = null,
+                    proof192 = proved.proof192,
+                    nf0 = proved.nf0,
+                    nf1 = proved.nf1,
+                    cm0 = proved.cm0,
+                    cm1 = proved.cm1,
+                    cm2 = proved.cm2,
+                    publicAmountOut = 1uL,
+                    relayerFeeAmount = 0uL,
+                    recipient = s0.pubkeyB58,
+                    relayerFeeRecipient = s0.pubkeyB58,
+                    memosBytes = ByteArray(0),
+                    transferHookAccounts = emptyList()
+                )
+            )
+        }
+        assertFalse(verifySelectiveDisclosureProof(sd.copy(laneId = 16u), enc.commitment))
+
+        val hPromoted = computeExecCtxHashFfi(
+            FfiExecCtxHashParams(
+                programId = pid,
+                poolId = 0u,
+                vkId = 0u,
+                outLaneId = 1u,
+                escrowShard = 3u,
+                changeMask = 0u,
+                feeOnOutput = false,
+                assetIn = ByteArray(32) { 1 },
+                amountIn = 100uL,
+                relayerFeeAmount = 0uL,
+                relayerFeeRecipient = null,
+                assetOut = ByteArray(32) { 2 },
+                minAmountOut = 50uL,
+                routerProg = s0.pubkeyB58,
+                routerAccounts = listOf(FfiAccountMeta(s3.pubkeyB58, false, false)),
+                extraWritablePubkeys = listOf(s3.pubkeyB58),
+                outStealthOwner = ByteArray(32) { 3 },
+                outBlinding = ByteArray(32) { 4 },
+                dynMemoHead = ByteArray(34) { 5 },
+                dynMask72 = ByteArray(72) { 6 },
+                routerIxData = byteArrayOf(1, 2),
+                changeMemos = ByteArray(0)
+            )
+        )
+        val hExplicit = computeExecCtxHashFfi(
+            FfiExecCtxHashParams(
+                programId = pid,
+                poolId = 0u,
+                vkId = 0u,
+                outLaneId = 1u,
+                escrowShard = 3u,
+                changeMask = 0u,
+                feeOnOutput = false,
+                assetIn = ByteArray(32) { 1 },
+                amountIn = 100uL,
+                relayerFeeAmount = 0uL,
+                relayerFeeRecipient = null,
+                assetOut = ByteArray(32) { 2 },
+                minAmountOut = 50uL,
+                routerProg = s0.pubkeyB58,
+                routerAccounts = listOf(FfiAccountMeta(s3.pubkeyB58, false, true)),
+                extraWritablePubkeys = emptyList(),
+                outStealthOwner = ByteArray(32) { 3 },
+                outBlinding = ByteArray(32) { 4 },
+                dynMemoHead = ByteArray(34) { 5 },
+                dynMask72 = ByteArray(72) { 6 },
+                routerIxData = byteArrayOf(1, 2),
+                changeMemos = ByteArray(0)
+            )
+        )
+        assertEquals(bytesToHex(hExplicit), bytesToHex(hPromoted))
     }
 }

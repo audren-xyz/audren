@@ -381,5 +381,105 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(dataToHex(proved.cm2), v.groth16.cm2_hex)
         XCTAssertEqual(dataToHex(proved.publicInputHash), v.groth16.public_input_hash_hex)
         XCTAssertEqual(dataToHex(proved.proof192), v.groth16.proof_192_hex)
+
+        // 6. v1.2.1 UniFFI zero-panic & extraWritablePubkeys & strict address/bounds checks
+        XCTAssertThrowsError(try decodeAudrenAddress(encoded: " " + alice.address))
+        XCTAssertThrowsError(try buildOpenPageIx(programId: pid, payer: sess0.pubkeyB58, pageKind: 4, poolId: 0, laneId: 0, pageSeq: 0))
+        XCTAssertThrowsError(try deriveLanePda(programId: pid, poolId: 0, laneId: 16))
+        XCTAssertThrowsError(try buildTransactIx(params: FfiTransactParams(
+            programId: pid,
+            payer: sess0.pubkeyB58,
+            poolId: 0,
+            vkId: 0,
+            ckptSlotIdx: 13,
+            outLaneId: 2,
+            outSubSeq: 0,
+            outRootSeq: 0,
+            outMemoSeq: 0,
+            outNfSeq: 0,
+            nextSubSeq: nil,
+            nextMemoSeq: nil,
+            nextNfSeq: nil,
+            outputMask: 0,
+            assetMode: 1,
+            unwrapWsol: false,
+            publicMint: nil,
+            publicVaultAta: nil,
+            publicTokenProg: nil,
+            proof192: proved.proof192,
+            nf0: proved.nf0,
+            nf1: proved.nf1,
+            cm0: proved.cm0,
+            cm1: proved.cm1,
+            cm2: proved.cm2,
+            publicAmountOut: 1,
+            relayerFeeAmount: 0,
+            recipient: sess0.pubkeyB58,
+            relayerFeeRecipient: sess0.pubkeyB58,
+            memosBytes: Data(),
+            transferHookAccounts: []
+        )))
+
+        let sdBadLane = FfiSelectiveDisclosureProof(
+            poolId: v.selective_disclosure.pool_id,
+            laneId: 16,
+            leafIndex: v.selective_disclosure.leaf_index,
+            stealthOwner: Data(v.selective_disclosure.stealth_owner),
+            mint: Data(v.selective_disclosure.mint),
+            amount: v.selective_disclosure.amount,
+            blinding: Data(v.selective_disclosure.blinding),
+            commitment: Data(v.selective_disclosure.commitment)
+        )
+        XCTAssertFalse(try verifySelectiveDisclosureProof(proof: sdBadLane, onchainSubtreeLeaf: enc.commitment))
+
+        let hPromoted = try computeExecCtxHashFfi(params: FfiExecCtxHashParams(
+            programId: pid,
+            poolId: 0,
+            vkId: 0,
+            outLaneId: 1,
+            escrowShard: 3,
+            changeMask: 0,
+            feeOnOutput: false,
+            assetIn: Data(repeating: 1, count: 32),
+            amountIn: 100,
+            relayerFeeAmount: 0,
+            relayerFeeRecipient: nil,
+            assetOut: Data(repeating: 2, count: 32),
+            minAmountOut: 50,
+            routerProg: sess0.pubkeyB58,
+            routerAccounts: [FfiAccountMeta(pubkeyB58: sess3.pubkeyB58, isSigner: false, isWritable: false)],
+            extraWritablePubkeys: [sess3.pubkeyB58],
+            outStealthOwner: Data(repeating: 3, count: 32),
+            outBlinding: Data(repeating: 4, count: 32),
+            dynMemoHead: Data(repeating: 5, count: 34),
+            dynMask72: Data(repeating: 6, count: 72),
+            routerIxData: Data([1, 2]),
+            changeMemos: Data()
+        ))
+        let hExplicit = try computeExecCtxHashFfi(params: FfiExecCtxHashParams(
+            programId: pid,
+            poolId: 0,
+            vkId: 0,
+            outLaneId: 1,
+            escrowShard: 3,
+            changeMask: 0,
+            feeOnOutput: false,
+            assetIn: Data(repeating: 1, count: 32),
+            amountIn: 100,
+            relayerFeeAmount: 0,
+            relayerFeeRecipient: nil,
+            assetOut: Data(repeating: 2, count: 32),
+            minAmountOut: 50,
+            routerProg: sess0.pubkeyB58,
+            routerAccounts: [FfiAccountMeta(pubkeyB58: sess3.pubkeyB58, isSigner: false, isWritable: true)],
+            extraWritablePubkeys: [],
+            outStealthOwner: Data(repeating: 3, count: 32),
+            outBlinding: Data(repeating: 4, count: 32),
+            dynMemoHead: Data(repeating: 5, count: 34),
+            dynMask72: Data(repeating: 6, count: 72),
+            routerIxData: Data([1, 2]),
+            changeMemos: Data()
+        ))
+        XCTAssertEqual(hPromoted, hExplicit)
     }
 }

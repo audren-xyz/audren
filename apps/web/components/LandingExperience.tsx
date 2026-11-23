@@ -1,10 +1,15 @@
 'use client'
 
-import { useState, type KeyboardEvent } from 'react'
+import { useState, type CSSProperties, type KeyboardEvent } from 'react'
 import Link from 'next/link'
-import { ArrowRight, ArrowUpRight } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, Check, KeyRound, Lock, Pause, Play, RotateCcw } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
+import { EscrowRail } from '@/components/motion/EscrowRail'
+import { PoolScene, poolSceneCaption } from '@/components/motion/PoolScene'
+import { SceneCaption, StepButton } from '@/components/motion/SceneControls'
+import { useAutoStepper, useHydrated, useInView } from '@/components/motion/hooks'
+import m from '@/components/motion/motion.module.css'
 import { AUDREN, explorerAddress, solscanAddress, solscanTx } from '@/lib/protocol'
 import styles from './LandingExperience.module.css'
 
@@ -162,15 +167,44 @@ const POOL_CASES: readonly PoolCase[] = [
   },
 ]
 
+/** Delay (seconds) as a CSS variable for the hero ledger choreography. */
+function at(seconds: number): CSSProperties {
+  return { '--d': `${seconds}s` } as CSSProperties
+}
+
+/**
+ * The same 420 USDC payment printed three times. Once the card is on screen,
+ * ink bars wipe across exactly what each model hides from a chain observer.
+ */
 function PrivacyComparisonCard() {
+  const [ref, inView] = useInView<HTMLElement>()
+  const hydrated = useHydrated()
+  const [started, setStarted] = useState(false)
+  const [run, setRun] = useState(0)
+  if (inView && !started) setStarted(true)
+
   return (
     <figure
+      ref={ref}
       className={styles.comparison}
+      data-play={!hydrated ? 'static' : started ? 'on' : 'off'}
       aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances and default confidential rings, and Audren shielded pool transfer"
     >
       <figcaption className={styles.figureHeader}>
-        <h3>What Solscan shows on a transfer</h3>
-        <span className={styles.figureSub}>Public chain observer view</span>
+        <div>
+          <h3>What Solscan shows on a transfer</h3>
+          <span className={styles.figureSub}>The same 420 USDC payment, three ways</span>
+        </div>
+        <button
+          type="button"
+          className={styles.replayBtn}
+          onClick={() => {
+            setStarted(true)
+            setRun((n) => n + 1)
+          }}
+        >
+          <RotateCcw size={12} aria-hidden="true" /> Replay
+        </button>
       </figcaption>
 
       <div className={styles.columnLabels} aria-hidden="true">
@@ -179,62 +213,82 @@ function PrivacyComparisonCard() {
         <span>Token / amount</span>
       </div>
 
-      <div className={styles.comparisonRow}>
-        <div className={styles.rowName}>
-          <span className={styles.rowTitle}>Ordinary Solana</span>
-          <span className={styles.rowMeta}>All 4 fields public</span>
+      <div key={run} className={styles.ledgerRows}>
+        <div className={styles.comparisonRow} style={at(0.2)}>
+          <div className={styles.rowName}>
+            <span className={styles.rowTitle}>Ordinary Solana</span>
+            <span className={styles.rowMeta}>All 4 fields public</span>
+          </div>
+          <div className={styles.people}>
+            <span>Wallet A</span>
+            <ArrowRight size={13} className={styles.rowArrow} aria-hidden="true" />
+            <span>Wallet B</span>
+          </div>
+          <div className={styles.value}>
+            <span className={styles.valueUnit}>USDC</span>
+            <span className={styles.valueAmount}>420.00</span>
+          </div>
         </div>
-        <div className={styles.people}>
-          <span>Wallet A</span>
-          <ArrowRight size={13} className={styles.rowArrow} aria-hidden="true" />
-          <span>Wallet B</span>
-        </div>
-        <div className={styles.value}>
-          <span className={styles.valueUnit}>USDC</span>
-          <span className={styles.valueAmount}>420.00</span>
-        </div>
-      </div>
 
-      <div className={styles.comparisonRow}>
-        <div className={styles.rowName}>
-          <span className={styles.rowTitle}>Confidential / Rings</span>
-          <span className={styles.rowMeta}>Token&#8209;2022 or default rings</span>
-        </div>
-        <div className={styles.people}>
-          <span>Wallet A</span>
-          <ArrowRight size={13} className={styles.rowArrow} aria-hidden="true" />
-          <span>Wallet B</span>
-        </div>
-        <div className={styles.value}>
-          <span className={styles.valueUnit}>Mint / ••••</span>
-          <span className={`${styles.valueAmount} ${styles.masked}`}>
-            <span aria-hidden="true">••••••</span>
+        <div className={styles.comparisonRow} style={at(0.7)}>
+          <div className={styles.rowName}>
+            <span className={styles.rowTitle}>Confidential / Rings</span>
+            <span className={styles.rowMeta}>Token&#8209;2022 or default rings</span>
+          </div>
+          <div className={styles.people}>
+            <span>Wallet A</span>
+            <ArrowRight size={13} className={styles.rowArrow} aria-hidden="true" />
+            <span>Wallet B</span>
+          </div>
+          <div className={styles.value}>
+            <span className={`${styles.valueUnit} ${styles.inkBar} ${styles.inkBarPartial}`} style={at(1.35)} aria-hidden="true">
+              USDC
+            </span>
+            <span className={`${styles.valueAmount} ${styles.inkBar}`} style={at(1.15)} aria-hidden="true">
+              420.00
+            </span>
             <span className={styles.visuallyHidden}>
               Amount hidden; mint public on Token-2022 or encrypted in default rings
             </span>
-          </span>
+          </div>
+        </div>
+
+        <div className={`${styles.comparisonRow} ${styles.audrenRow}`} style={at(1.3)}>
+          <div className={styles.rowName}>
+            <span className={styles.rowTitle}>Audren Global MASP</span>
+            <span className={styles.rowMeta}>SOL, Classic SPL, Token&#8209;2022</span>
+          </div>
+          <div className={styles.people}>
+            <span className={styles.swap} style={at(1.9)} aria-hidden="true">
+              <span className={styles.swapFrom}>Wallet A</span>
+              <span className={styles.swapTo}>Hidden input</span>
+            </span>
+            <ArrowRight size={13} className={styles.rowArrow} aria-hidden="true" />
+            <span className={styles.swap} style={at(2.1)} aria-hidden="true">
+              <span className={styles.swapFrom}>Wallet B</span>
+              <span className={styles.swapTo}>Stealth note</span>
+            </span>
+            <span className={styles.visuallyHidden}>Hidden input to a one-time stealth note</span>
+          </div>
+          <div className={styles.value}>
+            <span className={`${styles.valueUnit} ${styles.inkBar}`} style={at(2.35)} aria-hidden="true">
+              USDC
+            </span>
+            <span className={`${styles.valueAmount} ${styles.inkBar}`} style={at(2.5)} aria-hidden="true">
+              420.00
+            </span>
+            <span className={styles.visuallyHidden}>Token and amount hidden</span>
+          </div>
         </div>
       </div>
 
-      <div className={`${styles.comparisonRow} ${styles.audrenRow}`}>
-        <div className={styles.rowName}>
-          <span className={styles.rowTitle}>Audren Global MASP</span>
-          <span className={styles.rowMeta}>SOL, Classic SPL, Token&#8209;2022</span>
-        </div>
-        <div className={styles.people}>
-          <span>Hidden input</span>
-          <ArrowRight size={13} className={styles.rowArrow} aria-hidden="true" />
-          <span>Stealth note</span>
-        </div>
-        <div className={styles.value}>
-          <span className={`${styles.valueUnit} ${styles.masked}`} aria-hidden="true">
-            ••••
-          </span>
-          <span className={`${styles.valueAmount} ${styles.masked}`} aria-hidden="true">
-            ••••••
-          </span>
-          <span className={styles.visuallyHidden}>Token and amount hidden</span>
-        </div>
+      <div className={styles.ledgerLegend} aria-hidden="true">
+        <span>
+          <i className={styles.legendSolid} /> hidden from observers
+        </span>
+        <span>
+          <i className={styles.legendHatch} /> depends on the mode
+        </span>
       </div>
 
       <p className={styles.hiddenSummary}>
@@ -249,7 +303,16 @@ function PrivacyComparisonCard() {
   )
 }
 
+const TRACE_STEP_MS = [6200, 6600, 7000] as const
+
 function ProtocolTracePanel({ activeCase }: { activeCase: PoolCase }) {
+  const [ref, inView] = useInView<HTMLDivElement>()
+  const stepper = useAutoStepper({
+    count: 3,
+    durations: TRACE_STEP_MS,
+    active: inView,
+    resetKey: activeCase.id,
+  })
   const toneClass =
     activeCase.tone === 'exit'
       ? styles.traceExit
@@ -258,17 +321,54 @@ function ProtocolTracePanel({ activeCase }: { activeCase: PoolCase }) {
         : ''
 
   return (
-    <div className={`${styles.tracePanel} ${toneClass}`}>
-      <p className={styles.traceMeta}>{activeCase.stageMeta}</p>
+    <div ref={ref} className={`${styles.tracePanel} ${toneClass}`}>
+      <div className={styles.traceMetaRow}>
+        <p className={styles.traceMeta}>{activeCase.stageMeta}</p>
+        <button
+          type="button"
+          className={m.playBtn}
+          onClick={stepper.togglePlay}
+          aria-label={stepper.playing ? 'Pause walkthrough' : 'Play walkthrough'}
+        >
+          {stepper.playing ? <Pause size={13} aria-hidden="true" /> : <Play size={13} aria-hidden="true" />}
+        </button>
+      </div>
 
-      <ol className={styles.traceSteps}>
+      <PoolScene
+        caseId={activeCase.id}
+        step={stepper.step}
+        cycle={stepper.cycle}
+        reduced={stepper.reduced}
+      />
+
+      <SceneCaption
+        key={activeCase.id}
+        className={styles.traceCaption}
+        texts={[0, 1, 2].map((idx) => poolSceneCaption(activeCase.id, idx))}
+        index={stepper.step}
+        live={!stepper.playing}
+      />
+
+      <ol className={styles.traceSteps} aria-label="Steps in this flow">
         {activeCase.steps.map((step, index) => (
           <li key={step.phase} className={styles.traceStep}>
-            <span className={styles.tracePhase}>
-              {index + 1}. {step.phase}
-            </span>
-            <span className={styles.traceHeadline}>{step.headline}</span>
-            <span className={styles.traceDetail}>{step.detail}</span>
+            <StepButton
+              idx={index}
+              step={stepper.step}
+              text={step.headline}
+              playing={stepper.playing}
+              running={stepper.running}
+              duration={stepper.duration}
+              cycle={stepper.cycle}
+              onSelect={stepper.select}
+              className={styles.traceStepBtn}
+            >
+              <span className={styles.tracePhase}>
+                {index + 1}. {step.phase}
+              </span>
+              <span className={styles.traceHeadline}>{step.headline}</span>
+              <span className={styles.traceDetail}>{step.detail}</span>
+            </StepButton>
           </li>
         ))}
       </ol>
@@ -286,6 +386,102 @@ function ProtocolTracePanel({ activeCase }: { activeCase: PoolCase }) {
           </div>
         </dl>
       </div>
+    </div>
+  )
+}
+
+const HANDOFF_STEPS = ['Prove', 'Send', 'Membership', 'Conservation', 'Nullifier', 'Accepted'] as const
+const HANDOFF_MS = [1700, 1300, 950, 950, 950, 3200] as const
+const CHAIN_CHECKS = [
+  'Global 4-ary Depth-20 Merkle membership against RootCheckpoint',
+  'BN254 Groth16 value conservation and 64-bit range checks (17,861 R1CS)',
+  'Nullifier PDAs reject repeated spends on every lane (4 active, up to 16)',
+] as const
+
+/** Device → 192 B proof → Solana checks, with the spending key pinned to the device. */
+function ProofHandoff() {
+  const [ref, inView] = useInView<HTMLDivElement>()
+  const stepper = useAutoStepper({ count: HANDOFF_STEPS.length, durations: HANDOFF_MS, active: inView })
+  const step = stepper.reduced ? HANDOFF_STEPS.length - 1 : stepper.step
+
+  return (
+    <div ref={ref} className={styles.mechanism} data-step={step}>
+      <article className={styles.device}>
+        <h3>On your device</h3>
+        <p>
+          Syncs state through ordinary Solana RPC (2-pass CompactWalletStore) and generates
+          192-byte BN254 Groth16 proofs locally in a dedicated Web Worker from one 3.93 MB
+          proving key. Spending keys never leave your device.
+        </p>
+        <div className={styles.deviceWork} aria-hidden="true">
+          <span className={`${m.chip} ${styles.deviceKey}`} data-tone="key">
+            <KeyRound size={11} /> spend key <Lock size={10} />
+          </span>
+          <span className={styles.proveTrack}>
+            <span
+              key={step === 0 ? `prove-${stepper.cycle}` : 'proved'}
+              className={styles.proveFill}
+              data-state={step === 0 ? 'proving' : 'done'}
+            />
+          </span>
+          <span className={styles.proveLabel}>{step === 0 ? 'Proving…' : 'Proof ready · key stays'}</span>
+        </div>
+        <span className={styles.deviceMeta}>Local key custody · CompactWalletStore</span>
+      </article>
+
+      <div className={styles.proofLink} aria-hidden="true">
+        <span className={styles.proofLinkLabel}>192 B proof</span>
+        <span className={styles.proofTrack}>
+          <span
+            key={step === 1 ? `send-${stepper.cycle}` : 'rest'}
+            className={styles.proofPacket}
+            data-state={step < 1 ? 'waiting' : step === 1 ? 'sending' : 'arrived'}
+          />
+          <ArrowRight size={16} className={styles.proofArrow} />
+        </span>
+        <span className={styles.proofLinkSub}>No keys sent</span>
+      </div>
+
+      <article className={styles.chain}>
+        <h3>Verified on Solana</h3>
+        <ul>
+          {CHAIN_CHECKS.map((check, idx) => (
+            <li key={check} data-state={step >= idx + 2 ? 'ok' : 'pending'}>
+              <span className={styles.checkMark} aria-hidden="true">
+                <Check size={11} />
+              </span>
+              {check}
+            </li>
+          ))}
+        </ul>
+        <div className={styles.chainVerdict} aria-hidden="true">
+          {step >= 5 ? (
+            <span className={`${m.stamp} ${m.stampOk}`}>Spend accepted</span>
+          ) : (
+            <span className={styles.chainWaiting}>{step < 2 ? 'Waiting for a proof' : 'Checking…'}</span>
+          )}
+          <button
+            type="button"
+            className={styles.handoffToggle}
+            onClick={stepper.togglePlay}
+            aria-label={stepper.playing ? 'Pause proof animation' : 'Play proof animation'}
+          >
+            {stepper.playing ? <Pause size={12} aria-hidden="true" /> : <Play size={12} aria-hidden="true" />}
+          </button>
+        </div>
+        <div className={styles.vaultLinks}>
+          <a
+            href={`${solscanAddress(AUDREN.vaultAuthPda)}#portfolio`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Inspect Vault Authority · WSOL &amp; Token Custody <ArrowUpRight size={13} />
+          </a>
+          <a href={solscanAddress(AUDREN.pool0Pda)} target="_blank" rel="noreferrer">
+            Inspect Pool #0 state <ArrowUpRight size={13} />
+          </a>
+        </div>
+      </article>
     </div>
   )
 }
@@ -445,8 +641,10 @@ export function LandingExperience() {
               </p>
             </div>
 
+            <EscrowRail />
+
             <div className={styles.defiGrid}>
-              <article className={styles.defiCell}>
+              <article className={styles.defiCell} data-flow="dex">
                 <h3>DEX aggregators and AMMs</h3>
                 <p>
                   Route across Jupiter, Titan, DFlow, OKX DEX, Raydium, Orca, Meteora, or custom
@@ -459,7 +657,7 @@ export function LandingExperience() {
                 </span>
               </article>
 
-              <article className={styles.defiCell}>
+              <article className={styles.defiCell} data-flow="lend">
                 <h3>Lending supply</h3>
                 <p>
                   Supply USDC or WSOL into Solana lending reserves (such as Kamino Lend) and
@@ -471,7 +669,7 @@ export function LandingExperience() {
                 </span>
               </article>
 
-              <article className={styles.defiCell}>
+              <article className={styles.defiCell} data-flow="vault">
                 <h3>Yield and compounding vaults</h3>
                 <p>
                   Enter or exit ERC-4626-style Solana vaults (Kamino Vaults, Meteora Dynamic Vaults,
@@ -483,7 +681,7 @@ export function LandingExperience() {
                 </span>
               </article>
 
-              <article className={styles.defiCell}>
+              <article className={styles.defiCell} data-flow="stake">
                 <h3>Liquid staking tokens</h3>
                 <p>
                   Convert shielded SOL (stored as canonical WSOL) into yield-bearing liquid staking
@@ -495,7 +693,7 @@ export function LandingExperience() {
                 </span>
               </article>
 
-              <article className={styles.defiCell}>
+              <article className={styles.defiCell} data-flow="lp">
                 <h3>Perp LP and tokenized RWAs</h3>
                 <p>
                   Mint or redeem pooled liquidity tokens (such as Jupiter <code>JLP</code>) or
@@ -507,7 +705,7 @@ export function LandingExperience() {
                 </span>
               </article>
 
-              <article className={`${styles.defiCell} ${styles.defiCellSession}`}>
+              <article className={`${styles.defiCell} ${styles.defiCellSession}`} data-flow="session">
                 <h3>Borrowing and perps via session wallets</h3>
                 <p>
                   Fund deterministic session wallets (<code>B₀, B₁…</code>) from zero prior SOL via
@@ -630,44 +828,7 @@ export function LandingExperience() {
               </p>
             </div>
 
-            <div className={styles.mechanism}>
-              <article className={styles.device}>
-                <h3>On your device</h3>
-                <p>
-                  Syncs state through ordinary Solana RPC (2-pass CompactWalletStore) and generates
-                  192-byte BN254 Groth16 proofs locally in a dedicated Web Worker from one 3.93 MB
-                  proving key. Spending keys never leave your device.
-                </p>
-                <span className={styles.deviceMeta}>Local key custody · CompactWalletStore</span>
-              </article>
-
-              <div className={styles.proofLink} aria-hidden="true">
-                <span className={styles.proofLinkLabel}>192 B proof</span>
-                <ArrowRight size={16} />
-                <span className={styles.proofLinkSub}>No keys sent</span>
-              </div>
-
-              <article className={styles.chain}>
-                <h3>Verified on Solana</h3>
-                <ul>
-                  <li>Global 4-ary Depth-20 Merkle membership against RootCheckpoint</li>
-                  <li>BN254 Groth16 value conservation and 64-bit range checks (17,861 R1CS)</li>
-                  <li>Nullifier PDAs reject repeated spends across all 16 append lanes</li>
-                </ul>
-                <div className={styles.vaultLinks}>
-                  <a
-                    href={`${solscanAddress(AUDREN.vaultAuthPda)}#portfolio`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Inspect Vault Authority · WSOL &amp; Token Custody <ArrowUpRight size={13} />
-                  </a>
-                  <a href={solscanAddress(AUDREN.pool0Pda)} target="_blank" rel="noreferrer">
-                    Inspect Pool #0 state <ArrowUpRight size={13} />
-                  </a>
-                </div>
-              </article>
-            </div>
+            <ProofHandoff />
           </div>
         </section>
 

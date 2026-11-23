@@ -40,6 +40,15 @@ const ADDR_HRP: &str = "aud";
 const BECH32M_CONST: u32 = 0x2bc8_30a3;
 const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 const MAX_BECH32M_LEN: usize = 128;
+const X25519_PROBE_SCALAR: [u8; 32] = [0x09; 32];
+
+/// Verify an X25519 public key is contributory (rejects all-zero and Curve25519 order-8 low-order
+/// points using the fixed RFC 7748 probe scalar `[0x09; 32]`).
+pub fn is_contributory_x25519_point(view_pk: &[u8; 32]) -> bool {
+    X25519Sec::from(X25519_PROBE_SCALAR)
+        .diffie_hellman(&X25519Pub::from(*view_pk))
+        .was_contributory()
+}
 
 const HKDF_SALT_ROOT: &[u8] = b"audren/v1/root";
 const HKDF_INFO_SPEND_SK: &[u8] = b"audren/v1/spend_sk";
@@ -262,12 +271,18 @@ pub struct AudrenAddress {
 }
 
 impl AudrenAddress {
-    pub fn encode(&self) -> String {
+    pub fn encode(&self) -> Result<String, ClientError> {
+        if !audren_core::is_canonical_fr(&self.spend_pk) {
+            return Err(ClientError::InvalidFieldElement);
+        }
+        if !is_contributory_x25519_point(&self.view_pk) {
+            return Err(ClientError::Crypto("low-order X25519 public key"));
+        }
         let mut raw = [0u8; 65];
         raw[0] = ADDR_VERSION_V1;
         raw[1..33].copy_from_slice(&self.spend_pk);
         raw[33..65].copy_from_slice(&self.view_pk);
-        let data5 = convert_bits(&raw, 8, 5, true).expect("65 B -> 104 5-bit groups");
+        let data5 = convert_bits(&raw, 8, 5, true)?;
         let checksum = bech32m_create_checksum(ADDR_HRP, &data5);
         let mut out = String::with_capacity(ADDR_HRP.len() + 1 + data5.len() + checksum.len());
         out.push_str(ADDR_HRP);
@@ -278,7 +293,7 @@ impl AudrenAddress {
         for &v in &checksum {
             out.push(BECH32_CHARSET[v as usize] as char);
         }
-        out
+        Ok(out)
     }
 
     pub fn decode(s: &str) -> Result<Self, ClientError> {
@@ -345,6 +360,9 @@ impl AudrenAddress {
         if !audren_core::is_canonical_fr(&spend_pk) {
             return Err(ClientError::InvalidFieldElement);
         }
+        if !is_contributory_x25519_point(&view_pk) {
+            return Err(ClientError::Crypto("low-order X25519 public key"));
+        }
         Ok(Self { spend_pk, view_pk })
     }
 
@@ -406,6 +424,9 @@ pub struct SelectiveDisclosureProof {
 
 impl SelectiveDisclosureProof {
     pub fn verify_against_leaf(&self, onchain_subtree_leaf: &[u8; 32]) -> bool {
+        if (self.lane_id as usize) >= audren_core::NUM_LANES {
+            return false;
+        }
         let Some(stealth) = fr_from_be_bytes_strict(&self.stealth_owner) else {
             return false;
         };
@@ -680,7 +701,7 @@ mod tests {
     fn bech32m_aud1_address_roundtrip_and_strict_validation() {
         let keys = AudrenKeys::from_seed(&[0x11u8; 32]);
         let addr = keys.address();
-        let encoded = addr.encode();
+        let encoded = addr.encode().unwrap();
         assert!(encoded.starts_with("aud1"));
         assert_eq!(encoded.len(), 114, "aud1 + 104 data chars + 6 checksum chars");
 
@@ -690,6 +711,11 @@ mod tests {
             AudrenAddress::decode(&encoded.to_ascii_uppercase()).unwrap(),
             addr
         );
+
+        // Leading / trailing whitespace rejected strictly
+        assert!(AudrenAddress::decode(&format!(" {encoded}")).is_err());
+        assert!(AudrenAddress::decode(&format!("{encoded} ")).is_err());
+        assert!(AudrenAddress::decode(&format!("\n{encoded}\t")).is_err());
 
         // Single-character typo rejected
         let mut typo = encoded.as_bytes().to_vec();
@@ -725,7 +751,15 @@ mod tests {
         }
         assert!(AudrenAddress::decode(&bad_ver).is_err());
 
-        // Non-canonical spend_pk >= BN254_FR_MODULUS_BE with valid Bech32m checksum rejected
+        // Non-canonical spend_pk >= BN254_FR_MODULUS_BE rejected by both encode and decode
+        assert!(matches!(
+            AudrenAddress {
+                spend_pk: audren_core::BN254_FR_MODULUS_BE,
+                view_pk: addr.view_pk,
+            }
+            .encode(),
+            Err(ClientError::InvalidFieldElement)
+        ));
         raw[0] = ADDR_VERSION_V1;
         raw[1..33].copy_from_slice(&audren_core::BN254_FR_MODULUS_BE);
         let bad_fr5 = convert_bits(&raw, 8, 5, true).unwrap();
@@ -738,6 +772,50 @@ mod tests {
             AudrenAddress::decode(&bad_fr),
             Err(ClientError::InvalidFieldElement)
         ));
+
+        // Low-order X25519 view_pk ([0; 32] and RFC 7748 order-8 point) rejected by both encode and decode
+        for bad_vpk in [[0u8; 32], ORDER_8_POINT] {
+            assert!(matches!(
+                AudrenAddress {
+                    spend_pk: addr.spend_pk,
+                    view_pk: bad_vpk,
+                }
+                .encode(),
+                Err(ClientError::Crypto(_))
+            ));
+            raw[0] = ADDR_VERSION_V1;
+            raw[1..33].copy_from_slice(&addr.spend_pk);
+            raw[33..65].copy_from_slice(&bad_vpk);
+            let bad_vp5 = convert_bits(&raw, 8, 5, true).unwrap();
+            let bad_vp_ck = bech32m_create_checksum(ADDR_HRP, &bad_vp5);
+            let mut bad_vp = String::from("aud1");
+            for &v in bad_vp5.iter().chain(bad_vp_ck.iter()) {
+                bad_vp.push(BECH32_CHARSET[v as usize] as char);
+            }
+            assert!(matches!(
+                AudrenAddress::decode(&bad_vp),
+                Err(ClientError::Crypto(_))
+            ));
+        }
+
+        // SelectiveDisclosureProof rejects lane_id >= 16
+        let stealth_fr = derive_stealth_owner(keys.spend_pk, Fr::from(7u64));
+        let blind_fr = Fr::from(9u64);
+        let cm_fr = compute_note_commitment(stealth_fr, derive_asset_id(&WSOL_MINT), 1_000, blind_fr);
+        let cm_be = fr_to_be_bytes(&cm_fr);
+        let mut sd = SelectiveDisclosureProof {
+            pool_id: 0,
+            lane_id: 15,
+            leaf_index: 0,
+            stealth_owner: fr_to_be_bytes(&stealth_fr),
+            mint: WSOL_MINT,
+            amount: 1_000,
+            blinding: fr_to_be_bytes(&blind_fr),
+            commitment: cm_be,
+        };
+        assert!(sd.verify_against_leaf(&cm_be));
+        sd.lane_id = 16;
+        assert!(!sd.verify_against_leaf(&cm_be));
     }
 
     #[test]

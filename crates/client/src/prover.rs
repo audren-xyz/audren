@@ -83,18 +83,24 @@ impl AudrenProver {
         self.prove_with_seed(circuit, seed)
     }
 
-    /// Generate a deterministic 192-byte compressed BN254 Groth16 proof from an explicit 32-byte seed.
-    pub fn prove_with_seed(
+    /// Generate a deterministic 192-byte compressed BN254 Groth16 proof from an explicit 32-byte seed,
+    /// verifying off-chain satisfaction and returning `Err(ClientError::InvalidProofInput)` instead of
+    /// panicking if the witness does not satisfy the circuit constraints.
+    pub fn try_prove_with_seed(
         &self,
         circuit: JoinSplit4AryCircuit,
         seed: [u8; 32],
-    ) -> JoinSplitProofBundle {
+    ) -> Result<JoinSplitProofBundle, ClientError> {
         let public_inputs = circuit.public_inputs();
         let pub_hash = public_inputs.compute_hash();
         let proof = prove_joinsplit(&self.pk, circuit, seed);
-        debug_assert!(verify_joinsplit_offchain(&self.vk, &proof, pub_hash));
+        if !verify_joinsplit_offchain(&self.vk, &proof, pub_hash) {
+            return Err(ClientError::InvalidProofInput(
+                "unsatisfied joinsplit circuit witness",
+            ));
+        }
         let proof_192 = proof_to_solana_compressed_192(&proof);
-        JoinSplitProofBundle {
+        Ok(JoinSplitProofBundle {
             proof_192,
             nf0: fr_to_be_bytes(&public_inputs.nullifiers[0]),
             nf1: fr_to_be_bytes(&public_inputs.nullifiers[1]),
@@ -103,7 +109,17 @@ impl AudrenProver {
             cm2: fr_to_be_bytes(&public_inputs.out_commitments[2]),
             public_input_hash: fr_to_be_bytes(&pub_hash),
             public_inputs,
-        }
+        })
+    }
+
+    /// Generate a deterministic 192-byte compressed BN254 Groth16 proof from an explicit 32-byte seed.
+    pub fn prove_with_seed(
+        &self,
+        circuit: JoinSplit4AryCircuit,
+        seed: [u8; 32],
+    ) -> JoinSplitProofBundle {
+        self.try_prove_with_seed(circuit, seed)
+            .expect("joinsplit circuit witness must be satisfied")
     }
 
     /// Build & prove a `JoinSplit4AryCircuit` directly from witness slices.

@@ -75,6 +75,9 @@ import {
 const RPC_BATCH_CHUNK = 100;
 const utf8Encoder = new TextEncoder();
 const DECOY_DOMAIN_BYTES = utf8Encoder.encode('audren/v1/decoy');
+const DECOY_SCOPE_SYNC_BYTES = utf8Encoder.encode('sync');
+const DECOY_SCOPE_WITNESS_PREFIX = utf8Encoder.encode('witness');
+const DECOY_ORDER_LABEL_BYTES = utf8Encoder.encode('order');
 
 /** Maximum new `MemoPage`s fetched as an incremental sync (`<= ~256 KB`). */
 export const INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD = 25;
@@ -82,6 +85,8 @@ export const INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD = 25;
 export const INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD = 25;
 /** Minimum sealed `SubtreePage` anonymity set size when decoy-padding in `'strict'` mode. */
 export const STRICT_DECOY_SEALED_SUBTREE_TARGET = 16;
+/** Sealed-subtree count divisor for deterministic decoy epoch buckets (synced with Rust SDK). */
+export const DECOY_EPOCH_BUCKET_SIZE = 64;
 
 export type SyncPrivacyMode = 'strict' | 'fast';
 
@@ -99,41 +104,151 @@ function randomUniformInt(bound: number): number {
   }
 }
 
-function randomUniformBigInt(bound: bigint): bigint {
-  if (bound <= 0n) throw new RangeError(`bound must be positive, got ${bound}`);
-  if (bound === 1n) return 0n;
-  if (bound <= 0x1_0000_0000n) return BigInt(randomUniformInt(Number(bound)));
-  const maxU64Plus1 = 1n << 64n;
-  const maxUnbiased = (maxU64Plus1 / bound) * bound;
-  const buf = new Uint32Array(2);
-  for (;;) {
-    globalThis.crypto.getRandomValues(buf);
-    const v = (BigInt(buf[0]!) << 32n) | BigInt(buf[1]!);
-    if (v < maxUnbiased) return v % bound;
+function compareBytes32(a: Uint8Array, b: Uint8Array): number {
+  for (let i = 0; i < 32; i++) {
+    const diff = a[i]! - b[i]!;
+    if (diff !== 0) return diff;
   }
+  return 0;
+}
+
+function makeWitnessDecoyScope(targetLaneId: number, targetPageSeq: bigint): Uint8Array {
+  const out = new Uint8Array(DECOY_SCOPE_WITNESS_PREFIX.byteLength + 1 + 8);
+  out.set(DECOY_SCOPE_WITNESS_PREFIX, 0);
+  out[DECOY_SCOPE_WITNESS_PREFIX.byteLength] = targetLaneId & 0xff;
+  new DataView(out.buffer).setBigUint64(DECOY_SCOPE_WITNESS_PREFIX.byteLength + 1, targetPageSeq, true);
+  return out;
+}
+
+function computeSubtreeOrderKey(
+  viewSk: Uint8Array,
+  scope: Uint8Array,
+  epochBucket: bigint,
+  addrBytes: Uint8Array,
+): Uint8Array {
+  const buf = new Uint8Array(
+    32 + DECOY_DOMAIN_BYTES.byteLength + scope.byteLength + 8 + DECOY_ORDER_LABEL_BYTES.byteLength + 32,
+  );
+  let off = 0;
+  buf.set(viewSk, off);
+  off += 32;
+  buf.set(DECOY_DOMAIN_BYTES, off);
+  off += DECOY_DOMAIN_BYTES.byteLength;
+  buf.set(scope, off);
+  off += scope.byteLength;
+  new DataView(buf.buffer).setBigUint64(off, epochBucket, true);
+  off += 8;
+  buf.set(DECOY_ORDER_LABEL_BYTES, off);
+  off += DECOY_ORDER_LABEL_BYTES.byteLength;
+  buf.set(addrBytes, off);
+  return sha256(buf);
 }
 
 /**
- * Derive a deterministic wallet-keyed decoy index in `0..<bound` from
- * `SHA256(viewSk || "audren/v1/decoy" || epochBucket_le8 || counter_le4)`.
- * Ensures repeated syncs within the same epoch bucket request the exact same decoy set
- * (eliminating multi-sync set-intersection attacks).
+ * Deterministic Rendezvous (Highest Random Weight) sealed `SubtreePage` decoy selection matching
+ * `crates/client/src/scanner.rs::select_hrw_sealed_decoys` bit-for-bit:
+ *
+ *   `score = SHA256(viewSk[32] || "audren/v1/decoy" || scope || epochBucket_le8 || laneId || pageSeq_le8)`
+ *
+ * Selects the top-`K` highest-scoring candidates not in `alreadySelected` so `+1` sealed subtree
+ * growth within an epoch bucket preserves `~(K - 1) / K` (usually `K / K`) of decoys instead of
+ * scrambling modulo indices.
  */
-function deterministicDecoyIndex(
-  viewSk: Uint8Array,
-  epochBucket: bigint,
-  counter: number,
-  bound: bigint,
-): bigint {
-  const input = new Uint8Array(32 + DECOY_DOMAIN_BYTES.byteLength + 8 + 4);
-  input.set(viewSk, 0);
-  input.set(DECOY_DOMAIN_BYTES, 32);
-  const dv = new DataView(input.buffer);
-  dv.setBigUint64(32 + DECOY_DOMAIN_BYTES.byteLength, epochBucket, true);
-  dv.setUint32(32 + DECOY_DOMAIN_BYTES.byteLength + 8, counter >>> 0, true);
-  const digest = sha256(input);
-  const val = new DataView(digest.buffer, digest.byteOffset, digest.byteLength).getBigUint64(0, true);
-  return val % bound;
+export function selectHrwSealedDecoys(params: {
+  viewSk: Uint8Array;
+  scope: Uint8Array;
+  epochBucket: bigint;
+  sealedByLane: ReadonlyArray<{ laneId: number; sealedCount: bigint }>;
+  alreadySelected: ReadonlySet<string>;
+  targetSealed: number;
+}): Array<{ laneId: number; pageSeq: bigint }> {
+  const { viewSk, scope, epochBucket, sealedByLane, alreadySelected, targetSealed } = params;
+  if (viewSk.byteLength !== 32) {
+    throw new RangeError(`viewSk must be 32 bytes, got ${viewSk.byteLength}`);
+  }
+  let totalSealed = 0n;
+  let alreadySealedCount = 0;
+  for (const { laneId, sealedCount } of sealedByLane) {
+    totalSealed += sealedCount;
+    for (const key of alreadySelected) {
+      const sep = key.indexOf(':');
+      if (sep <= 0) continue;
+      const kLane = Number(key.slice(0, sep));
+      if (kLane === laneId) {
+        const kSeq = BigInt(key.slice(sep + 1));
+        if (kSeq < sealedCount) alreadySealedCount++;
+      }
+    }
+  }
+  const cappedTarget = Number(
+    totalSealed < BigInt(targetSealed) ? totalSealed : BigInt(targetSealed),
+  );
+  const need = cappedTarget - alreadySealedCount;
+  if (need <= 0) return [];
+
+  if (totalSealed <= BigInt(cappedTarget)) {
+    const out: Array<{ laneId: number; pageSeq: bigint }> = [];
+    for (const { laneId, sealedCount } of sealedByLane) {
+      for (let s = 0n; s < sealedCount; s++) {
+        if (!alreadySelected.has(`${laneId}:${s.toString()}`)) {
+          out.push({ laneId, pageSeq: s });
+        }
+      }
+    }
+    return out;
+  }
+
+  const preimageLen = 32 + DECOY_DOMAIN_BYTES.byteLength + scope.byteLength + 8 + 1 + 8;
+  const preimage = new Uint8Array(preimageLen);
+  const dv = new DataView(preimage.buffer);
+  let off = 0;
+  preimage.set(viewSk, off);
+  off += 32;
+  preimage.set(DECOY_DOMAIN_BYTES, off);
+  off += DECOY_DOMAIN_BYTES.byteLength;
+  preimage.set(scope, off);
+  off += scope.byteLength;
+  dv.setBigUint64(off, epochBucket, true);
+  off += 8;
+  const laneOff = off;
+  const seqOff = off + 1;
+
+  // Bounded top-`need` list kept sorted descending by `(score, -laneId, -pageSeq)` so `top[need - 1]`
+  // is the current threshold.
+  const top: Array<{ score: Uint8Array; laneId: number; pageSeq: bigint }> = [];
+  const beats = (
+    scoreA: Uint8Array,
+    laneA: number,
+    seqA: bigint,
+    b: { score: Uint8Array; laneId: number; pageSeq: bigint },
+  ): boolean => {
+    const cmp = compareBytes32(scoreA, b.score);
+    if (cmp !== 0) return cmp > 0;
+    if (laneA !== b.laneId) return laneA < b.laneId;
+    return seqA < b.pageSeq;
+  };
+
+  for (const { laneId, sealedCount } of sealedByLane) {
+    preimage[laneOff] = laneId & 0xff;
+    for (let s = 0n; s < sealedCount; s++) {
+      if (alreadySelected.has(`${laneId}:${s.toString()}`)) continue;
+      dv.setBigUint64(seqOff, s, true);
+      const score = sha256(preimage);
+      if (top.length === need && !beats(score, laneId, s, top[need - 1]!)) {
+        continue;
+      }
+      let insertAt = top.length;
+      while (insertAt > 0 && beats(score, laneId, s, top[insertAt - 1]!)) {
+        insertAt--;
+      }
+      top.splice(insertAt, 0, { score, laneId, pageSeq: s });
+      if (top.length > need) {
+        top.pop();
+      }
+    }
+  }
+
+  return top.map(({ laneId, pageSeq }) => ({ laneId, pageSeq }));
 }
 
 function shuffleInPlace<T>(items: T[]): void {
@@ -511,19 +626,25 @@ export async function syncCompactStoreWithRpc(params: {
   // Determine `SubtreePage`s needed across all active lanes:
   //   - In `'strict'` incremental sync (`<= 25` MemoPages & `<= 25` newly synced SubtreePages),
   //     fetch all SubtreePages covering newly synced leaves uniformly so hits are never revealed.
-  //   - In `'strict'` large catch-up (`> 25` MemoPages or `> 25` SubtreePages), ALWAYS fetch a
+  //   - In `'strict'` large catch-up (`> 25` MemoPages or `> 25` SubtreePages) OR whenever an
+  //     older unfrozen/hit sealed subtree outside the uniform window is requested, ALWAYS fetch a
   //     fixed uniform batch count of sealed `SubtreePage`s (multiples of 16, minimum 16 even on
-  //     0 hits) using deterministic wallet-keyed decoy selection `SHA256(viewSk || "audren/v1/decoy" || epochBucket)`
-  //     so repeated syncs cannot be intersected and 0-hit vs 1..16-hit syncs are indistinguishable.
-  const neededSubtrees = new Map<string, { laneId: number; subSeq: bigint; addr: string }>();
+  //     0 hits) using Rendezvous (HRW) decoy selection so repeated syncs and `+1` subtree growth
+  //     cannot be intersected and 0-hit vs 1..16-hit syncs are indistinguishable.
+  const neededSubtrees = new Map<
+    string,
+    { laneId: number; subSeq: bigint; addr: string; addrBytes: Uint8Array }
+  >();
   const uniformNewSubtreeKeys = new Set<string>();
   const addNeededSubtree = (laneId: number, subSeq: bigint): boolean => {
     const key = `${laneId}:${subSeq.toString()}`;
     if (neededSubtrees.has(key)) return false;
+    const pda = deriveSubtreePdaSync(poolId, laneId, subSeq, programId);
     neededSubtrees.set(key, {
       laneId,
       subSeq,
-      addr: deriveSubtreePdaSync(poolId, laneId, subSeq, programId).address,
+      addr: pda.address,
+      addrBytes: pda.addressBytes,
     });
     return true;
   };
@@ -544,11 +665,20 @@ export async function syncCompactStoreWithRpc(params: {
   }
 
   let hasHitCorrelatedSealedSubtree = false;
+  const finalizedByLane = new Map<number, bigint>();
+  const frontierRemByLane = new Map<number, number>();
+  const sealedByLaneList: Array<{ laneId: number; sealedCount: bigint }> = [];
+  let totalSealedSubtrees = 0n;
+
   for (const laneHdr of lanes) {
     const l = laneHdr.laneId;
     const laneState = params.store.lanes[l]!;
     const finalizedCount = laneHdr.nextLeaf / subSize;
     const frontierRem = Number(laneHdr.nextLeaf % subSize);
+    finalizedByLane.set(l, finalizedCount);
+    frontierRemByLane.set(l, frontierRem);
+    sealedByLaneList.push({ laneId: l, sealedCount: finalizedCount });
+    totalSealedSubtrees += finalizedCount;
 
     if (frontierRem > 0) {
       addNeededSubtree(l, finalizedCount);
@@ -587,89 +717,82 @@ export async function syncCompactStoreWithRpc(params: {
     }
   }
 
-  // Deterministic wallet-keyed decoy padding for `'strict'` large catch-up (`> 25` pages)
-  const isLargeStrictCatchup =
-    privacyMode === 'strict' &&
-    !fetchNewSubtreesUniformly &&
-    (totalNewMemoPages > BigInt(INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD) ||
-      totalNewSubtrees > BigInt(INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD) ||
-      hasHitCorrelatedSealedSubtree);
+  const epochBucket =
+    params.decoyEpochBucket ?? totalSealedSubtrees / BigInt(DECOY_EPOCH_BUCKET_SIZE);
 
-  if (isLargeStrictCatchup) {
-    const finalizedByLane = new Map<number, bigint>();
-    let totalSealedSubtrees = 0n;
-    for (const laneHdr of lanes) {
-      const fc = laneHdr.nextLeaf / subSize;
-      finalizedByLane.set(laneHdr.laneId, fc);
-      totalSealedSubtrees += fc;
+  // Rendezvous (HRW) wallet-keyed decoy padding for `'strict'` mode:
+  // Always pad BOTH large catch-ups (`!fetchNewSubtreesUniformly && totalNewMemoPages > 0`) AND
+  // incremental syncs that touch any historical sealed subtree outside the uniform window
+  // (`hasHitCorrelatedSealedSubtree`, e.g., freezing an older unfrozen note).
+  const shouldDecoyPad =
+    privacyMode === 'strict' &&
+    totalSealedSubtrees > 0n &&
+    (hasHitCorrelatedSealedSubtree || (!fetchNewSubtreesUniformly && totalNewMemoPages > 0n));
+
+  if (shouldDecoyPad) {
+    let currentSealedCount = 0;
+    for (const req of neededSubtrees.values()) {
+      if (req.subSeq < (finalizedByLane.get(req.laneId) ?? 0n)) {
+        currentSealedCount++;
+      }
     }
 
-    if (totalSealedSubtrees > 0n) {
-      let currentSealedCount = 0;
-      for (const req of neededSubtrees.values()) {
-        if (req.subSeq < (finalizedByLane.get(req.laneId) ?? 0n)) {
-          currentSealedCount++;
-        }
-      }
+    // Fixed uniform batch size independent of hit count: multiples of 16 (min 16 even on 0 hits)
+    const batchUnit = STRICT_DECOY_SEALED_SUBTREE_TARGET;
+    const batches = Math.max(1, Math.ceil(currentSealedCount / batchUnit));
+    const desiredBig = BigInt(batches * batchUnit);
+    const targetSealed = Number(
+      totalSealedSubtrees < desiredBig ? totalSealedSubtrees : desiredBig,
+    );
 
-      // Fixed uniform batch size independent of hit count: multiples of 16 (min 16 even on 0 hits)
-      const batchUnit = STRICT_DECOY_SEALED_SUBTREE_TARGET;
-      const batches = Math.max(1, Math.ceil(currentSealedCount / batchUnit));
-      const desiredBig = BigInt(batches * batchUnit);
-      const targetSealed = Number(
-        totalSealedSubtrees < desiredBig ? totalSealedSubtrees : desiredBig,
-      );
-
-      if (currentSealedCount < targetSealed) {
-        if (totalSealedSubtrees <= BigInt(targetSealed)) {
-          for (const laneHdr of lanes) {
-            const fc = finalizedByLane.get(laneHdr.laneId) ?? 0n;
-            for (let s = 0n; s < fc; s++) {
-              if (addNeededSubtree(laneHdr.laneId, s)) {
-                currentSealedCount++;
-              }
-            }
-          }
-        } else {
-          const epochBucket =
-            params.decoyEpochBucket ??
-            totalSealedSubtrees / BigInt(STRICT_DECOY_SEALED_SUBTREE_TARGET);
-          let counter = 0;
-          while (currentSealedCount < targetSealed) {
-            let g = deterministicDecoyIndex(
-              params.fvk.viewSk,
-              epochBucket,
-              counter++,
-              totalSealedSubtrees,
-            );
-            for (const laneHdr of lanes) {
-              const fc = finalizedByLane.get(laneHdr.laneId) ?? 0n;
-              if (g < fc) {
-                if (addNeededSubtree(laneHdr.laneId, g)) {
-                  currentSealedCount++;
-                }
-                break;
-              }
-              g -= fc;
-            }
-          }
-        }
+    if (currentSealedCount < targetSealed) {
+      const decoys = selectHrwSealedDecoys({
+        viewSk: params.fvk.viewSk,
+        scope: DECOY_SCOPE_SYNC_BYTES,
+        epochBucket,
+        sealedByLane: sealedByLaneList,
+        alreadySelected: new Set(neededSubtrees.keys()),
+        targetSealed,
+      });
+      for (const d of decoys) {
+        addNeededSubtree(d.laneId, d.pageSeq);
       }
     }
   }
 
   const fetchedSubtrees = new Map<string, Uint8Array[]>();
-  const subList = [...neededSubtrees.entries()];
-  // Sort by PDA Base58 address (SHA-256 output): pseudorandom uniform order AND 100% deterministic
-  // across repeated syncs so neither position nor batch diffs leak hit locations.
-  subList.sort((a, b) => (a[1].addr < b[1].addr ? -1 : a[1].addr > b[1].addr ? 1 : 0));
-  for (let off = 0; off < subList.length; off += RPC_BATCH_CHUNK) {
-    const chunk = subList.slice(off, off + RPC_BATCH_CHUNK);
-    const raws = await params.fetchBatch(chunk.map(([, req]) => req.addr));
+  const subListWithKeys = [...neededSubtrees.entries()].map(([key, req]) => ({
+    key,
+    req,
+    orderKey: computeSubtreeOrderKey(
+      params.fvk.viewSk,
+      DECOY_SCOPE_SYNC_BYTES,
+      epochBucket,
+      req.addrBytes,
+    ),
+  }));
+  // Sort by deterministic wallet-keyed hash matching Rust `scanner.rs` byte-for-byte.
+  subListWithKeys.sort((a, b) => compareBytes32(a.orderKey, b.orderKey));
+
+  let anyPass1dSubtreeMissing = false;
+  for (let off = 0; off < subListWithKeys.length; off += RPC_BATCH_CHUNK) {
+    const chunk = subListWithKeys.slice(off, off + RPC_BATCH_CHUNK);
+    const raws = await params.fetchBatch(chunk.map((item) => item.req.addr));
     for (let i = 0; i < chunk.length; i++) {
-      const [key] = chunk[i]!;
+      const item = chunk[i]!;
       const raw = raws[i];
-      if (raw) fetchedSubtrees.set(key, decodeSubtreePage(raw).leaves);
+      if (!raw) {
+        anyPass1dSubtreeMissing = true;
+        continue;
+      }
+      const leaves = decodeSubtreePage(raw).leaves;
+      const fc = finalizedByLane.get(item.req.laneId) ?? 0n;
+      const expectedMinLeaves =
+        item.req.subSeq < fc ? SUBTREE_LEAVES : (frontierRemByLane.get(item.req.laneId) ?? 0);
+      if (leaves.length < expectedMinLeaves) {
+        anyPass1dSubtreeMissing = true;
+      }
+      fetchedSubtrees.set(item.key, leaves);
     }
   }
 
@@ -682,7 +805,7 @@ export async function syncCompactStoreWithRpc(params: {
     const finalizedCount = laneHdr.nextLeaf / subSize;
     const frontierRem = Number(laneHdr.nextLeaf % subSize);
 
-    // Populate any fallback finalized subroots & freeze previously-unfrozen notes in fetched sealed pages
+    // Populate any fallback finalized subroots
     const fb = fallbackSubtreeSeqs.get(l);
     if (fb) {
       const sortedFb = [...fb].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -739,50 +862,57 @@ export async function syncCompactStoreWithRpc(params: {
         }
       }
     }
-    if (verifiedWatermark > laneState.nextMemoLeaf) {
-      laneState.nextMemoLeaf = verifiedWatermark;
-    }
 
-    // Freeze owned notes for every fetched sealed SubtreePage on this lane
-    for (const [key, req] of neededSubtrees) {
-      if (req.laneId !== l) continue;
-      const leaves = fetchedSubtrees.get(key);
-      if (leaves && leaves.length === SUBTREE_LEAVES) {
-        params.store.freezeOwnedNotesInSubtreePage(l, req.subSeq, leaves);
+    // Privacy invariant: if ANY Pass 1D `SubtreePage` fetch returned `null` (or truncated) —
+    // whether for a hit page OR a decoy/batch page — uniformly withhold `nextMemoLeaf`
+    // advancement, note freezing, and frontier updates across ALL lanes so an adversarial RPC
+    // cannot distinguish hit vs decoy drops on the next sync!
+    if (!anyPass1dSubtreeMissing) {
+      if (verifiedWatermark > laneState.nextMemoLeaf) {
+        laneState.nextMemoLeaf = verifiedWatermark;
       }
-    }
 
-    // Retain at most 1 just-sealed page (`prevSealedSubSeq`/`prevSealedLeaves`) for pre-seal checkpoints
-    if (finalizedCount > 0n) {
-      const latestSealedSeq = finalizedCount - 1n;
-      const latestSealedLeaves = fetchedSubtrees.get(`${l}:${latestSealedSeq.toString()}`);
-      if (latestSealedLeaves && latestSealedLeaves.length === SUBTREE_LEAVES) {
-        laneState.prevSealedSubSeq = latestSealedSeq;
-        laneState.prevSealedLeaves = latestSealedLeaves.map((b) => new Uint8Array(b));
-      } else if (
-        oldFrontierSubSeq === latestSealedSeq &&
-        oldFrontierLeaves.length > 0 &&
-        laneState.prevSealedSubSeq !== latestSealedSeq
-      ) {
-        laneState.prevSealedSubSeq = oldFrontierSubSeq;
-        laneState.prevSealedLeaves = oldFrontierLeaves;
+      // Freeze owned notes for every fetched sealed SubtreePage on this lane
+      for (const [key, req] of neededSubtrees) {
+        if (req.laneId !== l) continue;
+        const leaves = fetchedSubtrees.get(key);
+        if (leaves && leaves.length === SUBTREE_LEAVES) {
+          params.store.freezeOwnedNotesInSubtreePage(l, req.subSeq, leaves);
+        }
       }
-    }
 
-    // Update live unsealed frontier
-    if (frontierRem > 0) {
-      const frontierLeaves = fetchedSubtrees.get(`${l}:${finalizedCount.toString()}`);
-      if (frontierLeaves && frontierLeaves.length >= frontierRem) {
+      // Retain at most 1 just-sealed page (`prevSealedSubSeq`/`prevSealedLeaves`) for pre-seal checkpoints
+      if (finalizedCount > 0n) {
+        const latestSealedSeq = finalizedCount - 1n;
+        const latestSealedLeaves = fetchedSubtrees.get(`${l}:${latestSealedSeq.toString()}`);
+        if (latestSealedLeaves && latestSealedLeaves.length === SUBTREE_LEAVES) {
+          laneState.prevSealedSubSeq = latestSealedSeq;
+          laneState.prevSealedLeaves = latestSealedLeaves.map((b) => new Uint8Array(b));
+        } else if (
+          oldFrontierSubSeq === latestSealedSeq &&
+          oldFrontierLeaves.length > 0 &&
+          laneState.prevSealedSubSeq !== latestSealedSeq
+        ) {
+          laneState.prevSealedSubSeq = oldFrontierSubSeq;
+          laneState.prevSealedLeaves = oldFrontierLeaves;
+        }
+      }
+
+      // Update live unsealed frontier
+      if (frontierRem > 0) {
+        const frontierLeaves = fetchedSubtrees.get(`${l}:${finalizedCount.toString()}`);
+        if (frontierLeaves && frontierLeaves.length >= frontierRem) {
+          laneState.frontierSubSeq = finalizedCount;
+          laneState.frontierLeaves = frontierLeaves.slice(0, frontierRem).map((b) => new Uint8Array(b));
+        }
+      } else if (finalizedCount >= laneState.frontierSubSeq) {
         laneState.frontierSubSeq = finalizedCount;
-        laneState.frontierLeaves = frontierLeaves.slice(0, frontierRem).map((b) => new Uint8Array(b));
+        laneState.frontierLeaves = [];
       }
-    } else if (finalizedCount >= laneState.frontierSubSeq) {
-      laneState.frontierSubSeq = finalizedCount;
-      laneState.frontierLeaves = [];
     }
   }
 
-  if (params.latestCheckpoint) {
+  if (!anyPass1dSubtreeMissing && params.latestCheckpoint) {
     params.store.pruneSealedBeforeCheckpoint(params.latestCheckpoint);
   }
 
@@ -791,11 +921,11 @@ export async function syncCompactStoreWithRpc(params: {
   // =========================================================================
   // Even if Pass 1D experienced a transient `SubtreePage` miss, Pass 2 MUST STILL fetch every
   // `NullifierPage` uniformly so an adversarial RPC cannot drop a `SubtreePage` and observe
-  // whether Pass 2 was skipped. If any lane had an unverified miss, we hold `nextNfIndex`
-  // locally so missed notes are re-checked on the next healthy sync without losing spend tracking.
-  const allLanesCaughtUp = lanes.every(
-    (h) => params.store.lanes[h.laneId]!.nextMemoLeaf >= h.nextLeaf,
-  );
+  // whether Pass 2 was skipped. If ANY Pass 1D `SubtreePage` was missing OR any lane had an
+  // unverified miss, we hold `nextNfIndex` uniformly across ALL lanes.
+  const allLanesCaughtUp =
+    !anyPass1dSubtreeMissing &&
+    lanes.every((h) => params.store.lanes[h.laneId]!.nextMemoLeaf >= h.nextLeaf);
   const savedNextNfIndex = new Map<number, bigint>();
   for (const laneHdr of lanes) {
     savedNextNfIndex.set(laneHdr.laneId, params.store.lanes[laneHdr.laneId]!.nextNfIndex);
@@ -913,10 +1043,13 @@ export async function syncCompactStoreWithRpc(params: {
 /**
  * Stateless witness reconstruction for `(laneId, leafIdx)` at `RootCheckpoint(ckptSlotIdx)`.
  *
- * In default `'strict'` mode, NEVER issues a single-page pinpoint fetch right before spending:
- * pads `SubtreePage` fetches with decoy sealed `SubtreePage`s (or active-lane `SubtreePage`s when
- * fewer than 16 sealed pages exist) across all active lanes up to `min(16, totalSubtrees)`,
- * includes active-lane `SubtreeRootPage`s when needed, and shuffles the batch before fetching.
+ * In default `'strict'` mode, eliminates `laneId` and pinpoint-spend correlation:
+ * - Fetches ALL active lanes' `SubtreeRootPage`s uniformly (never capped by `neededSrPages`).
+ * - Fetches ALL active lanes' unsealed frontier `SubtreePage`s uniformly (never only `params.laneId`).
+ * - Fetches `min(16, totalSealed)` sealed `SubtreePage`s via Rendezvous (HRW) hashing scoped to
+ *   `("witness" || laneId || targetPageSeq_le8, totalSealed / 64)` so spending two different notes
+ *   in the same epoch uses independent decoy sets while retries of the same note stay identical.
+ * - Shuffles the combined batch and fetches in 100-account chunks.
  */
 export async function reconstructWitness(params: {
   fetchBatch: AccountBatchFetcher;
@@ -927,6 +1060,7 @@ export async function reconstructWitness(params: {
   programId?: string;
   privacyMode?: SyncPrivacyMode;
   viewSk?: Uint8Array;
+  decoyEpochBucket?: bigint;
 }): Promise<{ ckpt: DecodedRootCheckpoint; superRoot: bigint; path: MerklePath4Ary }> {
   const programId = params.programId ?? AUDREN_PROGRAM_ID;
   const privacyMode: SyncPrivacyMode = params.privacyMode ?? 'strict';
@@ -953,18 +1087,6 @@ export async function reconstructWitness(params: {
     srAddrSet.add(addr);
   }
 
-  if (privacyMode === 'strict' && neededSrPages > 0) {
-    for (let l = 0; l < NUM_LANES; l++) {
-      if (l === params.laneId) continue;
-      const laneSealed = ckpt.laneCounts[l]! / subSize;
-      if (laneSealed === 0n) continue;
-      const laneSrPages = Math.min(neededSrPages, Math.ceil(Number(laneSealed) / SUBROOTS_PER_PAGE));
-      for (let rp = 0; rp < laneSrPages; rp++) {
-        srAddrSet.add(deriveSubrootPdaSync(params.poolId, l, BigInt(rp), programId).address);
-      }
-    }
-  }
-
   const targetSubAddr = deriveSubtreePdaSync(
     params.poolId,
     params.laneId,
@@ -980,50 +1102,60 @@ export async function reconstructWitness(params: {
   if (frontierSubAddr) subAddrSet.add(frontierSubAddr);
 
   if (privacyMode === 'strict') {
-    const sealedByLane: bigint[] = [];
-    const totalByLane: bigint[] = [];
+    const sealedByLane: Array<{ laneId: number; sealedCount: bigint }> = [];
+    const alreadySealed = new Set<string>();
+    if (targetPageIdx < frontierPageIdx) {
+      alreadySealed.add(`${params.laneId}:${targetPageIdx.toString()}`);
+    }
     let totalSealed = 0n;
-    let totalSubtrees = 0n;
+
     for (let l = 0; l < NUM_LANES; l++) {
       const cnt = ckpt.laneCounts[l]!;
-      const sealed = cnt / subSize;
-      const total = cnt > 0n ? (cnt + subSize - 1n) / subSize : 0n;
-      sealedByLane.push(sealed);
-      totalByLane.push(total);
-      totalSealed += sealed;
-      totalSubtrees += total;
+      const laneSealed = cnt / subSize;
+      const laneFrontierRem = Number(cnt % subSize);
+      sealedByLane.push({ laneId: l, sealedCount: laneSealed });
+      totalSealed += laneSealed;
+
+      // Uniformly fetch ALL active lanes' SubtreeRootPages (never capped by `neededSrPages`)
+      if (laneSealed > 0n) {
+        const laneSrPages = Math.ceil(Number(laneSealed) / SUBROOTS_PER_PAGE);
+        for (let rp = 0; rp < laneSrPages; rp++) {
+          srAddrSet.add(deriveSubrootPdaSync(params.poolId, l, BigInt(rp), programId).address);
+        }
+      }
+
+      // Uniformly fetch ALL active lanes' unsealed frontier SubtreePages (zero laneId leak)
+      if (laneFrontierRem > 0) {
+        subAddrSet.add(deriveSubtreePdaSync(params.poolId, l, laneSealed, programId).address);
+      }
     }
 
-    const decoyCap = BigInt(STRICT_DECOY_SEALED_SUBTREE_TARGET);
-    const targetBatch = Number(totalSubtrees < decoyCap ? totalSubtrees : decoyCap);
-
-    if (subAddrSet.size < targetBatch) {
-      if (totalSubtrees <= decoyCap) {
-        for (let l = 0; l < NUM_LANES; l++) {
-          for (let s = 0n; s < totalByLane[l]!; s++) {
-            subAddrSet.add(deriveSubtreePdaSync(params.poolId, l, s, programId).address);
-          }
-        }
+    if (totalSealed > 0n) {
+      const targetSealed = Number(
+        totalSealed < BigInt(STRICT_DECOY_SEALED_SUBTREE_TARGET)
+          ? totalSealed
+          : BigInt(STRICT_DECOY_SEALED_SUBTREE_TARGET),
+      );
+      const epochBucket =
+        params.decoyEpochBucket ?? totalSealed / BigInt(DECOY_EPOCH_BUCKET_SIZE);
+      let key: Uint8Array;
+      if (params.viewSk && params.viewSk.byteLength === 32) {
+        key = params.viewSk;
       } else {
-        const useSealedPool = totalSealed >= decoyCap;
-        const poolCounts = useSealedPool ? sealedByLane : totalByLane;
-        const poolTotal = useSealedPool ? totalSealed : totalSubtrees;
-        const epochBucket = poolTotal / decoyCap;
-        let counter = 0;
-        while (subAddrSet.size < targetBatch) {
-          let g =
-            params.viewSk && params.viewSk.byteLength === 32
-              ? deterministicDecoyIndex(params.viewSk, epochBucket, counter++, poolTotal)
-              : randomUniformBigInt(poolTotal);
-          for (let l = 0; l < NUM_LANES; l++) {
-            const c = poolCounts[l]!;
-            if (g < c) {
-              subAddrSet.add(deriveSubtreePdaSync(params.poolId, l, g, programId).address);
-              break;
-            }
-            g -= c;
-          }
-        }
+        const eph = new Uint8Array(32);
+        globalThis.crypto.getRandomValues(eph);
+        key = eph;
+      }
+      const decoys = selectHrwSealedDecoys({
+        viewSk: key,
+        scope: makeWitnessDecoyScope(params.laneId, targetPageIdx),
+        epochBucket,
+        sealedByLane,
+        alreadySelected: alreadySealed,
+        targetSealed,
+      });
+      for (const d of decoys) {
+        subAddrSet.add(deriveSubtreePdaSync(params.poolId, d.laneId, d.pageSeq, programId).address);
       }
     }
   }
@@ -1033,10 +1165,13 @@ export async function reconstructWitness(params: {
     shuffleInPlace(addrs);
   }
 
-  const raws = await params.fetchBatch(addrs);
   const rawByAddr = new Map<string, Uint8Array | null>();
-  for (let i = 0; i < addrs.length; i++) {
-    rawByAddr.set(addrs[i]!, raws[i] ?? null);
+  for (let off = 0; off < addrs.length; off += RPC_BATCH_CHUNK) {
+    const chunk = addrs.slice(off, off + RPC_BATCH_CHUNK);
+    const raws = await params.fetchBatch(chunk);
+    for (let i = 0; i < chunk.length; i++) {
+      rawByAddr.set(chunk[i]!, raws[i] ?? null);
+    }
   }
 
   const finalizedRoots: bigint[] = [];

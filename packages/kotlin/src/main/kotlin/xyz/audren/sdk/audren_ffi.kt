@@ -1896,6 +1896,8 @@ data class FfiExecCtxHashParams (
     , 
     var `routerAccounts`: List<FfiAccountMeta>
     , 
+    var `extraWritablePubkeys`: List<kotlin.String>
+    , 
     var `outStealthOwner`: kotlin.ByteArray
     , 
     var `outBlinding`: kotlin.ByteArray
@@ -1938,6 +1940,7 @@ public object FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer<FfiEx
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+            FfiConverterSequenceString.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
@@ -1963,6 +1966,7 @@ public object FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer<FfiEx
             FfiConverterULong.allocationSize(value.`minAmountOut`) +
             FfiConverterString.allocationSize(value.`routerProg`) +
             FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`routerAccounts`) +
+            FfiConverterSequenceString.allocationSize(value.`extraWritablePubkeys`) +
             FfiConverterByteArray.allocationSize(value.`outStealthOwner`) +
             FfiConverterByteArray.allocationSize(value.`outBlinding`) +
             FfiConverterByteArray.allocationSize(value.`dynMemoHead`) +
@@ -1987,6 +1991,7 @@ public object FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer<FfiEx
             FfiConverterULong.write(value.`minAmountOut`, buf)
             FfiConverterString.write(value.`routerProg`, buf)
             FfiConverterSequenceTypeFfiAccountMeta.write(value.`routerAccounts`, buf)
+            FfiConverterSequenceString.write(value.`extraWritablePubkeys`, buf)
             FfiConverterByteArray.write(value.`outStealthOwner`, buf)
             FfiConverterByteArray.write(value.`outBlinding`, buf)
             FfiConverterByteArray.write(value.`dynMemoHead`, buf)
@@ -2069,6 +2074,8 @@ data class FfiExecViaEscrowParams (
     , 
     var `routerAccounts`: List<FfiAccountMeta>
     , 
+    var `extraWritablePubkeys`: List<kotlin.String>
+    , 
     var `changeMemos`: kotlin.ByteArray
     
 ){
@@ -2121,6 +2128,7 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterSequenceTypeFfiAccountMeta.read(buf),
+            FfiConverterSequenceString.read(buf),
             FfiConverterByteArray.read(buf),
         )
     }
@@ -2161,6 +2169,7 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.allocationSize(value.`routerProg`) +
             FfiConverterByteArray.allocationSize(value.`routerIxData`) +
             FfiConverterSequenceTypeFfiAccountMeta.allocationSize(value.`routerAccounts`) +
+            FfiConverterSequenceString.allocationSize(value.`extraWritablePubkeys`) +
             FfiConverterByteArray.allocationSize(value.`changeMemos`)
     )
 
@@ -2200,6 +2209,7 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.write(value.`routerProg`, buf)
             FfiConverterByteArray.write(value.`routerIxData`, buf)
             FfiConverterSequenceTypeFfiAccountMeta.write(value.`routerAccounts`, buf)
+            FfiConverterSequenceString.write(value.`extraWritablePubkeys`, buf)
             FfiConverterByteArray.write(value.`changeMemos`, buf)
     }
 }

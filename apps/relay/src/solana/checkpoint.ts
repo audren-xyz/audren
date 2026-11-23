@@ -409,7 +409,9 @@ export async function publishCheckpointIfNeeded(params: {
       computeUnitLimit: 120_000,
       priorityFeeLamports: 25_000n,
     })
-    const sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, [relayerB58])
+    const sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, [relayerB58], {
+      commitment: 'processed',
+    })
     return { signed, sim }
   }
 
@@ -448,13 +450,18 @@ export async function publishCheckpointIfNeeded(params: {
         }
         const freshEpoch = Number(freshSlot / ckptInterval)
         const freshSlotIdx = Number((freshSlot / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
-        if (freshEpoch > publishEpoch) {
+        if (freshEpoch >= publishEpoch && (freshSlotIdx !== publishSlotIdx || sim.err)) {
           publishEpoch = freshEpoch
           publishSlotIdx = freshSlotIdx
           const retried = await buildAndSimulate(publishSlotIdx)
           signed = retried.signed
           sim = retried.sim
         }
+      }
+
+      if (sim.err && sendAttempt === 0 && JSON.stringify(sim.err).includes('"Custom":6001')) {
+        await alignEpochWindow()
+        continue
       }
 
       if (sim.err) {
@@ -521,7 +528,9 @@ export async function publishCheckpointIfNeeded(params: {
     if (!finalSig) {
       throw new CheckpointError('PublishCheckpoint did not produce a transaction signature', 502, 'CHECKPOINT_SUBMIT_FAILED')
     }
-    published = true
+    // Only persist the 10s success grace record in `checkpoint_locks` when confirmation actually succeeded.
+    // Unconfirmed fire-and-forget cron sends (`confirm === false`) release the lock with `published: false`.
+    published = confirm && confirmedSlot !== undefined
     return {
       ok: true,
       cluster,

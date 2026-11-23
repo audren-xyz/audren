@@ -221,7 +221,7 @@ fn key_vec(seed: [u8; 32], keys: &AudrenKeys) -> KeyVector {
         nk_hex: to_hex(&fr_to_be_bytes(&keys.nk)),
         view_sk_hex: to_hex(&keys.view_sk),
         view_pk_hex: to_hex(&keys.view_pk),
-        address: keys.address().encode(),
+        address: keys.address().encode().unwrap(),
     }
 }
 
@@ -233,7 +233,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
     let alice_sub1 = AudrenKeys::from_seed_subaccount(&alice_seed, 1);
     let bob = AudrenKeys::from_seed(&bob_seed);
 
-    let alice_addr_str = alice.address().encode();
+    let alice_addr_str = alice.address().encode().unwrap();
     assert_eq!(alice_addr_str.len(), 114, "BIP-350 Bech32m aud1 address must be 114 chars");
     let decoded_addr = AudrenAddress::decode(&alice_addr_str).unwrap();
     assert_eq!(decoded_addr, alice.address());
@@ -410,6 +410,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
         400_000_000,
         &router_prog,
         &router_accs,
+        &[],
         &fr_to_be_bytes(&stealth),
         &fr_to_be_bytes(&bl),
         &dyn_head,

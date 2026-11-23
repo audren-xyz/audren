@@ -29,6 +29,7 @@ use audren_core::{
     },
     NUM_LANES,
 };
+use rand::{rngs::OsRng, Rng, RngCore};
 use sha2::{Digest, Sha256};
 use solana_address::Address;
 
@@ -50,8 +51,13 @@ pub const INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD: u64 = 25;
 pub const INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD: u64 = 25;
 /// Minimum sealed `SubtreePage` anonymity set size when decoy-padding in `Strict` mode.
 pub const STRICT_DECOY_SEALED_SUBTREE_TARGET: usize = 16;
-/// Domain tag for deterministic wallet-keyed decoy selection in `Strict` large catch-up.
+/// Sealed-subtree count divisor for deterministic decoy epoch buckets (synced with TypeScript SDK).
+pub const DECOY_EPOCH_BUCKET_SIZE: u64 = 64;
+/// Domain tag for Rendezvous (HRW) wallet-keyed decoy selection in `Strict` mode.
 const DECOY_DOMAIN: &[u8] = b"audren/v1/decoy";
+const DECOY_SCOPE_SYNC: &[u8] = b"sync";
+const DECOY_SCOPE_WITNESS_PREFIX: &[u8] = b"witness";
+const DECOY_ORDER_LABEL: &[u8] = b"order";
 /// Byte length of the `MemoPage` header prefix (`closed_slot` binary search).
 pub const MEMO_PAGE_HEADER_LEN: usize = 64;
 /// Byte length of the `MemoPage` SoA scan slice (`header + view_tags + ephemeral_pks = 3,328 B`).
@@ -59,20 +65,18 @@ pub const MEMO_PAGE_SCAN_SLICE_LEN: usize = MM_OFF_CIPHERTEXTS;
 /// Byte length of the `NullifierPage` header prefix (`closed_slot` binary search).
 pub const NF_PAGE_HEADER_LEN: usize = 64;
 
-/// RPC privacy mode for `CompactWalletStore` synchronization.
+/// RPC privacy mode for `CompactWalletStore` synchronization and witness reconstruction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SyncPrivacyMode {
-    /// Default privacy-preserving sync: fetches full `10,240 B` `MemoPage`s in uniform batches,
+    /// Default privacy-preserving mode: fetches full `10,240 B` `MemoPage`s in uniform batches,
     /// fetches newly synced `SubtreePage`s uniformly on incremental syncs (`<= 25` pages / `<= 25`
-    /// subtrees), uses deterministic wallet-keyed decoy padding (`min(16, total_sealed_subtrees)`)
-    /// on large catch-ups, and runs Pass 2 unconditionally without early-exit.
+    /// subtrees), uses Rendezvous (HRW) wallet-keyed decoy padding (`min(16, total_sealed)`)
+    /// on large catch-ups & unfrozen sealed notes, fetches all active lanes' frontiers + subroots
+    /// during witness reconstruction, and runs Pass 2 unconditionally without early-exit.
     #[default]
     Strict,
-    /// Opt-in bandwidth-saving mode for large historical catch-up (`> 25` `MemoPage`s) over a
-    /// self-hosted or trusted RPC: uses `3,328 B` `MemoPage` SoA `dataSlice` scanning followed by
-    /// targeted full `MemoPage` re-fetches on view-tag hits (trading RPC hit-visibility for lower
-    /// bandwidth). Small incremental syncs (`<= 25` `MemoPage`s) still fetch full `MemoPage`s
-    /// directly, and Pass 2 still streams all new `NullifierPage`s unconditionally without early-exit.
+    /// Opt-in bandwidth-saving mode for large historical catch-up (`> 25` `MemoPage`s) or minimal
+    /// witness fetching over a self-hosted / trusted RPC.
     Fast,
 }
 
@@ -87,6 +91,143 @@ pub struct AccountDataSlice {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SyncOptions {
     pub privacy_mode: SyncPrivacyMode,
+    /// Optional explicit epoch bucket override (defaults to `total_sealed_subtrees / 64`).
+    pub decoy_epoch_bucket: Option<u64>,
+}
+
+/// Options controlling stateless witness reconstruction (`reconstruct_witness_with_batch`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WitnessOptions {
+    pub privacy_mode: SyncPrivacyMode,
+    /// Optional 32-byte `view_sk` for deterministic Rendezvous (HRW) decoy selection scoped to
+    /// `(lane_id, target_page_seq, epoch_bucket)`. When `None`, a fresh CSPRNG key is sampled.
+    pub view_sk: Option<[u8; 32]>,
+    /// Optional explicit epoch bucket override (defaults to `total_sealed / 64`).
+    pub decoy_epoch_bucket: Option<u64>,
+}
+
+fn make_witness_decoy_scope(target_lane_id: u8, target_page_seq: u64) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[0..7].copy_from_slice(DECOY_SCOPE_WITNESS_PREFIX);
+    out[7] = target_lane_id;
+    out[8..16].copy_from_slice(&target_page_seq.to_le_bytes());
+    out
+}
+
+fn compute_subtree_order_key(
+    view_sk: &[u8; 32],
+    scope: &[u8],
+    epoch_bucket: u64,
+    addr: &Address,
+) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(view_sk);
+    h.update(DECOY_DOMAIN);
+    h.update(scope);
+    h.update(epoch_bucket.to_le_bytes());
+    h.update(DECOY_ORDER_LABEL);
+    h.update(addr.as_ref());
+    h.finalize().into()
+}
+
+/// Deterministic Rendezvous (Highest Random Weight) sealed `SubtreePage` decoy selection matching
+/// `packages/sdk/src/scanner.ts::selectHrwSealedDecoys` bit-for-bit:
+///
+/// `score = SHA256(view_sk[32] || "audren/v1/decoy" || scope || epoch_bucket_le8 || lane_id || page_seq_le8)`
+///
+/// Selects the top-`K` highest-scoring candidates not in `already_selected` so `+1` sealed subtree
+/// growth within an epoch bucket preserves `~(K - 1) / K` (typically `K / K`) of decoys instead
+/// of scrambling modulo indices.
+pub fn select_hrw_sealed_decoys(
+    view_sk: &[u8; 32],
+    scope: &[u8],
+    epoch_bucket: u64,
+    sealed_by_lane: &[(u8, u64)],
+    already_selected: &BTreeSet<(u8, u64)>,
+    target_sealed: usize,
+) -> Vec<(u8, u64)> {
+    let mut total_sealed = 0u64;
+    let mut already_sealed_count = 0usize;
+    for &(lane_id, sealed_count) in sealed_by_lane {
+        total_sealed = total_sealed.saturating_add(sealed_count);
+        for &(sel_lane, sel_seq) in already_selected {
+            if sel_lane == lane_id && sel_seq < sealed_count {
+                already_sealed_count += 1;
+            }
+        }
+    }
+    let capped_target = (target_sealed as u64).min(total_sealed) as usize;
+    let need = capped_target.saturating_sub(already_sealed_count);
+    if need == 0 {
+        return Vec::new();
+    }
+
+    if total_sealed <= capped_target as u64 {
+        let mut out = Vec::with_capacity(need);
+        for &(lane_id, sealed_count) in sealed_by_lane {
+            for s in 0..sealed_count {
+                if !already_selected.contains(&(lane_id, s)) {
+                    out.push((lane_id, s));
+                }
+            }
+        }
+        return out;
+    }
+
+    let mut preimage = Vec::with_capacity(32 + DECOY_DOMAIN.len() + scope.len() + 8 + 1 + 8);
+    preimage.extend_from_slice(view_sk);
+    preimage.extend_from_slice(DECOY_DOMAIN);
+    preimage.extend_from_slice(scope);
+    preimage.extend_from_slice(&epoch_bucket.to_le_bytes());
+    let lane_off = preimage.len();
+    preimage.push(0);
+    let seq_off = preimage.len();
+    preimage.extend_from_slice(&0u64.to_le_bytes());
+
+    let beats = |score_a: &[u8; 32],
+                 lane_a: u8,
+                 seq_a: u64,
+                 b: &([u8; 32], u8, u64)|
+     -> bool {
+        match score_a.cmp(&b.0) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => (lane_a, seq_a) < (b.1, b.2),
+        }
+    };
+
+    let mut top: Vec<([u8; 32], u8, u64)> = Vec::with_capacity(need + 1);
+    for &(lane_id, sealed_count) in sealed_by_lane {
+        preimage[lane_off] = lane_id;
+        for s in 0..sealed_count {
+            if already_selected.contains(&(lane_id, s)) {
+                continue;
+            }
+            preimage[seq_off..seq_off + 8].copy_from_slice(&s.to_le_bytes());
+            let score: [u8; 32] = Sha256::digest(&preimage).into();
+            if top.len() == need && !beats(&score, lane_id, s, &top[need - 1]) {
+                continue;
+            }
+            let mut insert_at = top.len();
+            while insert_at > 0 && beats(&score, lane_id, s, &top[insert_at - 1]) {
+                insert_at -= 1;
+            }
+            top.insert(insert_at, (score, lane_id, s));
+            if top.len() > need {
+                top.pop();
+            }
+        }
+    }
+
+    top.into_iter().map(|(_, l, s)| (l, s)).collect()
+}
+
+fn shuffle_in_place<T>(items: &mut [T]) {
+    let len = items.len();
+    for i in (1..len).rev() {
+        let j = OsRng.gen_range(0..=i);
+        items.swap(i, j);
+    }
 }
 
 pub fn decode_pool_state(data: &[u8]) -> Result<PoolState, ClientError> {
@@ -102,9 +243,10 @@ pub fn decode_root_checkpoint(data: &[u8]) -> Result<RootCheckpoint, ClientError
 }
 
 /// Reconstruct an exact historical 4-ary Depth-20 `MerklePath4Ary` witness for `(lane_id, leaf_idx)`
-/// at `RootCheckpoint(ckpt_slot_idx)` from any account-fetch closure (LiteSVM or Solana RPC).
+/// at `RootCheckpoint(ckpt_slot_idx)` using default `SyncPrivacyMode::Strict` padding over a
+/// single-account fetcher closure.
 pub fn reconstruct_witness_with<F>(
-    mut get_account_data: F,
+    get_account_data: F,
     program_id: &Address,
     pool_id: u32,
     ckpt_slot_idx: u16,
@@ -114,63 +256,257 @@ pub fn reconstruct_witness_with<F>(
 where
     F: FnMut(&Address) -> Option<Vec<u8>>,
 {
+    reconstruct_witness_with_options(
+        get_account_data,
+        program_id,
+        pool_id,
+        ckpt_slot_idx,
+        lane_id,
+        leaf_idx,
+        WitnessOptions::default(),
+    )
+}
+
+/// Reconstruct an exact historical 4-ary Depth-20 `MerklePath4Ary` witness over a single-account
+/// fetcher closure with explicit [`WitnessOptions`].
+pub fn reconstruct_witness_with_options<F>(
+    mut get_account_data: F,
+    program_id: &Address,
+    pool_id: u32,
+    ckpt_slot_idx: u16,
+    lane_id: u8,
+    leaf_idx: u64,
+    options: WitnessOptions,
+) -> Result<(RootCheckpoint, Fr, MerklePath4Ary), ClientError>
+where
+    F: FnMut(&Address) -> Option<Vec<u8>>,
+{
+    reconstruct_witness_with_batch(
+        |addrs, _slice| addrs.iter().map(&mut get_account_data).collect(),
+        program_id,
+        pool_id,
+        ckpt_slot_idx,
+        lane_id,
+        leaf_idx,
+        options,
+    )
+}
+
+/// Reconstruct an exact historical 4-ary Depth-20 `MerklePath4Ary` witness in `SyncPrivacyMode::Strict`
+/// over a batched `getMultipleAccounts` fetcher (all active lanes' `SubtreeRootPage`s + all active
+/// lanes' unsealed frontier `SubtreePage`s + Rendezvous HRW sealed decoy `SubtreePage`s in shuffled
+/// 100-account batches).
+pub fn reconstruct_witness_strict<F>(
+    fetch_batch: F,
+    program_id: &Address,
+    pool_id: u32,
+    ckpt_slot_idx: u16,
+    lane_id: u8,
+    leaf_idx: u64,
+    view_sk: Option<[u8; 32]>,
+) -> Result<(RootCheckpoint, Fr, MerklePath4Ary), ClientError>
+where
+    F: FnMut(&[Address], Option<AccountDataSlice>) -> Vec<Option<Vec<u8>>>,
+{
+    reconstruct_witness_with_batch(
+        fetch_batch,
+        program_id,
+        pool_id,
+        ckpt_slot_idx,
+        lane_id,
+        leaf_idx,
+        WitnessOptions {
+            privacy_mode: SyncPrivacyMode::Strict,
+            view_sk,
+            decoy_epoch_bucket: None,
+        },
+    )
+}
+
+/// Reconstruct an exact historical 4-ary Depth-20 `MerklePath4Ary` witness for `(lane_id, leaf_idx)`
+/// at `RootCheckpoint(ckpt_slot_idx)` via a batched `getMultipleAccounts` fetcher.
+///
+/// In default `SyncPrivacyMode::Strict` mode:
+/// - Fetches ALL active lanes' `SubtreeRootPage`s uniformly (never capped by `needed_sr_pages`).
+/// - Fetches ALL active lanes' unsealed frontier `SubtreePage`s uniformly (zero `lane_id` leak).
+/// - Fetches `min(16, total_sealed)` sealed `SubtreePage`s via Rendezvous (HRW) hashing scoped to
+///   `("witness" || lane_id || target_page_seq_le8, total_sealed / 64)` matching TypeScript
+///   `reconstructWitness` bit-for-bit.
+/// - Shuffles the combined batch and fetches in `RPC_BATCH_CHUNK` (100) chunks.
+pub fn reconstruct_witness_with_batch<F>(
+    mut fetch_batch: F,
+    program_id: &Address,
+    pool_id: u32,
+    ckpt_slot_idx: u16,
+    lane_id: u8,
+    leaf_idx: u64,
+    options: WitnessOptions,
+) -> Result<(RootCheckpoint, Fr, MerklePath4Ary), ClientError>
+where
+    F: FnMut(&[Address], Option<AccountDataSlice>) -> Vec<Option<Vec<u8>>>,
+{
+    let l = lane_id as usize;
+    if l >= NUM_LANES {
+        return Err(ClientError::InvalidEncoding("lane_id out of range"));
+    }
+
     let (ckpt_pda, _) = derive_checkpoint_pda(program_id, pool_id, ckpt_slot_idx);
-    let ckpt_data = get_account_data(&ckpt_pda)
+    let ckpt_data = fetch_batch(&[ckpt_pda], None)
+        .into_iter()
+        .next()
+        .flatten()
         .ok_or(ClientError::WitnessNotFound("RootCheckpoint account missing"))?;
     let ckpt = decode_root_checkpoint(&ckpt_data)?;
 
-    let l = lane_id as usize;
     let ckpt_count = ckpt.lane_counts[l];
     if leaf_idx >= ckpt_count {
         return Err(ClientError::WitnessNotFound("leaf_idx >= checkpoint lane count"));
     }
 
-    let target_page_idx = leaf_idx / SUBTREE_LEAVES as u64;
-    let frontier_page_idx = ckpt_count / SUBTREE_LEAVES as u64;
-    let frontier_rem = (ckpt_count % SUBTREE_LEAVES as u64) as usize;
-
-    let mut finalized_roots = Vec::with_capacity(frontier_page_idx as usize);
+    let sub_size = SUBTREE_LEAVES as u64;
+    let target_page_idx = leaf_idx / sub_size;
+    let frontier_page_idx = ckpt_count / sub_size;
+    let frontier_rem = (ckpt_count % sub_size) as usize;
     let needed_sr_pages = (frontier_page_idx as usize).div_ceil(SUBROOTS_PER_PAGE);
+
+    let mut target_sr_addrs = Vec::with_capacity(needed_sr_pages);
+    let mut sr_addr_set: BTreeSet<Address> = BTreeSet::new();
     for rp in 0..needed_sr_pages {
         let (sr_pda, _) = derive_subroot_pda(program_id, pool_id, lane_id, rp as u64);
-        let sr_data = get_account_data(&sr_pda)
+        target_sr_addrs.push(sr_pda);
+        sr_addr_set.insert(sr_pda);
+    }
+
+    let (target_sub_addr, _) = derive_subtree_pda(program_id, pool_id, lane_id, target_page_idx);
+    let frontier_sub_addr = if frontier_rem > 0 && frontier_page_idx != target_page_idx {
+        Some(derive_subtree_pda(program_id, pool_id, lane_id, frontier_page_idx).0)
+    } else {
+        None
+    };
+
+    let mut sub_addr_set: BTreeSet<Address> = BTreeSet::new();
+    sub_addr_set.insert(target_sub_addr);
+    if let Some(f_addr) = frontier_sub_addr {
+        sub_addr_set.insert(f_addr);
+    }
+
+    if options.privacy_mode == SyncPrivacyMode::Strict {
+        let mut sealed_by_lane = Vec::with_capacity(NUM_LANES);
+        let mut already_sealed: BTreeSet<(u8, u64)> = BTreeSet::new();
+        if target_page_idx < frontier_page_idx {
+            already_sealed.insert((lane_id, target_page_idx));
+        }
+        let mut total_sealed = 0u64;
+
+        for lane_idx in 0..NUM_LANES {
+            let lid = lane_idx as u8;
+            let cnt = ckpt.lane_counts[lane_idx];
+            let lane_sealed = cnt / sub_size;
+            let lane_frontier_rem = (cnt % sub_size) as usize;
+            sealed_by_lane.push((lid, lane_sealed));
+            total_sealed = total_sealed.saturating_add(lane_sealed);
+
+            if lane_sealed > 0 {
+                let lane_sr_pages = (lane_sealed as usize).div_ceil(SUBROOTS_PER_PAGE);
+                for rp in 0..lane_sr_pages {
+                    sr_addr_set
+                        .insert(derive_subroot_pda(program_id, pool_id, lid, rp as u64).0);
+                }
+            }
+            if lane_frontier_rem > 0 {
+                sub_addr_set
+                    .insert(derive_subtree_pda(program_id, pool_id, lid, lane_sealed).0);
+            }
+        }
+
+        if total_sealed > 0 {
+            let target_sealed = (STRICT_DECOY_SEALED_SUBTREE_TARGET as u64).min(total_sealed) as usize;
+            let epoch_bucket = options
+                .decoy_epoch_bucket
+                .unwrap_or(total_sealed / DECOY_EPOCH_BUCKET_SIZE);
+            let key = match options.view_sk {
+                Some(k) => k,
+                None => {
+                    let mut k = [0u8; 32];
+                    OsRng.fill_bytes(&mut k);
+                    k
+                }
+            };
+            let scope = make_witness_decoy_scope(lane_id, target_page_idx);
+            let decoys = select_hrw_sealed_decoys(
+                &key,
+                &scope,
+                epoch_bucket,
+                &sealed_by_lane,
+                &already_sealed,
+                target_sealed,
+            );
+            for (d_lane, d_seq) in decoys {
+                sub_addr_set.insert(derive_subtree_pda(program_id, pool_id, d_lane, d_seq).0);
+            }
+        }
+    }
+
+    let mut addrs: Vec<Address> = sr_addr_set
+        .into_iter()
+        .chain(sub_addr_set)
+        .collect();
+    if addrs.len() > 1 {
+        shuffle_in_place(&mut addrs);
+    }
+
+    let mut raw_by_addr: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+    for chunk in addrs.chunks(RPC_BATCH_CHUNK) {
+        let raws = fetch_batch(chunk, None);
+        for (i, &addr) in chunk.iter().enumerate() {
+            if let Some(raw) = raws.get(i).and_then(|o| o.as_ref()) {
+                raw_by_addr.insert(addr, raw.clone());
+            }
+        }
+    }
+
+    let mut finalized_roots = Vec::with_capacity(frontier_page_idx as usize);
+    for sr_pda in &target_sr_addrs {
+        let sr_data = raw_by_addr
+            .get(sr_pda)
             .ok_or(ClientError::WitnessNotFound("SubtreeRootPage missing"))?;
         if sr_data.len() != SUBROOT_PAGE_LEN || sr_data[0..8] != SUBROOT_MAGIC {
             return Err(ClientError::InvalidEncoding("invalid SubtreeRootPage"));
         }
-        let cnt = read_u16(&sr_data, SR_OFF_COUNT) as usize;
+        let cnt = read_u16(sr_data, SR_OFF_COUNT) as usize;
         for j in 0..cnt {
             if finalized_roots.len() == frontier_page_idx as usize {
                 break;
             }
-            let b = read_32(&sr_data, SR_OFF_ROOTS + j * 32);
+            let b = read_32(sr_data, SR_OFF_ROOTS + j * 32);
             finalized_roots.push(
                 fr_from_be_bytes_strict(&b).ok_or(ClientError::InvalidFieldElement)?,
             );
         }
     }
 
-    let read_sub_leaves = |get_fn: &mut F, seq: u64| -> Result<Vec<Fr>, ClientError> {
-        let (sub_pda, _) = derive_subtree_pda(program_id, pool_id, lane_id, seq);
-        let data = get_fn(&sub_pda).ok_or(ClientError::WitnessNotFound("SubtreePage missing"))?;
+    let decode_sub_fr = |addr: &Address| -> Result<Vec<Fr>, ClientError> {
+        let data = raw_by_addr
+            .get(addr)
+            .ok_or(ClientError::WitnessNotFound("SubtreePage missing"))?;
         if data.len() != SUBTREE_PAGE_LEN || data[0..8] != SUBTREE_MAGIC {
             return Err(ClientError::InvalidEncoding("invalid SubtreePage"));
         }
-        let cnt = read_u16(&data, SB_OFF_COUNT) as usize;
+        let cnt = read_u16(data, SB_OFF_COUNT) as usize;
         let mut leaves = Vec::with_capacity(cnt);
         for i in 0..cnt {
-            let b = read_32(&data, SB_OFF_LEAVES + i * 32);
+            let b = read_32(data, SB_OFF_LEAVES + i * 32);
             leaves.push(fr_from_be_bytes_strict(&b).ok_or(ClientError::InvalidFieldElement)?);
         }
         Ok(leaves)
     };
 
-    let target_leaves = read_sub_leaves(&mut get_account_data, target_page_idx)?;
+    let target_leaves = decode_sub_fr(&target_sub_addr)?;
     let frontier_leaves = if frontier_rem > 0 {
-        if frontier_page_idx == target_page_idx {
-            Some(target_leaves.clone())
+        if let Some(f_addr) = frontier_sub_addr {
+            Some(decode_sub_fr(&f_addr)?)
         } else {
-            Some(read_sub_leaves(&mut get_account_data, frontier_page_idx)?)
+            Some(target_leaves.clone())
         }
     } else {
         None
@@ -734,27 +1070,34 @@ where
         }
     }
 
-    // Deterministic wallet-keyed decoy padding for historical sealed `SubtreePage` fetches in
-    // `Strict` mode (`SHA256(view_sk || "audren/v1/decoy" || epoch_bucket || counter)`):
+    // Rendezvous (HRW) wallet-keyed decoy padding for historical sealed `SubtreePage` fetches in
+    // `Strict` mode (`SHA256(view_sk || "audren/v1/decoy" || "sync" || epoch_bucket_le8 || lane_id || page_seq_le8)`):
     // - Always fetches a fixed uniform count independent of hit count (even 0 hits) during large
     //   catch-up so RPC cannot tell whether a wallet had hits.
-    // - Deterministic per `(view_sk, epoch_bucket)` so repeated syncs / retries emit identical
-    //   decoy sets and cannot be intersected.
+    // - Preserves `~(K - 1) / K` of decoys across `+1` sealed subtree growth within an epoch bucket
+    //   and matches TypeScript `packages/sdk/src/scanner.ts` bit-for-bit.
     let mut finalized_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut frontier_rem_by_lane: BTreeMap<u8, usize> = BTreeMap::new();
+    let mut sealed_by_lane_list: Vec<(u8, u64)> = Vec::with_capacity(lanes.len());
     let mut total_sealed_subtrees = 0u64;
     for lane_hdr in &lanes {
         let fc = lane_hdr.next_leaf / sub_size;
+        let frem = (lane_hdr.next_leaf % sub_size) as usize;
         finalized_by_lane.insert(lane_hdr.lane_id, fc);
+        frontier_rem_by_lane.insert(lane_hdr.lane_id, frem);
+        sealed_by_lane_list.push((lane_hdr.lane_id, fc));
         total_sealed_subtrees = total_sealed_subtrees.saturating_add(fc);
     }
-    let epoch_bucket: u64 = total_sealed_subtrees / 64;
+    let epoch_bucket: u64 = options
+        .decoy_epoch_bucket
+        .unwrap_or(total_sealed_subtrees / DECOY_EPOCH_BUCKET_SIZE);
 
     let should_decoy_pad = privacy_mode == SyncPrivacyMode::Strict
         && total_sealed_subtrees > 0
         && (has_hit_correlated_sealed_subtree
             || (!fetch_new_subtrees_uniformly && total_new_memo_pages > 0));
     if should_decoy_pad {
-        let mut current_sealed_count = needed_subtrees
+        let current_sealed_count = needed_subtrees
             .keys()
             .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
             .count();
@@ -765,36 +1108,17 @@ where
             .min(total_sealed_subtrees as usize);
 
         if current_sealed_count < target_sealed {
-            if total_sealed_subtrees <= target_sealed as u64 {
-                for lane_hdr in &lanes {
-                    let fc = *finalized_by_lane.get(&lane_hdr.lane_id).unwrap_or(&0);
-                    for s in 0..fc {
-                        add_needed_subtree(&mut needed_subtrees, lane_hdr.lane_id, s);
-                    }
-                }
-            } else {
-                let mut counter: u32 = 0;
-                while current_sealed_count < target_sealed {
-                    let mut h = Sha256::new();
-                    h.update(fvk.view_sk);
-                    h.update(DECOY_DOMAIN);
-                    h.update(epoch_bucket.to_le_bytes());
-                    h.update(counter.to_le_bytes());
-                    counter = counter.wrapping_add(1);
-                    let digest: [u8; 32] = h.finalize().into();
-                    let mut g =
-                        u64::from_le_bytes(digest[0..8].try_into().unwrap()) % total_sealed_subtrees;
-                    for lane_hdr in &lanes {
-                        let fc = *finalized_by_lane.get(&lane_hdr.lane_id).unwrap_or(&0);
-                        if g < fc {
-                            if add_needed_subtree(&mut needed_subtrees, lane_hdr.lane_id, g) {
-                                current_sealed_count += 1;
-                            }
-                            break;
-                        }
-                        g -= fc;
-                    }
-                }
+            let already_selected: BTreeSet<(u8, u64)> = needed_subtrees.keys().copied().collect();
+            let decoys = select_hrw_sealed_decoys(
+                &fvk.view_sk,
+                DECOY_SCOPE_SYNC,
+                epoch_bucket,
+                &sealed_by_lane_list,
+                &already_selected,
+                target_sealed,
+            );
+            for (d_lane, d_seq) in decoys {
+                add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
             }
         }
     }
@@ -803,25 +1127,31 @@ where
         needed_subtrees.iter().map(|(&k, &v)| (k, v)).collect();
     if sub_list.len() > 1 {
         sub_list.sort_by_cached_key(|(_, addr)| {
-            let mut h = Sha256::new();
-            h.update(fvk.view_sk);
-            h.update(DECOY_DOMAIN);
-            h.update(epoch_bucket.to_le_bytes());
-            h.update(b"order");
-            h.update(addr.as_ref());
-            let d: [u8; 32] = h.finalize().into();
-            d
+            compute_subtree_order_key(&fvk.view_sk, DECOY_SCOPE_SYNC, epoch_bucket, addr)
         });
     }
 
     let mut fetched_subtrees: BTreeMap<(u8, u64), Vec<[u8; 32]>> = BTreeMap::new();
+    let mut any_pass1d_subtree_missing = false;
     for chunk in sub_list.chunks(RPC_BATCH_CHUNK) {
         let addrs: Vec<Address> = chunk.iter().map(|(_, a)| *a).collect();
         let raws = fetch_batch(&addrs, None);
         for (i, &(key, _)) in chunk.iter().enumerate() {
-            if let Some(raw) = raws.get(i).and_then(|o| o.as_ref()) {
-                fetched_subtrees.insert(key, decode_subtree_leaves_be(raw)?);
+            let Some(raw) = raws.get(i).and_then(|o| o.as_ref()) else {
+                any_pass1d_subtree_missing = true;
+                continue;
+            };
+            let leaves = decode_subtree_leaves_be(raw)?;
+            let fc = *finalized_by_lane.get(&key.0).unwrap_or(&0);
+            let expected_min_leaves = if key.1 < fc {
+                SUBTREE_LEAVES
+            } else {
+                *frontier_rem_by_lane.get(&key.0).unwrap_or(&0)
+            };
+            if leaves.len() < expected_min_leaves {
+                any_pass1d_subtree_missing = true;
             }
+            fetched_subtrees.insert(key, leaves);
         }
     }
 
@@ -902,62 +1232,69 @@ where
                 }
             }
         }
-        if verified_watermark > store.lanes[l].next_memo_leaf {
-            store.lanes[l].next_memo_leaf = verified_watermark;
-        }
 
-        // Freeze owned notes for every fetched sealed SubtreePage on this lane
-        for &(lid, s) in needed_subtrees.keys() {
-            if lid != lane_id {
-                continue;
+        // Privacy invariant: if ANY Pass 1D `SubtreePage` fetch returned `None` (or truncated) —
+        // whether for a hit page OR a decoy/batch page — uniformly withhold `next_memo_leaf`
+        // advancement, note freezing, and frontier updates across ALL lanes so an adversarial RPC
+        // cannot distinguish hit vs decoy drops on the next sync!
+        if !any_pass1d_subtree_missing {
+            if verified_watermark > store.lanes[l].next_memo_leaf {
+                store.lanes[l].next_memo_leaf = verified_watermark;
             }
-            if let Some(leaves) = fetched_subtrees.get(&(lid, s)) {
-                if leaves.len() == SUBTREE_LEAVES {
-                    store.freeze_owned_notes_in_subtree_page(lane_id, s, leaves)?;
+
+            // Freeze owned notes for every fetched sealed SubtreePage on this lane
+            for &(lid, s) in needed_subtrees.keys() {
+                if lid != lane_id {
+                    continue;
+                }
+                if let Some(leaves) = fetched_subtrees.get(&(lid, s)) {
+                    if leaves.len() == SUBTREE_LEAVES {
+                        store.freeze_owned_notes_in_subtree_page(lane_id, s, leaves)?;
+                    }
                 }
             }
-        }
 
-        if finalized_count > 0 {
-            let latest_sealed = finalized_count - 1;
-            if let Some(leaves) = fetched_subtrees.get(&(lane_id, latest_sealed)) {
-                if leaves.len() == SUBTREE_LEAVES {
-                    store.lanes[l].prev_sealed_sub_seq = Some(latest_sealed);
-                    store.lanes[l].prev_sealed_leaves = leaves.clone();
-                }
-            } else if old_frontier_sub_seq == latest_sealed
-                && !old_frontier_leaves.is_empty()
-                && store.lanes[l].prev_sealed_sub_seq != Some(latest_sealed)
-            {
-                store.lanes[l].prev_sealed_sub_seq = Some(old_frontier_sub_seq);
-                store.lanes[l].prev_sealed_leaves = old_frontier_leaves;
-            }
-        }
-
-        if frontier_rem > 0 {
-            if let Some(leaves) = fetched_subtrees.get(&(lane_id, finalized_count)) {
-                if leaves.len() >= frontier_rem {
-                    store.lanes[l].frontier_sub_seq = finalized_count;
-                    store.lanes[l].frontier_leaves = leaves[..frontier_rem].to_vec();
+            if finalized_count > 0 {
+                let latest_sealed = finalized_count - 1;
+                if let Some(leaves) = fetched_subtrees.get(&(lane_id, latest_sealed)) {
+                    if leaves.len() == SUBTREE_LEAVES {
+                        store.lanes[l].prev_sealed_sub_seq = Some(latest_sealed);
+                        store.lanes[l].prev_sealed_leaves = leaves.clone();
+                    }
+                } else if old_frontier_sub_seq == latest_sealed
+                    && !old_frontier_leaves.is_empty()
+                    && store.lanes[l].prev_sealed_sub_seq != Some(latest_sealed)
+                {
+                    store.lanes[l].prev_sealed_sub_seq = Some(old_frontier_sub_seq);
+                    store.lanes[l].prev_sealed_leaves = old_frontier_leaves;
                 }
             }
-        } else if finalized_count >= store.lanes[l].frontier_sub_seq {
-            store.lanes[l].frontier_sub_seq = finalized_count;
-            store.lanes[l].frontier_leaves.clear();
+
+            if frontier_rem > 0 {
+                if let Some(leaves) = fetched_subtrees.get(&(lane_id, finalized_count)) {
+                    if leaves.len() >= frontier_rem {
+                        store.lanes[l].frontier_sub_seq = finalized_count;
+                        store.lanes[l].frontier_leaves = leaves[..frontier_rem].to_vec();
+                    }
+                }
+            } else if finalized_count >= store.lanes[l].frontier_sub_seq {
+                store.lanes[l].frontier_sub_seq = finalized_count;
+                store.lanes[l].frontier_leaves.clear();
+            }
         }
     }
 
     // =========================================================================
     // PASS 2: Unconditionally stream ALL new `NullifierPage`s across ALL active
     //         lanes (ZERO early-exit, ZERO Pass 1D -> Pass 2 miss oracle!).
-    //         If Pass 1D missed a `SubtreePage` / `MemoPage` (`!all_caught_up`),
-    //         we still issue every Pass 2 RPC identically and apply nullifiers to
-    //         known notes, while keeping `next_nf_index` pinned so the retried
-    //         note's nullifier is guaranteed to be checked on the next sync.
+    //         If ANY Pass 1D `SubtreePage` was missing/truncated OR any lane had
+    //         an unverified miss (`!all_caught_up`), we still issue every Pass 2
+    //         RPC identically while keeping `next_nf_index` uniformly pinned.
     // =========================================================================
-    let all_caught_up = lanes
-        .iter()
-        .all(|h| store.lanes[h.lane_id as usize].next_memo_leaf >= h.next_leaf);
+    let all_caught_up = !any_pass1d_subtree_missing
+        && lanes
+            .iter()
+            .all(|h| store.lanes[h.lane_id as usize].next_memo_leaf >= h.next_leaf);
     let saved_nf_indices: Vec<u64> = lanes
         .iter()
         .map(|h| store.lanes[h.lane_id as usize].next_nf_index)
@@ -1341,6 +1678,7 @@ mod tests {
             &program_id,
             SyncOptions {
                 privacy_mode: SyncPrivacyMode::Fast,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1695,6 +2033,7 @@ mod tests {
             &program_id,
             SyncOptions {
                 privacy_mode: SyncPrivacyMode::Fast,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1825,10 +2164,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d_miss, 0, "missed SubtreePage cannot verify hit note yet");
-        assert_eq!(
-            miss_store.lanes[2].next_memo_leaf, alice_leaf_idx,
-            "next_memo_leaf must be capped at the missed hit leaf"
-        );
+        for l in 0..4 {
+            assert_eq!(
+                miss_store.lanes[l].next_memo_leaf, 0,
+                "Pass 1D SubtreePage drop must uniformly withhold next_memo_leaf across ALL lanes"
+            );
+            assert_eq!(
+                miss_store.lanes[l].next_nf_index, 0,
+                "Pass 1D SubtreePage drop must uniformly withhold next_nf_index across ALL lanes"
+            );
+        }
         let miss_nf: BTreeSet<Address> = miss_log
             .iter()
             .flat_map(|(a, _)| a.iter().copied())
@@ -1839,7 +2184,50 @@ mod tests {
             3,
             "Pass 2 MUST run unconditionally and fetch all 3 NullifierPages even when Pass 1D misses a hit SubtreePage"
         );
-        // Retry once RPC returns hit_sub_20 -> discovers note AND marks it spent!
+        // Dropping a DECOY SubtreePage instead of the hit page MUST produce identical withheld watermarks
+        // and IDENTICAL Sync #2 RPC batches (closing the Pass 1D watermark rollback oracle!).
+        let decoy_to_drop = *strict20_sealed
+            .iter()
+            .find(|&&a| a != hit_sub_20)
+            .expect("at least one decoy sealed SubtreePage");
+        let mut decoy_drop_store = CompactWalletStore::new(0, 0);
+        sync_compact_store_with_batch(
+            &mut decoy_drop_store,
+            &fvk,
+            |addrs, slice| {
+                addrs
+                    .iter()
+                    .map(|a| {
+                        if *a == decoy_to_drop {
+                            return None;
+                        }
+                        let full = acc_20.get(a)?;
+                        match slice {
+                            Some(s) => {
+                                let end = s.offset.saturating_add(s.length).min(full.len());
+                                Some(full[s.offset..end].to_vec())
+                            }
+                            None => Some(full.clone()),
+                        }
+                    })
+                    .collect()
+            },
+            &program_id,
+            SyncOptions::default(),
+        )
+        .unwrap();
+        for l in 0..4 {
+            assert_eq!(
+                decoy_drop_store.lanes[l].next_memo_leaf, 0,
+                "dropping a decoy SubtreePage must uniformly withhold next_memo_leaf on lane {l}"
+            );
+            assert_eq!(
+                decoy_drop_store.lanes[l].next_nf_index, 0,
+                "dropping a decoy SubtreePage must uniformly withhold next_nf_index on lane {l}"
+            );
+        }
+
+        // Retry once RPC returns all pages -> BOTH hit-drop and decoy-drop emit IDENTICAL Sync #2 traffic!
         let mut retry_log = Vec::new();
         let (_, _, d_retry) = sync_compact_store_with_batch(
             &mut miss_store,
@@ -1855,6 +2243,22 @@ mod tests {
             "retry Pass 2 must mark recovered note spent"
         );
         assert_eq!(miss_store.lanes[0].next_nf_index, nf_total_20);
+
+        let mut decoy_retry_log = Vec::new();
+        sync_compact_store_with_batch(
+            &mut decoy_drop_store,
+            &fvk,
+            |addrs, slice| slice_fetch(&acc_20, &mut decoy_retry_log, addrs, slice),
+            &program_id,
+            SyncOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            retry_log, decoy_retry_log,
+            "Sync #2 RPC traffic MUST be 100% identical after hit-page drop vs decoy-page drop"
+        );
+        assert!(decoy_drop_store.notes[0].spent);
+        assert!(decoy_drop_store.notes[0].frozen_intra_siblings.is_some());
 
         // 2B. Smaller large catch-up: 3 sealed subtrees/lane = 12 (< 16), 36 MemoPages (> 25) -> pads to all 12!
         let (acc_12, sealed_12, memos_12, _, _, _, _) = build_fixture(3);
@@ -1889,6 +2293,7 @@ mod tests {
             &program_id,
             SyncOptions {
                 privacy_mode: SyncPrivacyMode::Fast,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1924,5 +2329,172 @@ mod tests {
             .filter(|a| nf_20.contains(a))
             .collect();
         assert_eq!(fast_nf.len(), 3, "fast mode must STILL run full Pass 2 without early-exit");
+    }
+
+    #[test]
+    fn hrw_decoy_stability_and_uniform_batched_witness_reconstruction() {
+        use audren_circuits::merkle::{compute_super_root_4ary, zero_hashes_4ary};
+        use audren_core::layout::{
+            CKPT_LEN, CKPT_MAGIC, CK_OFF_LANE_COUNTS, CK_OFF_LANE_ROOTS, CK_OFF_SUPER_ROOT,
+            CK_OFF_VERSION,
+        };
+
+        let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
+        let view_sk = [0x42u8; 32];
+
+        // 1. Rendezvous (HRW) stability across +1 sealed subtree growth within epoch_bucket = 0:
+        //    growing from 32 -> 33 sealed subtrees preserves >= 15/16 of decoys!
+        let sealed_32 = vec![(0u8, 8u64), (1, 8), (2, 8), (3, 8)];
+        let sealed_33 = vec![(0u8, 9u64), (1, 8), (2, 8), (3, 8)];
+        let empty = BTreeSet::new();
+        let d32: BTreeSet<(u8, u64)> =
+            select_hrw_sealed_decoys(&view_sk, DECOY_SCOPE_SYNC, 0, &sealed_32, &empty, 16)
+                .into_iter()
+                .collect();
+        let d33: BTreeSet<(u8, u64)> =
+            select_hrw_sealed_decoys(&view_sk, DECOY_SCOPE_SYNC, 0, &sealed_33, &empty, 16)
+                .into_iter()
+                .collect();
+        assert_eq!(d32.len(), 16);
+        assert_eq!(d33.len(), 16);
+        let overlap = d32.intersection(&d33).count();
+        assert!(
+            overlap >= 15,
+            "HRW +1 sealed subtree growth must preserve >= 15/16 decoys, got {overlap}/16"
+        );
+
+        // 2. Asymmetric checkpoint fixture:
+        //    Lane 0: 20 sealed + 4 frontier (5,124 leaves)
+        //    Lane 1: 5 sealed + 7 frontier (1,287 leaves)
+        //    Lane 2: 0 sealed + 10 frontier (10 leaves)
+        //    Lane 3: 0 leaves
+        let dummy_leaves: Vec<Fr> = (0..SUBTREE_LEAVES)
+            .map(|i| Fr::from((i + 10) as u64))
+            .collect();
+        let dummy_subroot = compute_subtree_256_root(&dummy_leaves, SUBTREE_LEAVES);
+        let zeros = zero_hashes_4ary();
+        let compute_lane_root = |sealed_cnt: usize, frontier: &[Fr]| -> Fr {
+            let mut l4: Vec<Fr> = vec![dummy_subroot; sealed_cnt];
+            if !frontier.is_empty() {
+                l4.push(compute_subtree_256_root(frontier, frontier.len()));
+            }
+            if l4.is_empty() {
+                return zeros[18];
+            }
+            let mut cur = l4;
+            for zero_h in &zeros[4..18] {
+                let mut next = Vec::with_capacity(cur.len().div_ceil(4));
+                for chunk in cur.chunks(4) {
+                    let c0 = chunk[0];
+                    let c1 = *chunk.get(1).unwrap_or(zero_h);
+                    let c2 = *chunk.get(2).unwrap_or(zero_h);
+                    let c3 = *chunk.get(3).unwrap_or(zero_h);
+                    next.push(audren_circuits::poseidon::poseidon4(c0, c1, c2, c3));
+                }
+                cur = next;
+            }
+            cur[0]
+        };
+
+        let lane_specs: [(u8, usize, usize); 3] = [(0, 20, 4), (1, 5, 7), (2, 0, 10)];
+        let mut accounts: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+        let mut lane_roots = [zeros[18]; NUM_LANES];
+        let mut lane_counts = [0u64; NUM_LANES];
+        let mut all_sr_addrs: BTreeSet<Address> = BTreeSet::new();
+        let mut all_frontier_addrs: BTreeSet<Address> = BTreeSet::new();
+        let mut all_sealed_addrs: BTreeSet<Address> = BTreeSet::new();
+
+        for (lid, sealed_cnt, frem) in lane_specs {
+            let frontier = &dummy_leaves[..frem];
+            lane_counts[lid as usize] = (sealed_cnt * SUBTREE_LEAVES + frem) as u64;
+            lane_roots[lid as usize] = compute_lane_root(sealed_cnt, frontier);
+            if sealed_cnt > 0 {
+                let sr_addr = derive_subroot_pda(&program_id, 0, lid, 0).0;
+                all_sr_addrs.insert(sr_addr);
+                accounts.insert(sr_addr, make_subroot(lid, 0, &vec![dummy_subroot; sealed_cnt]));
+            }
+            for s in 0..sealed_cnt {
+                let addr = derive_subtree_pda(&program_id, 0, lid, s as u64).0;
+                all_sealed_addrs.insert(addr);
+                accounts.insert(addr, make_subtree(lid, s as u64, &dummy_leaves));
+            }
+            let f_addr = derive_subtree_pda(&program_id, 0, lid, sealed_cnt as u64).0;
+            all_frontier_addrs.insert(f_addr);
+            accounts.insert(f_addr, make_subtree(lid, sealed_cnt as u64, frontier));
+        }
+
+        let super_root = compute_super_root_4ary(&lane_roots);
+        let mut ckpt_raw = vec![0u8; CKPT_LEN];
+        ckpt_raw[0..8].copy_from_slice(&CKPT_MAGIC);
+        ckpt_raw[CK_OFF_VERSION] = PROTOCOL_VERSION;
+        ckpt_raw[CK_OFF_SUPER_ROOT..CK_OFF_SUPER_ROOT + 32]
+            .copy_from_slice(&fr_to_be_bytes(&super_root));
+        for i in 0..NUM_LANES {
+            ckpt_raw[CK_OFF_LANE_ROOTS + i * 32..CK_OFF_LANE_ROOTS + (i + 1) * 32]
+                .copy_from_slice(&fr_to_be_bytes(&lane_roots[i]));
+            ckpt_raw[CK_OFF_LANE_COUNTS + i * 8..CK_OFF_LANE_COUNTS + (i + 1) * 8]
+                .copy_from_slice(&lane_counts[i].to_le_bytes());
+        }
+        accounts.insert(derive_checkpoint_pda(&program_id, 0, 0).0, ckpt_raw);
+
+        let run_witness = |lid: u8, leaf: u64, mode: SyncPrivacyMode| {
+            let mut log: Vec<Address> = Vec::new();
+            let (_, sr, path) = reconstruct_witness_with_batch(
+                |addrs, _| {
+                    log.extend_from_slice(addrs);
+                    addrs.iter().map(|a| accounts.get(a).cloned()).collect()
+                },
+                &program_id,
+                0,
+                0,
+                lid,
+                leaf,
+                WitnessOptions {
+                    privacy_mode: mode,
+                    view_sk: Some(view_sk),
+                    decoy_epoch_bucket: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(sr, super_root);
+            let leaf_val = dummy_leaves[(leaf % SUBTREE_LEAVES as u64) as usize];
+            assert_eq!(path.compute_root(leaf_val), super_root);
+            log.into_iter().collect::<BTreeSet<Address>>()
+        };
+
+        // Spending frontier-only note on Lane 2 (0 sealed) vs sealed note on Lane 0 (page 1):
+        // BOTH fetch ALL active lanes' SubtreeRootPages AND ALL active lanes' frontier SubtreePages
+        // AND exactly 16 sealed SubtreePages!
+        let f_lane2 = run_witness(2, 3, SyncPrivacyMode::Strict);
+        let f_lane0_p1 = run_witness(0, 300, SyncPrivacyMode::Strict);
+        let f_lane0_p1_repeat = run_witness(0, 300, SyncPrivacyMode::Strict);
+        let f_lane0_p7 = run_witness(0, 7 * 256 + 5, SyncPrivacyMode::Strict);
+
+        for set in [&f_lane2, &f_lane0_p1, &f_lane0_p7] {
+            for sr_addr in &all_sr_addrs {
+                assert!(set.contains(sr_addr), "Strict witness must fetch ALL active lanes' SubtreeRootPages");
+            }
+            for f_addr in &all_frontier_addrs {
+                assert!(set.contains(f_addr), "Strict witness must fetch ALL active lanes' unsealed frontier pages");
+            }
+            let sealed_cnt = set.intersection(&all_sealed_addrs).count();
+            assert_eq!(sealed_cnt, 16, "Strict witness must always fetch exactly 16 sealed SubtreePages");
+        }
+        assert_eq!(f_lane0_p1, f_lane0_p1_repeat, "same note retry must yield identical page set");
+
+        // Spending two DIFFERENT notes in the same epoch uses independent witness-scoped decoys
+        // (symmetric difference must NOT isolate just the 2 target pages!)
+        let sealed_p1: BTreeSet<Address> = f_lane0_p1.intersection(&all_sealed_addrs).copied().collect();
+        let sealed_p7: BTreeSet<Address> = f_lane0_p7.intersection(&all_sealed_addrs).copied().collect();
+        let sym_diff = sealed_p1.symmetric_difference(&sealed_p7).count();
+        assert!(
+            sym_diff > 4,
+            "two different spends in same epoch must use independent witness-scoped decoys (sym_diff={sym_diff})"
+        );
+
+        // Fast mode fetches only minimal target pages
+        let fast_l2 = run_witness(2, 3, SyncPrivacyMode::Fast);
+        assert_eq!(fast_l2.intersection(&all_sealed_addrs).count(), 0);
+        assert_eq!(fast_l2.intersection(&all_frontier_addrs).count(), 1);
     }
 }

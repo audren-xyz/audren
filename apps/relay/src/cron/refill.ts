@@ -2,6 +2,7 @@ import { ed25519 } from '@noble/curves/ed25519.js'
 import { getAggregatorAdapter, quoteWithSelection } from '../aggregators/registry'
 import { getRelayerSecretsB64, type Env, type RelayPolicyConfig } from '../env'
 import {
+  AUDREN_PROGRAM_ID_STR,
   MEMO_NOTES_PER_PAGE,
   NF_PER_PAGE,
   OPEN_PAGE_KIND_MEMO,
@@ -14,6 +15,7 @@ import {
   decodeLaneHeader,
   decodePoolState,
   deriveLanePda,
+  deriveLaneRentVaultPda,
   deriveMemoPda,
   deriveNfPagePda,
   derivePoolPda,
@@ -39,6 +41,7 @@ import {
   fetchAccountBytes,
   fetchAllOwnedTokenAccounts,
   fetchBalance,
+  fetchLiveRentSchedule,
   fetchMintMetas,
   fetchMultipleAccounts,
   rpcCall,
@@ -47,6 +50,16 @@ import {
 } from '../solana/rpc'
 import type { Cluster, SolanaInstruction } from '../types'
 import { fetchMintPricesUsd } from '../policy/pricing'
+
+/** Maximum unsubsidized relayer SOL deficit permitted per page opened by the maintenance crank (0.002 SOL). */
+export const MAX_CRANK_PAGE_DEFICIT_LAMPORTS = 2_000_000n
+
+const FALLBACK_PAGE_RENT_BY_KIND: Record<number, bigint> = {
+  [OPEN_PAGE_KIND_SUBTREE]: 58_340_000n,
+  [OPEN_PAGE_KIND_SUBROOT]: 68_140_000n,
+  [OPEN_PAGE_KIND_MEMO]: 72_149_760n,
+  [OPEN_PAGE_KIND_NULLIFIER]: 68_140_000n,
+}
 
 /**
  * Permissionless Maintenance Crank (every 2 minutes):
@@ -83,6 +96,7 @@ export async function runMaintenanceCrank(
   const openedPages: string[] = []
 
   // Publish RootCheckpoint only when uncheckpointed leaves (or expired checkpoint) need publishing.
+  // `confirm: false` releases the checkpoint lock with `published: false` so dropped cron txs never poison `checkpoint_locks`.
   try {
     const ckptRes = await publishCheckpointIfNeeded({
       rpcUrl,
@@ -103,16 +117,42 @@ export async function runMaintenanceCrank(
   }
 
   // Ensure current pages exist AND pre-open next SubtreePage / SubtreeRootPage / MemoPage / NullifierPage
-  // for any lane approaching page boundaries (>= 80% full).
+  // for any lane approaching page boundaries (>= 80% full) ONLY when `LaneRentVault` covers page rent
+  // within `MAX_CRANK_PAGE_DEFICIT_LAMPORTS` (preventing relayer SOL drain on unsubsidized pages).
   const lanePdas = Array.from({ length: pool.activeLanes }, (_, l) =>
     base58Encode(deriveLanePda(0, l).address),
   )
-  const laneAccs = await fetchMultipleAccounts(rpcUrl, lanePdas)
+  const laneRentVaultPdas = Array.from({ length: pool.activeLanes }, (_, l) =>
+    base58Encode(deriveLaneRentVaultPda(0, l).address),
+  )
+  const [laneAndVaultAccs, rentSchedule] = await Promise.all([
+    fetchMultipleAccounts(rpcUrl, [...lanePdas, ...laneRentVaultPdas]),
+    fetchLiveRentSchedule(rpcUrl).catch(() => null),
+  ])
+  const laneAccs = laneAndVaultAccs.slice(0, lanePdas.length)
+  const vaultAccs = laneAndVaultAccs.slice(lanePdas.length)
+  const minVaultLamports = rentSchedule?.nullifierRentLamports ?? 890_880n
+  const pageRentForKind = (kind: number): bigint => {
+    if (kind === OPEN_PAGE_KIND_SUBTREE) {
+      return rentSchedule?.subtreePageRentLamports ?? FALLBACK_PAGE_RENT_BY_KIND[kind]!
+    }
+    if (kind === OPEN_PAGE_KIND_SUBROOT) {
+      return rentSchedule?.subrootPageRentLamports ?? FALLBACK_PAGE_RENT_BY_KIND[kind]!
+    }
+    if (kind === OPEN_PAGE_KIND_MEMO) {
+      return rentSchedule?.memoPageRentLamports ?? FALLBACK_PAGE_RENT_BY_KIND[kind]!
+    }
+    return rentSchedule?.nfPageRentLamports ?? FALLBACK_PAGE_RENT_BY_KIND[OPEN_PAGE_KIND_NULLIFIER]!
+  }
+
   const openIxs: SolanaInstruction[] = []
   for (let l = 0; l < laneAccs.length; l++) {
     const raw = laneAccs[l]?.bytes
     if (!raw) continue
     const hdr = decodeLaneHeader(raw)
+    const vaultLamports = BigInt(vaultAccs[l]?.lamports ?? 0)
+    let availableVaultLamports =
+      vaultLamports > minVaultLamports ? vaultLamports - minVaultLamports : 0n
 
     const subSize = BigInt(SUBTREE_LEAVES)
     const srSize = BigInt(SUBROOTS_PER_PAGE)
@@ -187,7 +227,20 @@ export async function runMaintenanceCrank(
       { dataSlice: { offset: 0, length: 0 } },
     )
     candidates.forEach((cand, idx) => {
-      if (!existing[idx]) {
+      const acc = existing[idx]
+      if (!acc || acc.owner !== AUDREN_PROGRAM_ID_STR) {
+        const pageRent = pageRentForKind(cand.pageKind)
+        const existingLamports = BigInt(acc?.lamports ?? 0)
+        const needed = pageRent > existingLamports ? pageRent - existingLamports : 0n
+        const subsidy = availableVaultLamports < needed ? availableVaultLamports : needed
+        const deficit = needed - subsidy
+        if (deficit > MAX_CRANK_PAGE_DEFICIT_LAMPORTS) {
+          notes.push(
+            `Skipped OpenPage(lane=${l}, kind=${cand.pageKind}, seq=${cand.pageSeq.toString()}): LaneRentVault underfunded (deficit ${deficit.toString()} > cap ${MAX_CRANK_PAGE_DEFICIT_LAMPORTS.toString()})`,
+          )
+          return
+        }
+        availableVaultLamports -= subsidy
         openIxs.push(
           buildOpenPageSolanaIx({
             payer: relayerB58,
@@ -201,20 +254,34 @@ export async function runMaintenanceCrank(
     })
   }
   for (const ix of openIxs.slice(0, 6)) {
-    const bh2 = await rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
-      { commitment: 'confirmed' },
+    const [bh2, preLamportsNum] = await Promise.all([
+      rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
+        { commitment: 'confirmed' },
+      ]),
+      fetchBalance(rpcUrl, relayerB58),
     ])
     const tx = buildAndSignV1Transaction(secret32, bh2.value.blockhash, [ix], {
       computeUnitLimit: 100_000,
       priorityFeeLamports: 5_000n,
     })
     const sim = await simulateV1Transaction(rpcUrl, tx.wireBytes, [relayerB58])
-    if (!sim.err) {
+    const preLamports = BigInt(preLamportsNum)
+    const postLamports = sim.accounts[0] ? BigInt(sim.accounts[0].lamports) : 0n
+    const simOutflow = preLamports > postLamports ? preLamports - postLamports : 0n
+    if (
+      !sim.err &&
+      sim.accounts[0] != null &&
+      simOutflow <= MAX_CRANK_PAGE_DEFICIT_LAMPORTS + 100_000n
+    ) {
       const sig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
         toBase64(tx.wireBytes),
         { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 2 },
       ])
       openedPages.push(sig)
+    } else if (!sim.err) {
+      notes.push(
+        `Skipped OpenPage tx: simulated relayer outflow ${simOutflow.toString()} lamports exceeds safe cap`,
+      )
     }
   }
 
@@ -324,8 +391,10 @@ async function refillSinglePayer(
     }
   }
 
-  // Step 2: Dynamically inspect decimals + USD prices for EVERY non-WSOL token owned by the relayer
-  const otherTokens = nonZero.filter((a) => a.mint !== WSOL_MINT_STR)
+  // Step 2: Inspect decimals + USD prices ONLY for vetted `SELF_PAY_FEE_MINTS` owned by the relayer
+  const otherTokens = nonZero.filter(
+    (a) => a.mint !== WSOL_MINT_STR && cfg.selfPayFeeMints.has(a.mint),
+  )
   if (otherTokens.length > 0) {
     const uniqueMints = [...new Set(otherTokens.map((a) => a.mint))]
     const [mintMetas, prices] = await Promise.all([
@@ -337,7 +406,7 @@ async function refillSinglePayer(
       if (currentSol >= cfg.refillMinSol * 1.5) break
       const meta = mintMetas[acc.mint]
       const price = prices[acc.mint]
-      if (!meta || !price) continue
+      if (!meta || !meta.isValidMint || meta.hasUnsafeSelfPayExt || !price) continue
       const usdVal = (Number(acc.amount) / Math.pow(10, meta.decimals)) * price
       if (usdVal < cfg.refillMinTokenUsd) {
         details.push(
@@ -364,6 +433,12 @@ async function refillSinglePayer(
           inputMint: acc.mint,
           outputMint: WSOL_MINT_STR,
         })
+        if (!cfg.auditedSwapRouterPrograms.has(built.swapInstruction.programId)) {
+          details.push(
+            `Skipped refill swap for ${acc.mint.slice(0, 6)}…: router program ${built.swapInstruction.programId} is not in AUDITED_SWAP_ROUTER_PROGRAMS`,
+          )
+          continue
+        }
         const [bh, preSwapLamports] = await Promise.all([
           rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
             { commitment: 'confirmed' },

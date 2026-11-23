@@ -1,6 +1,5 @@
 import {
   computeToken2022NetAmount,
-  inspectToken2022UnsafeSelfPay,
   parseToken2022TransferFeeConfig,
 } from '@audren/sdk'
 import {
@@ -23,8 +22,12 @@ import {
   decodePoolState,
   derivePoolPda,
   deterministicNoteRentFee,
+  parseMintSafetyInfo,
+  type MintSafetyInfo,
 } from './audren'
 import type { Cluster } from '../types'
+
+export { parseMintSafetyInfo, type MintSafetyInfo }
 
 // ============================================================================
 // Solana JSON-RPC Client
@@ -71,25 +74,39 @@ export async function fetchAccountBytes(
   }
 }
 
-export async function fetchMultipleAccounts(
+export interface MultipleAccountsContextResult {
+  slot: number | null
+  accounts: Array<{ bytes: Uint8Array; lamports: number; owner: string } | null>
+}
+
+export async function fetchMultipleAccountsWithContext(
   rpcUrl: string,
   addresses: string[],
-  opts?: { dataSlice?: { offset: number; length: number } },
-): Promise<Array<{ bytes: Uint8Array; lamports: number; owner: string } | null>> {
-  if (addresses.length === 0) return []
+  opts?: { dataSlice?: { offset: number; length: number }; commitment?: 'processed' | 'confirmed' },
+): Promise<MultipleAccountsContextResult> {
+  if (addresses.length === 0) return { slot: null, accounts: [] }
   const out: Array<{ bytes: Uint8Array; lamports: number; owner: string } | null> = []
+  let contextSlot: number | null = null
+  let slotMismatch = false
   for (let offset = 0; offset < addresses.length; offset += 100) {
     const chunk = addresses.slice(offset, offset + 100)
     const res = await rpcCall<{
+      context?: { slot?: number }
       value: Array<{ data: [string, string]; lamports: number; owner: string } | null>
     }>(rpcUrl, 'getMultipleAccounts', [
       chunk,
       {
         encoding: 'base64',
-        commitment: 'confirmed',
+        commitment: opts?.commitment ?? 'confirmed',
         ...(opts?.dataSlice ? { dataSlice: opts.dataSlice } : {}),
       },
     ])
+    const chunkSlot = typeof res.context?.slot === 'number' ? res.context.slot : null
+    if (offset === 0) {
+      contextSlot = chunkSlot
+    } else if (chunkSlot !== contextSlot) {
+      slotMismatch = true
+    }
     for (const acc of res.value ?? []) {
       out.push(
         acc
@@ -102,7 +119,16 @@ export async function fetchMultipleAccounts(
       )
     }
   }
-  return out
+  return { slot: slotMismatch ? null : contextSlot, accounts: out }
+}
+
+export async function fetchMultipleAccounts(
+  rpcUrl: string,
+  addresses: string[],
+  opts?: { dataSlice?: { offset: number; length: number }; commitment?: 'processed' | 'confirmed' },
+): Promise<Array<{ bytes: Uint8Array; lamports: number; owner: string } | null>> {
+  const res = await fetchMultipleAccountsWithContext(rpcUrl, addresses, opts)
+  return res.accounts
 }
 
 // ----------------------------------------------------------------------------
@@ -115,8 +141,13 @@ export interface OnChainMintMeta {
   tokenProgram: string
   decimals: number
   isValidMint: boolean
-  /** True for Token-2022 mints with extensions unsafe for relayer self-pay credit (PermanentDelegate, NonTransferable, active TransferHook, or high TransferFee). */
+  /**
+   * True when the mint is excluded from relayer self-pay fee credit (Pausable, mutable
+   * TransferFeeConfig authority, untrusted FreezeAuthority, PermanentDelegate,
+   * NonTransferable, active TransferHook, or TransferFeeConfig > 500 bps).
+   */
   hasUnsafeSelfPayExt: boolean
+  safety?: MintSafetyInfo
 }
 
 export interface OnChainMintMetaWithData {
@@ -197,6 +228,41 @@ export function computeSwapInputTransferFee(params: {
   }
 }
 
+/**
+ * Apply a conservative `2x` active Token-2022 `TransferFeeConfig` haircut when valuing
+ * non-WSOL Token-2022 relayer fee receipts at submit time (accounting for both receipt
+ * and subsequent liquidation/swap hops). Classic SPL mints pass through unchanged.
+ */
+export function applyToken2022FeeHaircut(params: {
+  tokenProgram: string
+  mintData: Uint8Array | null | undefined
+  currentEpoch: bigint | number
+  grossAmount: bigint
+}): { netAmount: bigint; activeTransferFeeBps: number; haircutAmount: bigint } {
+  const { tokenProgram, mintData, currentEpoch, grossAmount } = params
+  if (
+    tokenProgram !== TOKEN_2022_PROGRAM_ID_STR ||
+    !mintData ||
+    mintData.byteLength <= 166 ||
+    grossAmount <= 0n
+  ) {
+    return { netAmount: grossAmount > 0n ? grossAmount : 0n, activeTransferFeeBps: 0, haircutAmount: 0n }
+  }
+  const activeFee = parseToken2022TransferFeeConfig(mintData, currentEpoch)
+  if (!activeFee || activeFee.bps <= 0n) {
+    return { netAmount: grossAmount, activeTransferFeeBps: 0, haircutAmount: 0n }
+  }
+  const afterOne = computeToken2022NetAmount(grossAmount, activeFee)
+  const singleFee = grossAmount > afterOne ? grossAmount - afterOne : 0n
+  const doubleFee = singleFee * 2n
+  const netAmount = grossAmount > doubleFee ? grossAmount - doubleFee : 0n
+  return {
+    netAmount,
+    activeTransferFeeBps: Number(activeFee.bps),
+    haircutAmount: grossAmount - netAmount,
+  }
+}
+
 export async function resolveSwapInputTransferFee(
   rpcUrl: string,
   inMeta: OnChainMintMeta,
@@ -233,8 +299,7 @@ export async function fetchMintMetasWithData(
   const missing: string[] = []
   for (const m of mints) {
     const cached = MINT_META_CACHE.get(`${rpcUrl}:${m}`)
-    const isT22 = cached?.meta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR
-    const fresh = cached && (!isT22 || now - cached.fetchedAt < MINT_META_T22_TTL_MS)
+    const fresh = cached && now - cached.fetchedAt < MINT_META_T22_TTL_MS
     if (fresh) {
       out[m] = { meta: cached.meta, rawBytes: cached.rawBytes }
     } else if (!missing.includes(m)) {
@@ -263,11 +328,27 @@ export async function fetchMintMetasWithData(
       const isValidMint = isValidClassicMint || isValidT22Mint
       const tokenProgram = isT22 ? TOKEN_2022_PROGRAM_ID_STR : CLASSIC_TOKEN_PROGRAM_ID_STR
       const decimals = isValidMint ? bytes![44]! : 0
-      const hasUnsafeSelfPayExt = Boolean(
-        isValidT22Mint && bytes && inspectToken2022UnsafeSelfPay(bytes),
-      )
-      const meta: OnChainMintMeta = { mint, tokenProgram, decimals, isValidMint, hasUnsafeSelfPayExt }
-      const rawBytes = isValidT22Mint ? bytes : null
+      const safety = isValidMint
+        ? parseMintSafetyInfo(mint, tokenProgram, bytes)
+        : {
+            safeForSelfPay: false,
+            hasFreezeAuthority: false,
+            hasUntrustedFreezeAuthority: false,
+            hasPausableExt: false,
+            hasMutableTransferFeeAuthority: false,
+            hasUnsafeToken2022Ext: true,
+            reason: 'Invalid or uninitialized mint account',
+          }
+      const hasUnsafeSelfPayExt = !safety.safeForSelfPay
+      const meta: OnChainMintMeta = {
+        mint,
+        tokenProgram,
+        decimals,
+        isValidMint,
+        hasUnsafeSelfPayExt,
+        safety,
+      }
+      const rawBytes = isValidMint ? bytes : null
       if (isValidMint) {
         MINT_META_CACHE.set(`${rpcUrl}:${mint}`, { meta, rawBytes, fetchedAt: now })
       }
@@ -299,6 +380,11 @@ export interface LiveRentSchedule {
   pageRentPerNoteLamports: bigint
   ataRentLamports: bigint
   baseTxFeeLamports: bigint
+  /** Full rent-exemption lamports for each Audren on-chain page type (populated by live RPC fetch). */
+  subtreePageRentLamports?: bigint
+  subrootPageRentLamports?: bigint
+  memoPageRentLamports?: bigint
+  nfPageRentLamports?: bigint
   /** Total baseline cost for a default 2-nullifier, 2-output-note swap tx (including base/priority fee buffer). */
   swapBaselineLamports: bigint
   fetchedAt: number
@@ -306,6 +392,12 @@ export interface LiveRentSchedule {
 
 const RENT_CACHE = new Map<string, LiveRentSchedule>()
 const RENT_CACHE_TTL_MS = 300_000
+
+export function getCachedLiveRentSchedule(rpcUrl: string): LiveRentSchedule | null {
+  const cached = RENT_CACHE.get(rpcUrl)
+  if (!cached) return null
+  return Date.now() - cached.fetchedAt < RENT_CACHE_TTL_MS ? cached : null
+}
 
 const NULLIFIER_ACCOUNT_LEN = 0 // On-chain claim_nullifier creates a 0-byte sentinel PDA
 const SPL_TOKEN_ACCOUNT_LEN = 165
@@ -355,6 +447,10 @@ export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSch
     pageRentPerNoteLamports,
     ataRentLamports: ataLamports,
     baseTxFeeLamports,
+    subtreePageRentLamports: subRentBig,
+    subrootPageRentLamports: srRentBig,
+    memoPageRentLamports: memoRentBig,
+    nfPageRentLamports: BigInt(nfRent),
     swapBaselineLamports:
       2n * (nullifierLamports + nfPageRentPerNfLamports) +
       2n * pageRentPerNoteLamports +
@@ -443,6 +539,7 @@ export interface SimulationAccountPost {
 }
 
 export interface SimulationResult {
+  slot: number | null
   err: unknown | null
   logs: string[]
   unitsConsumed: number
@@ -453,8 +550,10 @@ export async function simulateV1Transaction(
   rpcUrl: string,
   wireBytes: Uint8Array,
   watchAddresses: string[],
+  opts?: { commitment?: 'processed' | 'confirmed' },
 ): Promise<SimulationResult> {
   const res = await rpcCall<{
+    context?: { slot?: number }
     value: {
       err: unknown | null
       logs?: string[] | null
@@ -471,7 +570,7 @@ export async function simulateV1Transaction(
       encoding: 'base64',
       sigVerify: false,
       replaceRecentBlockhash: true,
-      commitment: 'confirmed',
+      commitment: opts?.commitment ?? 'confirmed',
       ...(watchAddresses.length > 0
         ? { accounts: { encoding: 'base64', addresses: watchAddresses } }
         : {}),
@@ -480,6 +579,7 @@ export async function simulateV1Transaction(
 
   const val = res.value
   return {
+    slot: typeof res.context?.slot === 'number' ? res.context.slot : null,
     err: val.err ?? null,
     logs: val.logs ?? [],
     unitsConsumed: val.unitsConsumed ?? 0,

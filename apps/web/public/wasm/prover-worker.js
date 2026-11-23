@@ -10,7 +10,7 @@ const CANONICAL_PK_SHA256 =
   '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4'
 const WITNESS_TOTAL_BYTES = 4611
 const PROVE_OUTPUT_BYTES = 384
-const DEFAULT_WASM_URL = '/wasm/audren_circuits.wasm?v=1.2.0'
+const DEFAULT_WASM_URL = '/wasm/audren_circuits.wasm?v=1.2.1'
 const DEFAULT_PK_URL = '/wasm/audren_joinsplit.pk?v=2b22603e'
 
 let readyPromise = null
@@ -49,15 +49,22 @@ async function initWasmProver(wasmUrl, pkUrl) {
 
   const { instance } = await WebAssembly.instantiate(wasmBuf, {})
   const exports = instance.exports
-  const pkPtr = exports.wasm_alloc(pkBytes.byteLength)
+  let pkPtr = 0
   try {
+    pkPtr = exports.wasm_alloc(pkBytes.byteLength)
     new Uint8Array(exports.memory.buffer, pkPtr, pkBytes.byteLength).set(pkBytes)
     const rc = exports.wasm_load_pk_compressed(pkPtr, pkBytes.byteLength)
     if (rc !== 0) {
       throw new Error(`wasm_load_pk_compressed failed with code ${rc}`)
     }
   } finally {
-    exports.wasm_dealloc(pkPtr, pkBytes.byteLength)
+    if (pkPtr) {
+      try {
+        exports.wasm_dealloc(pkPtr, pkBytes.byteLength)
+      } catch {
+        // Ignore deallocation failure if WASM memory trapped
+      }
+    }
   }
   return exports
 }
@@ -102,11 +109,14 @@ globalThis.addEventListener('message', async (event) => {
           : globalThis.crypto.getRandomValues(new Uint8Array(32))
 
       const t0 = globalThis.performance.now()
-      const wPtr = exports.wasm_alloc(WITNESS_TOTAL_BYTES)
-      const sPtr = exports.wasm_alloc(32)
-      const oPtr = exports.wasm_alloc(PROVE_OUTPUT_BYTES)
+      let wPtr = 0
+      let sPtr = 0
+      let oPtr = 0
       let raw
       try {
+        wPtr = exports.wasm_alloc(WITNESS_TOTAL_BYTES)
+        sPtr = exports.wasm_alloc(32)
+        oPtr = exports.wasm_alloc(PROVE_OUTPUT_BYTES)
         new Uint8Array(exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).set(witnessBytes)
         new Uint8Array(exports.memory.buffer, sPtr, 32).set(seed)
         const rc = exports.wasm_prove_joinsplit(wPtr, WITNESS_TOTAL_BYTES, sPtr, oPtr)
@@ -114,10 +124,33 @@ globalThis.addEventListener('message', async (event) => {
           throw new Error(`wasm_prove_joinsplit failed with code ${rc}`)
         }
         raw = new Uint8Array(exports.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).slice()
+      } catch (proveErr) {
+        if (proveErr instanceof WebAssembly.RuntimeError) {
+          readyPromise = null
+        }
+        throw proveErr
       } finally {
-        exports.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES)
-        exports.wasm_dealloc(sPtr, 32)
-        exports.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES)
+        if (oPtr) {
+          try {
+            exports.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES)
+          } catch {
+            // Ignore deallocation failure if WASM instance trapped
+          }
+        }
+        if (sPtr) {
+          try {
+            exports.wasm_dealloc(sPtr, 32)
+          } catch {
+            // Ignore deallocation failure if WASM instance trapped
+          }
+        }
+        if (wPtr) {
+          try {
+            exports.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES)
+          } catch {
+            // Ignore deallocation failure if WASM instance trapped
+          }
+        }
       }
       const elapsedMs = Math.round(globalThis.performance.now() - t0)
       const result = {
@@ -143,6 +176,9 @@ globalThis.addEventListener('message', async (event) => {
 
     throw new Error(`Unsupported prover worker message type: ${String(data.type)}`)
   } catch (err) {
+    if (err instanceof WebAssembly.RuntimeError) {
+      readyPromise = null
+    }
     globalThis.postMessage({
       id,
       ok: false,

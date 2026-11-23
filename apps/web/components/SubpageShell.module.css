@@ -495,12 +495,6 @@
   color: var(--ink-subtle);
 }
 
-.stageSvg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
 .editorialNote {
   margin: 28px 0 0;
   padding: 2px 0 2px 18px;
@@ -751,8 +745,23 @@
 
 .cuFill {
   height: 100%;
+  width: 100%;
   background: var(--green);
-  transition: width 360ms ease;
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: calc(var(--i, 0) * 110ms);
+}
+
+.cuList[data-inview='true'] .cuFill {
+  transform: scaleX(var(--cu, 1));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cuFill {
+    transition: none;
+    transform: scaleX(var(--cu, 1));
+  }
 }
 
 .cuFillHigh {
@@ -839,6 +848,40 @@
   margin-bottom: 5px;
 }
 
+.faqPanel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.faqPanel[data-open='true'] {
+  grid-template-rows: 1fr;
+}
+
+.faqPanelInner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.faqPanel .faqA {
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 220ms ease, transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.faqPanel[data-open='true'] .faqA {
+  opacity: 1;
+  transform: none;
+  transition-delay: 60ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .faqPanel,
+  .faqPanel .faqA {
+    transition: none;
+  }
+}
+
 .faqA {
   padding: 0 0 24px;
   max-width: 760px;
@@ -922,19 +965,6 @@
 /* ============================================================================
    ANIMATED SVG PACKETS
    ============================================================================ */
-.flowDash {
-  stroke-dasharray: 5 5;
-  animation: dashMove 1.4s linear infinite;
-}
-
-@keyframes dashMove {
-  from {
-    stroke-dashoffset: 20;
-  }
-  to {
-    stroke-dashoffset: 0;
-  }
-}
 
 /* ============================================================================
    RESPONSIVE BREAKPOINTS
@@ -1072,8 +1102,92 @@
   }
 }
 
+
+/* ============================================================================
+   OBSERVER VIEW (compare matrix)
+   Ink bars wipe over every field a chain explorer cannot read.
+   ============================================================================ */
+.observerBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 18px;
+  margin: 4px 0 12px;
+}
+
+.observerToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--carbon, #161614);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.observerToggle:hover {
+  background: rgba(22, 22, 20, 0.05);
+}
+
+.observerToggle[aria-pressed='true'] {
+  background: var(--carbon, #161614);
+  color: var(--paper, #f4f1ea);
+}
+
+.observerLegend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-meta);
+  color: var(--ink-subtle);
+}
+
+.observerLegend i {
+  display: inline-block;
+  width: 18px;
+  height: 9px;
+  border-radius: 1px;
+  background: var(--carbon, #161614);
+}
+
+.observerLegend i + i {
+  margin-left: 10px;
+}
+
+.observerLegend i[data-kind='hatch'] {
+  background: repeating-linear-gradient(-45deg, var(--carbon, #161614) 0 3px, transparent 3px 6px);
+}
+
+.table[data-observer='true'] .visPublic {
+  background: #fff3dc;
+  box-shadow: 0 0 0 3px #fff3dc;
+  border-radius: 1px;
+}
+
+.matrixRow {
+  animation: matrixRowIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes matrixRowIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .flowDash {
-    animation: none !important;
+  .matrixRow {
+    animation: none;
   }
 }

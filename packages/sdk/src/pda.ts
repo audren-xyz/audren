@@ -4,6 +4,7 @@
  * (`audren_*`) matching `crates/client/src/pda.rs` byte-for-byte.
  */
 
+import { x25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -43,6 +44,29 @@ const BECH32_GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3] 
 const BECH32_MAX_LEN = 128;
 const AUDREN_ADDR_HRP = 'aud';
 const ADDR_VERSION_V1 = 0x01;
+const X25519_PROBE_SCALAR = new Uint8Array(32).fill(0x09);
+
+function isAllZero32(bytes: Uint8Array): boolean {
+  if (bytes.byteLength !== 32) return true;
+  let acc = 0;
+  for (let i = 0; i < 32; i++) acc |= bytes[i]!;
+  return acc === 0;
+}
+
+/**
+ * Verify an X25519 public key is contributory (rejects all-zero and Curve25519 order-8 low-order
+ * points using the fixed RFC 7748 probe scalar `[0x09; 32]`).
+ */
+export function isContributoryX25519Point(viewPk: Uint8Array): boolean {
+  if (viewPk.byteLength !== 32) return false;
+  let shared: Uint8Array;
+  try {
+    shared = x25519.getSharedSecret(X25519_PROBE_SCALAR, viewPk);
+  } catch {
+    return false;
+  }
+  return !isAllZero32(shared);
+}
 
 const utf8Encoder = new TextEncoder();
 const PDA_MARKER = utf8Encoder.encode('ProgramDerivedAddress');
@@ -208,6 +232,9 @@ export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): st
   if (!isCanonicalFr(spendPk)) {
     throw new Error('spendPk must be a canonical BN254 Fr scalar (< r)');
   }
+  if (!isContributoryX25519Point(viewPk)) {
+    throw new Error('viewPk must be a contributory X25519 public key (non-low-order)');
+  }
   const raw = new Uint8Array(65);
   raw[0] = ADDR_VERSION_V1;
   raw.set(spendPk, 1);
@@ -222,18 +249,18 @@ export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): st
 
 /**
  * Strictly decode and validate a BIP-350 Bech32m `aud1...` stealth address.
- * Rejects mixed case, wrong HRP, invalid Bech32m checksum, non-zero pad bits,
- * wrong payload length, wrong version byte (`!== 0x01`), and non-canonical `spendPk >= r`.
+ * Rejects leading/trailing whitespace, mixed case, wrong HRP, invalid Bech32m checksum,
+ * non-zero pad bits, wrong payload length, wrong version byte (`!== 0x01`),
+ * non-canonical `spendPk >= r`, and non-contributory / low-order X25519 `viewPk`.
  */
 export function parseAudrenAddress(encoded: string): ParsedAudrenAddress {
-  const trimmed = encoded.trim();
-  if (trimmed.length < 8 || trimmed.length > BECH32_MAX_LEN) {
-    throw new Error(`Invalid Audren Bech32m address length (${trimmed.length})`);
+  if (encoded.length < 8 || encoded.length > BECH32_MAX_LEN) {
+    throw new Error(`Invalid Audren Bech32m address length (${encoded.length})`);
   }
   let hasLower = false;
   let hasUpper = false;
-  for (let i = 0; i < trimmed.length; i++) {
-    const code = trimmed.charCodeAt(i);
+  for (let i = 0; i < encoded.length; i++) {
+    const code = encoded.charCodeAt(i);
     if (code < 33 || code > 126) {
       throw new Error(`Invalid character in Audren Bech32m address at index ${i}`);
     }
@@ -243,7 +270,7 @@ export function parseAudrenAddress(encoded: string): ParsedAudrenAddress {
   if (hasLower && hasUpper) {
     throw new Error('Mixed case is forbidden in Bech32m Audren address');
   }
-  const lower = trimmed.toLowerCase();
+  const lower = encoded.toLowerCase();
   const sep = lower.lastIndexOf('1');
   if (sep < 1 || sep + 7 > lower.length) {
     throw new Error('Invalid Bech32m separator position in Audren address');
@@ -274,6 +301,9 @@ export function parseAudrenAddress(encoded: string): ParsedAudrenAddress {
   const viewPk = raw.slice(33, 65);
   if (!isCanonicalFr(spendPk)) {
     throw new Error('Audren address spendPk is not a canonical BN254 Fr scalar');
+  }
+  if (!isContributoryX25519Point(viewPk)) {
+    throw new Error('Audren address viewPk is a low-order X25519 public key');
   }
   return { encoded: lower, spendPk, viewPk };
 }

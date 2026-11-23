@@ -87,6 +87,8 @@ export function computeSwapFeePlan(params: {
   feeAccount: string | null
   feeAccountExists: boolean
   hasUnsafeSelfPayExt?: boolean
+  /** Number of missing canonical vault/escrow ATAs (`0..4`) whose creation rent is priced into the quote. */
+  extraAtaCount?: number
   /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers, padded spend). */
   omitNf1?: boolean
   /** Shielded output note count (change + dynamic output). Defaults to `2`. */
@@ -103,24 +105,29 @@ export function computeSwapFeePlan(params: {
     feeAccount,
     feeAccountExists,
     hasUnsafeSelfPayExt = false,
+    extraAtaCount = 0,
     omitNf1 = false,
     outputCount,
   } = params
 
   const hasCustomShape = omitNf1 || outputCount !== undefined
-  const baseSwapLamports = hasCustomShape
-    ? BigInt(omitNf1 ? 1 : 2) *
-        (rentSchedule.nullifierRentLamports + rentSchedule.nfPageRentPerNfLamports) +
-      BigInt(Math.max(0, Math.min(3, Math.trunc(outputCount ?? 2)))) *
-        rentSchedule.pageRentPerNoteLamports +
-      20_000n
-    : rentSchedule.swapBaselineLamports
+  const extraAtaLamports =
+    BigInt(Math.max(0, Math.min(4, Math.trunc(extraAtaCount)))) * rentSchedule.ataRentLamports
+  const baseSwapLamports =
+    (hasCustomShape
+      ? BigInt(omitNf1 ? 1 : 2) *
+          (rentSchedule.nullifierRentLamports + rentSchedule.nfPageRentPerNfLamports) +
+        BigInt(Math.max(0, Math.min(3, Math.trunc(outputCount ?? 2)))) *
+          rentSchedule.pageRentPerNoteLamports +
+        20_000n
+      : rentSchedule.swapBaselineLamports) + extraAtaLamports
   const totalLamportsIfCreatingAta = baseSwapLamports + rentSchedule.ataRentLamports
   const costSol = Number(baseSwapLamports) / 1e9
   const estimatedRelayCostUsd =
     solPriceUsd && solPriceUsd > 0 ? costSol * solPriceUsd : null
+  const mintAllowedForSelfPay = cfg.selfPayFeeMints.has(outputMint)
 
-  if (!feeAccount || hasUnsafeSelfPayExt) {
+  if (!feeAccount || hasUnsafeSelfPayExt || !mintAllowedForSelfPay) {
     return {
       billingMode: 'sponsored',
       platformFeeBps: 0,
@@ -133,9 +140,11 @@ export function computeSwapFeePlan(params: {
       estimatedRelayCostUsd,
       estimatedSwapUsd: null,
       estimatedFeeUsd: 0,
-      reason: hasUnsafeSelfPayExt
-        ? 'Token-2022 output mint carries extensions excluded from self-pay fee credit; sponsored under rate limits.'
-        : 'Relayer fee account unavailable on this cluster; action sponsored under rate limits.',
+      reason: !mintAllowedForSelfPay
+        ? 'Output mint is not in the relayer self-pay fee allowlist; sponsored under rate limits.'
+        : hasUnsafeSelfPayExt
+          ? 'Output mint carries unsafe authority or Token-2022 extensions excluded from self-pay fee credit; sponsored under rate limits.'
+          : 'Relayer fee account unavailable on this cluster; action sponsored under rate limits.',
     }
   }
 
@@ -323,6 +332,7 @@ export function computeNativeFeeQuote(params: {
   } = params
 
   const isDirectLamportPayout = op === 'withdraw' && unwrapWsol
+  const mintAllowedForSelfPay = isDirectLamportPayout || cfg.selfPayFeeMints.has(feeMint)
   const nullifierCount = omitNf1 ? 1n : 2n
   const clampedOutputs = BigInt(Math.max(0, Math.min(3, Math.trunc(outputCount))))
   const nullifierRent =
@@ -345,7 +355,7 @@ export function computeNativeFeeQuote(params: {
 
   // Private transfers quote a strictly flat per-mint shielded cm2 fee; plaintext `amount` is never required or consulted.
   if (op === 'transfer') {
-    if (!feeShieldedAddress || hasUnsafeSelfPayExt) {
+    if (!feeShieldedAddress || hasUnsafeSelfPayExt || !mintAllowedForSelfPay) {
       return {
         ok: true,
         cluster,
@@ -365,9 +375,11 @@ export function computeNativeFeeQuote(params: {
         ...metaFields,
         estimatedRelayCostLamports: txBaseLamports.toString(),
         estimatedRelayCostUsd: costUsd(txBaseLamports),
-        reason: hasUnsafeSelfPayExt
-          ? 'Token-2022 mint carries extensions excluded from self-pay fee credit; sponsored under rate limits.'
-          : 'Relayer shielded FVK target unavailable; sponsored under rate limits.',
+        reason: !mintAllowedForSelfPay
+          ? 'Mint is not in the relayer self-pay fee allowlist; sponsored under rate limits.'
+          : hasUnsafeSelfPayExt
+            ? 'Mint carries unsafe authority or Token-2022 extensions excluded from self-pay fee credit; sponsored under rate limits.'
+            : 'Relayer shielded FVK target unavailable; sponsored under rate limits.',
       }
     }
 
@@ -436,7 +448,7 @@ export function computeNativeFeeQuote(params: {
 
   const amount = params.amount ?? 0n
 
-  if (!feeRecipient || amount <= 0n || hasUnsafeSelfPayExt) {
+  if (!feeRecipient || amount <= 0n || hasUnsafeSelfPayExt || !mintAllowedForSelfPay) {
     return {
       ok: true,
       cluster,
@@ -445,9 +457,9 @@ export function computeNativeFeeQuote(params: {
       feeSide,
       feeMint,
       feeTokenProgram: isDirectLamportPayout ? null : feeTokenProgram,
-      feeRecipient: hasUnsafeSelfPayExt ? feeRecipient : null,
+      feeRecipient: hasUnsafeSelfPayExt || !mintAllowedForSelfPay ? feeRecipient : null,
       feeShieldedAddress,
-      feeRecipientExists: hasUnsafeSelfPayExt ? feeRecipientExists : false,
+      feeRecipientExists: hasUnsafeSelfPayExt || !mintAllowedForSelfPay ? feeRecipientExists : false,
       needsFeeAtaSetup: false,
       relayerFee: '0',
       feeBps: 0,
@@ -456,9 +468,11 @@ export function computeNativeFeeQuote(params: {
       ...metaFields,
       estimatedRelayCostLamports: txBaseLamports.toString(),
       estimatedRelayCostUsd: costUsd(txBaseLamports),
-      reason: hasUnsafeSelfPayExt
-        ? 'Token-2022 mint carries extensions excluded from self-pay fee credit; sponsored under rate limits.'
-        : 'Relayer fee target unavailable; sponsored under rate limits.',
+      reason: !mintAllowedForSelfPay
+        ? 'Mint is not in the relayer self-pay fee allowlist; sponsored under rate limits.'
+        : hasUnsafeSelfPayExt
+          ? 'Mint carries unsafe authority or Token-2022 extensions excluded from self-pay fee credit; sponsored under rate limits.'
+          : 'Relayer fee target unavailable; sponsored under rate limits.',
     }
   }
 

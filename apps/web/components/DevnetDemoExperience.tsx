@@ -238,6 +238,7 @@ export function DevnetDemoExperience() {
       ckptSlotIdx: ck.slotIndex,
       laneId: note.laneId,
       leafIdx: note.leafIndex,
+      viewSk: keys?.viewSk,
     })
     return {
       ...note,

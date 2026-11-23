@@ -151,6 +151,7 @@ import {
   prepareEscrowAccounts,
   prepareEscrowAccountsForAudren,
   reconstructWitness,
+  selectHrwSealedDecoys,
   serializeV1Transaction,
   syncCompactStoreWithRpc,
   toPubkeyBytes,
@@ -311,6 +312,65 @@ test('BIP-350 Bech32m aud1... address codec enforces strict checksum, casing, ve
   badFrPayload.set(nonCanonical, 1);
   badFrPayload.set(alice.viewPk, 33);
   assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', badFrPayload)), /canonical BN254 Fr/);
+
+  // Leading / trailing whitespace strictly rejected (matching Rust BIP-350)
+  assert.throws(() => parseAudrenAddress(` ${addr}`), /Invalid character/);
+  assert.throws(() => parseAudrenAddress(`${addr} `), /Invalid character/);
+  assert.throws(() => parseAudrenAddress(`\n${addr}\t`), /Invalid character/);
+
+  // Low-order X25519 viewPk ([0; 32] and RFC 7748 order-8 point) rejected on BOTH encode and decode
+  const lowOrderViewPks = [
+    new Uint8Array(32),
+    Uint8Array.from([
+      0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
+      0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
+    ]),
+  ];
+  for (const badVpk of lowOrderViewPks) {
+    assert.throws(() => formatAudrenAddress(alice.spendPkBytes, badVpk), /contributory X25519/i);
+    const badVpPayload = new Uint8Array(65);
+    badVpPayload[0] = 1;
+    badVpPayload.set(alice.spendPkBytes, 1);
+    badVpPayload.set(badVpk, 33);
+    assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', badVpPayload)), /low-order X25519/i);
+  }
+});
+
+test('Finding #18: verifySelectiveDisclosureProof enforces strict u64 amount, laneId, poolId, and byte lengths', () => {
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x57));
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
+  const stealthFr = deriveStealthOwner(alice.spendPk, 77n);
+  const blindFr = 99n;
+  const realAmount = 1_500_000n;
+  const cmBe = frToBeBytes(computeNoteCommitment(stealthFr, wsolAsset, realAmount, blindFr));
+
+  const validProof = {
+    poolId: 0,
+    laneId: 2,
+    leafIndex: 5n,
+    stealthOwner: frToBeBytes(stealthFr),
+    mint: WSOL_MINT_BYTES,
+    amount: realAmount,
+    blinding: frToBeBytes(blindFr),
+    commitment: cmBe,
+  };
+  assert.equal(verifySelectiveDisclosureProof(validProof, cmBe), true);
+
+  // Modular field aliasing attack: realAmount + k * BN254_FR_MODULUS MUST be rejected!
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, amount: realAmount + BN254_FR_MODULUS }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, amount: realAmount + 2n * BN254_FR_MODULUS }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, amount: -1n }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, amount: (1n << 64n) }, cmBe), false);
+
+  // Bounds on poolId, laneId, leafIndex, and 32-byte fields
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, laneId: 16 }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, laneId: -1 }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, poolId: -1 }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, poolId: 0x1_0000_0000 }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, leafIndex: -1n }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, leafIndex: (1n << 64n) }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, mint: new Uint8Array(31) }, cmBe), false);
+  assert.equal(verifySelectiveDisclosureProof({ ...validProof, commitment: new Uint8Array(31) }, cmBe), false);
 });
 
 test('X25519 low-order points (all-zero & order-8) are rejected across all memo primitives', () => {
@@ -1885,7 +1945,8 @@ test('Deterministic wallet-keyed decoy selection in strict large catch-up, decoy
   );
   assert.notDeepEqual(bobSealed, sealedRun1, 'distinct wallets must derive distinct deterministic decoy sets');
 
-  // A3: Decoy-padded reconstructWitness() never issues a single-page pinpoint fetch!
+  // A3: Decoy-padded reconstructWitness() fetches ALL active lanes' SubtreeRootPages, ALL active
+  // lanes' unsealed frontier SubtreePages (zero laneId leak), AND exactly 16 HRW sealed SubtreePages!
   const rwStrictLog = [];
   const rwStrict = await reconstructWitness({
     fetchBatch: makeSliceFetcher(fix20.accounts, rwStrictLog),
@@ -1897,15 +1958,28 @@ test('Deterministic wallet-keyed decoy selection in strict large catch-up, decoy
   });
   assert.equal(rwStrict.superRoot, fix20.superRoot);
   assert.equal(computeMerkleRoot4Ary(rwStrict.path, aliceCm), fix20.superRoot);
-  const rwFetchedSubs = new Set(rwStrictLog.flatMap((e) => e.addrs).filter((a) => fix20.allSubAddrs.has(a)));
-  assert.equal(rwFetchedSubs.has(fix20.hitSubAddr), true);
+  const rwFetchedAll = new Set(rwStrictLog.flatMap((e) => e.addrs));
+  const rwFetchedSealed = new Set([...rwFetchedAll].filter((a) => fix20.sealedSubAddrs.has(a)));
+  assert.equal(rwFetchedSealed.has(fix20.hitSubAddr), true);
   assert.equal(
-    rwFetchedSubs.size,
+    rwFetchedSealed.size,
     16,
-    'reconstructWitness() in strict mode must decoy-pad SubtreePage fetches to min(16, totalSubtrees) = 16',
+    'reconstructWitness() in strict mode must fetch exactly min(16, totalSealed) = 16 sealed SubtreePages',
   );
+  for (let l = 0; l < 4; l++) {
+    assert.equal(
+      rwFetchedAll.has(deriveSubtreePdaSync(0, l, 5n).address),
+      true,
+      `strict reconstructWitness must uniformly fetch active lane ${l}'s unsealed frontier`,
+    );
+    assert.equal(
+      rwFetchedAll.has(deriveSubrootPdaSync(0, l, 0n).address),
+      true,
+      `strict reconstructWitness must uniformly fetch active lane ${l}'s SubtreeRootPage`,
+    );
+  }
 
-  // Repeat reconstructWitness with same viewSk fetches the exact same 16 SubtreePage set (intersection-resistant)
+  // Repeat reconstructWitness with same viewSk fetches the exact same SubtreePage set (intersection-resistant)
   const rwStrictLog2 = [];
   await reconstructWitness({
     fetchBatch: makeSliceFetcher(fix20.accounts, rwStrictLog2),
@@ -1916,7 +1990,134 @@ test('Deterministic wallet-keyed decoy selection in strict large catch-up, decoy
     viewSk: alice.viewSk,
   });
   const rwFetchedSubs2 = new Set(rwStrictLog2.flatMap((e) => e.addrs).filter((a) => fix20.allSubAddrs.has(a)));
+  const rwFetchedSubs = new Set([...rwFetchedAll].filter((a) => fix20.allSubAddrs.has(a)));
   assert.deepEqual([...rwFetchedSubs].sort(), [...rwFetchedSubs2].sort());
+
+  // Spending a DIFFERENT note in the SAME epoch uses witness-scoped decoys (no symmetric-difference intersection!)
+  const rwOtherLog = [];
+  await reconstructWitness({
+    fetchBatch: makeSliceFetcher(fix20.accounts, rwOtherLog),
+    poolId: 0,
+    ckptSlotIdx: 0,
+    laneId: 0,
+    leafIdx: 3n * BigInt(SUBTREE_LEAVES) + 10n,
+    viewSk: alice.viewSk,
+  });
+  const rwOtherSealed = new Set(rwOtherLog.flatMap((e) => e.addrs).filter((a) => fix20.sealedSubAddrs.has(a)));
+  assert.equal(rwOtherSealed.size, 16);
+  const symDiff = new Set([
+    ...[...rwFetchedSealed].filter((x) => !rwOtherSealed.has(x)),
+    ...[...rwOtherSealed].filter((x) => !rwFetchedSealed.has(x)),
+  ]);
+  assert.ok(symDiff.size > 4, `witness-scoped HRW decoys must diverge across distinct spends (symDiff=${symDiff.size})`);
+
+  // A3b: Pass 1D dropped-SubtreePage watermark rollback oracle closed (hit drop vs decoy drop):
+  // Dropping EITHER the hit page OR a decoy page withholds nextMemoLeaf & nextNfIndex across ALL
+  // lanes identically, and produces 100% IDENTICAL Sync #2 RPC batches!
+  const decoyToDrop = sealedRun1.find((a) => a !== fix20.hitSubAddr);
+  assert.ok(decoyToDrop);
+  const makeDropFetcher = (dropAddr, log) => async (addrs, opts) => {
+    log.push({ addrs: [...addrs], dataSlice: opts?.dataSlice ?? null });
+    return addrs.map((a) => {
+      if (a === dropAddr) return null;
+      const full = fix20.accounts.get(a) ?? null;
+      if (!full || !opts?.dataSlice) return full;
+      return full.slice(opts.dataSlice.offset, opts.dataSlice.offset + opts.dataSlice.length);
+    });
+  };
+  const hitDropStore = new CompactWalletStore(0, 0n);
+  await syncCompactStoreWithRpc({ store: hitDropStore, fvk, fetchBatch: makeDropFetcher(fix20.hitSubAddr, []) });
+  const decoyDropStore = new CompactWalletStore(0, 0n);
+  await syncCompactStoreWithRpc({ store: decoyDropStore, fvk, fetchBatch: makeDropFetcher(decoyToDrop, []) });
+  for (let l = 0; l < 4; l++) {
+    assert.equal(hitDropStore.lanes[l].nextMemoLeaf, 0n);
+    assert.equal(decoyDropStore.lanes[l].nextMemoLeaf, 0n);
+    assert.equal(hitDropStore.lanes[l].nextNfIndex, 0n);
+    assert.equal(decoyDropStore.lanes[l].nextNfIndex, 0n);
+  }
+  const hitRetryLog = [];
+  await syncCompactStoreWithRpc({ store: hitDropStore, fvk, fetchBatch: makeSliceFetcher(fix20.accounts, hitRetryLog) });
+  const decoyRetryLog = [];
+  await syncCompactStoreWithRpc({ store: decoyDropStore, fvk, fetchBatch: makeSliceFetcher(fix20.accounts, decoyRetryLog) });
+  assert.deepEqual(
+    hitRetryLog,
+    decoyRetryLog,
+    'Sync #2 RPC traffic MUST be 100% identical after Pass 1D hit drop vs decoy drop',
+  );
+  assert.equal(hitDropStore.notes[0].spent, true);
+  assert.equal(decoyDropStore.notes[0].spent, true);
+
+  // A3c: Dead-code fix regression — incremental sync (<= 25 memos & <= 25 subtrees) with an older
+  // unfrozen note in a sealed subtree MUST decoy-pad to 16 sealed SubtreePages (never 1-page pinpoint!)
+  const incStore = new CompactWalletStore(0, 0n);
+  for (let l = 0; l < 4; l++) {
+    incStore.lanes[l].nextMemoLeaf = BigInt(5 * SUBTREE_LEAVES + 4);
+    incStore.lanes[l].finalizedSubroots = Array.from({ length: 5 }, () => new Uint8Array(32));
+  }
+  incStore.recordVerifiedMemo({
+    fvk,
+    laneId: 2,
+    leafIdx: aliceLeafIdx, // older sealed SubtreePage (2, 1), NOT frozen yet!
+    decrypted: {
+      amount: 8_888_888n,
+      mint: WSOL_MINT_BYTES,
+      tweak,
+      blinding,
+      memoVersion: MEMO_VERSION_V1,
+      memoFlags: 0,
+      paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+      isDynamic: false,
+    },
+    cmBe: frToBeBytes(aliceCm),
+  });
+  assert.equal(incStore.notes[0].frozenIntraSiblings, null);
+  const incUnfrozenLog = [];
+  await syncCompactStoreWithRpc({
+    store: incStore,
+    fvk,
+    fetchBatch: makeSliceFetcher(fix20.accounts, incUnfrozenLog),
+  });
+  const incSealedFetched = new Set(
+    incUnfrozenLog.flatMap((e) => e.addrs).filter((a) => fix20.sealedSubAddrs.has(a)),
+  );
+  assert.equal(incSealedFetched.has(fix20.hitSubAddr), true);
+  assert.equal(
+    incSealedFetched.size,
+    16,
+    'incremental sync freezing an older sealed note MUST decoy-pad to 16 sealed SubtreePages',
+  );
+  assert.ok(incStore.notes[0].frozenIntraSiblings);
+
+  // A3d: Rendezvous (HRW) stability across +1 sealed subtree growth within epochBucket = 0
+  const hrw32 = selectHrwSealedDecoys({
+    viewSk: new Uint8Array(32).fill(0x42),
+    scope: new TextEncoder().encode('sync'),
+    epochBucket: 0n,
+    sealedByLane: [
+      { laneId: 0, sealedCount: 8n },
+      { laneId: 1, sealedCount: 8n },
+      { laneId: 2, sealedCount: 8n },
+      { laneId: 3, sealedCount: 8n },
+    ],
+    alreadySelected: new Set(),
+    targetSealed: 16,
+  });
+  const hrw33 = selectHrwSealedDecoys({
+    viewSk: new Uint8Array(32).fill(0x42),
+    scope: new TextEncoder().encode('sync'),
+    epochBucket: 0n,
+    sealedByLane: [
+      { laneId: 0, sealedCount: 9n },
+      { laneId: 1, sealedCount: 8n },
+      { laneId: 2, sealedCount: 8n },
+      { laneId: 3, sealedCount: 8n },
+    ],
+    alreadySelected: new Set(),
+    targetSealed: 16,
+  });
+  const set32 = new Set(hrw32.map((d) => `${d.laneId}:${d.pageSeq}`));
+  const overlap32_33 = hrw33.filter((d) => set32.has(`${d.laneId}:${d.pageSeq}`)).length;
+  assert.ok(overlap32_33 >= 15, `HRW +1 growth must preserve >= 15/16 decoys, got ${overlap32_33}/16`);
 
   // Opt-in fast reconstructWitness fetches minimal SubtreePages (target + frontier = 2)
   const rwFastLog = [];
@@ -2123,10 +2324,39 @@ test('AudrenRelayClient supports transfer privacy, requestCheckpoint, and multi-
       mint: WSOL_MINT,
       amount: '50000000',
       omitNf1: true,
+      relayerPubkey: 'PinnedRelayer1111111111111111111111111111111',
     });
     const withdrawUrl = new URL(calls[1].url);
     assert.equal(withdrawUrl.searchParams.get('amount'), '50000000');
     assert.equal(withdrawUrl.searchParams.get('omitNf1'), 'true');
+    assert.equal(
+      withdrawUrl.searchParams.get('relayerPubkey'),
+      'PinnedRelayer1111111111111111111111111111111',
+    );
+
+    await client.quoteSwap({
+      inputMint: WSOL_MINT,
+      outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+      amount: '1000000',
+      relayerPubkey: 'PinnedRelayer1111111111111111111111111111111',
+    });
+    const swapQuoteUrl = new URL(calls[2].url);
+    assert.equal(
+      swapQuoteUrl.searchParams.get('relayerPubkey'),
+      'PinnedRelayer1111111111111111111111111111111',
+    );
+
+    await client.buildSwapInstructions({
+      provider: 'jupiter',
+      quoteResponse: { route: [] },
+      inputMint: WSOL_MINT,
+      outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+      relayerPubkey: 'PinnedRelayer1111111111111111111111111111111',
+    });
+    assert.equal(
+      JSON.parse(calls[3].init.body).relayerPubkey,
+      'PinnedRelayer1111111111111111111111111111111',
+    );
 
     const ckRes = await client.requestCheckpoint({ cluster: 'devnet', poolId: 0 });
     assert.equal(ckRes.status, 'published');
@@ -2141,7 +2371,7 @@ test('AudrenRelayClient supports transfer privacy, requestCheckpoint, and multi-
       ],
     });
     assert.equal(batchRes.signature, 'batchSig999');
-    const submittedBody = JSON.parse(calls[3].init.body);
+    const submittedBody = JSON.parse(calls[5].init.body);
     assert.equal(submittedBody.instructions.length, 2);
 
     // Reject empty submit payload

@@ -18,10 +18,11 @@ use audren_circuits::{
 };
 use audren_client::{
     instructions::{
-        build_deposit, build_exec_via_escrow, build_init_lane, build_init_pool, build_open_page,
-        build_publish_checkpoint, build_set_paused, build_transact, build_update_pool,
-        compute_exec_ctx_hash, compute_page_rollovers, compute_transact_ctx_hash,
-        deterministic_note_rent_fee, AudrenAccountMeta, AudrenInstruction, UpdatePoolAction,
+        build_init_pool, build_set_paused, build_update_pool, compute_page_rollovers,
+        deterministic_note_rent_fee, try_build_deposit, try_build_exec_via_escrow,
+        try_build_init_lane, try_build_open_page, try_build_publish_checkpoint, try_build_transact,
+        try_compute_exec_ctx_hash, try_compute_transact_ctx_hash, AudrenAccountMeta,
+        AudrenInstruction, UpdatePoolAction,
     },
     keys::{
         check_memo_view_tag as rust_check_view_tag,
@@ -48,7 +49,7 @@ use audren_client::{
 };
 use audren_core::{
     layout::{DYN_MEMO_HEAD_LEN, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_PAYMENT_ID_LEN},
-    AUDREN_PROGRAM_ID, PROTOCOL_VERSION,
+    AUDREN_PROGRAM_ID, CHECKPOINT_RING_SLOTS, NUM_ESCROW_SHARDS, NUM_LANES, PROTOCOL_VERSION,
 };
 use solana_address::Address;
 
@@ -101,6 +102,39 @@ fn parse_addr(s: &str, label: &str) -> Result<Address, AudrenFfiError> {
     s.parse::<Address>().map_err(|_| AudrenFfiError::InvalidInput {
         reason: format!("invalid base58 pubkey for {label}"),
     })
+}
+
+fn validate_lane_id(lane_id: u8) -> Result<(), AudrenFfiError> {
+    if (lane_id as usize) >= NUM_LANES {
+        return Err(AudrenFfiError::InvalidInput {
+            reason: format!("lane_id must be 0..{}, got {lane_id}", NUM_LANES - 1),
+        });
+    }
+    Ok(())
+}
+
+fn validate_slot_idx(slot_idx: u16) -> Result<(), AudrenFfiError> {
+    if u64::from(slot_idx) >= CHECKPOINT_RING_SLOTS {
+        return Err(AudrenFfiError::InvalidInput {
+            reason: format!(
+                "slot_idx must be 0..{}, got {slot_idx}",
+                CHECKPOINT_RING_SLOTS - 1
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_shard_id(shard_id: u8) -> Result<(), AudrenFfiError> {
+    if (shard_id as usize) >= NUM_ESCROW_SHARDS {
+        return Err(AudrenFfiError::InvalidInput {
+            reason: format!(
+                "shard_id must be 0..{}, got {shard_id}",
+                NUM_ESCROW_SHARDS - 1
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -298,15 +332,15 @@ fn to_audren_metas(metas: &[FfiAccountMeta]) -> Result<Vec<AudrenAccountMeta>, A
         .collect()
 }
 
-fn keys_to_ffi(k: &AudrenKeys) -> FfiAudrenKeys {
-    FfiAudrenKeys {
+fn keys_to_ffi(k: &AudrenKeys) -> Result<FfiAudrenKeys, AudrenFfiError> {
+    Ok(FfiAudrenKeys {
         spend_sk: fr_to_be_bytes(&k.spend_sk).to_vec(),
         spend_pk: fr_to_be_bytes(&k.spend_pk).to_vec(),
         nk: fr_to_be_bytes(&k.nk).to_vec(),
         view_sk: k.view_sk.to_vec(),
         view_pk: k.view_pk.to_vec(),
-        address: k.address().encode(),
-    }
+        address: k.address().encode()?,
+    })
 }
 
 fn fvk_from_ffi(fvk: &FfiFullViewingKey) -> Result<FullViewingKey, AudrenFfiError> {
@@ -344,7 +378,7 @@ pub fn jupiter_cpi_excluded_dexes() -> Vec<String> {
 #[uniffi::export]
 pub fn derive_keys_from_seed(seed: Vec<u8>) -> Result<FfiAudrenKeys, AudrenFfiError> {
     let s = to_arr::<32>(&seed, "seed")?;
-    Ok(keys_to_ffi(&AudrenKeys::from_seed(&s)))
+    keys_to_ffi(&AudrenKeys::from_seed(&s))
 }
 
 #[uniffi::export]
@@ -353,10 +387,7 @@ pub fn derive_subaccount_keys(
     account_index: u32,
 ) -> Result<FfiAudrenKeys, AudrenFfiError> {
     let s = to_arr::<32>(&seed, "seed")?;
-    Ok(keys_to_ffi(&AudrenKeys::from_seed_subaccount(
-        &s,
-        account_index,
-    )))
+    keys_to_ffi(&AudrenKeys::from_seed_subaccount(&s, account_index))
 }
 
 #[uniffi::export]
@@ -424,6 +455,7 @@ pub fn derive_lane_pda(
     pool_id: u32,
     lane_id: u8,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_lane_id(lane_id)?;
     let (a, b) = rust_derive_lane_pda(&parse_addr(&program_id, "program_id")?, pool_id, lane_id);
     Ok(FfiPdaResult {
         address: a.to_string(),
@@ -437,6 +469,7 @@ pub fn derive_lane_rent_pda(
     pool_id: u32,
     lane_id: u8,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_lane_id(lane_id)?;
     let (a, b) =
         rust_derive_lane_rent_pda(&parse_addr(&program_id, "program_id")?, pool_id, lane_id);
     Ok(FfiPdaResult {
@@ -452,6 +485,7 @@ pub fn derive_subtree_pda(
     lane_id: u8,
     page_seq: u64,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_lane_id(lane_id)?;
     let (a, b) = rust_derive_subtree_pda(
         &parse_addr(&program_id, "program_id")?,
         pool_id,
@@ -471,6 +505,7 @@ pub fn derive_subroot_pda(
     lane_id: u8,
     root_page_seq: u64,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_lane_id(lane_id)?;
     let (a, b) = rust_derive_subroot_pda(
         &parse_addr(&program_id, "program_id")?,
         pool_id,
@@ -490,6 +525,7 @@ pub fn derive_memo_pda(
     lane_id: u8,
     page_seq: u64,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_lane_id(lane_id)?;
     let (a, b) = rust_derive_memo_pda(
         &parse_addr(&program_id, "program_id")?,
         pool_id,
@@ -509,6 +545,7 @@ pub fn derive_nf_page_pda(
     lane_id: u8,
     page_seq: u64,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_lane_id(lane_id)?;
     let (a, b) = rust_derive_nf_page_pda(
         &parse_addr(&program_id, "program_id")?,
         pool_id,
@@ -527,6 +564,7 @@ pub fn derive_checkpoint_pda(
     pool_id: u32,
     slot_idx: u16,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_slot_idx(slot_idx)?;
     let (a, b) =
         rust_derive_checkpoint_pda(&parse_addr(&program_id, "program_id")?, pool_id, slot_idx);
     Ok(FfiPdaResult {
@@ -555,6 +593,7 @@ pub fn derive_escrow_pda(
     pool_id: u32,
     shard_id: u8,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
+    validate_shard_id(shard_id)?;
     let (a, b) =
         rust_derive_escrow_pda(&parse_addr(&program_id, "program_id")?, pool_id, shard_id);
     Ok(FfiPdaResult {
@@ -709,8 +748,10 @@ pub fn decrypt_and_verify_memo_entry(
     let cm = to_arr::<32>(&onchain_commitment, "onchain_commitment")?;
     let f = fvk_from_ffi(&fvk)?;
     let vt = [m[0], m[1]];
-    let epk: [u8; 32] = m[2..34].try_into().unwrap();
-    let ct: [u8; MEMO_CT_LEN] = m[34..MEMO_ENTRY_WIRE_LEN].try_into().unwrap();
+    let mut epk = [0u8; 32];
+    epk.copy_from_slice(&m[2..34]);
+    let mut ct = [0u8; MEMO_CT_LEN];
+    ct.copy_from_slice(&m[34..MEMO_ENTRY_WIRE_LEN]);
     Ok(rust_decrypt_memo(&f, vt, &epk, &ct, &cm).map(|d| FfiDecryptedMemo {
         tweak: fr_to_be_bytes(&d.tweak).to_vec(),
         blinding: fr_to_be_bytes(&d.blinding).to_vec(),
@@ -745,7 +786,9 @@ pub fn verify_selective_disclosure_proof(
 #[uniffi::export]
 pub fn compact_store_new_json(pool_id: u32, birthday_slot: u64) -> Result<String, AudrenFfiError> {
     let store = CompactWalletStore::new(pool_id, birthday_slot);
-    Ok(String::from_utf8(store.to_json_bytes()?).unwrap())
+    String::from_utf8(store.to_json_bytes()?).map_err(|_| AudrenFfiError::Crypto {
+        reason: "invalid UTF-8 JSON".to_string(),
+    })
 }
 
 #[uniffi::export]
@@ -759,7 +802,7 @@ pub fn prove_joinsplit_witness_bytes(
             reason: format!("invalid binary witness (code {c})"),
         }
     })?;
-    let b = canonical_prover().prove_with_seed(circuit, seed);
+    let b = canonical_prover().try_prove_with_seed(circuit, seed)?;
     Ok(FfiGroth16ProofBundle {
         proof_192: b.proof_192.to_vec(),
         nf0: b.nf0.to_vec(),
@@ -804,7 +847,7 @@ pub fn compute_transact_ctx_hash_ffi(
         .map(|s| parse_addr(s, "relayer_fee_recipient"))
         .transpose()?;
     let paid = to_arr::<32>(&params.public_asset_id, "public_asset_id")?;
-    let h = compute_transact_ctx_hash(
+    let h = try_compute_transact_ctx_hash(
         &pid,
         params.pool_id,
         params.vk_id,
@@ -818,7 +861,7 @@ pub fn compute_transact_ctx_hash_ffi(
         params.public_amount_out,
         params.relayer_fee_amount,
         &params.memos_bytes,
-    );
+    )?;
     Ok(fr_to_be_bytes(&h).to_vec())
 }
 
@@ -839,6 +882,7 @@ pub struct FfiExecCtxHashParams {
     pub min_amount_out: u64,
     pub router_prog: String,
     pub router_accounts: Vec<FfiAccountMeta>,
+    pub extra_writable_pubkeys: Vec<String>,
     pub out_stealth_owner: Vec<u8>,
     pub out_blinding: Vec<u8>,
     pub dyn_memo_head: Vec<u8>,
@@ -859,7 +903,12 @@ pub fn compute_exec_ctx_hash_ffi(
         .map(|s| parse_addr(s, "relayer_fee_recipient"))
         .transpose()?;
     let raccs = to_audren_metas(&params.router_accounts)?;
-    let h = compute_exec_ctx_hash(
+    let extra_writable: Vec<Address> = params
+        .extra_writable_pubkeys
+        .iter()
+        .map(|s| parse_addr(s, "extra_writable_pubkeys"))
+        .collect::<Result<_, _>>()?;
+    let h = try_compute_exec_ctx_hash(
         &pid,
         params.pool_id,
         params.vk_id,
@@ -875,13 +924,14 @@ pub fn compute_exec_ctx_hash_ffi(
         params.min_amount_out,
         &rprog,
         &raccs,
+        &extra_writable,
         &to_arr::<32>(&params.out_stealth_owner, "out_stealth_owner")?,
         &to_arr::<32>(&params.out_blinding, "out_blinding")?,
         &to_arr::<DYN_MEMO_HEAD_LEN>(&params.dyn_memo_head, "dyn_memo_head")?,
         &to_arr::<MEMO_CT_LEN>(&params.dyn_mask_72, "dyn_mask_72")?,
         &params.router_ix_data,
         &params.change_memos,
-    );
+    )?;
     Ok(fr_to_be_bytes(&h).to_vec())
 }
 
@@ -948,12 +998,12 @@ pub fn build_init_lane_ix(
     pool_id: u32,
     lane_id: u8,
 ) -> Result<FfiInstruction, AudrenFfiError> {
-    Ok(from_audren_ix(build_init_lane(
+    Ok(from_audren_ix(try_build_init_lane(
         parse_addr(&program_id, "program_id")?,
         parse_addr(&authority, "authority")?,
         pool_id,
         lane_id,
-    )))
+    )?))
 }
 
 #[uniffi::export]
@@ -965,14 +1015,14 @@ pub fn build_open_page_ix(
     lane_id: u8,
     page_seq: u64,
 ) -> Result<FfiInstruction, AudrenFfiError> {
-    Ok(from_audren_ix(build_open_page(
+    Ok(from_audren_ix(try_build_open_page(
         parse_addr(&program_id, "program_id")?,
         parse_addr(&payer, "payer")?,
         page_kind,
         pool_id,
         lane_id,
         page_seq,
-    )))
+    )?))
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1007,7 +1057,7 @@ pub fn build_deposit_ix(params: FfiDepositParams) -> Result<FfiInstruction, Audr
         .ok_or(ClientError::InvalidFieldElement)?;
     let m = to_arr::<MEMO_ENTRY_WIRE_LEN>(&params.memo_106, "memo_106")?;
     let hooks = to_audren_metas(&params.transfer_hook_accounts)?;
-    Ok(from_audren_ix(build_deposit(
+    Ok(from_audren_ix(try_build_deposit(
         parse_addr(&params.program_id, "program_id")?,
         parse_addr(&params.depositor, "depositor")?,
         params.pool_id,
@@ -1028,7 +1078,7 @@ pub fn build_deposit_ix(params: FfiDepositParams) -> Result<FfiInstruction, Audr
         bl,
         &m,
         &hooks,
-    )))
+    )?))
 }
 
 #[uniffi::export]
@@ -1039,13 +1089,13 @@ pub fn build_publish_checkpoint_ix(
     slot_idx: u16,
     active_lanes: u8,
 ) -> Result<FfiInstruction, AudrenFfiError> {
-    Ok(from_audren_ix(build_publish_checkpoint(
+    Ok(from_audren_ix(try_build_publish_checkpoint(
         parse_addr(&program_id, "program_id")?,
         parse_addr(&payer, "payer")?,
         pool_id,
         slot_idx,
         active_lanes,
-    )))
+    )?))
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1103,7 +1153,7 @@ pub fn build_transact_ix(params: FfiTransactParams) -> Result<FfiInstruction, Au
         }
     };
     let hooks = to_audren_metas(&params.transfer_hook_accounts)?;
-    Ok(from_audren_ix(build_transact(
+    Ok(from_audren_ix(try_build_transact(
         parse_addr(&params.program_id, "program_id")?,
         parse_addr(&params.payer, "payer")?,
         params.pool_id,
@@ -1131,7 +1181,7 @@ pub fn build_transact_ix(params: FfiTransactParams) -> Result<FfiInstruction, Au
         parse_addr(&params.relayer_fee_recipient, "relayer_fee_recipient")?,
         &params.memos_bytes,
         &hooks,
-    )))
+    )?))
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1171,6 +1221,7 @@ pub struct FfiExecViaEscrowParams {
     pub router_prog: String,
     pub router_ix_data: Vec<u8>,
     pub router_accounts: Vec<FfiAccountMeta>,
+    pub extra_writable_pubkeys: Vec<String>,
     pub change_memos: Vec<u8>,
 }
 
@@ -1197,7 +1248,12 @@ pub fn build_exec_via_escrow_ix(
         .as_deref()
         .map(|s| parse_addr(s, "relayer_fee_recipient"))
         .transpose()?;
-    Ok(from_audren_ix(build_exec_via_escrow(
+    let extra_writable: Vec<Address> = params
+        .extra_writable_pubkeys
+        .iter()
+        .map(|s| parse_addr(s, "extra_writable_pubkeys"))
+        .collect::<Result<_, _>>()?;
+    Ok(from_audren_ix(try_build_exec_via_escrow(
         parse_addr(&params.program_id, "program_id")?,
         parse_addr(&params.payer, "payer")?,
         params.pool_id,
@@ -1231,8 +1287,9 @@ pub fn build_exec_via_escrow_ix(
         parse_addr(&params.router_prog, "router_prog")?,
         &params.router_ix_data,
         to_audren_metas(&params.router_accounts)?,
+        &extra_writable,
         &params.change_memos,
-    )))
+    )?))
 }
 
 #[uniffi::export]

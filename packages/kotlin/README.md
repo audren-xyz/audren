@@ -2,7 +2,7 @@
 
 Native Kotlin SDK for **Audren** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3`), targeting **Android (API 24+)** and **JVM 21+**.
 
-Backed by the canonical Rust core (`crates/client` + `crates/audren-circuits` via `crates/audren-ffi` + UniFFI + JNA) so Android wallets and JVM backends run native local BN254 Groth16 proving (`17,861` R1CS, 4-ary Depth-20 global MASP, 16-lane-capable architecture) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
+Backed by the canonical Rust core (`crates/client` + `crates/audren-circuits` via `crates/audren-ffi` + UniFFI + JNA) with a zero-panic `Result`/`AudrenFfiException` API across all `46` exports (Bech32m low-order X25519 `view_pk` rejection and `extraWritablePubkeys` on `FfiExecCtxHashParams` / `FfiExecViaEscrowParams`) so Android wallets and JVM backends run native local BN254 Groth16 proving (`17,861` R1CS, 4-ary Depth-20 global MASP, 16-lane-capable architecture) with zero cryptographic re-implementation drift. Verified byte-for-byte against [`spec/test-vectors.json`](../../spec/test-vectors.json) on every CI run.
 
 ## Core Building Blocks
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import Link from 'next/link'
 import {
   ArrowRight,
@@ -11,6 +11,11 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { AUDREN, solscanAddress, solscanTx } from '@/lib/protocol'
+import { AttackSimulator } from '@/components/motion/AttackSimulator'
+import { ProgressTrack } from '@/components/motion/SceneControls'
+import { StealthDemo } from '@/components/motion/StealthDemo'
+import { ViewTagScanner } from '@/components/motion/ViewTagScanner'
+import { useAutoStepper, useInView } from '@/components/motion/hooks'
 
 type FlowId = 'public-to-private' | 'private-to-private' | 'private-swap' | 'prove-or-exit'
 
@@ -416,44 +421,41 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
   },
 ]
 
-const STEP_DURATION_MS = 3200
+const STEP_DURATION_MS = 4800
+const ADDRESS_PARTS = ['prefix', 'spend', 'view'] as const
 
 export function HowAudrenWorksVisual() {
   const [activeFlowId, setActiveFlowId] = useState<FlowId>('public-to-private')
-  const [activeStep, setActiveStep] = useState<number>(0)
-  const [autoPlay, setAutoPlay] = useState<boolean>(true)
   const [copiedSample, setCopiedSample] = useState<boolean>(false)
+  const [hoverPart, setHoverPart] = useState<number | null>(null)
+
+  const [addrRef, addrInView] = useInView<HTMLDivElement>()
+  // One guided pass (prefix → spend key → view key), then the whole address rests.
+  const addrStepper = useAutoStepper({ count: 4, durations: 2600, active: addrInView, loop: false })
+  const focusIdx = hoverPart ?? (addrStepper.reduced || addrStepper.step === 3 ? null : addrStepper.step)
+  const addrFocus = focusIdx === null ? 'none' : ADDRESS_PARTS[focusIdx]
+
+  const [theaterRef, theaterInView] = useInView<HTMLDivElement>()
+  const flowStepper = useAutoStepper({
+    count: 4,
+    durations: STEP_DURATION_MS,
+    active: theaterInView,
+    resetKey: activeFlowId,
+  })
+  const activeStep = flowStepper.step
+  const autoPlay = flowStepper.playing
 
   const flow = FLOWS.find((f) => f.id === activeFlowId) ?? FLOWS[0]
   const currentStep = flow.steps[activeStep] ?? flow.steps[0]
 
-  useEffect(() => {
-    if (!autoPlay) return
-    const timer = window.setInterval(() => {
-      setActiveStep((prev) => (prev + 1) % 4)
-    }, STEP_DURATION_MS)
-    return () => window.clearInterval(timer)
-  }, [autoPlay, activeFlowId])
-
   const selectFlow = (id: FlowId) => {
     setActiveFlowId(id)
-    setActiveStep(0)
+    flowStepper.goTo(0)
   }
 
-  const selectStep = (idx: number) => {
-    setActiveStep(idx)
-    setAutoPlay(false)
-  }
-
-  const stepPrev = () => {
-    setAutoPlay(false)
-    setActiveStep((prev) => (prev + 3) % 4)
-  }
-
-  const stepNext = () => {
-    setAutoPlay(false)
-    setActiveStep((prev) => (prev + 1) % 4)
-  }
+  const selectStep = (idx: number) => flowStepper.select(idx)
+  const stepPrev = () => flowStepper.select((activeStep + 3) % 4)
+  const stepNext = () => flowStepper.select((activeStep + 1) % 4)
 
   const copySampleAddress = () => {
     const sample =
@@ -474,7 +476,12 @@ export function HowAudrenWorksVisual() {
       <section className="section" id="how-it-works" style={{ paddingTop: 52 }}>
         <div className="container">
           {/* PART A: YOUR REUSABLE PRIVATE ADDRESS ANATOMY */}
-          <div className="aud-addr-card">
+          <div
+            ref={addrRef}
+            className="aud-addr-card"
+            data-focus={addrFocus}
+            onMouseLeave={() => setHoverPart(null)}
+          >
             <div className="aud-addr-head">
               <div className="aud-addr-title-wrap">
                 <h3>
@@ -489,16 +496,16 @@ export function HowAudrenWorksVisual() {
 
             <div className="aud-addr-specimen">
               <div className="aud-addr-string mono" aria-label="Anatomy of an Audren BIP-350 Bech32m private address">
-                <span className="aud-seg is-prefix" title="BIP-350 Bech32m human-readable prefix (hrp = aud) and separator">
+                <span className="aud-seg is-prefix" data-part="prefix" title="BIP-350 Bech32m human-readable prefix (hrp = aud) and separator">
                   aud1
                 </span>
-                <span className="aud-seg is-spend" title="Version 0x01 + 32-byte BN254 Poseidon Spend Public Key (5-bit Bech32m)">
+                <span className="aud-seg is-spend" data-part="spend" title="Version 0x01 + 32-byte BN254 Poseidon Spend Public Key (5-bit Bech32m)">
                   qyy8j5pa6dnmqs9asr5u8cne6577wuy4a2yednkw5lre7xjfmlczd
                 </span>
-                <span className="aud-seg is-view" title="32-byte X25519 View Public Key (5-bit Bech32m)">
+                <span className="aud-seg is-view" data-part="view" title="32-byte X25519 View Public Key (5-bit Bech32m)">
                   dgk44pa6mf3ujjcgjgemvuwq2a44dcxgjjnp54jmk0dw5krjjcd
                 </span>
-                <span className="aud-seg is-prefix" title="6-character BIP-350 Bech32m typo-detecting checksum">
+                <span className="aud-seg is-prefix" data-part="prefix" title="6-character BIP-350 Bech32m typo-detecting checksum">
                   ppvea6
                 </span>
               </div>
@@ -520,7 +527,11 @@ export function HowAudrenWorksVisual() {
             </div>
 
             <div className="aud-addr-legend">
-              <div className="aud-legend-item">
+              <div
+                className="aud-legend-item"
+                data-part="prefix"
+                onPointerEnter={(e) => e.pointerType === 'mouse' && setHoverPart(0)}
+              >
                 <div>
                   <h4
                     className="mono"
@@ -541,7 +552,11 @@ export function HowAudrenWorksVisual() {
                   </p>
                 </div>
               </div>
-              <div className="aud-legend-item">
+              <div
+                className="aud-legend-item"
+                data-part="spend"
+                onPointerEnter={(e) => e.pointerType === 'mouse' && setHoverPart(1)}
+              >
                 <div>
                   <h4
                     className="mono"
@@ -561,7 +576,11 @@ export function HowAudrenWorksVisual() {
                   </p>
                 </div>
               </div>
-              <div className="aud-legend-item">
+              <div
+                className="aud-legend-item"
+                data-part="view"
+                onPointerEnter={(e) => e.pointerType === 'mouse' && setHoverPart(2)}
+              >
                 <div>
                   <h4
                     className="mono"
@@ -584,8 +603,11 @@ export function HowAudrenWorksVisual() {
             </div>
           </div>
 
+          <StealthDemo />
+
           {/* PART B: ANIMATED INTERACTIVE FLOW THEATER */}
           <div
+            ref={theaterRef}
             className="flow-theater"
             aria-label="Animated step-by-step walkthrough of Audren privacy flows"
           >
@@ -620,7 +642,7 @@ export function HowAudrenWorksVisual() {
                   type="button"
                   className="flow-ctrl-btn"
                   style={{ letterSpacing: 0 }}
-                  onClick={() => setAutoPlay((p) => !p)}
+                  onClick={flowStepper.togglePlay}
                   aria-label={autoPlay ? 'Pause animation' : 'Auto-play animation'}
                 >
                   {autoPlay ? (
@@ -655,10 +677,7 @@ export function HowAudrenWorksVisual() {
                 <button
                   type="button"
                   className="flow-ctrl-btn"
-                  onClick={() => {
-                    setActiveStep(0)
-                    setAutoPlay(true)
-                  }}
+                  onClick={flowStepper.restart}
                   aria-label="Replay flow"
                   title="Replay flow"
                 >
@@ -687,7 +706,9 @@ export function HowAudrenWorksVisual() {
                     className="flow-packet mono"
                     style={{ left: `${activeCenterPct}%`, letterSpacing: 0, border: 'none' }}
                   >
-                    <span>{currentStep.packetLabel}</span>
+                    <span key={currentStep.packetLabel} className="flow-packet-label">
+                      {currentStep.packetLabel}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -704,6 +725,13 @@ export function HowAudrenWorksVisual() {
                       onClick={() => selectStep(idx)}
                       aria-current={isCurrent ? 'step' : undefined}
                     >
+                      <ProgressTrack
+                        state={isCurrent ? 'current' : isDone ? 'done' : 'todo'}
+                        animate={isCurrent && autoPlay}
+                        running={flowStepper.running}
+                        duration={flowStepper.duration}
+                        resetKey={`${flowStepper.cycle}-${autoPlay}`}
+                      />
                       <div className="flow-node-top">
                         <span
                           className="flow-node-num mono"
@@ -731,8 +759,10 @@ export function HowAudrenWorksVisual() {
                   <span style={{ fontWeight: 500 }}>What actually happens</span>
                   <span className="flow-pane-actor">{currentStep.actor}</span>
                 </div>
-                <h4 className="flow-detail-title">{currentStep.title}</h4>
-                <p className="flow-detail-body">{currentStep.detail}</p>
+                <div key={`${flow.id}-${activeStep}`} className="flow-detail-swap">
+                  <h4 className="flow-detail-title">{currentStep.title}</h4>
+                  <p className="flow-detail-body">{currentStep.detail}</p>
+                </div>
                 <div className="flow-crypto-strip mono">
                   <span>{currentStep.cryptoTag}</span>
                 </div>
@@ -744,9 +774,13 @@ export function HowAudrenWorksVisual() {
                   <span>Public ledger view</span>
                 </div>
 
-                <div className="flow-solscan-rows">
-                  {flow.solscan.map((row) => (
-                    <div key={row.label} className={`flow-solscan-row is-${row.visibility}`}>
+                <div key={flow.id} className="flow-solscan-rows">
+                  {flow.solscan.map((row, rowIdx) => (
+                    <div
+                      key={row.label}
+                      className={`flow-solscan-row is-${row.visibility}`}
+                      style={{ animationDelay: `${rowIdx * 70}ms` }}
+                    >
                       <div className="flow-solscan-meta">
                         <span className="flow-solscan-label" style={{ fontWeight: 500 }}>
                           {row.label}
@@ -804,7 +838,26 @@ export function HowAudrenWorksVisual() {
       </section>
 
       {/* ================================================================
-          SECTION 2: CRYPTOGRAPHIC SOUNDNESS AND ON-CHAIN CHECKS
+          SECTION 2: ZERO-INDEXER WALLET DISCOVERY
+         ================================================================ */}
+      <section className="section section-ruled" id="discovery">
+        <div className="container">
+          <div className="section-head-split">
+            <div>
+              <h2>How your wallet finds its own payments.</h2>
+            </div>
+            <p className="section-sub">
+              Nobody keeps a list of who received what. Your device reads the same public pages
+              as everyone else and recognises its own notes locally, using ordinary Solana RPC and
+              no indexer.
+            </p>
+          </div>
+          <ViewTagScanner />
+        </div>
+      </section>
+
+      {/* ================================================================
+          SECTION 3: CRYPTOGRAPHIC SOUNDNESS AND ON-CHAIN CHECKS
          ================================================================ */}
       <section className="section section-ruled" id="security">
         <div className="container">
@@ -818,6 +871,8 @@ export function HowAudrenWorksVisual() {
               establish an independent solvency audit. Audren is pre-audit and upgradeable.
             </p>
           </div>
+
+          <AttackSimulator />
 
           <div className="soundness-grid">
             {SOUNDNESS_PILLARS.map((item) => (

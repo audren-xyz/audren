@@ -113,7 +113,7 @@ ERROR_DOCS: dict[str, str] = {
     "SubtreePageFull": "Active SubtreePage has reached 256 note commitments.",
     "SubtreePageMismatch": "Provided SubtreePage sequence does not match active lane leaf index.",
     "SubrootPageMismatch": "Provided SubtreeRootPage sequence does not match finalized subtree index.",
-    "CheckpointTooSoon": "Checkpoint epoch is not strictly greater than the existing slot epoch.",
+    "CheckpointTooSoon": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots.",
     "CheckpointExpired": "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots.",
     "CheckpointMismatch": "Referenced RootCheckpoint account is uninitialized or belongs to another pool.",
     "ProofVerificationFailed": "BN254 Groth16 proof verification or ctx_hash binding failed.",
@@ -637,7 +637,7 @@ def build_audren_codama(core: dict) -> dict:
         ix_node(
             "updatePool",
             tags["TAG_UPDATE_POOL"],
-            ["Update pool governance parameters or execute two-step authority transfer / renounce (renounce requires !paused)."],
+            ["Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."],
             [
                 ix_acc("signer", False, True, ["Pool authority (or pending_authority for AcceptAuthority)."]),
                 ix_acc("poolState", True, False, ["PoolState PDA."]),
@@ -645,7 +645,7 @@ def build_audren_codama(core: dict) -> dict:
             [
                 ix_arg("poolId", num_t("u32")),
                 ix_arg("action", num_t("u8"), ["0=UpdateParams, 1=ProposeAuthority, 2=AcceptAuthority, 3=RenounceAuthority."]),
-                ix_arg("payload", bytes_t(), ["UpdateParams: ckpt_interval(8)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."]),
+                ix_arg("payload", bytes_t(), ["UpdateParams: ckpt_interval(8, immutable — must equal PoolState.ckpt_interval)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."]),
             ],
         ),
     ]

@@ -1,12 +1,14 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, type CSSProperties } from 'react'
 import Link from 'next/link'
 import { ArrowLeft, ArrowRight, ArrowUpRight } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import { AUDREN, MEASURED_CU_ROWS, explorerAddress, solscanAddress } from '@/lib/protocol'
 import styles from '@/components/SubpageShell.module.css'
+import { MemoFetchModes } from '@/components/motion/MemoFetchModes'
+import { useHydrated, useInView } from '@/components/motion/hooks'
 
 const INSTRUCTIONS = [
   {
@@ -61,7 +63,7 @@ const INSTRUCTIONS = [
     tag: '0x08',
     name: 'UpdatePool',
     summary:
-      'Authority-signed governance instruction supporting parameter updates (checkpoint cadence and rent fees), 2-step authority transfer via pending_authority, and permanent authority renouncement.',
+      'Authority-signed governance instruction supporting parameter updates (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool), 2-step authority transfer via pending_authority, and permanent authority renouncement (forbidden while paused).',
   },
 ] as const
 
@@ -154,6 +156,10 @@ const MAX_TX_CU = 1_400_000
 
 export function ArchitectureExperience() {
   const [activeSlice, setActiveSlice] = useState<number>(1)
+  const [cuRef, cuInView] = useInView<HTMLDivElement>()
+  const hydrated = useHydrated()
+  const [cuSeen, setCuSeen] = useState(false)
+  if (cuInView && !cuSeen) setCuSeen(true)
   const slice = MEMO_PAGE_MAP[activeSlice] ?? MEMO_PAGE_MAP[0]
 
   return (
@@ -298,6 +304,8 @@ export function ArchitectureExperience() {
                   : 'Full in strict mode · on hit in opt-in fast mode'}
               </span>
             </div>
+
+            <MemoFetchModes />
           </div>
         </section>
 
@@ -323,8 +331,8 @@ export function ArchitectureExperience() {
                 </div>
                 <span>ExecViaEscrow leaves &gt;1.2M CU for external DeFi CPI</span>
               </div>
-              <div className={styles.cuList}>
-                {MEASURED_CU_ROWS.map((row) => {
+              <div ref={cuRef} className={styles.cuList} data-inview={!hydrated || cuSeen ? 'true' : 'false'}>
+                {MEASURED_CU_ROWS.map((row, rowIdx) => {
                   const pct = Math.max(2, Math.min(100, (row.cu / MAX_TX_CU) * 100))
                   return (
                     <div key={row.ix} className={styles.cuRow}>
@@ -332,7 +340,7 @@ export function ArchitectureExperience() {
                       <div className={styles.cuTrack} aria-label={`${row.ix}: ${row.cu.toLocaleString()} CU`}>
                         <div
                           className={`${styles.cuFill} ${pct > 65 ? styles.cuFillHigh : ''}`}
-                          style={{ width: `${pct.toFixed(1)}%` }}
+                          style={{ '--cu': (pct / 100).toFixed(3), '--i': rowIdx } as CSSProperties}
                         />
                       </div>
                       <span className={styles.cuVal}>{row.cu.toLocaleString()} CU</span>
