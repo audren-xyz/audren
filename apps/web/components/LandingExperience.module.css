@@ -457,20 +457,20 @@
   padding: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  gap: 20px;
 }
 
 .traceStep {
-  background: rgba(244, 241, 234, 0.72);
-  border-radius: 4px;
-  padding: 16px;
+  padding: 2px 0 2px 16px;
+  border-left: 1px solid var(--divider);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
-.traceExit .traceStep {
-  background: rgba(250, 248, 243, 0.78);
+.traceStep:first-child {
+  padding-left: 0;
+  border-left: 0;
 }
 
 .tracePhase {
@@ -562,17 +562,17 @@
 .defiGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px;
+  gap: 44px 48px;
 }
 
 .defiCell {
-  background: var(--surface);
+  background: transparent;
   border: 0;
-  border-radius: var(--radius-card);
-  padding: 26px;
+  padding: 20px 0 0;
+  border-top: 1px solid var(--divider);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .defiCell h3 {
@@ -596,12 +596,11 @@
   font-weight: 400;
   color: var(--green);
   margin-top: auto;
-  padding-top: 14px;
-  border-top: 1px solid var(--divider);
+  padding-top: 8px;
 }
 
 .defiCellSession {
-  background: var(--sand-wash);
+  border-top-color: rgba(110, 73, 40, 0.28);
 }
 
 .defiCellSession .defiFlowTag {
@@ -619,20 +618,24 @@
 .compareGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px;
+  gap: 32px;
+  align-items: start;
 }
 
 .compareCol {
-  background: var(--surface);
+  background: transparent;
   border: 0;
-  border-radius: var(--radius-card);
-  padding: 28px;
+  padding: 24px 0 0;
+  border-top: 1px solid var(--divider);
   display: flex;
   flex-direction: column;
 }
 
 .compareColAudren {
   background: var(--green-wash);
+  border-top: 0;
+  border-radius: var(--radius-card);
+  padding: 28px;
 }
 
 .compareCol h3 {
@@ -1127,7 +1130,18 @@
 
   .traceSteps {
     grid-template-columns: 1fr;
-    gap: 10px;
+    gap: 14px;
+  }
+
+  .traceStep {
+    padding: 12px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--divider);
+  }
+
+  .traceStep:first-child {
+    padding-top: 0;
+    border-top: 0;
   }
 
   .boundaryLedger {

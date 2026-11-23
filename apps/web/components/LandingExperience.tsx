@@ -309,12 +309,13 @@ export function LandingExperience() {
         {/* HERO */}
         <section className={`container ${styles.hero}`}>
           <div className={styles.heroCopy}>
-            <h1>Private money on Solana. Existing tokens, one shared pool.</h1>
+            <h1>Private payments on Solana with your existing tokens.</h1>
             <p>
-              Deposit SOL, Classic SPL, or transferable Token-2022 assets without a wrapper token.
-              Make private payments, compose with Solana DeFi via isolated escrow CPI (DEX swaps,
-              lending supply, liquid staking, yield vaults, RWAs), or fund fresh wallets directly
-              with self-paying fees and atomic WSOL unwrap. Your spending keys stay on your device.
+              Deposit SOL, Classic SPL, or transferable Token-2022 assets into one shared pool
+              without a wrapper token. Make private payments, compose with Solana DeFi via isolated
+              escrow CPI (DEX swaps, lending supply, liquid staking, yield vaults, RWAs), or fund
+              fresh wallets directly with self-paying fees and atomic WSOL unwrap. Your spending
+              keys stay on your device.
             </p>
             <div className={styles.actions}>
               <Link href="/demo" className="btn-ink">
@@ -341,9 +342,10 @@ export function LandingExperience() {
         <section className={styles.assetBand} aria-label="Supported Solana assets">
           <div className={`container ${styles.assetBandInner}`}>
             <div className={styles.assetLead}>
-              <p className={styles.assetHeading}>Original assets. No Audren wrapper token.</p>
+              <p className={styles.assetHeading}>No wrapper token or mint allowlist.</p>
               <p className={styles.assetNote}>
-                No protocol mint allowlist or bridge. Token issuer restrictions still apply.
+                Works with existing Solana assets without a bridge. Token issuer restrictions still
+                apply.
               </p>
             </div>
             <div className={styles.assetTypes}>
@@ -357,7 +359,7 @@ export function LandingExperience() {
         {/* SHARED VAULT & GLOBAL MASP */}
         <section className={`container ${styles.lifeSection}`} id="use-cases">
           <div className={styles.sectionIntro}>
-            <h2>Enter the shared vault once. Pay privately, trade, and return.</h2>
+            <h2>Deposit once to pay privately, use DeFi, or exit on demand.</h2>
             <p>
               Public vaults hold the pooled assets while private notes authorize spending. Proofs
               conceal the spent note across the entire historical global pool. Public amounts,
@@ -604,7 +606,7 @@ export function LandingExperience() {
         <section className={styles.mechanismSection} id="how-it-works">
           <div className="container">
             <div className={styles.sectionIntro}>
-              <h2>Public assets on Solana. Spending keys on your device.</h2>
+              <h2>Public vault balances on Solana, with spending keys on your device.</h2>
               <p>
                 Anyone can inspect the pooled SOL and token accounts on Solscan. Public assets offer
                 useful transparency, though they do not independently reveal or verify all private
