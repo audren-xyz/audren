@@ -407,99 +407,134 @@ export async function publishCheckpointIfNeeded(params: {
     ])
     const signed = buildAndSignV1Transaction(relayerSecret32, bh.value.blockhash, [ckIx], {
       computeUnitLimit: 120_000,
-      priorityFeeLamports: 5_000n,
+      priorityFeeLamports: 25_000n,
     })
     const sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, [relayerB58])
     return { signed, sim }
   }
 
+  const alignEpochWindow = async () => {
+    const ckptInterval = snapshot.pool.ckptInterval > 0n ? snapshot.pool.ckptInterval : 1n
+    if (ckptInterval > 16n) return
+    let curSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
+    const rem = curSlot % ckptInterval
+    if (rem >= ckptInterval - 3n) {
+      const waitMs = Number(ckptInterval - rem) * SLOT_DURATION_MS + 150
+      await new Promise((r) => setTimeout(r, waitMs))
+      curSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
+    }
+    const freshEpoch = Number(curSlot / ckptInterval)
+    if (freshEpoch >= publishEpoch) {
+      publishEpoch = freshEpoch
+      publishSlotIdx = Number((curSlot / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
+    }
+  }
+
   try {
-    let { signed, sim } = await buildAndSimulate(publishSlotIdx)
-
-    // Handle slot boundary tick or concurrent publisher race gracefully (including fast 8-slot epochs).
-    if (sim.err) {
-      let freshSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
-      const ckptInterval = snapshot.pool.ckptInterval > 0n ? snapshot.pool.ckptInterval : 1n
-      const rem = freshSlot % ckptInterval
-      if (ckptInterval <= 16n && rem >= ckptInterval - 2n) {
-        const waitMs = Number(ckptInterval - rem) * SLOT_DURATION_MS + 150
-        await new Promise((r) => setTimeout(r, waitMs))
-        freshSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
-      }
-      const freshEpoch = Number(freshSlot / ckptInterval)
-      const freshSlotIdx = Number((freshSlot / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
-      if (freshEpoch > publishEpoch) {
-        publishEpoch = freshEpoch
-        publishSlotIdx = freshSlotIdx
-        const retried = await buildAndSimulate(publishSlotIdx)
-        signed = retried.signed
-        sim = retried.sim
-      }
-    }
-
-    if (sim.err) {
-      // Another publisher may have landed the checkpoint in this epoch; re-check cleanly.
-      const freshSnap = await fetchPoolCheckpointSnapshot(rpcUrl, poolId).catch(() => null)
-      if (freshSnap) {
-        const reEval = evaluateCheckpointState(freshSnap)
-        if (reEval.action === 'up_to_date') {
-          return {
-            ok: true,
-            cluster,
-            poolId,
-            status: 'up_to_date',
-            epoch: reEval.epoch,
-            ...(reEval.slotIdx !== undefined ? { slotIdx: reEval.slotIdx } : {}),
-            totalLeaves: reEval.totalLeaves.toString(),
-            lastCkptTotalLeaves: reEval.lastCkptTotalLeaves.toString(),
-          }
-        }
-        if (reEval.action === 'cooldown') {
-          return {
-            ok: true,
-            cluster,
-            poolId,
-            status: 'cooldown',
-            epoch: reEval.epoch,
-            slotsRemaining: reEval.slotsRemaining,
-            waitMs: reEval.waitMs,
-            totalLeaves: reEval.totalLeaves.toString(),
-            lastCkptTotalLeaves: reEval.lastCkptTotalLeaves.toString(),
-          }
-        }
-      }
-      throw new CheckpointError(
-        `PublishCheckpoint simulation failed: ${JSON.stringify(sim.err)}`,
-        502,
-        'CHECKPOINT_SIMULATION_FAILED',
-      )
-    }
-
-    sentSig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
-      toBase64(signed.wireBytes),
-      { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 2 },
-    ])
-
+    await alignEpochWindow()
     let confirmedSlot: number | undefined
-    if (confirm) {
-      const conf = await waitForConfirmation(rpcUrl, sentSig)
-      confirmedSlot = conf.slot
+    for (let sendAttempt = 0; sendAttempt < 2; sendAttempt++) {
+      let { signed, sim } = await buildAndSimulate(publishSlotIdx)
+
+      // Handle slot boundary tick or concurrent publisher race gracefully (including fast 8-slot epochs).
+      if (sim.err) {
+        let freshSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
+        const ckptInterval = snapshot.pool.ckptInterval > 0n ? snapshot.pool.ckptInterval : 1n
+        const rem = freshSlot % ckptInterval
+        if (ckptInterval <= 16n && rem >= ckptInterval - 3n) {
+          const waitMs = Number(ckptInterval - rem) * SLOT_DURATION_MS + 150
+          await new Promise((r) => setTimeout(r, waitMs))
+          freshSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
+        }
+        const freshEpoch = Number(freshSlot / ckptInterval)
+        const freshSlotIdx = Number((freshSlot / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
+        if (freshEpoch > publishEpoch) {
+          publishEpoch = freshEpoch
+          publishSlotIdx = freshSlotIdx
+          const retried = await buildAndSimulate(publishSlotIdx)
+          signed = retried.signed
+          sim = retried.sim
+        }
+      }
+
+      if (sim.err) {
+        // Another publisher may have landed the checkpoint in this epoch; re-check cleanly.
+        const freshSnap = await fetchPoolCheckpointSnapshot(rpcUrl, poolId).catch(() => null)
+        if (freshSnap) {
+          const reEval = evaluateCheckpointState(freshSnap)
+          if (reEval.action === 'up_to_date') {
+            return {
+              ok: true,
+              cluster,
+              poolId,
+              status: 'up_to_date',
+              epoch: reEval.epoch,
+              ...(reEval.slotIdx !== undefined ? { slotIdx: reEval.slotIdx } : {}),
+              totalLeaves: reEval.totalLeaves.toString(),
+              lastCkptTotalLeaves: reEval.lastCkptTotalLeaves.toString(),
+            }
+          }
+          if (reEval.action === 'cooldown') {
+            return {
+              ok: true,
+              cluster,
+              poolId,
+              status: 'cooldown',
+              epoch: reEval.epoch,
+              slotsRemaining: reEval.slotsRemaining,
+              waitMs: reEval.waitMs,
+              totalLeaves: reEval.totalLeaves.toString(),
+              lastCkptTotalLeaves: reEval.lastCkptTotalLeaves.toString(),
+            }
+          }
+        }
+        throw new CheckpointError(
+          `PublishCheckpoint simulation failed: ${JSON.stringify(sim.err)}`,
+          502,
+          'CHECKPOINT_SIMULATION_FAILED',
+        )
+      }
+
+      sentSig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
+        toBase64(signed.wireBytes),
+        { encoding: 'base64', preflightCommitment: 'processed', maxRetries: 2 },
+      ])
+
+      if (confirm) {
+        try {
+          const conf = await waitForConfirmation(rpcUrl, sentSig)
+          confirmedSlot = conf.slot
+          break
+        } catch (confirmErr) {
+          // If the 8-slot epoch boundary ticked while the tx was in flight (Custom:6001 InvalidPda), retry once cleanly.
+          if (sendAttempt === 0 && String(confirmErr).includes('"Custom":6001')) {
+            await alignEpochWindow()
+            continue
+          }
+          throw confirmErr
+        }
+      }
+      break
     }
 
+    const finalSig = sentSig
+    if (!finalSig) {
+      throw new CheckpointError('PublishCheckpoint did not produce a transaction signature', 502, 'CHECKPOINT_SUBMIT_FAILED')
+    }
     published = true
     return {
       ok: true,
       cluster,
       poolId,
       status: 'published',
-      signature: sentSig,
+      signature: finalSig,
       epoch: publishEpoch,
       slotIdx: publishSlotIdx,
       ...(confirmedSlot !== undefined ? { slot: confirmedSlot } : {}),
       totalLeaves: evalRes.totalLeaves.toString(),
       lastCkptTotalLeaves: evalRes.lastCkptTotalLeaves.toString(),
-      solscanUrl: solscanTxUrl(sentSig, cluster),
-      explorerUrl: explorerTxUrl(sentSig, cluster),
+      solscanUrl: solscanTxUrl(finalSig, cluster),
+      explorerUrl: explorerTxUrl(finalSig, cluster),
     }
   } finally {
     if (lock && lockHeld) {

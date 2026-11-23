@@ -38,7 +38,7 @@ Mainnet releases use deterministic Linux/Docker builds via the Solana Foundation
 | **Target Architecture** | `sBPFv3` (`--arch v3 --cargo-build-sbf-args="--tools-version v1.57"`) |
 | **Workspace / Library** | `--workspace-path program --library-name audren` |
 | **Otter Verify PDA (Mainnet)** | `FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt` |
-| **Verified Source Commit (`v1.2.0`)** | `936cc659bd6286417a692e7970d3cbd91a49e9bd` |
+| **Verified Source Commit (`v1.2.0`)** | `b60ec029f42551eb4f9678783dee1b73f9ea9f28` |
 | **Source Repository** | `https://github.com/audren-xyz/audren` |
 | **GitHub Release** | [`v1.2.0`](https://github.com/audren-xyz/audren/releases/tag/v1.2.0) |
 | **Explorer / OtterSec Status** | [Mainnet Verified Build](https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build) · [`verify.osec.io`](https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3) |
