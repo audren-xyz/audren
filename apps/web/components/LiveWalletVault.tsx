@@ -1748,6 +1748,7 @@ export function LiveWalletVault() {
         const info = await relayClient.getInfo(cluster)
         if (!info.relayerPubkey) throw new Error(`Relayer at ${relayUrl} has no fee payer for ${cluster}`)
         payerPubkey = info.relayerPubkey
+        const prevWithdrawHadChange = amount < totalIn
         await fetchRelayerFee(omitNf1, totalIn)
 
         const requiredWithFee =
@@ -1756,15 +1757,33 @@ export function LiveWalletVault() {
           const expanded = selectInputNotesForMint(selectedNote, unspentNotes, requiredWithFee)
           if (!expanded) {
             throw new Error(
-              `Insufficient note balance to cover amount + relayer fee (${formatUnits(relayerFeeAmount, decimals)} ${symbol}). Use "Max" to auto-fit.`,
+              mode === 'withdraw'
+                ? `Insufficient note balance to cover withdrawal + relayer fee (${formatUnits(relayerFeeAmount, decimals)} ${symbol}). Click "Max (net of fee)" to auto-fit.`
+                : `Insufficient note balance to cover send + relayer fee (${formatUnits(feeShieldedAddr ? relayerFeeAmount : 0n, decimals)} ${symbol}). Use "Max" to auto-fit.`,
             )
           }
           const grewToTwo = expanded.length === 2 && inputNotes.length === 1
+          const omitNf1Changed = grewToTwo && omitNf1
           inputNotes = expanded
           totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
-          if (grewToTwo && omitNf1) {
-            omitNf1 = false
+          if (inputNotes.length > 1) omitNf1 = false
+          const withdrawOutputGrew = mode === 'withdraw' && !prevWithdrawHadChange && amount < totalIn
+          if (omitNf1Changed || (grewToTwo && mode === 'withdraw') || withdrawOutputGrew) {
             await fetchRelayerFee(false, totalIn)
+            const postRequiredWithFee =
+              amount + (mode === 'send' ? (feeShieldedAddr ? relayerFeeAmount : 0n) : relayerFeeAmount)
+            if (totalIn < postRequiredWithFee) {
+              const reExpanded = selectInputNotesForMint(selectedNote, unspentNotes, postRequiredWithFee)
+              if (!reExpanded) {
+                throw new Error(
+                  mode === 'withdraw'
+                    ? `Insufficient note balance to cover withdrawal + relayer fee (${formatUnits(relayerFeeAmount, decimals)} ${symbol}). Click "Max (net of fee)" to auto-fit.`
+                    : `Insufficient note balance to cover send + relayer fee (${formatUnits(feeShieldedAddr ? relayerFeeAmount : 0n, decimals)} ${symbol}). Use "Max" to auto-fit.`,
+                )
+              }
+              inputNotes = reExpanded
+              totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
+            }
           }
         }
       } else if (!connected) {
@@ -2060,6 +2079,11 @@ export function LiveWalletVault() {
       if (!snap.initialized) {
         throw new Error(`Pool #0 is not initialized on ${cluster} yet`)
       }
+      const currentEpoch = BigInt(snap.currentEpoch ?? '0')
+      const mintInfo = isNativeSol
+        ? null
+        : await resolveMintOnChain(cluster, mintStr, currentEpoch).catch(() => null)
+      const decimals = isNativeSol ? 9 : mintInfo?.decimals ?? info.decimals
 
       const relayClient = new AudrenRelayClient(relayUrl)
       let payerPubkey = connected?.address ?? ''
@@ -2090,7 +2114,7 @@ export function LiveWalletVault() {
       const mergedAmount = noteA.amount + noteB.amount - effectiveShieldedFee
       if (mergedAmount <= 0n) {
         throw new Error(
-          `Combined balance of the 2 smallest ${info.symbol} notes (${formatUnits(noteA.amount + noteB.amount, info.decimals)} ${info.symbol}) does not exceed the relayer fee (${formatUnits(effectiveShieldedFee, info.decimals)} ${info.symbol}).`,
+          `Combined balance of the 2 smallest ${info.symbol} notes (${formatUnits(noteA.amount + noteB.amount, decimals)} ${info.symbol}) does not exceed the relayer fee (${formatUnits(effectiveShieldedFee, decimals)} ${info.symbol}).`,
         )
       }
 
@@ -2259,7 +2283,7 @@ export function LiveWalletVault() {
         cluster,
         proverMs: elapsedMs,
         relayed: useRelayer,
-        summary: `Consolidated 2 ${info.symbol} notes into 1 note (${formatUnits(mergedAmount, info.decimals)} ${info.symbol})`,
+        summary: `Consolidated 2 ${info.symbol} notes into 1 note (${formatUnits(mergedAmount, decimals)} ${info.symbol})`,
       })
       setStatusMsg('Merge confirmed. Syncing CompactWalletStore…')
       await syncVault(keys, cluster, store, walletScope)
@@ -2400,27 +2424,28 @@ export function LiveWalletVault() {
           tokenProgram: m.tokenProgram,
         }))
 
-        const fetchExecFee = async (curOmitNf1: boolean) => {
+        const baseMissingAtaCount = relaySetupAtas.length
+        let needsSwapFeeAtaSetup = false
+        const computeSwapOutputCount = (curTotalIn: bigint) =>
+          1 + (curTotalIn > amountIn || !economyMode ? 1 : 0)
+
+        const fetchExecFee = async (curOmitNf1: boolean, curOutputCount: number) => {
           const fq = await relayClient.getFeeQuote({
             cluster,
             op: 'exec_escrow',
             mint: swapFeeOnOutput ? swapOutMint : inMintStr,
             amount: swapFeeOnOutput ? activeQuoteOut : amountIn.toString(),
             feeOnOutput: swapFeeOnOutput,
-            missingAtaCount: relaySetupAtas.length,
+            outputCount: curOutputCount,
+            missingAtaCount: baseMissingAtaCount,
             omitNf1: curOmitNf1,
           })
           relayerFeeAmount = BigInt(fq.relayerFee || '0')
           relayerFeeRecipient = fq.feeRecipient
-          if (relayerFeeAmount > 0n && fq.needsFeeAtaSetup) {
-            const feeMint = swapFeeOnOutput ? swapOutMint : inMintStr
-            const feeTp = swapFeeOnOutput ? outTokenProgram : inTokenProgram
-            if (!relaySetupAtas.some((a) => a.owner === payerPubkey && a.mint === feeMint)) {
-              relaySetupAtas.push({ owner: payerPubkey, mint: feeMint, tokenProgram: feeTp })
-            }
-          }
+          needsSwapFeeAtaSetup = Boolean(relayerFeeAmount > 0n && fq.needsFeeAtaSetup)
         }
-        await fetchExecFee(omitNf1)
+        const initialOutputCount = computeSwapOutputCount(totalIn)
+        await fetchExecFee(omitNf1, initialOutputCount)
 
         if (!swapFeeOnOutput && relayerFeeAmount > 0n && totalIn < amountIn + relayerFeeAmount) {
           const expanded = selectInputNotesForMint(selectedNote, unspentNotes, amountIn + relayerFeeAmount)
@@ -2430,11 +2455,31 @@ export function LiveWalletVault() {
             )
           }
           const grewToTwo = expanded.length === 2 && inputNotes.length === 1
+          const omitNf1Changed = grewToTwo && omitNf1
           inputNotes = expanded
           totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
-          if (grewToTwo && omitNf1) {
-            omitNf1 = false
-            await fetchExecFee(false)
+          if (inputNotes.length > 1) omitNf1 = false
+          const nextOutputCount = computeSwapOutputCount(totalIn)
+          if (omitNf1Changed || nextOutputCount !== initialOutputCount) {
+            await fetchExecFee(omitNf1, nextOutputCount)
+            if (relayerFeeAmount > 0n && totalIn < amountIn + relayerFeeAmount) {
+              const reExpanded = selectInputNotesForMint(selectedNote, unspentNotes, amountIn + relayerFeeAmount)
+              if (!reExpanded) {
+                throw new Error(
+                  `Insufficient note balance for swap + input fee (${formatUnits(relayerFeeAmount, inDec)} ${inSym})`,
+                )
+              }
+              inputNotes = reExpanded
+              totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
+            }
+          }
+        }
+
+        if (needsSwapFeeAtaSetup) {
+          const feeMint = swapFeeOnOutput ? swapOutMint : inMintStr
+          const feeTp = swapFeeOnOutput ? outTokenProgram : inTokenProgram
+          if (!relaySetupAtas.some((a) => a.owner === payerPubkey && a.mint === feeMint)) {
+            relaySetupAtas.push({ owner: payerPubkey, mint: feeMint, tokenProgram: feeTp })
           }
         }
       } else {
@@ -2545,6 +2590,13 @@ export function LiveWalletVault() {
         outputs[0] = { stealthOwner: chOwner, assetId: assetIn, amount: changeAmt, blinding: mCh.blinding }
         changeMask = 1
         changeMemos = mCh.memo90
+      } else if (!economyMode) {
+        // Default privacy mode: pad full-note swap sweeps with a zero-value encrypted change note
+        // so changeMask = 1 is indistinguishable on-chain from partial swaps with change.
+        const padCh = createZeroDummyOutput(assetIn, selectedNote.mint)
+        outputs[0] = padCh.witness
+        changeMask = 1
+        changeMemos = padCh.memo90
       }
 
       const roll = computePageRollovers({
@@ -3563,10 +3615,10 @@ export function LiveWalletVault() {
                           onChange={(e) => setEconomyMode(e.target.checked)}
                         />
                         <div>
-                          <span className="lv-checkbox-title">Economy mode (1 nullifier on single-note spends)</span>
+                          <span className="lv-checkbox-title">Economy mode (1 nullifier and unpadded full-note sweeps)</span>
                           <span>
-                            Saves ~0.00089 SOL in permanent NullifierPDA rent on 1-note spends by omitting the dummy second nullifier.
-                            Disabled automatically when combining 2 notes.
+                            Saves permanent NullifierPDA rent on 1-note spends by omitting the dummy second nullifier and skips the zero-value padded change note on full-note swaps.
+                            Disabled automatically for nullifiers when combining 2 notes.
                           </span>
                         </div>
                       </label>

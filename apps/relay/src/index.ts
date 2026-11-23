@@ -22,7 +22,10 @@ import {
   MAX_ESCROW_SHARDS,
   PROTOCOL_VERSION,
   deriveEscrowPda,
+  deriveLanePda,
   deriveVaultAuthPda,
+  listReferencedPageSlots,
+  planMissingOpenPageIxs,
 } from './solana/audren'
 import {
   CheckpointError,
@@ -296,6 +299,7 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
     rentSchedule: rentSchedule
       ? {
           nullifierRentLamports: rentSchedule.nullifierRentLamports.toString(),
+          nfPageRentPerNfLamports: rentSchedule.nfPageRentPerNfLamports.toString(),
           noteRentPerLeafLamports: rentSchedule.pageRentPerNoteLamports.toString(),
           pageRentPerNoteLamports: rentSchedule.pageRentPerNoteLamports.toString(),
           ataRentLamports: rentSchedule.ataRentLamports.toString(),
@@ -1007,7 +1011,57 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   let lockHeld = true
   let reservationId: string | undefined
   try {
-    // 2. Build full instruction list (validated setupAtas + strictly allowlisted preInstructions + Audren ix)
+    // 2. Fetch blockhash + pre-simulation balances + LaneTreeState + primary/rollover page PDAs
+    //    in ONE parallel RPC batch (zero extra round-trip).
+    const watchAddresses = [relayer.pubkeyB58]
+    if (verdict.watchedRelayerFeeAta) watchAddresses.push(verdict.watchedRelayerFeeAta)
+
+    const lanePdaB58 = base58Encode(deriveLanePda(verdict.poolId, verdict.outLaneId).address)
+    const pageSlots = listReferencedPageSlots(verdict.pages)
+    const laneFetchIdx = watchAddresses.length
+    const pagesFetchStartIdx = laneFetchIdx + 1
+    const preFetchAddresses = [...watchAddresses, lanePdaB58, ...pageSlots.map((p) => p.pda)]
+
+    const [bhRes, preAccounts] = await Promise.all([
+      rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
+        { commitment: 'confirmed' },
+      ]),
+      fetchMultipleAccounts(rpcUrl, preFetchAddresses),
+    ])
+
+    const preRelayerLamports = BigInt(preAccounts[0]?.lamports ?? 0)
+    const preFeeUnits = verdict.watchedRelayerFeeAta
+      ? readSplTokenAccountAmount(preAccounts[1]?.bytes ?? null)
+      : 0n
+
+    // 3. Auto-prepend `OpenPage` (Tag 2, reimbursed from `LaneRentVault`) for any missing primary
+    //    or rollover page PDA after verifying canonical PDA derivation against `LaneTreeState`.
+    const pagePlan = planMissingOpenPageIxs({
+      payerB58: relayer.pubkeyB58,
+      poolId: verdict.poolId,
+      outLaneId: verdict.outLaneId,
+      laneAcc: preAccounts[laneFetchIdx] ?? null,
+      pages: verdict.pages,
+      pageSlots,
+      pageAccs: pageSlots.map((_, idx) => preAccounts[pagesFetchStartIdx + idx] ?? null),
+    })
+    if (!pagePlan.ok) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: true,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        { error: pagePlan.error, code: 'INVALID_PAGE_PDA' },
+        400,
+      )
+    }
+
+    // 4. Build full instruction list (setupAtas + OpenPage Tag 2 + allowlisted preInstructions + Audren ix)
     const instructions: SolanaInstruction[] = []
 
     for (const s of verdict.setupAtas) {
@@ -1022,6 +1076,10 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
+    for (const openIx of pagePlan.openPageIxs) {
+      instructions.push(openIx)
+    }
+
     // Prepend strictly-allowlisted zero-signer DeFi refresh cranks (Tag 7 only)
     for (const preIx of verdict.preInstructions) {
       instructions.push(preIx)
@@ -1033,32 +1091,20 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       data: verdict.ixData,
     })
 
-    const requestedCu = Math.trunc(rawCu) + verdict.preInstructions.length * 40_000
-    const cuLimit = Math.min(Math.max(requestedCu, 200_000), 1_400_000)
+    const baseCu = Math.max(Math.trunc(rawCu), 200_000)
+    const requestedCu =
+      baseCu +
+      verdict.preInstructions.length * 40_000 +
+      pagePlan.openPageIxs.length * 20_000
+    const cuLimit = Math.min(requestedCu, 1_400_000)
 
-    // 3. Fetch blockhash + pre-simulation balances in ONE parallel RPC batch
-    const watchAddresses = [relayer.pubkeyB58]
-    if (verdict.watchedRelayerFeeAta) watchAddresses.push(verdict.watchedRelayerFeeAta)
-
-    const [bhRes, preAccounts] = await Promise.all([
-      rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
-        { commitment: 'confirmed' },
-      ]),
-      fetchMultipleAccounts(rpcUrl, watchAddresses),
-    ])
-
-    const preRelayerLamports = BigInt(preAccounts[0]?.lamports ?? 0)
-    const preFeeUnits = verdict.watchedRelayerFeeAta
-      ? readSplTokenAccountAmount(preAccounts[1]?.bytes ?? null)
-      : 0n
-
-    // 4. Compile & sign Solana v1 (0x81) single transaction
+    // 5. Compile & sign Solana v1 (0x81) single transaction
     const signed = buildAndSignV1Transaction(relayer.secret32, bhRes.value.blockhash, instructions, {
       computeUnitLimit: cuLimit,
       priorityFeeLamports: cappedPriority,
     })
 
-    // 5. Pre-flight simulation on Solana RPC before committing lamports:
+    // 6. Pre-flight simulation on Solana RPC before committing lamports:
     //    measures exact SOL outflow and exact fee token/SOL inflow directly from Solana runtime.
     const sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, watchAddresses)
     if (sim.err) {
@@ -1341,6 +1387,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       relayerPubkey: relayer.pubkeyB58,
       priorityFeeLamports: cappedPriority.toString(),
       computeUnitLimit: cuLimit,
+      openedPagesCount: pagePlan.openPageIxs.length,
       simulatedUnitsConsumed: sim.unitsConsumed,
       simulatedCostLamports: simulatedCostLamports.toString(),
       simulatedFeeUnits:

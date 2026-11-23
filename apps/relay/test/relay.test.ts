@@ -26,14 +26,23 @@ import {
   LN_OFF_POOL_ID,
   LN_OFF_VERSION,
   NATIVE_SOL_MINT_BYTES,
+  OPEN_PAGE_KIND_MEMO,
+  OPEN_PAGE_KIND_NULLIFIER,
+  OPEN_PAGE_KIND_SUBROOT,
+  OPEN_PAGE_KIND_SUBTREE,
   PL_OFF_ACTIVE_LANES,
   PL_OFF_CKPT_INTERVAL,
   PL_OFF_MAX_CKPT_AGE,
+  PL_OFF_NF_RENT_FEE,
   PL_OFF_NOTE_RENT_FEE,
   PL_OFF_POOL_ID,
   PL_OFF_VERSION,
   POOL_MAGIC,
   POOL_STATE_LEN,
+  SYSTEM_PROGRAM_ID,
+  TAG_EXEC_VIA_ESCROW,
+  TAG_JOINSPLIT,
+  TAG_OPEN_PAGE,
   TOKEN_2022_PROGRAM_ID,
   WSOL_MINT,
   base58Encode,
@@ -47,8 +56,13 @@ import {
   deriveEscrowPdaSync,
   deriveKeysFromSeed,
   deriveLanePdaSync,
+  deriveLaneRentVaultPdaSync,
+  deriveMemoPdaSync,
+  deriveNfPagePdaSync,
   derivePoolPdaSync,
   deriveStealthOwner,
+  deriveSubrootPdaSync,
+  deriveSubtreePdaSync,
   deriveVaultAuthPdaSync,
   encryptNoteMemo,
   exportFullViewingKey,
@@ -60,9 +74,10 @@ import { findExcludedCpiVenue } from '../src/aggregators/registry'
 import { titanAdapter } from '../src/aggregators/titan'
 import { FirewallError, validateRelaySubmission } from '../src/policy/firewall'
 import { computeNativeFeeQuote, computeSwapFeePlan } from '../src/policy/pricing'
-import { evaluateCheckpointState } from '../src/solana/checkpoint'
-import { fromBase64, toBase64, toHex } from '../src/solana/codec'
-import { computeSwapInputTransferFee } from '../src/solana/rpc'
+import { parseExecEscrowMeta, parseJoinSplitMeta } from '../src/solana/audren'
+import { evaluateCheckpointState, fetchPoolCheckpointSnapshot } from '../src/solana/checkpoint'
+import { base58Decode, fromBase64, readU16le, readU32le, readU64le, toBase64, toHex } from '../src/solana/codec'
+import { computeSwapInputTransferFee, fetchLiveRentSchedule } from '../src/solana/rpc'
 
 // Provide a lightweight stub for Cloudflare's `cloudflare:workers` built-in module when
 // exercising the full Worker HTTP router (`src/index.ts`) inside Node's test runner.
@@ -363,10 +378,11 @@ test('3-mode dynamic pricing computes self_paying shielded_cm2, withdraw, and ex
   const cfg = loadPolicyConfig({} as never)
   const rentSchedule = {
     nullifierRentLamports: 890_880n,
+    nfPageRentPerNfLamports: 113_567n,
     pageRentPerNoteLamports: 1_500_000n,
     ataRentLamports: 2_039_280n,
     baseTxFeeLamports: 5_000n,
-    swapBaselineLamports: 2_395_880n,
+    swapBaselineLamports: 2n * (890_880n + 113_567n) + 2n * 1_500_000n + 20_000n,
     fetchedAt: Date.now(),
   }
   const qTransfer = computeNativeFeeQuote({
@@ -506,6 +522,7 @@ function makePoolStateBytes(params: {
   ckptInterval?: bigint
   maxCkptAge?: bigint
   noteRentFee?: bigint
+  nfRentFee?: bigint
 }): Uint8Array {
   const buf = new Uint8Array(POOL_STATE_LEN)
   const dv = new DataView(buf.buffer)
@@ -516,6 +533,7 @@ function makePoolStateBytes(params: {
   dv.setBigUint64(PL_OFF_CKPT_INTERVAL, params.ckptInterval ?? 16n, true)
   dv.setBigUint64(PL_OFF_MAX_CKPT_AGE, params.maxCkptAge ?? 3600n, true)
   dv.setBigUint64(PL_OFF_NOTE_RENT_FEE, params.noteRentFee ?? 1_000_000n, true)
+  dv.setBigUint64(PL_OFF_NF_RENT_FEE, params.nfRentFee ?? 0n, true)
   return buf
 }
 
@@ -604,7 +622,23 @@ function createMockGuard(overrides?: Partial<{
 }>) {
   const releasedCalls: Array<Record<string, unknown>> = []
   const acquireCalls: Array<Record<string, unknown>> = []
+  const relayReleaseCalls: Array<Record<string, unknown>> = []
+  const relayAuthorizeCalls: Array<Record<string, unknown>> = []
+  const relayCommitCalls: Array<Record<string, unknown>> = []
   const stub = {
+    async begin() {
+      return { allowed: true }
+    },
+    async authorizeSpend(req: Record<string, unknown>) {
+      relayAuthorizeCalls.push(req)
+      return { allowed: true, reservationId: 'mock-res-1' }
+    },
+    async commit(req: Record<string, unknown>) {
+      relayCommitCalls.push(req)
+    },
+    async release(req: Record<string, unknown>) {
+      relayReleaseCalls.push(req)
+    },
     async checkCheckpointRateLimit() {
       return overrides?.rateDecision ?? { allowed: true }
     },
@@ -623,6 +657,9 @@ function createMockGuard(overrides?: Partial<{
     } as unknown as Env['RELAY_GUARD'],
     acquireCalls,
     releasedCalls,
+    relayReleaseCalls,
+    relayAuthorizeCalls,
+    relayCommitCalls,
   }
 }
 
@@ -650,10 +687,11 @@ test('computeNativeFeeQuote: op=transfer ignores amount and prices 1 vs 2 nullif
   const cfg = loadPolicyConfig({} as never)
   const rentSchedule = {
     nullifierRentLamports: 890_880n,
+    nfPageRentPerNfLamports: 113_567n,
     pageRentPerNoteLamports: 1_500_000n,
     ataRentLamports: 2_039_280n,
     baseTxFeeLamports: 5_000n,
-    swapBaselineLamports: 2_395_880n,
+    swapBaselineLamports: 2n * (890_880n + 113_567n) + 2n * 1_500_000n + 20_000n,
     fetchedAt: Date.now(),
   }
 
@@ -678,7 +716,7 @@ test('computeNativeFeeQuote: op=transfer ignores amount and prices 1 vs 2 nullif
   assert.equal(q2.flatFee, true)
   assert.equal(q2.feeBps, 0)
   assert.equal(q2.nullifierCount, 2)
-  const expectedCost2 = 2n * 890_880n + 3n * 1_500_000n + 20_000n
+  const expectedCost2 = 2n * (890_880n + 113_567n) + 3n * 1_500_000n + 20_000n
   assert.equal(q2.estimatedRelayCostLamports, expectedCost2.toString())
   assert.equal(q2.relayerFee, BigInt(Math.ceil(Number(expectedCost2) * 1.1)).toString())
 
@@ -704,7 +742,7 @@ test('computeNativeFeeQuote: op=transfer ignores amount and prices 1 vs 2 nullif
   assert.equal(q1.nullifierCount, 1)
   assert.equal(
     BigInt(q2.estimatedRelayCostLamports) - BigInt(q1.estimatedRelayCostLamports),
-    rentSchedule.nullifierRentLamports,
+    rentSchedule.nullifierRentLamports + rentSchedule.nfPageRentPerNfLamports,
   )
   assert.ok(BigInt(q2.relayerFee) > BigInt(q1.relayerFee))
 
@@ -1321,6 +1359,1150 @@ test('HTTP GET /v1/swap/quote passes netInputAmount to aggregator for Token-2022
       assert.equal(wsolBody.quote.inAmount, '1000000000')
       assert.equal(jupQuotedAmounts[1], '1000000000')
       assert.equal(epochInfoCalls, 1) // no extra getEpochInfo for WSOL
+    },
+  )
+})
+
+// ============================================================================
+// 4. Regression Tests for Critical / High / Medium / Low Relay Fixes
+// ============================================================================
+
+/** Decode a compiled Solana Transaction v1 (`0x81`) wire payload back into instructions + CU limit. */
+function decodeV1Tx(wireBytes: Uint8Array): {
+  computeUnitLimit: number | null
+  accounts: string[]
+  instructions: Array<{ programId: string; accounts: string[]; data: Uint8Array }>
+} {
+  assert.equal(wireBytes[0], 0x81, 'expected Solana Transaction v1 (0x81)')
+  const configMask = readU32le(wireBytes, 4)
+  const numIxs = wireBytes[40]!
+  const numAccs = wireBytes[41]!
+  const accounts: string[] = []
+  let off = 42
+  for (let i = 0; i < numAccs; i++) {
+    accounts.push(base58Encode(wireBytes.subarray(off, off + 32)))
+    off += 32
+  }
+  if ((configMask & 0b11) !== 0) off += 8 // priorityFeeLamports
+  let computeUnitLimit: number | null = null
+  if ((configMask & 0b100) !== 0) {
+    computeUnitLimit = readU32le(wireBytes, off)
+    off += 4
+  }
+  if ((configMask & 0b1000) !== 0) off += 4 // loadedAccountsDataSizeLimit
+  if ((configMask & 0b10000) !== 0) off += 4 // heapSize
+
+  const headers: Array<{ progIdx: number; accCnt: number; dataLen: number }> = []
+  for (let i = 0; i < numIxs; i++) {
+    headers.push({
+      progIdx: wireBytes[off]!,
+      accCnt: wireBytes[off + 1]!,
+      dataLen: readU16le(wireBytes, off + 2),
+    })
+    off += 4
+  }
+  const instructions: Array<{ programId: string; accounts: string[]; data: Uint8Array }> = []
+  for (const h of headers) {
+    const ixAccs: string[] = []
+    for (let j = 0; j < h.accCnt; j++) {
+      ixAccs.push(accounts[wireBytes[off++]!]!)
+    }
+    const data = wireBytes.subarray(off, off + h.dataLen)
+    off += h.dataLen
+    instructions.push({ programId: accounts[h.progIdx]!, accounts: ixAccs, data })
+  }
+  return { computeUnitLimit, accounts, instructions }
+}
+
+test('Finding #6.1: parseJoinSplitMeta & parseExecEscrowMeta reject unknown flags and missing rollover accounts', () => {
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const vaultWsolAta = deriveAssociatedTokenAddressSync(
+    vaultAuth,
+    WSOL_MINT,
+    CLASSIC_TOKEN_PROGRAM_ID,
+  ).address
+  const recipient = base58Encode(new Uint8Array(32).fill(0x33))
+  const nf1 = new Uint8Array(32).fill(0x02)
+
+  // Valid JoinSplit (WSOL unwrap + all 3 rollovers: nextSub, nextMemo, nextNf)
+  const validUnwrapRoll = buildJoinsplitInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 2,
+    outLaneId: 1,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0,
+    assetMode: ASSET_MODE_SPL,
+    unwrapWsol: true,
+    splWithdrawAccs: {
+      mint: WSOL_MINT,
+      vaultAta: vaultWsolAta,
+      tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    },
+    rollover: { nextSubSeq: 1n, nextMemoSeq: 1n, nextNfSeq: 1n },
+    proof192: dummyProof,
+    nf0,
+    nf1,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 500_000_000n,
+    relayerFeeAmount: 2_500_000n,
+    recipient,
+    relayerFeeRecipient: relayerB58,
+    memosBytes: new Uint8Array(0),
+  })
+  const decodedAccs = validUnwrapRoll.accounts.map((a) => ({
+    pubkey: base58Decode(a.pubkey),
+    isSigner: a.isSigner,
+    isWritable: a.isWritable,
+  }))
+  const parsed = parseJoinSplitMeta(validUnwrapRoll.data, decodedAccs)
+  assert.ok(parsed)
+  assert.equal(parsed.poolId, 0)
+  assert.equal(parsed.outLaneId, 1)
+  assert.equal(parsed.unwrapWsol, true)
+  assert.equal(parsed.outSub, deriveSubtreePdaSync(0, 1, 0n).address)
+  assert.equal(parsed.outRoot, deriveSubrootPdaSync(0, 1, 0n).address)
+  assert.equal(parsed.outMemo, deriveMemoPdaSync(0, 1, 0n).address)
+  assert.equal(parsed.nfPage, deriveNfPagePdaSync(0, 1, 0n).address)
+  assert.equal(parsed.nextSub, deriveSubtreePdaSync(0, 1, 1n).address)
+  assert.equal(parsed.nextMemo, deriveMemoPdaSync(0, 1, 1n).address)
+  assert.equal(parsed.nextNf, deriveNfPagePdaSync(0, 1, 1n).address)
+
+  // Unknown flag bits (e.g., bit 4 = 0x10, bit 7 = 0x80) MUST be rejected
+  for (const badBit of [0x10, 0x20, 0x40, 0x80]) {
+    const badData = new Uint8Array(validUnwrapRoll.data)
+    badData[9] = (badData[9]! | badBit) & 0xff
+    assert.equal(parseJoinSplitMeta(badData, decodedAccs), null)
+    assert.throws(
+      () =>
+        validateRelaySubmission(
+          { instructionDataB64: toBase64(badData), accounts: validUnwrapRoll.accounts },
+          relayerPubkey,
+          allowedPre,
+          relayerFvk,
+        ),
+      FirewallError,
+    )
+  }
+
+  // Truncated rollover accounts (flags = 0x07 | 0x08 expects 19 + 3 = 22 accounts; 21 must fail)
+  assert.equal(parseJoinSplitMeta(validUnwrapRoll.data, decodedAccs.slice(0, -1)), null)
+  assert.throws(
+    () =>
+      validateRelaySubmission(
+        {
+          instructionDataB64: toBase64(validUnwrapRoll.data),
+          accounts: validUnwrapRoll.accounts.slice(0, -1),
+        },
+        relayerPubkey,
+        allowedPre,
+        relayerFvk,
+      ),
+    FirewallError,
+  )
+
+  // Single rollover bit set in private transfer with missing trailing account MUST fail
+  const privRoll = buildJoinsplitInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0b001,
+    assetMode: ASSET_MODE_PRIVATE,
+    rollover: { nextMemoSeq: 1n },
+    proof192: dummyProof,
+    nf0,
+    nf1: nf1Zero,
+    cm0: new Uint8Array(32).fill(0x11),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: new Uint8Array(90).fill(0x22),
+  })
+  const privAccs = privRoll.accounts.map((a) => ({
+    pubkey: base58Decode(a.pubkey),
+    isSigner: a.isSigner,
+    isWritable: a.isWritable,
+  }))
+  assert.equal(parseJoinSplitMeta(privRoll.data, privAccs)?.nextMemo, deriveMemoPdaSync(0, 0, 1n).address)
+  assert.equal(parseJoinSplitMeta(privRoll.data, privAccs.slice(0, -1)), null)
+
+  // ExecViaEscrow: unknown flag bits and rollover without router accounts MUST fail
+  const escrow = deriveEscrowPdaSync(0, 2).address
+  const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+  const vaultOutAta = deriveAssociatedTokenAddressSync(vaultAuth, usdcMint, CLASSIC_TOKEN_PROGRAM_ID).address
+  const escrowOutAta = deriveAssociatedTokenAddressSync(escrow, usdcMint, CLASSIC_TOKEN_PROGRAM_ID).address
+  const execRoll = buildExecViaEscrowInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 1,
+    outLaneId: 2,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    escrowShard: 2,
+    changeMask: 0,
+    inKind: EXEC_KIND_SOL,
+    outKind: EXEC_KIND_SPL,
+    outSpl: {
+      mint: usdcMint,
+      vaultAta: vaultOutAta,
+      escrowAta: escrowOutAta,
+      tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    },
+    relayerFeeAmount: 0n,
+    rollover: { nextSubSeq: 1n, nextMemoSeq: 1n },
+    proof192: dummyProof,
+    nf0,
+    nf1: nf1Zero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    amountIn: 100_000_000n,
+    minAmountOut: 10_000_000n,
+    outStealthOwner: new Uint8Array(32).fill(0x02),
+    outBlinding: new Uint8Array(32).fill(0x03),
+    dynMemoHead: new Uint8Array(34).fill(0x04),
+    dynMask56: new Uint8Array(56).fill(0x05),
+    routerProg: base58Encode(new Uint8Array(32).fill(0x55)),
+    routerIxData: new Uint8Array([1, 2, 3]),
+    routerAccounts: [
+      { pubkey: base58Encode(new Uint8Array(32).fill(0x66)), isSigner: false, isWritable: true },
+    ],
+    changeMemos: new Uint8Array(0),
+  })
+  const execAccs = execRoll.accounts.map((a) => ({
+    pubkey: base58Decode(a.pubkey),
+    isSigner: a.isSigner,
+    isWritable: a.isWritable,
+  }))
+  const parsedExec = parseExecEscrowMeta(execRoll.data, execAccs)
+  assert.ok(parsedExec)
+  assert.equal(parsedExec.nextSub, deriveSubtreePdaSync(0, 2, 1n).address)
+  assert.equal(parsedExec.nextMemo, deriveMemoPdaSync(0, 2, 1n).address)
+  assert.equal(parsedExec.nextNf, null)
+
+  const badExecData = new Uint8Array(execRoll.data)
+  badExecData[11] = (badExecData[11]! | 0x40) & 0xff
+  assert.equal(parseExecEscrowMeta(badExecData, execAccs), null)
+  // Removing the sole router account leaves 0 router accounts -> must fail
+  assert.equal(parseExecEscrowMeta(execRoll.data, execAccs.slice(0, -1)), null)
+})
+
+test('Finding #2: handleRelaySubmit auto-prepends OpenPage (Tag 2) for missing rollover & primary pages in 1 batch and rejects spoofed PDAs', async () => {
+  const worker = await getWorker()
+  const mockRpc = 'https://mock-rpc.local/open-page-submit'
+  const outLaneId = 1
+  const lanePda = deriveLanePdaSync(0, outLaneId).address
+  const laneRentVault = deriveLaneRentVaultPdaSync(0, outLaneId).address
+  const poolPda = derivePoolPdaSync(0).address
+  const sub0 = deriveSubtreePdaSync(0, outLaneId, 0n).address
+  const sr0 = deriveSubrootPdaSync(0, outLaneId, 0n).address
+  const memo0 = deriveMemoPdaSync(0, outLaneId, 0n).address
+  const memo1 = deriveMemoPdaSync(0, outLaneId, 1n).address
+  const nfPage0 = deriveNfPagePdaSync(0, outLaneId, 0n).address
+  const nfPage1 = deriveNfPagePdaSync(0, outLaneId, 1n).address
+  const nf1 = new Uint8Array(32).fill(0x02)
+
+  // Lane is at nextLeaf = 111 (memo page 0 has 1 slot left) and nfCount = 599 (nf page 0 has 1 slot left).
+  // A 2-output, 2-nullifier transfer rolls over BOTH memo (0 -> 1) and nfPage (0 -> 1)!
+  const laneBytes = makeLaneStateBytes({ laneId: outLaneId, nextLeaf: 111n, nfCount: 599n })
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+
+  const transferIx = buildJoinsplitInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 1,
+    outLaneId,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0b011,
+    assetMode: ASSET_MODE_PRIVATE,
+    rollover: { nextMemoSeq: 1n, nextNfSeq: 1n },
+    proof192: dummyProof,
+    nf0,
+    nf1,
+    cm0: new Uint8Array(32).fill(0x10),
+    cm1: new Uint8Array(32).fill(0x20),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: new Uint8Array(180).fill(0x33),
+  })
+
+  // Case A: nextMemo (memo1) is missing (null) and nextNf (nfPage1) is 1-lamport pre-funded System-owned (still unopened!)
+  const guardA = createMockGuard()
+  const envA = {
+    RELAY_GUARD: guardA.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+  } as Env
+
+  let getMultiCalls = 0
+  let sentWire: Uint8Array | null = null
+  const accMapA = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [lanePda, { bytes: laneBytes, lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [sub0, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [sr0, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [memo0, { bytes: dummyPageBytes, lamports: 71_480_000, owner: AUDREN_PROGRAM_ID }],
+    [nfPage0, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    // 1-lamport pre-funded System-owned PDA must still be detected as unopened!
+    [nfPage1, { bytes: new Uint8Array(0), lamports: 1, owner: SYSTEM_PROGRAM_ID }],
+  ])
+
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x44)) } },
+        })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        getMultiCalls++
+        const addrs = body.params[0] as string[]
+        assert.ok(addrs.includes(lanePda), 'single batch must include LaneTreeState')
+        assert.ok(addrs.includes(memo1), 'single batch must include nextMemo rollover PDA')
+        assert.ok(addrs.includes(nfPage1), 'single batch must include nextNf rollover PDA')
+        const value = addrs.map((a) => {
+          const hit = accMapA.get(a)
+          return hit
+            ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner }
+            : null
+        })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value } })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: {
+              err: null,
+              logs: ['OpenPage OK', 'OpenPage OK', 'JoinSplit OK'],
+              unitsConsumed: 185_000,
+              accounts: [
+                { lamports: 498_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] },
+              ],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        sentWire = fromBase64(String(body.params[0]))
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5OpenPageMockSig11111111111111111111111111111' })
+      }
+      if (body.method === 'getSignatureStatuses') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: [{ slot: 9999, err: null, confirmationStatus: 'confirmed' }] },
+        })
+      }
+      throw new Error(`Unexpected RPC method: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(transferIx.data),
+            accounts: transferIx.accounts,
+            computeUnitLimit: 300_000,
+          }),
+        }),
+        envA,
+      )
+      assert.equal(res.status, 200)
+      const jsonBody = (await res.json()) as {
+        ok: boolean
+        openedPagesCount: number
+        computeUnitLimit: number
+      }
+      assert.equal(jsonBody.ok, true)
+      assert.equal(jsonBody.openedPagesCount, 2)
+      assert.equal(jsonBody.computeUnitLimit, 340_000) // 300k + 2 * 20k CU headroom
+      assert.equal(getMultiCalls, 1, 'must use ZERO extra RPC round-trips')
+      assert.ok(sentWire)
+
+      const decoded = decodeV1Tx(sentWire)
+      assert.equal(decoded.computeUnitLimit, 340_000)
+      assert.equal(decoded.instructions.length, 3)
+
+      // ix[0]: OpenPage (Tag 2) for MemoPage seq 1
+      const ix0 = decoded.instructions[0]!
+      assert.equal(ix0.programId, AUDREN_PROGRAM_ID)
+      assert.equal(ix0.data.length, 15)
+      assert.equal(ix0.data[0], TAG_OPEN_PAGE)
+      assert.equal(ix0.data[1], OPEN_PAGE_KIND_MEMO)
+      assert.equal(readU32le(ix0.data, 2), 0)
+      assert.equal(ix0.data[6], outLaneId)
+      assert.equal(readU64le(ix0.data, 7), 1n)
+      assert.deepEqual(ix0.accounts, [
+        relayerB58,
+        poolPda,
+        lanePda,
+        laneRentVault,
+        memo1,
+        SYSTEM_PROGRAM_ID,
+      ])
+
+      // ix[1]: OpenPage (Tag 2) for NullifierPage seq 1
+      const ix1 = decoded.instructions[1]!
+      assert.equal(ix1.programId, AUDREN_PROGRAM_ID)
+      assert.equal(ix1.data[0], TAG_OPEN_PAGE)
+      assert.equal(ix1.data[1], OPEN_PAGE_KIND_NULLIFIER)
+      assert.equal(readU32le(ix1.data, 2), 0)
+      assert.equal(ix1.data[6], outLaneId)
+      assert.equal(readU64le(ix1.data, 7), 1n)
+      assert.deepEqual(ix1.accounts, [
+        relayerB58,
+        poolPda,
+        lanePda,
+        laneRentVault,
+        nfPage1,
+        SYSTEM_PROGRAM_ID,
+      ])
+
+      // ix[2]: Original JoinSplit (Tag 6)
+      assert.equal(decoded.instructions[2]!.programId, AUDREN_PROGRAM_ID)
+      assert.equal(decoded.instructions[2]!.data[0], TAG_JOINSPLIT)
+    },
+  )
+
+  // Case B: Spoofed rollover PDA (e.g. arbitrary pubkey or wrong seq/lane) MUST be rejected with 400
+  // before simulation or send, and must release the guard nullifier lock with recordFailure=true!
+  const spoofedAccounts = transferIx.accounts.map((a) => ({ ...a }))
+  // Replace nextMemo (second-to-last account) with a spoofed pubkey (memo seq 9 instead of seq 1)
+  spoofedAccounts[spoofedAccounts.length - 2] = {
+    pubkey: deriveMemoPdaSync(0, outLaneId, 9n).address,
+    isSigner: false,
+    isWritable: true,
+  }
+  const guardB = createMockGuard()
+  const envB = {
+    RELAY_GUARD: guardB.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+  } as Env
+
+  let simCalled = 0
+  let sendCalled = 0
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x44)) } },
+        })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        const value = addrs.map((a) => {
+          const hit = accMapA.get(a)
+          return hit
+            ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner }
+            : null
+        })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value } })
+      }
+      if (body.method === 'simulateTransaction') simCalled++
+      if (body.method === 'sendTransaction') sendCalled++
+      throw new Error(`Unexpected RPC call after spoofed PDA: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(transferIx.data),
+            accounts: spoofedAccounts,
+          }),
+        }),
+        envB,
+      )
+      assert.equal(res.status, 400)
+      const errBody = (await res.json()) as { code: string; error: string }
+      assert.equal(errBody.code, 'INVALID_PAGE_PDA')
+      assert.equal(simCalled, 0)
+      assert.equal(sendCalled, 0)
+      assert.equal(guardB.relayReleaseCalls.length, 1)
+      assert.equal(guardB.relayReleaseCalls[0]?.recordFailure, true)
+    },
+  )
+
+  // Case C: Concurrent rollover race (lane advanced to nextLeaf = 112 => curMemo = 1 while client built
+  // with outMemo = memo(0) existing & nextMemo = memo(1) missing) opens memo(1) cleanly; also ExecViaEscrow Tag 7
+  // with missing nextSub opens SubtreePage seq 1 before Tag 7!
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const escrow = deriveEscrowPdaSync(0, 0).address
+  const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+  const vaultOutAta = deriveAssociatedTokenAddressSync(vaultAuth, usdcMint, CLASSIC_TOKEN_PROGRAM_ID).address
+  const escrowOutAta = deriveAssociatedTokenAddressSync(escrow, usdcMint, CLASSIC_TOKEN_PROGRAM_ID).address
+  const sub1 = deriveSubtreePdaSync(0, outLaneId, 1n).address
+  const laneAt256 = makeLaneStateBytes({ laneId: outLaneId, nextLeaf: 256n, nfCount: 10n })
+  const execRaceIx = buildExecViaEscrowInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 1,
+    outLaneId,
+    outSubSeq: 0n, // client saw nextLeaf=255 before concurrent tx advanced to 256
+    outRootSeq: 0n,
+    outMemoSeq: 2n,
+    outNfSeq: 0n,
+    escrowShard: 0,
+    changeMask: 0,
+    inKind: EXEC_KIND_SOL,
+    outKind: EXEC_KIND_SPL,
+    outSpl: {
+      mint: usdcMint,
+      vaultAta: vaultOutAta,
+      escrowAta: escrowOutAta,
+      tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    },
+    relayerFeeAmount: 0n,
+    rollover: { nextSubSeq: 1n },
+    proof192: dummyProof,
+    nf0,
+    nf1: nf1Zero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    amountIn: 100_000_000n,
+    minAmountOut: 10_000_000n,
+    outStealthOwner: new Uint8Array(32).fill(0x02),
+    outBlinding: new Uint8Array(32).fill(0x03),
+    dynMemoHead: new Uint8Array(34).fill(0x04),
+    dynMask56: new Uint8Array(56).fill(0x05),
+    routerProg: base58Encode(new Uint8Array(32).fill(0x55)),
+    routerIxData: new Uint8Array([1, 2, 3]),
+    routerAccounts: [
+      { pubkey: base58Encode(new Uint8Array(32).fill(0x66)), isSigner: false, isWritable: true },
+    ],
+    changeMemos: new Uint8Array(0),
+  })
+  const memo2 = deriveMemoPdaSync(0, outLaneId, 2n).address
+  const guardC = createMockGuard()
+  const envC = {
+    RELAY_GUARD: guardC.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+  } as Env
+  let sentWireC: Uint8Array | null = null
+  const accMapC = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [lanePda, { bytes: laneAt256, lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [sub0, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [sr0, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [memo2, { bytes: dummyPageBytes, lamports: 71_480_000, owner: AUDREN_PROGRAM_ID }],
+    [nfPage0, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    // sub1 is missing (null) on-chain!
+  ])
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x45)) } },
+        })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        const value = addrs.map((a) => {
+          const hit = accMapC.get(a)
+          return hit
+            ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner }
+            : null
+        })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value } })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: {
+              err: null,
+              logs: ['OpenPage OK', 'ExecViaEscrow OK'],
+              unitsConsumed: 220_000,
+              accounts: [
+                { lamports: 498_500_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] },
+              ],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        sentWireC = fromBase64(String(body.params[0]))
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5ExecOpenPageSig11111111111111111111111111111' })
+      }
+      if (body.method === 'getSignatureStatuses') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: [{ slot: 10001, err: null, confirmationStatus: 'confirmed' }] },
+        })
+      }
+      throw new Error(`Unexpected RPC method: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(execRaceIx.data),
+            accounts: execRaceIx.accounts,
+            computeUnitLimit: 400_000,
+          }),
+        }),
+        envC,
+      )
+      assert.equal(res.status, 200)
+      assert.ok(sentWireC)
+      const decoded = decodeV1Tx(sentWireC)
+      assert.equal(decoded.instructions.length, 2)
+      assert.equal(decoded.instructions[0]!.data[0], TAG_OPEN_PAGE)
+      assert.equal(decoded.instructions[0]!.data[1], OPEN_PAGE_KIND_SUBTREE)
+      assert.equal(readU64le(decoded.instructions[0]!.data, 7), 1n)
+      assert.equal(decoded.instructions[0]!.accounts[4], sub1)
+      assert.equal(decoded.instructions[1]!.data[0], TAG_EXEC_VIA_ESCROW)
+    },
+  )
+
+  // Case D: Missing primary pages (`outSub` seq 300 & `outRoot` seq 1 at `nextLeaf = 76_800 = 256 * 300`)
+  // auto-prepend OpenPage(SUBTREE, 300) and OpenPage(SUBROOT, 1)!
+  const laneAt76800 = makeLaneStateBytes({ laneId: outLaneId, nextLeaf: 76_800n, nfCount: 10n })
+  const sub300 = deriveSubtreePdaSync(0, outLaneId, 300n).address
+  const sr1 = deriveSubrootPdaSync(0, outLaneId, 1n).address
+  const memo685 = deriveMemoPdaSync(0, outLaneId, 685n).address // floor(76800 / 112) = 685
+  const primaryMissingIx = buildJoinsplitInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 1,
+    outLaneId,
+    outSubSeq: 300n,
+    outRootSeq: 1n,
+    outMemoSeq: 685n,
+    outNfSeq: 0n,
+    outputMask: 0b001,
+    assetMode: ASSET_MODE_PRIVATE,
+    proof192: dummyProof,
+    nf0,
+    nf1: nf1Zero,
+    cm0: new Uint8Array(32).fill(0x19),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: new Uint8Array(90).fill(0x39),
+  })
+  const guardD = createMockGuard()
+  const envD = {
+    RELAY_GUARD: guardD.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+  } as Env
+  let sentWireD: Uint8Array | null = null
+  const accMapD = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [lanePda, { bytes: laneAt76800, lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [memo685, { bytes: dummyPageBytes, lamports: 71_480_000, owner: AUDREN_PROGRAM_ID }],
+    [nfPage0, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    // Both primary outSub (300) and primary outRoot (1) are missing (null) on-chain!
+  ])
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x46)) } },
+        })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        const value = addrs.map((a) => {
+          const hit = accMapD.get(a)
+          return hit
+            ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner }
+            : null
+        })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value } })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: {
+              err: null,
+              logs: ['OpenPage OK', 'OpenPage OK', 'JoinSplit OK'],
+              unitsConsumed: 190_000,
+              accounts: [{ lamports: 499_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        sentWireD = fromBase64(String(body.params[0]))
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5PrimaryOpenPageSig11111111111111111111111111' })
+      }
+      if (body.method === 'getSignatureStatuses') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: [{ slot: 10002, err: null, confirmationStatus: 'confirmed' }] },
+        })
+      }
+      throw new Error(`Unexpected RPC method: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(primaryMissingIx.data),
+            accounts: primaryMissingIx.accounts,
+          }),
+        }),
+        envD,
+      )
+      assert.equal(res.status, 200)
+      assert.ok(sentWireD)
+      const decoded = decodeV1Tx(sentWireD)
+      assert.equal(decoded.instructions.length, 3)
+      assert.equal(decoded.instructions[0]!.data[0], TAG_OPEN_PAGE)
+      assert.equal(decoded.instructions[0]!.data[1], OPEN_PAGE_KIND_SUBTREE)
+      assert.equal(readU64le(decoded.instructions[0]!.data, 7), 300n)
+      assert.equal(decoded.instructions[0]!.accounts[4], sub300)
+      assert.equal(decoded.instructions[1]!.data[0], TAG_OPEN_PAGE)
+      assert.equal(decoded.instructions[1]!.data[1], OPEN_PAGE_KIND_SUBROOT)
+      assert.equal(readU64le(decoded.instructions[1]!.data, 7), 1n)
+      assert.equal(decoded.instructions[1]!.accounts[4], sr1)
+      assert.equal(decoded.instructions[2]!.data[0], TAG_JOINSPLIT)
+    },
+  )
+})
+
+test('Finding #3: nfPageRentPerNfLamports keeps 2-nullifier full withdrawal strictly self_paying and fixes 2-nullifier swapBaselineLamports', async () => {
+  const worker = await getWorker()
+  const mockRpc = 'https://mock-rpc.local/nf-rent-fee-test'
+  const mockRpcCapped = 'https://mock-rpc.local/nf-rent-fee-capped-test'
+  const poolPda = derivePoolPdaSync(0).address
+  const poolBytes = makePoolStateBytes({ noteRentFee: 1_000_000n, nfRentFee: 120_000n })
+  const poolBytesCapped = makePoolStateBytes({ noteRentFee: 1_000_000n, nfRentFee: 80_000n })
+
+  const rentMap: Record<number, number> = {
+    0: 890_880,
+    165: 2_039_280,
+    8256: 58_340_000,
+    9664: 68_140_000, // livePerNf = ceil(68_140_000 / 600) = 113_567
+    10144: 71_480_000,
+  }
+  const expectedLivePerNf = 113_567n
+  const expectedLivePerNote = 227_891n + 888n + 638_215n // 866_994n (< pool noteRentFee 1_000_000n)
+  const expectedSwapBaseline =
+    2n * (890_880n + expectedLivePerNf) + 2n * expectedLivePerNote + 20_000n
+
+  // 1. Verify fetchLiveRentSchedule caps nfPageRentPerNfLamports at min(pool.nfRentFee, livePerNf)
+  await withMockFetch(
+    async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getMinimumBalanceForRentExemption') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: rentMap[Number(body.params[0])] ?? 1_000_000 })
+      }
+      if (body.method === 'getAccountInfo' && body.params[0] === poolPda) {
+        const bytes = url === mockRpcCapped ? poolBytesCapped : poolBytes
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { data: [toBase64(bytes), 'base64'], lamports: 2_000_000, owner: AUDREN_PROGRAM_ID } },
+        })
+      }
+      throw new Error(`Unexpected RPC call in rent schedule test: ${body.method}`)
+    },
+    async () => {
+      const sched = await fetchLiveRentSchedule(mockRpc)
+      assert.equal(sched.nfPageRentPerNfLamports, expectedLivePerNf)
+      assert.equal(sched.pageRentPerNoteLamports, expectedLivePerNote)
+      assert.equal(sched.swapBaselineLamports, expectedSwapBaseline)
+
+      const schedCapped = await fetchLiveRentSchedule(mockRpcCapped)
+      assert.equal(schedCapped.nfPageRentPerNfLamports, 80_000n)
+      assert.equal(
+        schedCapped.swapBaselineLamports,
+        2n * (890_880n + 80_000n) + 2n * expectedLivePerNote + 20_000n,
+      )
+
+      // computeSwapFeePlan uses exact 2-nullifier + 2-output swapBaselineLamports (no stale +15k)
+      const cfg = loadPolicyConfig({} as never)
+      const planDefault = computeSwapFeePlan({
+        cfg,
+        rentSchedule: sched,
+        outputMint: WSOL_MINT,
+        outputDecimals: 9,
+        estimatedOutAmount: 1_000_000_000n,
+        solPriceUsd: 150,
+        outputTokenPriceUsd: 150,
+        feeAccount: relayerB58,
+        feeAccountExists: true,
+      })
+      assert.equal(planDefault.billingMode, 'self_paying')
+      assert.equal(planDefault.estimatedRelayCostLamports, expectedSwapBaseline.toString())
+
+      // Optional omitNf1=true, outputCount=1 override prices 1 nullifier + 1 output
+      const planEconomy = computeSwapFeePlan({
+        cfg,
+        rentSchedule: sched,
+        outputMint: WSOL_MINT,
+        outputDecimals: 9,
+        estimatedOutAmount: 1_000_000_000n,
+        solPriceUsd: 150,
+        outputTokenPriceUsd: 150,
+        feeAccount: relayerB58,
+        feeAccountExists: true,
+        omitNf1: true,
+        outputCount: 1,
+      })
+      assert.equal(
+        planEconomy.estimatedRelayCostLamports,
+        (890_880n + expectedLivePerNf + expectedLivePerNote + 20_000n).toString(),
+      )
+    },
+  )
+
+  // 2. End-to-end HTTP /v1/info + /v1/fee-quote (2-nullifier full withdrawal at 10% margin) -> /v1/relay/submit
+  const guard = createMockGuard()
+  const env = {
+    RELAY_GUARD: guard.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+  } as Env
+
+  const lanePda = deriveLanePdaSync(0, 0).address
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+  const sub0 = deriveSubtreePdaSync(0, 0, 0n).address
+  const sr0 = deriveSubrootPdaSync(0, 0, 0n).address
+  const memo0 = deriveMemoPdaSync(0, 0, 0n).address
+  const nfPage0 = deriveNfPagePdaSync(0, 0, 0n).address
+  const preRelayerLamports = 500_000_000n
+  // Actual on-chain debit for 2-nullifier full withdrawal (0 outputs):
+  // 2 * NullifierPDA (890,880) + 2 * nf_rent_fee (113,567) + base sig (5,000) + priority (5,000) = 2,018,894 lamports
+  const actualOnChainDebit = 2n * 890_880n + 2n * expectedLivePerNf + 5_000n + 5_000n
+  let quotedRelayerFee = 0n
+
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getMinimumBalanceForRentExemption') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: rentMap[Number(body.params[0])] ?? 1_000_000 })
+      }
+      if (body.method === 'getAccountInfo' && body.params[0] === poolPda) {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { data: [toBase64(poolBytes), 'base64'], lamports: 2_000_000, owner: AUDREN_PROGRAM_ID } },
+        })
+      }
+      if (body.method === 'getBalance') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: Number(preRelayerLamports) } })
+      }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x55)) } },
+        })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        const value = addrs.map((a) => {
+          if (a === relayerB58) {
+            return { data: ['', 'base64'], lamports: Number(preRelayerLamports), owner: SYSTEM_PROGRAM_ID }
+          }
+          if (a === lanePda) {
+            return {
+              data: [toBase64(makeLaneStateBytes({ laneId: 0, nextLeaf: 1n, nfCount: 1n })), 'base64'],
+              lamports: 15_000_000,
+              owner: AUDREN_PROGRAM_ID,
+            }
+          }
+          if (a === sub0 || a === sr0 || a === memo0 || a === nfPage0) {
+            return { data: [toBase64(dummyPageBytes), 'base64'], lamports: 58_000_000, owner: AUDREN_PROGRAM_ID }
+          }
+          return null
+        })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value } })
+      }
+      if (body.method === 'simulateTransaction') {
+        // Exact post-execution relayer balance = pre - actualOnChainDebit + quotedRelayerFee
+        const postLamports = preRelayerLamports - actualOnChainDebit + quotedRelayerFee
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: {
+              err: null,
+              logs: ['JoinSplit Withdraw OK'],
+              unitsConsumed: 150_000,
+              accounts: [{ lamports: Number(postLamports), owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5SelfPayWithdrawSig11111111111111111111111111' })
+      }
+      if (body.method === 'getSignatureStatuses') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: [{ slot: 12345, err: null, confirmationStatus: 'confirmed' }] },
+        })
+      }
+      throw new Error(`Unexpected RPC method in Finding #3 HTTP test: ${body.method}`)
+    },
+    async () => {
+      // /v1/info exposes nfPageRentPerNfLamports and updated 2-nullifier swapBaselineLamports
+      const infoRes = await worker.fetch(new Request('https://relay.audren.xyz/v1/info?cluster=mainnet'), env)
+      assert.equal(infoRes.status, 200)
+      const info = (await infoRes.json()) as {
+        rentSchedule: { nfPageRentPerNfLamports: string; swapBaselineLamports: string }
+      }
+      assert.equal(info.rentSchedule.nfPageRentPerNfLamports, expectedLivePerNf.toString())
+      assert.equal(info.rentSchedule.swapBaselineLamports, expectedSwapBaseline.toString())
+
+      // Quote a 2-nullifier full SOL withdrawal (`outputCount=0&omitNf1=false`) at 10% selfPayMarginBps
+      const quoteRes = await worker.fetch(
+        new Request(
+          'https://relay.audren.xyz/v1/fee-quote?cluster=mainnet&op=withdraw&mint=native&amount=500000000&outputCount=0&omitNf1=false',
+        ),
+        env,
+      )
+      assert.equal(quoteRes.status, 200)
+      const q = (await quoteRes.json()) as {
+        billingMode: string
+        nullifierCount: number
+        estimatedRelayCostLamports: string
+        relayerFee: string
+      }
+      assert.equal(q.billingMode, 'self_paying')
+      assert.equal(q.nullifierCount, 2)
+      const expectedTxBase = 2n * (890_880n + expectedLivePerNf) + 20_000n // 2_028_894n
+      assert.equal(q.estimatedRelayCostLamports, expectedTxBase.toString())
+      quotedRelayerFee = BigInt(q.relayerFee)
+      assert.ok(quotedRelayerFee > actualOnChainDebit, '1.1x quoted fee must exceed actual 2-nf on-chain debit')
+
+      // Submit the exact quoted 2-nullifier full withdrawal and verify billingMode === 'self_paying'
+      const recipient = base58Encode(new Uint8Array(32).fill(0x77))
+      const withdrawIx = buildJoinsplitInstruction({
+        payer: relayerB58,
+        poolId: 0,
+        ckptSlotIdx: 0,
+        outLaneId: 0,
+        outSubSeq: 0n,
+        outRootSeq: 0n,
+        outMemoSeq: 0n,
+        outNfSeq: 0n,
+        outputMask: 0,
+        assetMode: ASSET_MODE_SOL,
+        proof192: dummyProof,
+        nf0,
+        nf1: new Uint8Array(32).fill(0x02),
+        cm0: new Uint8Array(32),
+        cm1: new Uint8Array(32),
+        cm2: new Uint8Array(32),
+        publicAmountOut: 500_000_000n - quotedRelayerFee,
+        relayerFeeAmount: quotedRelayerFee,
+        recipient,
+        relayerFeeRecipient: relayerB58,
+        memosBytes: new Uint8Array(0),
+      })
+      const submitRes = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(withdrawIx.data),
+            accounts: withdrawIx.accounts,
+          }),
+        }),
+        env,
+      )
+      assert.equal(submitRes.status, 200)
+      const submitBody = (await submitRes.json()) as {
+        ok: boolean
+        billingMode: string
+        netSponsoredLamports: string
+      }
+      assert.equal(submitBody.ok, true)
+      assert.equal(submitBody.billingMode, 'self_paying')
+      assert.equal(submitBody.netSponsoredLamports, '0')
+      assert.equal(guard.relayAuthorizeCalls[0]?.selfPaying, true)
+    },
+  )
+})
+
+test('Finding #5: fetchPoolCheckpointSnapshot scans remaining ring slots when firstBatch only contains an ancient wrapped checkpoint', async () => {
+  const mockRpcWrap = 'https://mock-rpc.local/ckpt-ring-wrap'
+  const mockRpcRecent = 'https://mock-rpc.local/ckpt-ring-recent'
+  const poolPda = derivePoolPdaSync(0).address
+  const lanePdas = [0, 1, 2, 3].map((l) => deriveLanePdaSync(0, l).address)
+  const poolBytes = makePoolStateBytes({ activeLanes: 4, ckptInterval: 16n, maxCkptAge: 3600n })
+
+  // currentSlot = 16_000 => curEpoch = 1000, firstBatchCount = 100 - 4 = 96 => minRecentEpoch = 905
+  // Ancient wrapped checkpoint sits in slotIdx = 1000 % 256 = 232 (epochId = 744 < 905)
+  // Real newer checkpoint sits in slotIdx = 850 % 256 = 82 (epochId = 850, 150 epochs ago => in second batch!)
+  const ancientSlotIdx = 1000 % 256 // 232
+  const newerSlotIdx = 850 % 256 // 82
+  const recentBoundarySlotIdx = 905 % 256 // 137 (exact minRecentEpoch boundary)
+
+  const ancientCkptPda = deriveCheckpointPdaSync(0, ancientSlotIdx).address
+  const newerCkptPda = deriveCheckpointPdaSync(0, newerSlotIdx).address
+  const recentBoundaryPda = deriveCheckpointPdaSync(0, recentBoundarySlotIdx).address
+
+  const ancientCkptBytes = makeCheckpointBytes({
+    slotIdx: ancientSlotIdx,
+    epochId: 744n,
+    publishedSlot: 744n * 16n,
+    laneCounts: [1n, 0n, 0n, 0n],
+  })
+  const newerCkptBytes = makeCheckpointBytes({
+    slotIdx: newerSlotIdx,
+    epochId: 850n,
+    publishedSlot: 850n * 16n,
+    laneCounts: [5n, 3n, 0n, 0n],
+  })
+  const recentBoundaryBytes = makeCheckpointBytes({
+    slotIdx: recentBoundarySlotIdx,
+    epochId: 905n,
+    publishedSlot: 905n * 16n,
+    laneCounts: [7n, 3n, 0n, 0n],
+  })
+
+  // Case A: firstBatch contains ONLY ancient wrapped epoch 744 -> MUST scan rest of ring and find epoch 850!
+  let multiCallsWrap = 0
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getAccountInfo' && body.params[0] === poolPda) {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { data: [toBase64(poolBytes), 'base64'], lamports: 5_000_000, owner: AUDREN_PROGRAM_ID } },
+        })
+      }
+      if (body.method === 'getSlot') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: 16_000 })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        multiCallsWrap++
+        const addrs = body.params[0] as string[]
+        const value = addrs.map((addr) => {
+          const laneIdx = lanePdas.indexOf(addr)
+          if (laneIdx >= 0) {
+            return {
+              data: [toBase64(makeLaneStateBytes({ laneId: laneIdx, nextLeaf: laneIdx === 0 ? 5n : laneIdx === 1 ? 3n : 0n })), 'base64'],
+              lamports: 5_000_000,
+              owner: AUDREN_PROGRAM_ID,
+            }
+          }
+          if (addr === ancientCkptPda) {
+            return { data: [toBase64(ancientCkptBytes), 'base64'], lamports: 5_000_000, owner: AUDREN_PROGRAM_ID }
+          }
+          if (addr === newerCkptPda) {
+            return { data: [toBase64(newerCkptBytes), 'base64'], lamports: 5_000_000, owner: AUDREN_PROGRAM_ID }
+          }
+          return null
+        })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value } })
+      }
+      throw new Error(`Unexpected RPC call in ring-wrap test: ${body.method}`)
+    },
+    async () => {
+      const snap = await fetchPoolCheckpointSnapshot(mockRpcWrap, 0)
+      assert.ok(snap)
+      assert.ok(multiCallsWrap > 1, `expected second-batch ring scan, got ${multiCallsWrap} getMultipleAccounts call(s)`)
+      assert.equal(snap.latestCkpt?.epochId, 850n)
+      assert.equal(snap.latestCkpt?.slotIdx, newerSlotIdx)
+      assert.equal(snap.targetSlotCkpt?.epochId, 744n)
+    },
+  )
+
+  // Case B: firstBatch contains a genuine recent checkpoint (epoch 905 === minRecentEpoch) -> MUST skip rest of ring!
+  let multiCallsRecent = 0
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getAccountInfo' && body.params[0] === poolPda) {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { data: [toBase64(poolBytes), 'base64'], lamports: 5_000_000, owner: AUDREN_PROGRAM_ID } },
+        })
+      }
+      if (body.method === 'getSlot') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: 16_000 })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        multiCallsRecent++
+        const addrs = body.params[0] as string[]
+        const value = addrs.map((addr) => {
+          const laneIdx = lanePdas.indexOf(addr)
+          if (laneIdx >= 0) {
+            return {
+              data: [toBase64(makeLaneStateBytes({ laneId: laneIdx, nextLeaf: 0n })), 'base64'],
+              lamports: 5_000_000,
+              owner: AUDREN_PROGRAM_ID,
+            }
+          }
+          if (addr === ancientCkptPda) {
+            return { data: [toBase64(ancientCkptBytes), 'base64'], lamports: 5_000_000, owner: AUDREN_PROGRAM_ID }
+          }
+          if (addr === recentBoundaryPda) {
+            return { data: [toBase64(recentBoundaryBytes), 'base64'], lamports: 5_000_000, owner: AUDREN_PROGRAM_ID }
+          }
+          return null
+        })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value } })
+      }
+      throw new Error(`Unexpected RPC call in recent ring test: ${body.method}`)
+    },
+    async () => {
+      const snap = await fetchPoolCheckpointSnapshot(mockRpcRecent, 0)
+      assert.ok(snap)
+      assert.equal(multiCallsRecent, 1, 'recent checkpoint in firstBatch should preserve single-batch fast path')
+      assert.equal(snap.latestCkpt?.epochId, 905n)
     },
   )
 })

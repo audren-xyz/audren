@@ -18,6 +18,7 @@ import {
   verifyShieldedCm2RelayerFee,
   type ParsedExecEscrowMeta,
   type ParsedJoinSplitMeta,
+  type ParsedPageAccounts,
 } from '../solana/audren'
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID_STR,
@@ -61,7 +62,9 @@ export interface FirewallVerdict {
   ixData: Uint8Array
   decodedAccounts: SolanaAccountMeta[]
   nullifiers: string[]
+  poolId: number
   outLaneId: number
+  pages: ParsedPageAccounts
   setupAtas: ValidatedSetupAta[]
   preInstructions: SolanaInstruction[]
   joinSplitMeta: ParsedJoinSplitMeta | null
@@ -205,7 +208,18 @@ export function validateRelaySubmission(
   }
 
   const opKind: AudrenOpKind = execMeta ? 'exec_escrow' : joinSplitMeta!.opKind
+  const poolId = execMeta ? execMeta.poolId : joinSplitMeta!.poolId
   const outLaneId = execMeta ? execMeta.outLaneId : joinSplitMeta!.outLaneId
+  const pageSrc = execMeta ?? joinSplitMeta!
+  const pages: ParsedPageAccounts = {
+    outSub: pageSrc.outSub,
+    outRoot: pageSrc.outRoot,
+    outMemo: pageSrc.outMemo,
+    nfPage: pageSrc.nfPage,
+    nextSub: pageSrc.nextSub,
+    nextMemo: pageSrc.nextMemo,
+    nextNf: pageSrc.nextNf,
+  }
 
   // Validate strictly allowlisted zero-signer DeFi refresh cranks (`preInstructions`, Tag 7 only).
   const FORBIDDEN_PRE_IX_PROGRAMS = new Set([
@@ -472,7 +486,9 @@ export function validateRelaySubmission(
     ixData,
     decodedAccounts,
     nullifiers,
+    poolId,
     outLaneId,
+    pages,
     setupAtas,
     preInstructions,
     joinSplitMeta,

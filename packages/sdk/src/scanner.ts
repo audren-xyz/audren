@@ -1,14 +1,23 @@
 /**
  * Indexer-free ordinary Solana RPC (`getMultipleAccounts`) 2-pass sync & historical witness
- * reconstruction using all three on-chain scaling primitives:
+ * reconstruction with privacy-preserving defaults (`privacyMode: 'strict'`):
+ *
  *   1. `SubtreeRootPage` fast sync (`126 KB` / 1M notes vs `32.3 MB` of sealed `SubtreePage`s)
- *   2. `MemoPage` Structure-of-Arrays `dataSlice` (`3,872 B` header + view_tags + ephemeral_pks,
- *      fetching full `10,144 B` pages only on `1/65,536` view-tag matches)
- *   3. Optional `birthdaySlot` binary search on `64 B` page headers (`closedSlot < birthdaySlot`)
+ *   2. Default `'strict'` mode fetches full `10,144 B` `MemoPage`s in uniform 100-account batches
+ *      (never revealing view-tag hits via `dataSlice` -> single-page re-fetch), fetches
+ *      `SubtreePage`s covering newly synced leaves uniformly on incremental syncs (`<= 25` pages /
+ *      `<= 25` subtrees), and decoy-pads + shuffles any hit-correlated historical sealed
+ *      `SubtreePage` fetches up to `min(16, totalSealedSubtrees)` on large catch-ups (`> 25` pages).
+ *   3. Opt-in `'fast'` mode (for bandwidth-constrained cold recovery over self-hosted/trusted RPCs)
+ *      uses `MemoPage` SoA `dataSlice` (`[0..3,872]`) on large catch-ups (`> 25` pages), while
+ *      still fetching full `MemoPage`s directly on small incremental syncs (`<= 25` pages).
+ *   4. Optional `birthdaySlot` binary search on `64 B` page headers (`closedSlot < birthdaySlot`).
  *
  * Pass 1 ingests tree subroots, memos, and frontier leaves across ALL active lanes first so every
- * owned note is present in `store.notes`. Pass 2 streams `NullifierPage`s in bounded chunks against
- * an `O(owned_unspent_notes)` prefix map and discards stranger prefixes immediately (zero growth).
+ * owned note is present in `store.notes`. Pass 2 unconditionally streams ALL new `NullifierPage`s
+ * up to `laneHdr.nfCount` in uniform 100-account batches (zero early-exit when 0 unspent notes
+ * exist or after the last unspent note is spent), matching against an `O(owned_unspent_notes)` map
+ * and discarding stranger prefixes immediately (zero unbounded growth).
  */
 
 import {
@@ -56,6 +65,51 @@ import {
 } from './store.ts';
 
 const RPC_BATCH_CHUNK = 100;
+/** Maximum new `MemoPage`s fetched as an incremental sync (`<= ~250 KB`). */
+export const INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD = 25;
+/** Maximum newly synced `SubtreePage`s fetched uniformly on incremental sync in `'strict'` mode. */
+export const INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD = 25;
+/** Minimum sealed `SubtreePage` anonymity set size when decoy-padding in `'strict'` mode. */
+export const STRICT_DECOY_SEALED_SUBTREE_TARGET = 16;
+
+export type SyncPrivacyMode = 'strict' | 'fast';
+
+function randomUniformInt(bound: number): number {
+  if (!Number.isInteger(bound) || bound <= 0) {
+    throw new RangeError(`bound must be a positive integer, got ${bound}`);
+  }
+  if (bound === 1) return 0;
+  const maxUnbiased = Math.floor(0x1_0000_0000 / bound) * bound;
+  const buf = new Uint32Array(1);
+  for (;;) {
+    globalThis.crypto.getRandomValues(buf);
+    const v = buf[0]!;
+    if (v < maxUnbiased) return v % bound;
+  }
+}
+
+function randomUniformBigInt(bound: bigint): bigint {
+  if (bound <= 0n) throw new RangeError(`bound must be positive, got ${bound}`);
+  if (bound === 1n) return 0n;
+  if (bound <= 0x1_0000_0000n) return BigInt(randomUniformInt(Number(bound)));
+  const maxU64Plus1 = 1n << 64n;
+  const maxUnbiased = (maxU64Plus1 / bound) * bound;
+  const buf = new Uint32Array(2);
+  for (;;) {
+    globalThis.crypto.getRandomValues(buf);
+    const v = (BigInt(buf[0]!) << 32n) | BigInt(buf[1]!);
+    if (v < maxUnbiased) return v % bound;
+  }
+}
+
+function shuffleInPlace<T>(items: T[]): void {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = randomUniformInt(i + 1);
+    const tmp = items[i]!;
+    items[i] = items[j]!;
+    items[j] = tmp;
+  }
+}
 
 export interface AccountBatchFetchOptions {
   dataSlice?: { offset: number; length: number };
@@ -147,8 +201,10 @@ interface MemoHitCandidate {
 
 /**
  * Incrementally sync `CompactWalletStore` across all active lanes via ordinary `getMultipleAccounts`
- * calls using 2-pass sync (`SubtreeRootPage` fast sync + `MemoPage` SoA `dataSlice` + optional
- * `birthdaySlot` header binary search + zero-stranger-prefix `NullifierPage` streaming).
+ * calls using 2-pass sync (`SubtreeRootPage` fast sync + privacy-first `'strict'` full-`MemoPage`
+ * batches & decoy-padded `SubtreePage` fetches, or explicit opt-in `'fast'` SoA `dataSlice` on
+ * `> 25` pages + optional `birthdaySlot` header binary search + zero-early-exit `NullifierPage`
+ * streaming).
  */
 export async function syncCompactStoreWithRpc(params: {
   store: CompactWalletStore;
@@ -157,9 +213,11 @@ export async function syncCompactStoreWithRpc(params: {
   programId?: string;
   birthdaySlot?: bigint | number;
   latestCheckpoint?: DecodedRootCheckpoint;
+  privacyMode?: SyncPrivacyMode;
 }): Promise<{ pool: DecodedPoolState; lanes: DecodedLaneHeader[]; discoveredNotes: number }> {
   const programId = params.programId ?? AUDREN_PROGRAM_ID;
   const poolId = params.store.poolId;
+  const privacyMode: SyncPrivacyMode = params.privacyMode ?? 'strict';
   const birthdaySlot =
     params.birthdaySlot !== undefined ? BigInt(params.birthdaySlot) : params.store.birthdaySlot;
   const { pool, lanes } = await fetchPoolAndLanes(params.fetchBatch, poolId, programId);
@@ -266,109 +324,142 @@ export async function syncCompactStoreWithRpc(params: {
     }
   }
 
+  // Compute total new MemoPages and newly synced SubtreePages across all active lanes (post-Pass 1B)
+  const scanStartLeafByLane = new Map<number, bigint>();
+  let totalNewMemoPages = 0n;
+  let totalNewSubtrees = 0n;
+  for (const laneHdr of lanes) {
+    const l = laneHdr.laneId;
+    const startLeaf = params.store.lanes[l]!.nextMemoLeaf;
+    scanStartLeafByLane.set(l, startLeaf);
+    if (laneHdr.nextLeaf > 0n && startLeaf < laneHdr.nextLeaf) {
+      const startMemo = startLeaf / memoSize;
+      const targetMemoMax = (laneHdr.nextLeaf - 1n) / memoSize;
+      totalNewMemoPages += targetMemoMax - startMemo + 1n;
+      const startSub = startLeaf / subSize;
+      const endSub = (laneHdr.nextLeaf - 1n) / subSize;
+      totalNewSubtrees += endSub - startSub + 1n;
+    }
+  }
+
+  const isIncrementalMemoSync = totalNewMemoPages <= BigInt(INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD);
+  // In `'strict'` mode we NEVER use `dataSlice` + targeted hit re-fetch for MemoPages.
+  // Even in opt-in `'fast'` mode, small incremental syncs (`<= 25` pages) fetch full MemoPages directly.
+  const useMemoDataSlice = privacyMode === 'fast' && !isIncrementalMemoSync;
+  const fetchNewSubtreesUniformly =
+    privacyMode === 'strict' &&
+    isIncrementalMemoSync &&
+    totalNewSubtrees <= BigInt(INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD);
+
   // =========================================================================
-  // PASS 1C: `MemoPage` SoA `dataSlice` scan (`3,872 B` header + viewTags + epks)
+  // PASS 1C: Fetch `MemoPage`s across ALL active lanes in uniform 100-account batches
   // =========================================================================
   const hitsByLane = new Map<number, MemoHitCandidate[]>();
   const scannedWatermarkByLane = new Map<number, bigint>();
   const inlineFullMemos = new Map<string, DecodedMemoPage>();
   const neededFullMemos = new Map<string, { laneId: number; memoSeq: bigint; addr: string }>();
 
+  const memoQueue: Array<{ laneId: number; memoSeq: bigint; nextLeaf: bigint; addr: string }> = [];
   for (const laneHdr of lanes) {
     const l = laneHdr.laneId;
-    const laneState = params.store.lanes[l]!;
-    let cursor = laneState.nextMemoLeaf;
-    scannedWatermarkByLane.set(l, cursor);
-    if (laneHdr.nextLeaf === 0n || cursor >= laneHdr.nextLeaf) continue;
-
-    const startMemo = cursor / memoSize;
+    const startLeaf = scanStartLeafByLane.get(l) ?? params.store.lanes[l]!.nextMemoLeaf;
+    scannedWatermarkByLane.set(l, startLeaf);
+    hitsByLane.set(l, []);
+    if (laneHdr.nextLeaf === 0n || startLeaf >= laneHdr.nextLeaf) continue;
+    const startMemo = startLeaf / memoSize;
     const targetMemoMax = (laneHdr.nextLeaf - 1n) / memoSize;
-    const laneHits: MemoHitCandidate[] = [];
-    hitsByLane.set(l, laneHits);
+    for (let m = startMemo; m <= targetMemoMax; m++) {
+      memoQueue.push({
+        laneId: l,
+        memoSeq: m,
+        nextLeaf: laneHdr.nextLeaf,
+        addr: deriveMemoPdaSync(poolId, l, m, programId).address,
+      });
+    }
+  }
 
-    let laneStopped = false;
-    for (let mStart = startMemo; mStart <= targetMemoMax && !laneStopped; mStart += BigInt(RPC_BATCH_CHUNK)) {
-      const mEnd =
-        mStart + BigInt(RPC_BATCH_CHUNK) - 1n < targetMemoMax
-          ? mStart + BigInt(RPC_BATCH_CHUNK) - 1n
-          : targetMemoMax;
-      const chunkSeqs: bigint[] = [];
-      const chunkAddrs: string[] = [];
-      for (let m = mStart; m <= mEnd; m++) {
-        chunkSeqs.push(m);
-        chunkAddrs.push(deriveMemoPdaSync(poolId, l, m, programId).address);
+  const stoppedMemoLanes = new Set<number>();
+  for (let off = 0; off < memoQueue.length; off += RPC_BATCH_CHUNK) {
+    const chunk = memoQueue.slice(off, off + RPC_BATCH_CHUNK);
+    if (chunk.every((item) => stoppedMemoLanes.has(item.laneId))) continue;
+    const chunkAddrs = chunk.map((item) => item.addr);
+    const raws = useMemoDataSlice
+      ? await params.fetchBatch(chunkAddrs, {
+          dataSlice: { offset: 0, length: MEMO_PAGE_SCAN_SLICE_LEN },
+        })
+      : await params.fetchBatch(chunkAddrs);
+
+    for (let i = 0; i < chunk.length; i++) {
+      const item = chunk[i]!;
+      if (stoppedMemoLanes.has(item.laneId)) continue;
+      const raw = raws[i];
+      if (!raw) {
+        stoppedMemoLanes.add(item.laneId);
+        continue;
+      }
+      if (!useMemoDataSlice && raw.byteLength !== MEMO_PAGE_LEN) {
+        throw new Error(`Invalid full MemoPage account (len=${raw.byteLength})`);
+      }
+      const scan = decodeMemoPageScanSlice(raw);
+      let cursor = scannedWatermarkByLane.get(item.laneId)!;
+      const pageBase = item.memoSeq * memoSize;
+      const startSlot = cursor > pageBase ? Number(cursor - pageBase) : 0;
+      const maxForSnapshot = Math.min(
+        MEMO_NOTES_PER_PAGE,
+        item.nextLeaf > pageBase ? Number(item.nextLeaf - pageBase) : 0,
+      );
+      const limitSlot = Math.min(scan.count, maxForSnapshot);
+
+      if (
+        startSlot === 0 &&
+        birthdaySlot > 0n &&
+        scan.count === MEMO_NOTES_PER_PAGE &&
+        scan.closedSlot > 0n &&
+        scan.closedSlot < birthdaySlot
+      ) {
+        cursor = pageBase + BigInt(limitSlot);
+        scannedWatermarkByLane.set(item.laneId, cursor);
+        if (scan.count < maxForSnapshot) {
+          stoppedMemoLanes.add(item.laneId);
+        }
+        continue;
       }
 
-      const raws = await params.fetchBatch(chunkAddrs, {
-        dataSlice: { offset: 0, length: MEMO_PAGE_SCAN_SLICE_LEN },
-      });
-      for (let i = 0; i < chunkSeqs.length; i++) {
-        const m = chunkSeqs[i]!;
-        const raw = raws[i];
-        if (!raw) {
-          laneStopped = true;
-          break;
+      const laneHits = hitsByLane.get(item.laneId)!;
+      let pageMatched = false;
+      for (let slot = startSlot; slot < limitSlot; slot++) {
+        if (checkMemoViewTag(params.fvk.viewSk, scan.viewTags[slot]!, scan.ephemeralPks[slot]!)) {
+          pageMatched = true;
+          laneHits.push({
+            laneId: item.laneId,
+            memoSeq: item.memoSeq,
+            slot,
+            leafIdx: pageBase + BigInt(slot),
+          });
         }
-        const scan = decodeMemoPageScanSlice(raw);
-        const pageBase = m * memoSize;
-        const startSlot = cursor > pageBase ? Number(cursor - pageBase) : 0;
-        const maxForSnapshot = Math.min(
-          MEMO_NOTES_PER_PAGE,
-          laneHdr.nextLeaf > pageBase ? Number(laneHdr.nextLeaf - pageBase) : 0,
-        );
-        const limitSlot = Math.min(scan.count, maxForSnapshot);
-
-        if (
-          startSlot === 0 &&
-          birthdaySlot > 0n &&
-          scan.count === MEMO_NOTES_PER_PAGE &&
-          scan.closedSlot > 0n &&
-          scan.closedSlot < birthdaySlot
-        ) {
-          cursor = pageBase + BigInt(limitSlot);
-          if (scan.count < maxForSnapshot) {
-            laneStopped = true;
-            break;
-          }
-          continue;
+      }
+      if (pageMatched) {
+        const memoKey = `${item.laneId}:${item.memoSeq.toString()}`;
+        if (scan.hasCiphertexts && raw.byteLength === MEMO_PAGE_LEN) {
+          inlineFullMemos.set(memoKey, decodeMemoPage(raw));
+        } else if (!neededFullMemos.has(memoKey)) {
+          neededFullMemos.set(memoKey, {
+            laneId: item.laneId,
+            memoSeq: item.memoSeq,
+            addr: item.addr,
+          });
         }
-
-        let pageMatched = false;
-        for (let slot = startSlot; slot < limitSlot; slot++) {
-          if (checkMemoViewTag(params.fvk.viewSk, scan.viewTags[slot]!, scan.ephemeralPks[slot]!)) {
-            pageMatched = true;
-            laneHits.push({
-              laneId: l,
-              memoSeq: m,
-              slot,
-              leafIdx: pageBase + BigInt(slot),
-            });
-          }
-        }
-        if (pageMatched) {
-          const memoKey = `${l}:${m.toString()}`;
-          if (scan.hasCiphertexts && raw.byteLength === MEMO_PAGE_LEN) {
-            inlineFullMemos.set(memoKey, decodeMemoPage(raw));
-          } else if (!neededFullMemos.has(memoKey)) {
-            neededFullMemos.set(memoKey, {
-              laneId: l,
-              memoSeq: m,
-              addr: chunkAddrs[i]!,
-            });
-          }
-        }
-        cursor = pageBase + BigInt(limitSlot);
-        if (scan.count < maxForSnapshot) {
-          laneStopped = true;
-          break;
-        }
+      }
+      cursor = pageBase + BigInt(limitSlot);
+      scannedWatermarkByLane.set(item.laneId, cursor);
+      if (scan.count < maxForSnapshot) {
+        stoppedMemoLanes.add(item.laneId);
       }
     }
-    scannedWatermarkByLane.set(l, cursor);
   }
 
   // =========================================================================
-  // PASS 1D: Fetch ONLY matched full `MemoPage`s, live frontiers, and required `SubtreePage`s
+  // PASS 1D: Fetch full `MemoPage`s (fast-mode >25 pages only) & `SubtreePage`s
   // =========================================================================
   const fetchedFullMemos = new Map<string, DecodedMemoPage>(inlineFullMemos);
   const fullMemoList = [...neededFullMemos.entries()];
@@ -382,24 +473,41 @@ export async function syncCompactStoreWithRpc(params: {
     }
   }
 
-  // Determine the minimal set of `SubtreePage`s needed across all lanes:
-  //   1. Live unsealed frontier (`frontierRem > 0`)
-  //   2. Historical pages containing a view-tag match
-  //   3. Sealed pages containing an existing owned note whose 12 siblings are not frozen yet
-  //   4. Previous active frontier page that just sealed (so `prevSealedLeaves` covers pre-seal ckpts)
-  //   5. Fallback pages only if a mock returned null for `SubtreeRootPage`
+  // Determine `SubtreePage`s needed across all active lanes:
+  //   - In `'strict'` incremental sync (`<= 25` MemoPages & `<= 25` newly synced SubtreePages),
+  //     fetch all SubtreePages covering newly synced leaves uniformly so hits are never revealed.
+  //   - In `'strict'` large catch-up (`> 25` MemoPages), decoy-pad any hit-correlated historical
+  //     sealed `SubtreePage` fetches up to `min(16, totalSealedSubtrees)` across active lanes and
+  //     shuffle the batch before fetching.
   const neededSubtrees = new Map<string, { laneId: number; subSeq: bigint; addr: string }>();
-  const addNeededSubtree = (laneId: number, subSeq: bigint) => {
+  const uniformNewSubtreeKeys = new Set<string>();
+  const addNeededSubtree = (laneId: number, subSeq: bigint): boolean => {
     const key = `${laneId}:${subSeq.toString()}`;
-    if (!neededSubtrees.has(key)) {
-      neededSubtrees.set(key, {
-        laneId,
-        subSeq,
-        addr: deriveSubtreePdaSync(poolId, laneId, subSeq, programId).address,
-      });
-    }
+    if (neededSubtrees.has(key)) return false;
+    neededSubtrees.set(key, {
+      laneId,
+      subSeq,
+      addr: deriveSubtreePdaSync(poolId, laneId, subSeq, programId).address,
+    });
+    return true;
   };
 
+  if (fetchNewSubtreesUniformly) {
+    for (const laneHdr of lanes) {
+      const l = laneHdr.laneId;
+      const startLeaf = scanStartLeafByLane.get(l) ?? params.store.lanes[l]!.nextMemoLeaf;
+      if (laneHdr.nextLeaf > 0n && startLeaf < laneHdr.nextLeaf) {
+        const startSub = startLeaf / subSize;
+        const endSub = (laneHdr.nextLeaf - 1n) / subSize;
+        for (let s = startSub; s <= endSub; s++) {
+          addNeededSubtree(l, s);
+          uniformNewSubtreeKeys.add(`${l}:${s.toString()}`);
+        }
+      }
+    }
+  }
+
+  let hasHitCorrelatedSealedSubtree = false;
   for (const laneHdr of lanes) {
     const l = laneHdr.laneId;
     const laneState = params.store.lanes[l]!;
@@ -412,13 +520,22 @@ export async function syncCompactStoreWithRpc(params: {
     const hits = hitsByLane.get(l);
     if (hits) {
       for (const hit of hits) {
-        addNeededSubtree(l, hit.leafIdx / subSize);
+        const hitSubSeq = hit.leafIdx / subSize;
+        addNeededSubtree(l, hitSubSeq);
+        if (hitSubSeq < finalizedCount && !uniformNewSubtreeKeys.has(`${l}:${hitSubSeq.toString()}`)) {
+          hasHitCorrelatedSealedSubtree = true;
+        }
       }
     }
     for (const note of params.store.notes) {
       if (note.laneId === l && !note.frozenIntraSiblings) {
         const noteSubSeq = note.leafIndex / subSize;
-        if (noteSubSeq < finalizedCount) addNeededSubtree(l, noteSubSeq);
+        if (noteSubSeq < finalizedCount) {
+          addNeededSubtree(l, noteSubSeq);
+          if (!uniformNewSubtreeKeys.has(`${l}:${noteSubSeq.toString()}`)) {
+            hasHitCorrelatedSealedSubtree = true;
+          }
+        }
       }
     }
     if (
@@ -434,8 +551,60 @@ export async function syncCompactStoreWithRpc(params: {
     }
   }
 
+  // Decoy-pad hit-correlated historical sealed `SubtreePage` fetches in `'strict'` mode
+  if (privacyMode === 'strict' && hasHitCorrelatedSealedSubtree) {
+    const finalizedByLane = new Map<number, bigint>();
+    let totalSealedSubtrees = 0n;
+    for (const laneHdr of lanes) {
+      const fc = laneHdr.nextLeaf / subSize;
+      finalizedByLane.set(laneHdr.laneId, fc);
+      totalSealedSubtrees += fc;
+    }
+
+    const decoyTargetBig = BigInt(STRICT_DECOY_SEALED_SUBTREE_TARGET);
+    const targetSealed = Number(
+      totalSealedSubtrees < decoyTargetBig ? totalSealedSubtrees : decoyTargetBig,
+    );
+    let currentSealedCount = 0;
+    for (const req of neededSubtrees.values()) {
+      if (req.subSeq < (finalizedByLane.get(req.laneId) ?? 0n)) {
+        currentSealedCount++;
+      }
+    }
+
+    if (currentSealedCount < targetSealed) {
+      if (totalSealedSubtrees <= decoyTargetBig) {
+        for (const laneHdr of lanes) {
+          const fc = finalizedByLane.get(laneHdr.laneId) ?? 0n;
+          for (let s = 0n; s < fc; s++) {
+            if (addNeededSubtree(laneHdr.laneId, s)) {
+              currentSealedCount++;
+            }
+          }
+        }
+      } else {
+        while (currentSealedCount < targetSealed) {
+          let g = randomUniformBigInt(totalSealedSubtrees);
+          for (const laneHdr of lanes) {
+            const fc = finalizedByLane.get(laneHdr.laneId) ?? 0n;
+            if (g < fc) {
+              if (addNeededSubtree(laneHdr.laneId, g)) {
+                currentSealedCount++;
+              }
+              break;
+            }
+            g -= fc;
+          }
+        }
+      }
+    }
+  }
+
   const fetchedSubtrees = new Map<string, Uint8Array[]>();
   const subList = [...neededSubtrees.entries()];
+  if (subList.length > 1) {
+    shuffleInPlace(subList);
+  }
   for (let off = 0; off < subList.length; off += RPC_BATCH_CHUNK) {
     const chunk = subList.slice(off, off + RPC_BATCH_CHUNK);
     const raws = await params.fetchBatch(chunk.map(([, req]) => req.addr));
@@ -560,112 +729,107 @@ export async function syncCompactStoreWithRpc(params: {
   }
 
   // =========================================================================
-  // PASS 2: Stream `NullifierPage`s across ALL active lanes (O(owned_unspent_notes) RAM!)
+  // PASS 2: Stream ALL new `NullifierPage`s across ALL active lanes (ZERO early-exit!)
   // =========================================================================
   const allLanesCaughtUp = lanes.every(
     (h) => params.store.lanes[h.laneId]!.nextMemoLeaf >= h.nextLeaf,
   );
   if (allLanesCaughtUp) {
-    if (!params.store.notes.some((n) => !n.spent)) {
-      // Zero unspent owned notes across all lanes: advance watermarks with zero NullifierPage fetches.
-      for (const laneHdr of lanes) {
-        const laneState = params.store.lanes[laneHdr.laneId]!;
-        if (laneHdr.nfCount > laneState.nextNfIndex) {
-          laneState.nextNfIndex = laneHdr.nfCount;
-        }
-      }
-    } else {
-      // Optional birthdaySlot binary search on `64 B` NullifierPage headers for fresh wallets
-      if (birthdaySlot > 0n) {
-        const nfBsStates: Array<{ laneId: number; nfCount: bigint; lo: bigint; hi: bigint }> = [];
-        for (const laneHdr of lanes) {
-          const l = laneHdr.laneId;
-          const laneState = params.store.lanes[l]!;
-          if (laneHdr.nfCount > 0n && laneState.nextNfIndex === 0n) {
-            const targetNfMax = (laneHdr.nfCount - 1n) / nfSize;
-            if (targetNfMax > 2n) {
-              nfBsStates.push({ laneId: l, nfCount: laneHdr.nfCount, lo: 0n, hi: targetNfMax + 1n });
-            }
-          }
-        }
-        while (nfBsStates.some((s) => s.lo < s.hi)) {
-          const active = nfBsStates.filter((s) => s.lo < s.hi);
-          const mids = active.map((s) => (s.lo + s.hi) >> 1n);
-          const addrs = active.map(
-            (s, i) => deriveNfPagePdaSync(poolId, s.laneId, mids[i]!, programId).address,
-          );
-          const raws = await params.fetchBatch(addrs, {
-            dataSlice: { offset: 0, length: NF_PAGE_HEADER_LEN },
-          });
-          for (let i = 0; i < active.length; i++) {
-            const st = active[i]!;
-            const mid = mids[i]!;
-            const raw = raws[i];
-            if (raw && raw.byteLength >= NF_PAGE_HEADER_LEN) {
-              const hdr = decodeNullifierPageHeader(raw);
-              if (hdr.count === NF_PER_PAGE && hdr.closedSlot > 0n && hdr.closedSlot < birthdaySlot) {
-                st.lo = mid + 1n;
-              } else {
-                st.hi = mid;
-              }
-            } else {
-              st.hi = mid;
-            }
-          }
-        }
-        for (const st of nfBsStates) {
-          if (st.lo > 0n) {
-            const skipTo = st.lo * nfSize;
-            params.store.lanes[st.laneId]!.nextNfIndex =
-              skipTo < st.nfCount ? skipTo : st.nfCount;
-          }
-        }
-      }
-
-      const nfQueue: Array<{ laneId: number; pageSeq: bigint; maxNfIndex: bigint; addr: string }> = [];
+    // Optional birthdaySlot binary search on `64 B` NullifierPage headers for fresh wallets
+    // (runs uniformly regardless of owned-note balance so RPC cannot infer first receipt).
+    if (birthdaySlot > 0n) {
+      const nfBsStates: Array<{ laneId: number; nfCount: bigint; lo: bigint; hi: bigint }> = [];
       for (const laneHdr of lanes) {
         const l = laneHdr.laneId;
         const laneState = params.store.lanes[l]!;
-        if (laneHdr.nfCount === 0n || laneState.nextNfIndex >= laneHdr.nfCount) continue;
-        const startNf = laneState.nextNfIndex / nfSize;
-        const targetNfMax = (laneHdr.nfCount - 1n) / nfSize;
-        for (let n = startNf; n <= targetNfMax; n++) {
-          nfQueue.push({
-            laneId: l,
-            pageSeq: n,
-            maxNfIndex: laneHdr.nfCount,
-            addr: deriveNfPagePdaSync(poolId, l, n, programId).address,
-          });
+        if (laneHdr.nfCount > 0n && laneState.nextNfIndex === 0n) {
+          const targetNfMax = (laneHdr.nfCount - 1n) / nfSize;
+          if (targetNfMax > 2n) {
+            nfBsStates.push({ laneId: l, nfCount: laneHdr.nfCount, lo: 0n, hi: targetNfMax + 1n });
+          }
         }
       }
-
-      const stoppedNfLanes = new Set<number>();
-      for (let off = 0; off < nfQueue.length; off += RPC_BATCH_CHUNK) {
-        if (!params.store.notes.some((n) => !n.spent)) {
-          for (const laneHdr of lanes) {
-            if (!stoppedNfLanes.has(laneHdr.laneId)) {
-              const ls = params.store.lanes[laneHdr.laneId]!;
-              if (laneHdr.nfCount > ls.nextNfIndex) ls.nextNfIndex = laneHdr.nfCount;
-            }
-          }
-          break;
-        }
-        const chunk = nfQueue.slice(off, off + RPC_BATCH_CHUNK);
-        const raws = await params.fetchBatch(chunk.map((q) => q.addr));
-        for (let i = 0; i < chunk.length; i++) {
-          const item = chunk[i]!;
-          if (stoppedNfLanes.has(item.laneId)) continue;
+      while (nfBsStates.some((s) => s.lo < s.hi)) {
+        const active = nfBsStates.filter((s) => s.lo < s.hi);
+        const mids = active.map((s) => (s.lo + s.hi) >> 1n);
+        const addrs = active.map(
+          (s, i) => deriveNfPagePdaSync(poolId, s.laneId, mids[i]!, programId).address,
+        );
+        const raws = await params.fetchBatch(addrs, {
+          dataSlice: { offset: 0, length: NF_PAGE_HEADER_LEN },
+        });
+        for (let i = 0; i < active.length; i++) {
+          const st = active[i]!;
+          const mid = mids[i]!;
           const raw = raws[i];
-          if (!raw) {
-            stoppedNfLanes.add(item.laneId);
-            continue;
+          if (raw && raw.byteLength >= NF_PAGE_HEADER_LEN) {
+            const hdr = decodeNullifierPageHeader(raw);
+            if (hdr.count === NF_PER_PAGE && hdr.closedSlot > 0n && hdr.closedSlot < birthdaySlot) {
+              st.lo = mid + 1n;
+            } else {
+              st.hi = mid;
+            }
+          } else {
+            st.hi = mid;
           }
-          params.store.ingestNullifierPage({
-            laneId: item.laneId,
-            pageSeq: item.pageSeq,
-            raw,
-            maxNfIndex: item.maxNfIndex,
-          });
+        }
+      }
+      for (const st of nfBsStates) {
+        if (st.lo > 0n) {
+          const skipTo = st.lo * nfSize;
+          params.store.lanes[st.laneId]!.nextNfIndex =
+            skipTo < st.nfCount ? skipTo : st.nfCount;
+        }
+      }
+    }
+
+    // Stream ALL new NullifierPages up to `laneHdr.nfCount` in uniform 100-account batches.
+    // NEVER skip when 0 unspent notes exist, and NEVER break early when the last unspent note
+    // is marked spent — stranger prefixes are discarded immediately (zero RAM/JSON growth).
+    const nfQueue: Array<{ laneId: number; pageSeq: bigint; maxNfIndex: bigint; addr: string }> = [];
+    for (const laneHdr of lanes) {
+      const l = laneHdr.laneId;
+      const laneState = params.store.lanes[l]!;
+      if (laneHdr.nfCount === 0n || laneState.nextNfIndex >= laneHdr.nfCount) continue;
+      const startNf = laneState.nextNfIndex / nfSize;
+      const targetNfMax = (laneHdr.nfCount - 1n) / nfSize;
+      for (let n = startNf; n <= targetNfMax; n++) {
+        nfQueue.push({
+          laneId: l,
+          pageSeq: n,
+          maxNfIndex: laneHdr.nfCount,
+          addr: deriveNfPagePdaSync(poolId, l, n, programId).address,
+        });
+      }
+    }
+
+    const stoppedNfLanes = new Set<number>();
+    for (let off = 0; off < nfQueue.length; off += RPC_BATCH_CHUNK) {
+      const chunk = nfQueue.slice(off, off + RPC_BATCH_CHUNK);
+      if (chunk.every((item) => stoppedNfLanes.has(item.laneId))) continue;
+      const raws = await params.fetchBatch(chunk.map((q) => q.addr));
+      for (let i = 0; i < chunk.length; i++) {
+        const item = chunk[i]!;
+        if (stoppedNfLanes.has(item.laneId)) continue;
+        const raw = raws[i];
+        if (!raw) {
+          stoppedNfLanes.add(item.laneId);
+          continue;
+        }
+        const hdr = decodeNullifierPageHeader(raw);
+        const pageBase = item.pageSeq * nfSize;
+        const expectedCap = Math.min(
+          NF_PER_PAGE,
+          item.maxNfIndex > pageBase ? Number(item.maxNfIndex - pageBase) : 0,
+        );
+        params.store.ingestNullifierPage({
+          laneId: item.laneId,
+          pageSeq: item.pageSeq,
+          raw,
+          maxNfIndex: item.maxNfIndex,
+        });
+        if (hdr.count < expectedCap) {
+          stoppedNfLanes.add(item.laneId);
         }
       }
     }

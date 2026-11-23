@@ -917,15 +917,15 @@ test('Post-seal checkpoint witness building via prevSealedLeaves & automatic pru
   assert.equal(reloaded.lanes[0].prevSealedLeaves.length, 0);
 });
 
-test('SubtreeRootPage fast sync + MemoPage SoA dataSlice + birthdaySlot binary search', async () => {
+test('SubtreeRootPage fast sync + strict incremental sync + birthdaySlot binary search', async () => {
   const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x91));
   const fvk = exportFullViewingKey(alice);
   const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
 
   // Lane 0 has 780 leaves = 3 sealed SubtreePages (0, 1, 2) + 12 frontier leaves in SubtreePage 3.
   // MemoPages: 0..5 (sealed, 112 each, leaves 0..671) + MemoPage 6 (108 leaves, 672..779).
+  // Total = 7 MemoPages (<= 25 incremental threshold) and 4 SubtreePages (<= 25 threshold).
   // Alice owns ONLY 1 note at leaf 700 (SubtreePage 2, MemoPage 6).
-  // Sealed SubtreePages 0 and 1 have ZERO owned notes and must NEVER be downloaded!
   const totalLeaves = 780;
   const allLeaves = [];
   const memoPages = new Map();
@@ -977,9 +977,8 @@ test('SubtreeRootPage fast sync + MemoPage SoA dataSlice + birthdaySlot binary s
     accounts.set(deriveMemoPdaSync(0, 0, m).address, raw);
   }
 
-  const fetchLog = [];
-  const sliceAwareFetcher = async (addrs, opts) => {
-    fetchLog.push({ addrs: [...addrs], dataSlice: opts?.dataSlice ?? null });
+  const makeLoggingFetcher = (log) => async (addrs, opts) => {
+    log.push({ addrs: [...addrs], dataSlice: opts?.dataSlice ?? null });
     return addrs.map((a) => {
       const full = accounts.get(a) ?? null;
       if (!full || !opts?.dataSlice) return full;
@@ -987,70 +986,102 @@ test('SubtreeRootPage fast sync + MemoPage SoA dataSlice + birthdaySlot binary s
     });
   };
 
-  // Run 1: Full sync with dataSlice (no birthdaySlot)
-  const storeFull = new CompactWalletStore(0, 0n);
-  const rFull = await syncCompactStoreWithRpc({ store: storeFull, fvk, fetchBatch: sliceAwareFetcher });
-  assert.equal(rFull.discoveredNotes, 1);
-  assert.equal(storeFull.notes[0].leafIndex, 700n);
-  assert.equal(storeFull.notes[0].amount, 12_345_678n);
-  assert.ok(storeFull.notes[0].frozenIntraSiblings, 'owned note in sealed SubtreePage 2 must freeze siblings');
-  assert.equal(storeFull.lanes[0].finalizedSubroots.length, 3);
-  assert.equal(storeFull.lanes[0].frontierSubSeq, 3n);
-  assert.equal(storeFull.lanes[0].frontierLeaves.length, 12);
+  // Run 1: Default `'strict'` mode on <= 25 MemoPages -> ZERO dataSlice calls, ZERO hit re-fetches,
+  // and uniform fetch of all 4 SubtreePages covering newly synced leaves!
+  const strictLog = [];
+  const storeStrict = new CompactWalletStore(0, 0n);
+  const rStrict = await syncCompactStoreWithRpc({
+    store: storeStrict,
+    fvk,
+    fetchBatch: makeLoggingFetcher(strictLog),
+  });
+  assert.equal(rStrict.discoveredNotes, 1);
+  assert.equal(storeStrict.notes[0].leafIndex, 700n);
+  assert.equal(storeStrict.notes[0].amount, 12_345_678n);
+  assert.ok(storeStrict.notes[0].frozenIntraSiblings, 'owned note in sealed SubtreePage 2 must freeze siblings');
+  assert.equal(storeStrict.lanes[0].finalizedSubroots.length, 3);
+  assert.equal(storeStrict.lanes[0].frontierSubSeq, 3n);
+  assert.equal(storeStrict.lanes[0].frontierLeaves.length, 12);
 
-  // Verify SubtreePages 0 & 1 were NEVER fetched (SubtreeRootPage fast sync!)
-  const allFetchedAddrs = fetchLog.flatMap((e) => e.addrs);
-  assert.equal(allFetchedAddrs.includes(deriveSubtreePdaSync(0, 0, 0n).address), false, 'SubtreePage 0 must not be fetched');
-  assert.equal(allFetchedAddrs.includes(deriveSubtreePdaSync(0, 0, 1n).address), false, 'SubtreePage 1 must not be fetched');
-  assert.equal(allFetchedAddrs.includes(deriveSubtreePdaSync(0, 0, 2n).address), true, 'SubtreePage 2 fetched for owned note');
-  assert.equal(allFetchedAddrs.includes(deriveSubtreePdaSync(0, 0, 3n).address), true, 'Frontier SubtreePage 3 fetched');
-
-  // Verify MemoPages were scanned via 3,872 B dataSlice and ONLY MemoPage 6 was fetched in full!
-  const memoSliceCalls = fetchLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN);
-  assert.ok(memoSliceCalls.length >= 1, 'MemoPage scan must pass 3,872 B dataSlice');
-  const fullMemoCalls = fetchLog.filter(
-    (e) => e.dataSlice === null && e.addrs.some((a) => a === deriveMemoPdaSync(0, 0, 6n).address),
-  );
-  assert.equal(fullMemoCalls.length, 1, 'only view-tag matched MemoPage 6 should be fetched in full');
   assert.equal(
-    fullMemoCalls[0].addrs.includes(deriveMemoPdaSync(0, 0, 0n).address),
-    false,
-    'unmatched MemoPage 0 must never be fetched in full',
+    strictLog.filter((e) => e.dataSlice !== null).length,
+    0,
+    'default strict incremental sync must issue ZERO dataSlice calls',
   );
+  const strictMemoAddrs = strictLog.flatMap((e) => e.addrs);
+  for (let m = 0; m < totalMemos; m++) {
+    const addr = deriveMemoPdaSync(0, 0, BigInt(m)).address;
+    assert.equal(
+      strictMemoAddrs.filter((a) => a === addr).length,
+      1,
+      `MemoPage ${m} must be fetched exactly once in full (zero hit-correlated re-fetch)`,
+    );
+  }
+  for (let s = 0; s < 4; s++) {
+    assert.equal(
+      strictMemoAddrs.includes(deriveSubtreePdaSync(0, 0, BigInt(s)).address),
+      true,
+      `SubtreePage ${s} must be fetched uniformly on <= 25 subtree incremental strict sync`,
+    );
+  }
 
   // Verify offline witness against checkpoint at leaf count = 780 passes bit-for-bit!
   const { ckpt, superRoot } = makeSyntheticCheckpoint(0, computeLaneRootFromLeaves(allLeaves), BigInt(totalLeaves));
-  const { path } = storeFull.buildWitnessForNote(storeFull.notes[0], ckpt);
+  const { path } = storeStrict.buildWitnessForNote(storeStrict.notes[0], ckpt);
   assert.equal(computeMerkleRoot4Ary(path, allLeaves[700]), superRoot);
 
-  // Run 2: birthdaySlot = 1000 skips sealed MemoPages 0..4 via 64 B header binary search, still syncs all 3 SubtreeRoots!
+  // Run 2: birthdaySlot = 1000 skips sealed MemoPages 0..4 via 64 B header binary search,
+  // fetches post-birthday MemoPages 5..6 in full (zero 3,872 B dataSlice), and syncs all 3 SubtreeRoots!
   const bdLog = [];
-  const bdFetcher = async (addrs, opts) => {
-    bdLog.push({ addrs: [...addrs], dataSlice: opts?.dataSlice ?? null });
-    return sliceAwareFetcher(addrs, opts);
-  };
   const storeBd = new CompactWalletStore(0, 0n);
   const rBd = await syncCompactStoreWithRpc({
     store: storeBd,
     fvk,
-    fetchBatch: bdFetcher,
+    fetchBatch: makeLoggingFetcher(bdLog),
     birthdaySlot: 1000n,
   });
   assert.equal(rBd.discoveredNotes, 1);
   assert.equal(storeBd.lanes[0].finalizedSubroots.length, 3, 'SubtreeRootPage still synced across all subtrees');
   const headerProbes = bdLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_HEADER_LEN);
   assert.ok(headerProbes.length >= 1, 'birthdaySlot binary search must use 64 B header probes');
-  const bdMemoSlices = bdLog
-    .filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN)
-    .flatMap((e) => e.addrs);
-  assert.equal(bdMemoSlices.includes(deriveMemoPdaSync(0, 0, 0n).address), false, 'pre-birthday MemoPage 0 skipped');
-  assert.equal(bdMemoSlices.includes(deriveMemoPdaSync(0, 0, 4n).address), false, 'pre-birthday MemoPage 4 skipped');
-  assert.equal(bdMemoSlices.includes(deriveMemoPdaSync(0, 0, 5n).address), true, 'post-birthday MemoPage 5 scanned');
-  assert.equal(bdMemoSlices.includes(deriveMemoPdaSync(0, 0, 6n).address), true, 'open MemoPage 6 scanned');
+  assert.equal(
+    bdLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN).length,
+    0,
+    'strict mode must never use 3,872 B MemoPage dataSlice',
+  );
+  const bdFullAddrs = bdLog.filter((e) => e.dataSlice === null).flatMap((e) => e.addrs);
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 0n).address), false, 'pre-birthday MemoPage 0 skipped');
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 4n).address), false, 'pre-birthday MemoPage 4 skipped');
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 5n).address), true, 'post-birthday MemoPage 5 scanned in full');
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 6n).address), true, 'open MemoPage 6 scanned in full');
+  assert.equal(bdFullAddrs.includes(deriveSubtreePdaSync(0, 0, 0n).address), false, 'pre-birthday SubtreePage 0 skipped');
+  assert.equal(bdFullAddrs.includes(deriveSubtreePdaSync(0, 0, 1n).address), false, 'pre-birthday SubtreePage 1 skipped');
   const { path: pathBd } = storeBd.buildWitnessForNote(storeBd.notes[0], ckpt);
   assert.equal(computeMerkleRoot4Ary(pathBd, allLeaves[700]), superRoot);
 
-  // Run 3: Legacy/mock fetcher that ignores `dataSlice` (always returns full 10,144 B bytes) still works cleanly!
+  // Run 3: Explicit `privacyMode: 'fast'` on <= 25 MemoPages STILL fetches full MemoPages directly
+  // (zero 3,872 B dataSlice on small incremental syncs), while skipping unhit sealed SubtreePages 0 & 1!
+  const fastSmallLog = [];
+  const storeFastSmall = new CompactWalletStore(0, 0n);
+  const rFastSmall = await syncCompactStoreWithRpc({
+    store: storeFastSmall,
+    fvk,
+    fetchBatch: makeLoggingFetcher(fastSmallLog),
+    privacyMode: 'fast',
+  });
+  assert.equal(rFastSmall.discoveredNotes, 1);
+  assert.equal(
+    fastSmallLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN).length,
+    0,
+    'fast mode must still fetch full MemoPages directly on <= 25 page incremental syncs',
+  );
+  const fastSmallAddrs = fastSmallLog.flatMap((e) => e.addrs);
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 0n).address), false, 'SubtreePage 0 skipped in fast mode');
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 1n).address), false, 'SubtreePage 1 skipped in fast mode');
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 2n).address), true, 'SubtreePage 2 fetched for hit');
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 3n).address), true, 'Frontier SubtreePage 3 fetched');
+
+  // Run 4: Legacy/mock fetcher that ignores `dataSlice` (always returns full 10,144 B bytes) still works cleanly!
   const fullOnlyCalls = [];
   const legacyFetcher = async (addrs) => {
     fullOnlyCalls.push([...addrs]);
@@ -1060,9 +1091,393 @@ test('SubtreeRootPage fast sync + MemoPage SoA dataSlice + birthdaySlot binary s
   const rLegacy = await syncCompactStoreWithRpc({ store: storeLegacy, fvk, fetchBatch: legacyFetcher });
   assert.equal(rLegacy.discoveredNotes, 1);
   assert.equal(storeLegacy.notes[0].amount, 12_345_678n);
-  // MemoPage 6 should NOT be fetched twice since legacyFetcher already returned full 10,144 B!
   const memo6Count = fullOnlyCalls.flat().filter((a) => a === deriveMemoPdaSync(0, 0, 6n).address).length;
   assert.equal(memo6Count, 1);
+});
+
+test('Finding #1 regression: Pass 2 streams ALL NullifierPages with zero early-exit (0 unspent & mid-stream spend)', async () => {
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0xa1));
+  const aliceFvk = exportFullViewingKey(alice);
+  const bob = deriveKeysFromSeed(new Uint8Array(32).fill(0xb2));
+  const bobFvk = exportFullViewingKey(bob);
+  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+
+  // Lane 0: 1 leaf (Alice's note) and 121 NullifierPages (72,005 nullifiers -> 2 RPC batches: 100 + 21).
+  // Lane 1: 0 leaves and 3 NullifierPages (1,203 nullifiers).
+  // Alice's ONLY note is spent on NullifierPage 0 of Lane 0 (batch 0).
+  const { tweak, blinding, memo90 } = encryptNoteMemo(
+    alice.viewPk,
+    new Uint8Array(32).fill(0xa2),
+    3_000_000n,
+    NATIVE_SOL_MINT_BYTES,
+  );
+  const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), solAsset, 3_000_000n, blinding);
+  const lane0Sub0 = makeSubtreePage(0, 0n, [cm]);
+  const lane0Memo0 = makeMemoPageWithMeta(0, 0n, 1);
+  writeMemoSlot(lane0Memo0, 0, memo90);
+
+  const probeStore = new CompactWalletStore(0, 0n);
+  probeStore.ingestLanePages({
+    fvk: aliceFvk,
+    laneId: 0,
+    subtreePages: [{ pageSeq: 0n, raw: lane0Sub0 }],
+    memoPages: [{ pageSeq: 0n, raw: lane0Memo0 }],
+    nfPages: [],
+  });
+  const aliceNfPrefix = probeStore.notes[0].nullifier.subarray(0, NF_PREFIX_LEN);
+
+  const lane0NfPagesCount = 121;
+  const lane0NfTotal = BigInt((lane0NfPagesCount - 1) * NF_PER_PAGE + 5);
+  const lane1NfPagesCount = 3;
+  const lane1NfTotal = BigInt((lane1NfPagesCount - 1) * NF_PER_PAGE + 3);
+
+  const fullStrangerPrefixes = Array.from({ length: NF_PER_PAGE }, (_, i) => {
+    const p = new Uint8Array(NF_PREFIX_LEN);
+    p[0] = 0xcc;
+    p[1] = i & 0xff;
+    p[2] = (i >> 8) & 0xff;
+    return p;
+  });
+  const tail5Prefixes = fullStrangerPrefixes.slice(0, 5);
+  const tail3Prefixes = fullStrangerPrefixes.slice(0, 3);
+
+  const lane0Page0Prefixes = [...fullStrangerPrefixes];
+  lane0Page0Prefixes[0] = aliceNfPrefix;
+
+  const accounts = new Map([
+    [derivePoolPdaSync(0).address, makePoolState(2)],
+    [deriveLanePdaSync(0, 0).address, makeLaneState(0, 1n, lane0NfTotal)],
+    [deriveLanePdaSync(0, 1).address, makeLaneState(1, 0n, lane1NfTotal)],
+    [deriveSubtreePdaSync(0, 0, 0n).address, lane0Sub0],
+    [deriveMemoPdaSync(0, 0, 0n).address, lane0Memo0],
+  ]);
+
+  const expectedNfAddrs = new Set();
+  const reusableLane0Full = makeNfPage(0, 1n, fullStrangerPrefixes);
+  const lane0Tail = makeNfPage(0, BigInt(lane0NfPagesCount - 1), tail5Prefixes);
+  const reusableLane1Full = makeNfPage(1, 0n, fullStrangerPrefixes);
+  const lane1Tail = makeNfPage(1, BigInt(lane1NfPagesCount - 1), tail3Prefixes);
+
+  for (let p = 0; p < lane0NfPagesCount; p++) {
+    const addr = deriveNfPagePdaSync(0, 0, BigInt(p)).address;
+    expectedNfAddrs.add(addr);
+    if (p === 0) {
+      accounts.set(addr, makeNfPage(0, 0n, lane0Page0Prefixes));
+    } else if (p === lane0NfPagesCount - 1) {
+      accounts.set(addr, lane0Tail);
+    } else {
+      accounts.set(addr, reusableLane0Full);
+    }
+  }
+  for (let p = 0; p < lane1NfPagesCount; p++) {
+    const addr = deriveNfPagePdaSync(0, 1, BigInt(p)).address;
+    expectedNfAddrs.add(addr);
+    accounts.set(addr, p === lane1NfPagesCount - 1 ? lane1Tail : reusableLane1Full);
+  }
+
+  const makeFetcher = (log) => async (addrs, opts) => {
+    log.push({ addrs: [...addrs], dataSlice: opts?.dataSlice ?? null });
+    return addrs.map((a) => accounts.get(a) ?? null);
+  };
+
+  // Case 1: Bob has ZERO unspent notes -> Pass 2 MUST STILL fetch all 124 NullifierPages across both batches!
+  const bobLog = [];
+  const bobStore = new CompactWalletStore(0, 0n);
+  const bobRes = await syncCompactStoreWithRpc({
+    store: bobStore,
+    fvk: bobFvk,
+    fetchBatch: makeFetcher(bobLog),
+  });
+  assert.equal(bobRes.discoveredNotes, 0);
+  assert.equal(bobStore.notes.length, 0);
+  assert.equal(bobStore.lanes[0].nextNfIndex, lane0NfTotal);
+  assert.equal(bobStore.lanes[1].nextNfIndex, lane1NfTotal);
+  const bobFetchedNf = new Set(bobLog.flatMap((e) => e.addrs).filter((a) => expectedNfAddrs.has(a)));
+  assert.equal(
+    bobFetchedNf.size,
+    expectedNfAddrs.size,
+    'wallet with 0 unspent notes must fetch ALL 124 NullifierPages without skipping Pass 2',
+  );
+  assert.equal('seenNfPrefixes' in JSON.parse(bobStore.toJSON()), false);
+
+  // Case 2: Alice's ONLY note is spent on NullifierPage 0 (batch 0) -> Pass 2 MUST NOT break early!
+  const aliceLog = [];
+  const aliceStore = new CompactWalletStore(0, 0n);
+  const aliceRes = await syncCompactStoreWithRpc({
+    store: aliceStore,
+    fvk: aliceFvk,
+    fetchBatch: makeFetcher(aliceLog),
+  });
+  assert.equal(aliceRes.discoveredNotes, 1);
+  assert.equal(aliceStore.notes[0].spent, true);
+  assert.equal(aliceStore.unspentNotes().length, 0);
+  assert.equal(aliceStore.lanes[0].nextNfIndex, lane0NfTotal);
+  assert.equal(aliceStore.lanes[1].nextNfIndex, lane1NfTotal);
+  const aliceFetchedNf = new Set(aliceLog.flatMap((e) => e.addrs).filter((a) => expectedNfAddrs.has(a)));
+  assert.equal(
+    aliceFetchedNf.size,
+    expectedNfAddrs.size,
+    'Pass 2 must fetch ALL 124 NullifierPages even after last unspent note is marked spent on page 0',
+  );
+  const aliceJson = aliceStore.toJSON();
+  assert.equal('seenNfPrefixes' in JSON.parse(aliceJson), false);
+  assert.equal(aliceJson.includes('cc00000000'), false, 'zero stranger prefixes stored in JSON');
+});
+
+test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-padding vs opt-in fast dataSlice', async () => {
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0xd1));
+  const fvk = exportFullViewingKey(alice);
+  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+
+  // Build reusable fixtures for a 4-lane pool with `sealedPerLane` sealed SubtreePages + 4 frontier leaves per lane.
+  const dummyLeafFrs = Array.from({ length: SUBTREE_LEAVES }, (_, i) => BigInt(i + 1));
+  const dummySubRoot = computeSubtree256Root(dummyLeafFrs, SUBTREE_LEAVES);
+  const dummyFrontierFrs = dummyLeafFrs.slice(0, 4);
+
+  const { tweak, blinding, memo90 } = encryptNoteMemo(
+    alice.viewPk,
+    new Uint8Array(32).fill(0xd2),
+    8_888_888n,
+    NATIVE_SOL_MINT_BYTES,
+  );
+  const aliceCm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), solAsset, 8_888_888n, blinding);
+  // Place Alice's note on Lane 2, leaf 300 -> sealed SubtreePage (lane=2, seq=1, slot=44), MemoPage (lane=2, seq=2, slot=76).
+  const aliceLeafIdx = 300n;
+  const aliceSubSeq = 1n;
+  const aliceSubSlot = Number(aliceLeafIdx % BigInt(SUBTREE_LEAVES)); // 44
+  const aliceMemoSeq = aliceLeafIdx / BigInt(MEMO_NOTES_PER_PAGE); // 2n
+  const aliceMemoSlot = Number(aliceLeafIdx % BigInt(MEMO_NOTES_PER_PAGE)); // 76
+
+  const hitSubLeaves = [...dummyLeafFrs];
+  hitSubLeaves[aliceSubSlot] = aliceCm;
+  const hitSubRoot = computeSubtree256Root(hitSubLeaves, SUBTREE_LEAVES);
+
+  // Derive Alice's exact nullifier prefix so we can place it on Lane 0 NullifierPage 0 (of 3 pages)
+  const hitSubRaw = makeSubtreePage(2, aliceSubSeq, hitSubLeaves);
+  const hitMemoRaw = makeMemoPageWithMeta(2, aliceMemoSeq, MEMO_NOTES_PER_PAGE);
+  writeMemoSlot(hitMemoRaw, aliceMemoSlot, memo90);
+  const probe = new CompactWalletStore(0, 0n);
+  probe.recordVerifiedMemo({
+    fvk,
+    laneId: 2,
+    leafIdx: aliceLeafIdx,
+    decrypted: { amount: 8_888_888n, mint: NATIVE_SOL_MINT_BYTES, tweak, blinding, isDynamic: false },
+    cmBe: frToBeBytes(aliceCm),
+  });
+  const aliceNfPrefix = probe.notes[0].nullifier.subarray(0, NF_PREFIX_LEN);
+
+  const buildLargePoolFixture = (sealedPerLane) => {
+    const activeLanes = 4;
+    const leavesPerLane = sealedPerLane * SUBTREE_LEAVES + 4;
+    const memosPerLane = Math.ceil(leavesPerLane / MEMO_NOTES_PER_PAGE);
+    const nfPagesLane0 = 3;
+    const nfTotalLane0 = BigInt((nfPagesLane0 - 1) * NF_PER_PAGE + 5);
+
+    const accounts = new Map([[derivePoolPdaSync(0).address, makePoolState(activeLanes)]]);
+    const sealedSubAddrs = new Set();
+    const frontierSubAddrs = new Set();
+    const allMemoAddrs = new Set();
+    const allNfAddrs = new Set();
+
+    const strangerPrefixes = Array.from({ length: NF_PER_PAGE }, (_, i) => {
+      const p = new Uint8Array(NF_PREFIX_LEN);
+      p[0] = 0xdd;
+      p[1] = i & 0xff;
+      return p;
+    });
+    const nf0Prefixes = [...strangerPrefixes];
+    nf0Prefixes[0] = aliceNfPrefix;
+
+    for (let p = 0; p < nfPagesLane0; p++) {
+      const addr = deriveNfPagePdaSync(0, 0, BigInt(p)).address;
+      allNfAddrs.add(addr);
+      accounts.set(
+        addr,
+        p === 0
+          ? makeNfPage(0, 0n, nf0Prefixes)
+          : makeNfPage(0, BigInt(p), p === nfPagesLane0 - 1 ? strangerPrefixes.slice(0, 5) : strangerPrefixes),
+      );
+    }
+
+    for (let l = 0; l < activeLanes; l++) {
+      accounts.set(
+        deriveLanePdaSync(0, l).address,
+        makeLaneState(l, BigInt(leavesPerLane), l === 0 ? nfTotalLane0 : 0n),
+      );
+      const roots = Array.from({ length: sealedPerLane }, (_, s) =>
+        l === 2 && BigInt(s) === aliceSubSeq ? hitSubRoot : dummySubRoot,
+      );
+      accounts.set(deriveSubrootPdaSync(0, l, 0n).address, makeSubrootPage(l, 0n, roots));
+
+      const genericSealed = makeSubtreePage(l, 0n, dummyLeafFrs);
+      for (let s = 0; s < sealedPerLane; s++) {
+        const addr = deriveSubtreePdaSync(0, l, BigInt(s)).address;
+        sealedSubAddrs.add(addr);
+        accounts.set(addr, l === 2 && BigInt(s) === aliceSubSeq ? hitSubRaw : genericSealed);
+      }
+      const fAddr = deriveSubtreePdaSync(0, l, BigInt(sealedPerLane)).address;
+      frontierSubAddrs.add(fAddr);
+      accounts.set(fAddr, makeSubtreePage(l, BigInt(sealedPerLane), dummyFrontierFrs));
+
+      const fullEmptyMemo = makeMemoPageWithMeta(l, 0n, MEMO_NOTES_PER_PAGE);
+      for (let m = 0; m < memosPerLane; m++) {
+        const addr = deriveMemoPdaSync(0, l, BigInt(m)).address;
+        allMemoAddrs.add(addr);
+        const cnt = Math.min(MEMO_NOTES_PER_PAGE, leavesPerLane - m * MEMO_NOTES_PER_PAGE);
+        if (l === 2 && BigInt(m) === aliceMemoSeq) {
+          accounts.set(addr, hitMemoRaw);
+        } else if (cnt === MEMO_NOTES_PER_PAGE) {
+          accounts.set(addr, fullEmptyMemo);
+        } else {
+          accounts.set(addr, makeMemoPageWithMeta(l, BigInt(m), cnt));
+        }
+      }
+    }
+
+    return {
+      accounts,
+      sealedSubAddrs,
+      frontierSubAddrs,
+      allMemoAddrs,
+      allNfAddrs,
+      nfTotalLane0,
+      hitSubAddr: deriveSubtreePdaSync(0, 2, aliceSubSeq).address,
+      hitMemoAddr: deriveMemoPdaSync(0, 2, aliceMemoSeq).address,
+    };
+  };
+
+  // Fixture A: 5 sealed subtrees/lane -> 20 total sealed subtrees (> 16), 48 total MemoPages (> 25).
+  const fix20 = buildLargePoolFixture(5);
+  assert.equal(fix20.sealedSubAddrs.size, 20);
+  assert.equal(fix20.allMemoAddrs.size, 48);
+
+  const makeSliceFetcher = (accounts, log) => async (addrs, opts) => {
+    log.push({ addrs: [...addrs], dataSlice: opts?.dataSlice ?? null });
+    return addrs.map((a) => {
+      const full = accounts.get(a) ?? null;
+      if (!full || !opts?.dataSlice) return full;
+      return full.slice(opts.dataSlice.offset, opts.dataSlice.offset + opts.dataSlice.length);
+    });
+  };
+
+  // A1: Default `'strict'` mode on > 25 MemoPages & 20 sealed subtrees:
+  // - ZERO dataSlice calls
+  // - Every MemoPage fetched ONCE in full (zero hit-correlated MemoPage re-fetch)
+  // - Hit historical sealed SubtreePage padded with random decoys to min(16, 20) = 16 sealed subtrees!
+  // - Pass 2 streams all 3 NullifierPages with zero early-exit!
+  const strict20Log = [];
+  const strict20Store = new CompactWalletStore(0, 0n);
+  const resStrict20 = await syncCompactStoreWithRpc({
+    store: strict20Store,
+    fvk,
+    fetchBatch: makeSliceFetcher(fix20.accounts, strict20Log),
+  });
+  assert.equal(resStrict20.discoveredNotes, 1);
+  assert.equal(strict20Store.notes[0].amount, 8_888_888n);
+  assert.equal(strict20Store.notes[0].spent, true);
+  assert.ok(strict20Store.notes[0].frozenIntraSiblings, 'sealed hit note must freeze 12 intra-subtree siblings');
+  assert.equal(strict20Store.lanes[0].nextNfIndex, fix20.nfTotalLane0);
+
+  assert.equal(
+    strict20Log.filter((e) => e.dataSlice !== null).length,
+    0,
+    'strict mode large catch-up must issue ZERO dataSlice calls',
+  );
+  const strict20Addrs = strict20Log.flatMap((e) => e.addrs);
+  for (const mAddr of fix20.allMemoAddrs) {
+    assert.equal(
+      strict20Addrs.filter((a) => a === mAddr).length,
+      1,
+      'strict mode must fetch each MemoPage exactly once in full (zero Pass 1D re-fetch)',
+    );
+  }
+  const strict20SealedFetched = new Set(strict20Addrs.filter((a) => fix20.sealedSubAddrs.has(a)));
+  assert.equal(
+    strict20SealedFetched.has(fix20.hitSubAddr),
+    true,
+    'hit sealed SubtreePage must be fetched',
+  );
+  assert.equal(
+    strict20SealedFetched.size,
+    16,
+    'strict mode must decoy-pad historical sealed SubtreePage batch to min(16, 20) = 16',
+  );
+  const strict20NfFetched = new Set(strict20Addrs.filter((a) => fix20.allNfAddrs.has(a)));
+  assert.equal(strict20NfFetched.size, 3, 'Pass 2 must fetch all 3 NullifierPages without early-exit');
+
+  // A2: Smaller large catch-up with 3 sealed subtrees/lane -> 12 total sealed subtrees (< 16), 28 MemoPages (> 25):
+  // Decoy padding must include ALL min(16, 12) = 12 sealed subtrees!
+  const fix12 = buildLargePoolFixture(3);
+  assert.equal(fix12.sealedSubAddrs.size, 12);
+  assert.equal(fix12.allMemoAddrs.size, 28);
+  const strict12Log = [];
+  const strict12Store = new CompactWalletStore(0, 0n);
+  const resStrict12 = await syncCompactStoreWithRpc({
+    store: strict12Store,
+    fvk,
+    fetchBatch: makeSliceFetcher(fix12.accounts, strict12Log),
+  });
+  assert.equal(resStrict12.discoveredNotes, 1);
+  const strict12SealedFetched = new Set(
+    strict12Log.flatMap((e) => e.addrs).filter((a) => fix12.sealedSubAddrs.has(a)),
+  );
+  assert.equal(
+    strict12SealedFetched.size,
+    12,
+    'when fewer than 16 sealed subtrees exist, strict mode must pad to all 12 sealed subtrees',
+  );
+
+  // A3: Explicit opt-in `privacyMode: 'fast'` on > 25 MemoPages & 20 sealed subtrees:
+  // - Uses dataSlice(0, 3872) on Pass 1C MemoPages
+  // - Re-fetches ONLY hit MemoPage (2, 2) in full on Pass 1D
+  // - Fetches ONLY hit sealed SubtreePage (2, 1) (plus live frontiers) without decoy padding
+  // - STILL runs full Pass 2 across all 3 NullifierPages without early-exit!
+  const fast20Log = [];
+  const fast20Store = new CompactWalletStore(0, 0n);
+  const resFast20 = await syncCompactStoreWithRpc({
+    store: fast20Store,
+    fvk,
+    fetchBatch: makeSliceFetcher(fix20.accounts, fast20Log),
+    privacyMode: 'fast',
+  });
+  assert.equal(resFast20.discoveredNotes, 1);
+  assert.equal(fast20Store.notes[0].spent, true);
+  assert.equal(fast20Store.lanes[0].nextNfIndex, fix20.nfTotalLane0);
+
+  const fastSliceCalls = fast20Log.filter(
+    (e) => e.dataSlice?.offset === 0 && e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN,
+  );
+  assert.ok(fastSliceCalls.length >= 1, 'fast mode on > 25 MemoPages must use dataSlice(0, 3872)');
+  const fastSlicedMemos = new Set(fastSliceCalls.flatMap((e) => e.addrs));
+  assert.equal(fastSlicedMemos.size, 48, 'all 48 MemoPages scanned via 3,872 B dataSlice');
+
+  const fastFullMemos = fast20Log
+    .filter((e) => e.dataSlice === null)
+    .flatMap((e) => e.addrs)
+    .filter((a) => fix20.allMemoAddrs.has(a));
+  assert.deepEqual(
+    fastFullMemos,
+    [fix20.hitMemoAddr],
+    'fast mode Pass 1D must fetch ONLY view-tag hit MemoPage in full',
+  );
+
+  const fastSealedFetched = new Set(
+    fast20Log.flatMap((e) => e.addrs).filter((a) => fix20.sealedSubAddrs.has(a)),
+  );
+  assert.deepEqual(
+    [...fastSealedFetched],
+    [fix20.hitSubAddr],
+    'fast mode skips decoy sealed SubtreePages',
+  );
+
+  const fastNfFetched = new Set(
+    fast20Log.flatMap((e) => e.addrs).filter((a) => fix20.allNfAddrs.has(a)),
+  );
+  assert.equal(
+    fastNfFetched.size,
+    3,
+    'fast mode must STILL run full Pass 2 across all 3 NullifierPages without early-exit',
+  );
 });
 
 test('computePageRollovers exact boundaries (110..112, 254..256, 598..600, 76798..76800)', () => {

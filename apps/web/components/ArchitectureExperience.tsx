@@ -113,7 +113,7 @@ const MEMO_PAGE_MAP = [
     inScan: true,
     bg: '#ebe7dc',
     color: '#2b2d26',
-    desc: 'AUD2MM03 magic, lane_id, bump, count (0..=112), pool_id, page_seq, created_slot, closed_slot (enables optional birthdaySlot skipping inside the 3,872 B dataSlice scan).',
+    desc: 'AUD2MM03 magic, lane_id, bump, count (0..=112), pool_id, page_seq, created_slot, closed_slot (enables optional birthdaySlot skipping during cold wallet recovery).',
   },
   {
     offset: '64..288',
@@ -124,7 +124,7 @@ const MEMO_PAGE_MAP = [
     inScan: true,
     bg: '#184433',
     color: '#f4f1ea',
-    desc: '16-bit view tag rejects 65,535 / 65,536 non-owned notes before AEAD decryption.',
+    desc: '16-bit view tag rejects 65,535 / 65,536 non-owned notes locally before AEAD decryption.',
   },
   {
     offset: '288..3,872',
@@ -135,7 +135,7 @@ const MEMO_PAGE_MAP = [
     inScan: true,
     bg: '#255a44',
     color: '#f4f1ea',
-    desc: 'X25519 ephemeral public keys for deterministic ECDH shared secret derivation inside the 3,872 B dataSlice scan.',
+    desc: 'X25519 ephemeral public keys for deterministic ECDH shared secret derivation; included with header and view_tags in the opt-in 3,872 B fast-mode dataSlice.',
   },
   {
     offset: '3,872..10,144',
@@ -146,7 +146,7 @@ const MEMO_PAGE_MAP = [
     inScan: false,
     bg: '#e8efe8',
     color: '#1b2b22',
-    desc: 'Fetched only on 1/65,536 view-tag hit: ChaCha20-Poly1305 encrypted (amount_u64 || mint_32) + 16 B tag (or XOR-masked AUD2DYN2 swap note).',
+    desc: 'ChaCha20-Poly1305 encrypted (amount_u64 || mint_32) + 16 B tag (or XOR-masked AUD2DYN2 swap note). Fetched in full in default strict mode; deferred until view-tag hit only in opt-in fast mode (> 25 pages) over self-hosted or trusted RPCs.',
   },
 ] as const
 
@@ -226,15 +226,19 @@ export function ArchitectureExperience() {
             <p>
               Every on-chain account fits strictly below Solana’s 10,240 B CPI allocation cap with
               zero <code>realloc</code>. <code>CompactWalletStore</code> runs a 2-pass sync over
-              ordinary <code>getMultipleAccounts</code>: Pass 1 ingests{' '}
-              <code>SubtreeRootPage</code> (9,664 B, 300 sealed roots) and scans{' '}
-              <code>MemoPage</code> (10,144 B) via SoA <code>dataSlice</code> (<code>[0..3,872]</code>
-              ), fetching full memos and historical <code>SubtreePage</code>s (8,256 B) only on
-              owned hits to verify commitments and freeze 12 intra-subtree siblings; Pass 2 streams{' '}
-              <code>NullifierPage</code>s (9,664 B, 600 × 16 B prefixes) against owned unspent notes
-              and discards every stranger prefix and raw page permanently (
-              <span style={{ fontWeight: 500, color: '#161614' }}>1.28 MB</span> local store at 10M
-              pool notes).
+              ordinary <code>getMultipleAccounts</code>: in default <code>strict</code> privacy
+              mode, Pass 1 ingests <code>SubtreeRootPage</code> (9,664 B, 300 sealed roots), fetches
+              full 10,144 B <code>MemoPage</code>s in uniform batches (with uniform newly-synced{' '}
+              <code>SubtreePage</code> fetches on incremental syncs of 25 pages or fewer, and
+              decoy-padded shuffled historical <code>SubtreePage</code> batches on larger catch-up)
+              so the RPC never learns which page matched; Pass 2 streams every new{' '}
+              <code>NullifierPage</code> (9,664 B, 600 × 16 B prefixes) to lane head without
+              early-exit, matching only owned unspent notes and discarding stranger prefixes
+              permanently (<span style={{ fontWeight: 500, color: '#161614' }}>1.28 MB</span> local
+              store at 10M pool notes). Opt-in <code>fast</code> mode enables 3,872 B SoA{' '}
+              <code>dataSlice</code> scanning (<code>[0..3,872]</code>) on large historical catch-up
+              (&gt;25 pages) for self-hosted or trusted RPCs, trading RPC hit-visibility for lower
+              bandwidth.
             </p>
           </div>
 
@@ -244,8 +248,8 @@ export function ArchitectureExperience() {
                 Interactive MemoPage byte layout (10,144 B; click any region to inspect)
               </div>
               <span>
-                dataSlice [0..3,872] scans header + view_tags + ephemeral_pks; full 10,144 B fetched
-                only on 1/65,536 hit
+                Default strict mode fetches full 10,144 B uniformly; opt-in fast mode (&gt;25 pages)
+                uses dataSlice [0..3,872] on trusted RPCs
               </span>
             </div>
 
@@ -289,7 +293,9 @@ export function ArchitectureExperience() {
                   fontWeight: 500,
                 }}
               >
-                {slice.inScan ? 'Included in 3,872 B dataSlice' : 'Fetched only on view-tag hit'}
+                {slice.inScan
+                  ? 'Full in strict mode · in 3,872 B fast dataSlice'
+                  : 'Full in strict mode · on hit in opt-in fast mode'}
               </span>
             </div>
           </div>

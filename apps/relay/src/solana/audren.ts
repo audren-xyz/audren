@@ -9,7 +9,9 @@ import {
   EXEC_KIND_SOL,
   EXEC_KIND_SPL,
   MEMO_ENTRY_WIRE_LEN,
+  MEMO_NOTES_PER_PAGE,
   NATIVE_SOL_MINT_BYTES,
+  NF_PER_PAGE,
   NUM_ESCROW_SHARDS,
   NUM_LANES,
   OPEN_PAGE_KIND_MEMO,
@@ -17,6 +19,8 @@ import {
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
   PROTOCOL_VERSION,
+  SUBROOTS_PER_PAGE,
+  SUBTREE_LEAVES,
   TAG_DEPOSIT_SOL,
   TAG_DEPOSIT_SPL,
   TAG_EXEC_VIA_ESCROW,
@@ -187,7 +191,17 @@ export function extractNullifierPdas(tag: number, accounts: SolanaAccountMeta[])
   return out
 }
 
-export interface ParsedJoinSplitMeta {
+export interface ParsedPageAccounts {
+  outSub: string
+  outRoot: string
+  outMemo: string
+  nfPage: string
+  nextSub: string | null
+  nextMemo: string | null
+  nextNf: string | null
+}
+
+export interface ParsedJoinSplitMeta extends ParsedPageAccounts {
   poolId: number
   vkId: number
   outLaneId: number
@@ -213,7 +227,7 @@ export interface ParsedJoinSplitMeta {
 }
 
 /**
- * Parse Tag 6 (`JoinSplit`) wire payload & fixed account layout.
+ * Parse Tag 6 (`JoinSplit`) wire payload & fixed/outflow/rollover account layout.
  * Wire:
  *   [0] tag(6), [1..5] pool_id, [5] vk_id, [6] out_lane_id, [7] output_mask,
  *   [8] asset_mode, [9] flags, [10..202] proof(192), [202..234] nf0, [234..266] nf1,
@@ -231,7 +245,12 @@ export function parseJoinSplitMeta(
   const outputMask = ixData[7]!
   const assetMode = ixData[8]!
   const flags = ixData[9]!
-  if (outLaneId >= NUM_LANES || (outputMask & ~0x07) !== 0 || assetMode > ASSET_MODE_SPL) {
+  if (
+    outLaneId >= NUM_LANES ||
+    (outputMask & ~0x07) !== 0 ||
+    assetMode > ASSET_MODE_SPL ||
+    (flags & ~(0x07 | WITHDRAW_FLAG_UNWRAP_WSOL)) !== 0
+  ) {
     return null
   }
   const outputCount = popcount3(outputMask)
@@ -248,9 +267,25 @@ export function parseJoinSplitMeta(
   const publicAmountOut = readU64le(ixData, 362)
   const relayerFee = readU64le(ixData, 370)
 
+  if (unwrapWsol && publicAmountOut === 0n) return null
+  if (assetMode === ASSET_MODE_PRIVATE && (publicAmountOut !== 0n || relayerFee !== 0n)) {
+    return null
+  }
+  if (assetMode !== ASSET_MODE_PRIVATE && publicAmountOut === 0n) return null
+
   if (isAllZero32(nf0)) return null
   if (isAllZero32(nf1) && !bytesEqual(accounts[4]!.pubkey, SYSTEM_PROGRAM_ID)) return null
   if (!isAllZero32(nf1) && bytesEqual(accounts[4]!.pubkey, SYSTEM_PROGRAM_ID)) return null
+  if (!bytesEqual(accounts[5]!.pubkey, deriveLanePda(poolId, outLaneId).address)) return null
+  if (!bytesEqual(accounts[6]!.pubkey, deriveLaneRentVaultPda(poolId, outLaneId).address)) {
+    return null
+  }
+  if (!bytesEqual(accounts[11]!.pubkey, SYSTEM_PROGRAM_ID)) return null
+
+  const outSub = base58Encode(accounts[7]!.pubkey)
+  const outRoot = base58Encode(accounts[8]!.pubkey)
+  const outMemo = base58Encode(accounts[9]!.pubkey)
+  const nfPage = base58Encode(accounts[10]!.pubkey)
 
   let cm2Memo90: Uint8Array | null = null
   if ((outputMask & 0x04) !== 0) {
@@ -263,12 +298,14 @@ export function parseJoinSplitMeta(
   let tokenProgram: string | null = null
   let recipientAccount: string | null = null
   let feeRecipient: string | null = null
+  let cursor = 12
 
   if (assetMode === ASSET_MODE_SOL) {
     if (accounts.length < 15) return null
     if (!bytesEqual(accounts[12]!.pubkey, deriveSolVaultPda(poolId).address)) return null
     recipientAccount = base58Encode(accounts[13]!.pubkey)
     feeRecipient = base58Encode(accounts[14]!.pubkey)
+    cursor = 15
   } else if (assetMode === ASSET_MODE_SPL) {
     const minAccs = unwrapWsol ? 19 : 18
     if (accounts.length < minAccs) return null
@@ -281,7 +318,18 @@ export function parseJoinSplitMeta(
       if (mint !== WSOL_MINT_STR || tokenProgram !== CLASSIC_TOKEN_PROGRAM_ID_STR) return null
       if (!bytesEqual(accounts[18]!.pubkey, deriveUnwrapPda(poolId, nf0).address)) return null
     }
+    cursor = minAccs
   }
+
+  // Optional atomic rollover accounts (bit 0 = nextSub, bit 1 = nextMemo, bit 2 = nextNf)
+  const hasNextSub = (flags & 0x01) !== 0
+  const hasNextMemo = (flags & 0x02) !== 0
+  const hasNextNf = (flags & 0x04) !== 0
+  const rolloverCount = (hasNextSub ? 1 : 0) + (hasNextMemo ? 1 : 0) + (hasNextNf ? 1 : 0)
+  if (accounts.length < cursor + rolloverCount) return null
+  const nextSub = hasNextSub ? base58Encode(accounts[cursor++]!.pubkey) : null
+  const nextMemo = hasNextMemo ? base58Encode(accounts[cursor++]!.pubkey) : null
+  const nextNf = hasNextNf ? base58Encode(accounts[cursor++]!.pubkey) : null
 
   return {
     poolId,
@@ -305,6 +353,13 @@ export function parseJoinSplitMeta(
     recipientAccount,
     feeRecipient,
     cm2Memo90,
+    outSub,
+    outRoot,
+    outMemo,
+    nfPage,
+    nextSub,
+    nextMemo,
+    nextNf,
   }
 }
 
@@ -327,7 +382,7 @@ export function verifyShieldedCm2RelayerFee(
   }
 }
 
-export interface ParsedExecEscrowMeta {
+export interface ParsedExecEscrowMeta extends ParsedPageAccounts {
   poolId: number
   vkId: number
   outLaneId: number
@@ -356,7 +411,7 @@ export interface ParsedExecEscrowMeta {
 }
 
 /**
- * Parse Tag 7 (`ExecViaEscrow`) wire payload & variable leg accounts.
+ * Parse Tag 7 (`ExecViaEscrow`) wire payload & variable leg/rollover accounts.
  * Wire:
  *   [0] tag(7), [1..5] pool_id, [5] vk_id, [6] out_lane_id, [7] escrow_shard,
  *   [8] change_mask, [9] in_kind, [10] out_kind, [11] flags,
@@ -384,6 +439,7 @@ export function parseExecEscrowMeta(
     outLaneId >= NUM_LANES ||
     shardId >= NUM_ESCROW_SHARDS ||
     (changeMask & ~0x03) !== 0 ||
+    (flags & ~(0x07 | EXEC_FLAG_FEE_ON_OUTPUT)) !== 0 ||
     (inKind !== EXEC_KIND_SOL && inKind !== EXEC_KIND_SPL) ||
     (outKind !== EXEC_KIND_SOL && outKind !== EXEC_KIND_SPL)
   ) {
@@ -398,11 +454,23 @@ export function parseExecEscrowMeta(
   if (isAllZero32(nf0)) return null
   if (isAllZero32(nf1) && !bytesEqual(accounts[4]!.pubkey, SYSTEM_PROGRAM_ID)) return null
   if (!isAllZero32(nf1) && bytesEqual(accounts[4]!.pubkey, SYSTEM_PROGRAM_ID)) return null
+  if (!bytesEqual(accounts[5]!.pubkey, deriveLanePda(poolId, outLaneId).address)) return null
+  if (!bytesEqual(accounts[6]!.pubkey, deriveLaneRentVaultPda(poolId, outLaneId).address)) {
+    return null
+  }
+  if (!bytesEqual(accounts[13]!.pubkey, SYSTEM_PROGRAM_ID)) return null
+
+  const outSub = base58Encode(accounts[7]!.pubkey)
+  const outRoot = base58Encode(accounts[8]!.pubkey)
+  const outMemo = base58Encode(accounts[9]!.pubkey)
+  const nfPage = base58Encode(accounts[10]!.pubkey)
 
   const feeOnOutput = (flags & EXEC_FLAG_FEE_ON_OUTPUT) !== 0
   const amountIn = readU64le(ixData, 364)
   const minAmountOut = readU64le(ixData, 372)
   const relayerFee = readU64le(ixData, 380)
+  if (amountIn === 0n) return null
+  if (feeOnOutput && relayerFee === 0n) return null
 
   const expectedEscrow = deriveEscrowPda(poolId, shardId).address
   if (!bytesEqual(accounts[11]!.pubkey, expectedEscrow)) return null
@@ -451,11 +519,16 @@ export function parseExecEscrowMeta(
     feeRecipient = base58Encode(accounts[cursor++]!.pubkey)
   }
 
-  // Optional rollover accounts (flags bits 0, 1, 2)
-  if ((flags & 1) !== 0) cursor++
-  if ((flags & 2) !== 0) cursor++
-  if ((flags & 4) !== 0) cursor++
-  if (cursor > accounts.length) return null
+  // Optional atomic rollover accounts (bit 0 = nextSub, bit 1 = nextMemo, bit 2 = nextNf)
+  const hasNextSub = (flags & 0x01) !== 0
+  const hasNextMemo = (flags & 0x02) !== 0
+  const hasNextNf = (flags & 0x04) !== 0
+  const rolloverCount = (hasNextSub ? 1 : 0) + (hasNextMemo ? 1 : 0) + (hasNextNf ? 1 : 0)
+  // Strictly > 0 router accounts must follow rollover accounts (matches `program/src/lib.rs:2686`).
+  if (cursor + rolloverCount >= accounts.length) return null
+  const nextSub = hasNextSub ? base58Encode(accounts[cursor++]!.pubkey) : null
+  const nextMemo = hasNextMemo ? base58Encode(accounts[cursor++]!.pubkey) : null
+  const nextNf = hasNextNf ? base58Encode(accounts[cursor++]!.pubkey) : null
 
   const feeKind = feeOnOutput ? outKind : inKind
   const feeIsNativeSol = feeKind === EXEC_KIND_SOL
@@ -486,5 +559,183 @@ export function parseExecEscrowMeta(
     feeTokenProg: feeOnOutput ? tokenProgOut : tokenProgIn,
     escrowPda: base58Encode(expectedEscrow),
     routerAccountsStartIdx: cursor,
+    outSub,
+    outRoot,
+    outMemo,
+    nfPage,
+    nextSub,
+    nextMemo,
+    nextNf,
   }
+}
+
+export type PageSlotName =
+  | 'outSub'
+  | 'outRoot'
+  | 'outMemo'
+  | 'nfPage'
+  | 'nextSub'
+  | 'nextMemo'
+  | 'nextNf'
+
+export interface PageSlotEntry {
+  slot: PageSlotName
+  pda: string
+}
+
+export function listReferencedPageSlots(pages: ParsedPageAccounts): PageSlotEntry[] {
+  const slots: PageSlotEntry[] = [
+    { slot: 'outSub', pda: pages.outSub },
+    { slot: 'outRoot', pda: pages.outRoot },
+    { slot: 'outMemo', pda: pages.outMemo },
+    { slot: 'nfPage', pda: pages.nfPage },
+  ]
+  if (pages.nextSub) slots.push({ slot: 'nextSub', pda: pages.nextSub })
+  if (pages.nextMemo) slots.push({ slot: 'nextMemo', pda: pages.nextMemo })
+  if (pages.nextNf) slots.push({ slot: 'nextNf', pda: pages.nextNf })
+  return slots
+}
+
+export interface FetchedAccountMeta {
+  bytes: Uint8Array
+  owner: string
+}
+
+export type MissingPagePlanResult =
+  | { ok: true; openPageIxs: SolanaInstruction[] }
+  | { ok: false; error: string }
+
+function isInitializedAudrenPage(acc: FetchedAccountMeta | null | undefined): boolean {
+  return Boolean(acc && acc.owner === AUDREN_PROGRAM_ID_STR && acc.bytes.length > 0)
+}
+
+/**
+ * Inspect the batched on-chain `LaneTreeState` and primary/rollover page accounts for a
+ * `JoinSplit` (Tag 6) or `ExecViaEscrow` (Tag 7) instruction, verify every unopened page PDA
+ * matches the exact canonical PDA derived from `(poolId, outLaneId, nextLeaf, nfCount)`
+ * (rejecting spoofed PDAs), and return `OpenPage` (Tag 2) instructions to prepend atomically.
+ */
+export function planMissingOpenPageIxs(params: {
+  payerB58: string
+  poolId: number
+  outLaneId: number
+  laneAcc: FetchedAccountMeta | null | undefined
+  pages: ParsedPageAccounts
+  pageSlots: PageSlotEntry[]
+  pageAccs: Array<FetchedAccountMeta | null | undefined>
+}): MissingPagePlanResult {
+  const { payerB58, poolId, outLaneId, laneAcc, pages, pageSlots, pageAccs } = params
+  const missing: PageSlotEntry[] = []
+  for (let i = 0; i < pageSlots.length; i++) {
+    if (!isInitializedAudrenPage(pageAccs[i])) {
+      missing.push(pageSlots[i]!)
+    }
+  }
+  if (missing.length === 0) {
+    return { ok: true, openPageIxs: [] }
+  }
+
+  if (!laneAcc || laneAcc.owner !== AUDREN_PROGRAM_ID_STR || laneAcc.bytes.length === 0) {
+    return {
+      ok: false,
+      error: `Cannot open missing page(s): LaneTreeState for pool ${poolId} lane ${outLaneId} is not initialized`,
+    }
+  }
+
+  let hdr: DecodedLaneHeader
+  try {
+    hdr = decodeLaneHeader(laneAcc.bytes)
+  } catch {
+    return {
+      ok: false,
+      error: `Cannot open missing page(s): invalid LaneTreeState for pool ${poolId} lane ${outLaneId}`,
+    }
+  }
+  if (hdr.poolId !== poolId || hdr.laneId !== outLaneId) {
+    return {
+      ok: false,
+      error: `LaneTreeState header mismatch for pool ${poolId} lane ${outLaneId}`,
+    }
+  }
+
+  const curSub = hdr.nextLeaf / BigInt(SUBTREE_LEAVES)
+  const curRoot = curSub / BigInt(SUBROOTS_PER_PAGE)
+  const curMemo = hdr.nextLeaf / BigInt(MEMO_NOTES_PER_PAGE)
+  const curNf = hdr.nfCount / BigInt(NF_PER_PAGE)
+
+  const deriveKindPda = (pageKind: number, seq: bigint): string => {
+    if (pageKind === OPEN_PAGE_KIND_SUBTREE) {
+      return base58Encode(deriveSubtreePda(poolId, outLaneId, seq).address)
+    }
+    if (pageKind === OPEN_PAGE_KIND_SUBROOT) {
+      return base58Encode(deriveSubrootPda(poolId, outLaneId, seq).address)
+    }
+    if (pageKind === OPEN_PAGE_KIND_MEMO) {
+      return base58Encode(deriveMemoPda(poolId, outLaneId, seq).address)
+    }
+    return base58Encode(deriveNfPagePda(poolId, outLaneId, seq).address)
+  }
+
+  const seenOpened = new Set<string>()
+  const openPageIxs: SolanaInstruction[] = []
+
+  for (const item of missing) {
+    let pageKind: number
+    let expectedSeq: bigint
+
+    if (item.slot === 'outSub') {
+      pageKind = OPEN_PAGE_KIND_SUBTREE
+      expectedSeq = curSub
+    } else if (item.slot === 'outRoot') {
+      pageKind = OPEN_PAGE_KIND_SUBROOT
+      expectedSeq = curRoot
+    } else if (item.slot === 'outMemo') {
+      pageKind = OPEN_PAGE_KIND_MEMO
+      expectedSeq = curMemo
+    } else if (item.slot === 'nfPage') {
+      pageKind = OPEN_PAGE_KIND_NULLIFIER
+      expectedSeq = curNf
+    } else if (item.slot === 'nextSub') {
+      pageKind = OPEN_PAGE_KIND_SUBTREE
+      expectedSeq =
+        curSub > 0n && pages.outSub === deriveKindPda(OPEN_PAGE_KIND_SUBTREE, curSub - 1n)
+          ? curSub
+          : curSub + 1n
+    } else if (item.slot === 'nextMemo') {
+      pageKind = OPEN_PAGE_KIND_MEMO
+      expectedSeq =
+        curMemo > 0n && pages.outMemo === deriveKindPda(OPEN_PAGE_KIND_MEMO, curMemo - 1n)
+          ? curMemo
+          : curMemo + 1n
+    } else {
+      pageKind = OPEN_PAGE_KIND_NULLIFIER
+      expectedSeq =
+        curNf > 0n && pages.nfPage === deriveKindPda(OPEN_PAGE_KIND_NULLIFIER, curNf - 1n)
+          ? curNf
+          : curNf + 1n
+    }
+
+    const expectedPda = deriveKindPda(pageKind, expectedSeq)
+    if (item.pda !== expectedPda) {
+      return {
+        ok: false,
+        error: `Unopened ${item.slot} PDA (${item.pda}) does not match expected canonical PDA (${expectedPda}) for lane ${outLaneId} seq ${expectedSeq.toString()}`,
+      }
+    }
+
+    if (!seenOpened.has(expectedPda)) {
+      seenOpened.add(expectedPda)
+      openPageIxs.push(
+        buildOpenPageSolanaIx({
+          payer: payerB58,
+          pageKind,
+          poolId,
+          laneId: outLaneId,
+          pageSeq: expectedSeq,
+        }),
+      )
+    }
+  }
+
+  return { ok: true, openPageIxs }
 }

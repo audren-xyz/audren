@@ -359,8 +359,8 @@ async function fetchPoolSnapshot(
     lanePdas.push(deriveLanePdaSync(poolId, l, AUDREN_PROGRAM_ID).address)
   }
 
-  // Probe the 80 most recent ring slots in the first batch alongside lanes (<= 96 accounts).
-  // If no non-expired checkpoint is found in those 80 slots, scan the remaining ring slots.
+  // Probe the most recent ring slots in the first batch alongside lanes (<= 100 accounts).
+  // Scan the remaining ring slots unless a non-expired checkpoint from the probed epoch window was found.
   const orderedSlots: number[] = []
   const orderedPdas: string[] = []
   for (let back = 0; back < CHECKPOINT_RING_SLOTS; back++) {
@@ -396,6 +396,7 @@ async function fetchPoolSnapshot(
 
   let latestCheckpoint: InitializedPoolSnapshot['latestCheckpoint'] = null
   let bestSlot = -1n
+  let bestEpoch = -1n
   let bestAnySlot = -1n
   const curSlotBig = BigInt(currentSlot)
   const scanCkptAccounts = (pdas: string[], vals: Array<{ data: [string, string] } | null>) => {
@@ -405,8 +406,12 @@ async function fetchPoolSnapshot(
       const ck = decodeRootCheckpoint(fromBase64(acc.data[0]))
       if (ck.publishedSlot > bestAnySlot) bestAnySlot = ck.publishedSlot
       const age = curSlotBig >= ck.publishedSlot ? curSlotBig - ck.publishedSlot : 0n
-      if (age <= pool.maxCkptAge && ck.publishedSlot > bestSlot) {
+      if (
+        age <= pool.maxCkptAge &&
+        (ck.publishedSlot > bestSlot || (ck.publishedSlot === bestSlot && ck.epochId > bestEpoch))
+      ) {
         bestSlot = ck.publishedSlot
+        bestEpoch = ck.epochId
         latestCheckpoint = {
           slotIndex: ck.slotIdx,
           pda: pdas[i]!,
@@ -420,7 +425,12 @@ async function fetchPoolSnapshot(
   }
 
   scanCkptAccounts(firstCkptPdas, laneAndCkpt.value.slice(lanePdas.length))
-  if (!latestCheckpoint && orderedPdas.length > firstBatchCount) {
+  const minRecentEpoch =
+    firstBatchCount > 0 && curEpoch >= BigInt(firstBatchCount - 1)
+      ? curEpoch - BigInt(firstBatchCount - 1)
+      : 0n
+  const hasRecentCheckpoint = bestSlot >= 0n && bestEpoch >= minRecentEpoch
+  if (!hasRecentCheckpoint && orderedPdas.length > firstBatchCount) {
     const restPdas = orderedPdas.slice(firstBatchCount)
     const chunks: string[][] = []
     for (let off = 0; off < restPdas.length; off += 100) {

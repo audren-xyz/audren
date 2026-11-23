@@ -239,8 +239,13 @@ export async function fetchPoolCheckpointSnapshot(
     }
   }
 
-  let latestCkpt: DecodedRootCheckpoint | null = null
-  let targetSlotCkpt: DecodedRootCheckpoint | null = null
+  const scanState: {
+    latestCkpt: DecodedRootCheckpoint | null
+    targetSlotCkpt: DecodedRootCheckpoint | null
+  } = {
+    latestCkpt: null,
+    targetSlotCkpt: null,
+  }
 
   const scanCheckpoints = (
     accounts: Array<{ bytes: Uint8Array } | null>,
@@ -256,27 +261,43 @@ export async function fetchPoolCheckpointSnapshot(
         continue
       }
       if (isFirstBatch && i === 0) {
-        targetSlotCkpt = ckpt
+        scanState.targetSlotCkpt = ckpt
       }
       if (
-        !latestCkpt ||
-        ckpt.publishedSlot > latestCkpt.publishedSlot ||
-        (ckpt.publishedSlot === latestCkpt.publishedSlot && ckpt.epochId > latestCkpt.epochId)
+        !scanState.latestCkpt ||
+        ckpt.publishedSlot > scanState.latestCkpt.publishedSlot ||
+        (ckpt.publishedSlot === scanState.latestCkpt.publishedSlot &&
+          ckpt.epochId > scanState.latestCkpt.epochId)
       ) {
-        latestCkpt = ckpt
+        scanState.latestCkpt = ckpt
       }
     }
   }
 
   scanCheckpoints(firstBatch.slice(lanePdas.length), true)
 
-  // If no checkpoint was found in the most recent ~84..96 ring slots, scan the rest of the ring.
-  if (!latestCkpt && orderedCkptPdas.length > firstBatchCount) {
+  // Only skip scanning the rest of the 256-slot ring when a genuine recent checkpoint
+  // (`epochId >= minRecentEpoch`) was found in `firstBatch`. An ancient wrapped checkpoint
+  // from a previous ring cycle (`epochId < minRecentEpoch`) must NOT short-circuit the scan.
+  const minRecentEpoch =
+    firstBatchCount > 0 && curEpoch >= BigInt(firstBatchCount - 1)
+      ? curEpoch - BigInt(firstBatchCount - 1)
+      : 0n
+  const foundRecentInFirstBatch =
+    scanState.latestCkpt !== null && scanState.latestCkpt.epochId >= minRecentEpoch
+
+  if (!foundRecentInFirstBatch && orderedCkptPdas.length > firstBatchCount) {
     const restAccs = await fetchMultipleAccounts(rpcUrl, orderedCkptPdas.slice(firstBatchCount))
     scanCheckpoints(restAccs, false)
   }
 
-  return { pool, lanes, latestCkpt, targetSlotCkpt, currentSlot }
+  return {
+    pool,
+    lanes,
+    latestCkpt: scanState.latestCkpt,
+    targetSlotCkpt: scanState.targetSlotCkpt,
+    currentSlot,
+  }
 }
 
 /**

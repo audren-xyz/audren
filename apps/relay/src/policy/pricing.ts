@@ -87,6 +87,10 @@ export function computeSwapFeePlan(params: {
   feeAccount: string | null
   feeAccountExists: boolean
   hasUnsafeSelfPayExt?: boolean
+  /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers, padded swap). */
+  omitNf1?: boolean
+  /** Shielded output note count (change + dynamic output). Defaults to `2`. */
+  outputCount?: number
 }): SwapFeePlan {
   const {
     cfg,
@@ -99,9 +103,18 @@ export function computeSwapFeePlan(params: {
     feeAccount,
     feeAccountExists,
     hasUnsafeSelfPayExt = false,
+    omitNf1,
+    outputCount,
   } = params
 
-  const baseSwapLamports = rentSchedule.swapBaselineLamports + 15_000n
+  const hasCustomShape = omitNf1 !== undefined || outputCount !== undefined
+  const baseSwapLamports = hasCustomShape
+    ? BigInt(omitNf1 ? 1 : 2) *
+        (rentSchedule.nullifierRentLamports + rentSchedule.nfPageRentPerNfLamports) +
+      BigInt(Math.max(0, Math.min(3, Math.trunc(outputCount ?? 2)))) *
+        rentSchedule.pageRentPerNoteLamports +
+      20_000n
+    : rentSchedule.swapBaselineLamports
   const totalLamportsIfCreatingAta = baseSwapLamports + rentSchedule.ataRentLamports
   const costSol = Number(baseSwapLamports) / 1e9
   const estimatedRelayCostUsd =
@@ -304,7 +317,8 @@ export function computeNativeFeeQuote(params: {
 
   const nullifierCount = omitNf1 ? 1n : 2n
   const clampedOutputs = BigInt(Math.max(0, Math.min(3, Math.trunc(outputCount))))
-  const nullifierRent = nullifierCount * rentSchedule.nullifierRentLamports
+  const nullifierRent =
+    nullifierCount * (rentSchedule.nullifierRentLamports + rentSchedule.nfPageRentPerNfLamports)
   const noteRent = clampedOutputs * rentSchedule.pageRentPerNoteLamports
   const extraAtas =
     BigInt(Math.max(0, Math.min(6, Math.trunc(missingAtaCount)))) * rentSchedule.ataRentLamports

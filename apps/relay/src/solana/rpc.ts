@@ -283,10 +283,11 @@ export async function fetchMintMetas(
 
 export interface LiveRentSchedule {
   nullifierRentLamports: bigint
+  nfPageRentPerNfLamports: bigint
   pageRentPerNoteLamports: bigint
   ataRentLamports: bigint
   baseTxFeeLamports: bigint
-  /** Total baseline cost for a 1-nullifier, 1-output-note swap tx (before priority fee). */
+  /** Total baseline cost for a default 2-nullifier, 2-output-note swap tx (including base/priority fee buffer). */
   swapBaselineLamports: bigint
   fetchedAt: number
 }
@@ -298,6 +299,7 @@ const NULLIFIER_ACCOUNT_LEN = 0 // On-chain claim_nullifier creates a 0-byte sen
 const SUBTREE_PAGE_LEN = 8_256
 const SUBROOT_PAGE_LEN = 9_664
 const MEMO_PAGE_LEN = 10_144
+const NF_PAGE_LEN = 9_664
 const SPL_TOKEN_ACCOUNT_LEN = 165
 
 export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSchedule> {
@@ -308,11 +310,12 @@ export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSch
   }
 
   const poolPdaB58 = base58Encode(derivePoolPda(0).address)
-  const [nullifierRent, subRent, srRent, memoRent, ataRent, poolAcc] = await Promise.all([
+  const [nullifierRent, subRent, srRent, memoRent, nfRent, ataRent, poolAcc] = await Promise.all([
     rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [NULLIFIER_ACCOUNT_LEN]),
     rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBTREE_PAGE_LEN]),
     rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBROOT_PAGE_LEN]),
     rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [MEMO_PAGE_LEN]),
+    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [NF_PAGE_LEN]),
     rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SPL_TOKEN_ACCOUNT_LEN]),
     fetchAccountBytes(rpcUrl, poolPdaB58).catch(() => null),
   ])
@@ -324,17 +327,25 @@ export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSch
     divCeil(BigInt(subRent), 256n) +
     divCeil(BigInt(srRent), 256n * 300n) +
     divCeil(BigInt(memoRent), 112n)
-  const poolConfigured = poolAcc ? decodePoolState(poolAcc.bytes).noteRentFee : livePerNote
+  const livePerNf = divCeil(BigInt(nfRent), 600n)
+  const decodedPool = poolAcc ? decodePoolState(poolAcc.bytes) : null
+  const poolConfigured = decodedPool ? decodedPool.noteRentFee : livePerNote
   const pageRentPerNoteLamports =
     poolConfigured > 0n && poolConfigured < livePerNote ? poolConfigured : livePerNote
+  const poolNfFee = decodedPool ? decodedPool.nfRentFee : livePerNf
+  const nfPageRentPerNfLamports = poolNfFee < livePerNf ? poolNfFee : livePerNf
   const baseTxFeeLamports = 5_000n
 
   const schedule: LiveRentSchedule = {
     nullifierRentLamports: nullifierLamports,
+    nfPageRentPerNfLamports,
     pageRentPerNoteLamports,
     ataRentLamports: ataLamports,
     baseTxFeeLamports,
-    swapBaselineLamports: nullifierLamports + pageRentPerNoteLamports + baseTxFeeLamports,
+    swapBaselineLamports:
+      2n * (nullifierLamports + nfPageRentPerNfLamports) +
+      2n * pageRentPerNoteLamports +
+      20_000n,
     fetchedAt: now,
   }
   RENT_CACHE.set(rpcUrl, schedule)
