@@ -26,16 +26,12 @@ import {
   ASSET_MODE_PUBLIC,
   AUDREN_PROGRAM_ID,
   AUDREN_PROGRAM_ID_STR,
-  MEMO_NOTES_PER_PAGE,
   NF_PER_PAGE,
   NUM_ESCROW_SHARDS,
   OPEN_PAGE_KIND_MEMO,
-  OPEN_PAGE_KIND_NULLIFIER,
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
   PROTOCOL_VERSION,
-  SUBROOTS_PER_PAGE,
-  SUBTREE_LEAVES,
   TAG_DEPOSIT,
   TAG_EXEC_VIA_ESCROW,
   TAG_PUBLISH_CHECKPOINT,
@@ -1069,15 +1065,9 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
 
   const cluster = parseCluster(body.cluster, 'mainnet')
   const rpcUrl = getRpcUrl(env, cluster)
-  const requestedPayer =
-    Array.isArray(body.instructions) && typeof body.instructions[0]?.accounts?.[0]?.pubkey === 'string'
-      ? body.instructions[0]!.accounts[0]!.pubkey
-      : Array.isArray(body.accounts) && typeof body.accounts[0]?.pubkey === 'string'
-        ? body.accounts[0]!.pubkey
-        : undefined
-  const relayer = getRelayerPubkeyForCluster(env, cluster, requestedPayer)
+  const relayerPool = getRelayerPoolForCluster(env, cluster)
   const fvkInfo = getRelayerFvk(env, cluster)
-  if (!rpcUrl || !relayer) {
+  if (!rpcUrl || relayerPool.length === 0) {
     const reqHost = new URL(request.url).host
     return json(
       request,
@@ -1087,15 +1077,43 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     )
   }
 
+  const requestedPayer =
+    Array.isArray(body.instructions) && typeof body.instructions[0]?.accounts?.[0]?.pubkey === 'string'
+      ? body.instructions[0]!.accounts[0]!.pubkey
+      : Array.isArray(body.accounts) && typeof body.accounts[0]?.pubkey === 'string'
+        ? body.accounts[0]!.pubkey
+        : undefined
+  const relayer = requestedPayer
+    ? relayerPool.find((r) => r.pubkeyB58 === requestedPayer) ?? null
+    : null
+  if (!relayer) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      {
+        error: `accounts[0] must be a configured relayer fee-payer (${relayerPool.map((p) => p.pubkeyB58).join(', ')}); got ${requestedPayer ?? 'missing'}`,
+        code: 'FIREWALL_REJECTED',
+      },
+      400,
+    )
+  }
+
   // 1. Strict Zero-Trust Audren v1 Firewall (permits Transact Tag 5, 1..=4 private Transact batches,
-  //    & ExecViaEscrow Tag 6; enforces vk_id === 0 and canonical ATAs; rejects Deposit Tag 3)
+  //    & ExecViaEscrow Tag 6; enforces vk_id === 0 and canonical ATAs; rejects Deposit Tag 3).
+  //    Expensive Mode 1 `cm2` crypto (X25519 + ChaCha20 + Poseidon) is deferred until AFTER `guard.begin()`.
   let verdict: ReturnType<typeof validateRelaySubmission>
   try {
     verdict = validateRelaySubmission(
       body,
       relayer.pubkey,
       cfg.allowedPreIxPrograms,
-      fvkInfo?.fvk ?? null,
+      null,
+      {
+        relayerPoolPubkeys: relayerPool.map((r) => r.pubkey),
+        auditedSwapRouterPrograms: cfg.auditedSwapRouterPrograms,
+        selfPayFeeMints: cfg.selfPayFeeMints,
+        deferCm2Verification: true,
+      },
     )
   } catch (err) {
     if (err instanceof FirewallError) {
@@ -1123,7 +1141,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   const clientIp = extractClientIp(request)
   const guard = getGuardStub(env)
 
-  // Pre-simulation guard: hashes IP inside DO using ephemeral daily 32-byte random salt,
+  // Pre-simulation guard: hashes IP inside DO using ephemeral in-memory daily 32-byte random salt,
   // atomically deduplicates all nullifiers across the single ix or batch without linking IP to nullifiers.
   const beginDecision = await guard.begin({ clientIp, nullifiers: verdict.nullifiers })
   if (!beginDecision.allowed) {
@@ -1146,10 +1164,19 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   let lockHeld = true
   let reservationId: string | undefined
   try {
-    // 2. Fetch blockhash + pre-simulation balances + all touched LaneTreeStates + all primary/rollover
-    //    page PDAs across the instruction(s) in ONE parallel RPC batch (zero extra round-trip).
+    // Now that per-IP rate limits & nullifier dedup passed, decrypt & verify Mode 1 shielded `cm2` fee notes.
+    resolveShieldedCm2Fees(verdict, fvkInfo?.fvk ?? null)
+
+    // 2. Fetch blockhash + pre-simulation balances (with `context.slot`) + PoolState + all touched
+    //    LaneTreeStates, LaneRentVaults, primary/rollover page PDAs, and setupAtas in ONE RPC batch.
     const watchAddresses = [relayer.pubkeyB58]
-    if (verdict.watchedRelayerFeeAta) watchAddresses.push(verdict.watchedRelayerFeeAta)
+    const watchedFeeAtaIdx = verdict.watchedRelayerFeeAta ? watchAddresses.push(verdict.watchedRelayerFeeAta) - 1 : -1
+    const watchedNativeRecipientIdx =
+      verdict.nativeSolFeeToRelayer > 0n &&
+      verdict.nativeSolFeeRecipient &&
+      verdict.nativeSolFeeRecipient !== relayer.pubkeyB58
+        ? watchAddresses.push(verdict.nativeSolFeeRecipient) - 1
+        : -1
 
     const preFetchAddresses: string[] = [...watchAddresses]
     const seenFetch = new Set<string>(watchAddresses)
@@ -1160,33 +1187,39 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       }
     }
 
+    const pool0PdaB58 = base58Encode(derivePoolPda(0).address)
+    enqueueFetch(pool0PdaB58)
+
     for (const entry of verdict.audrenInstructions) {
       enqueueFetch(base58Encode(deriveLanePda(entry.poolId, entry.outLaneId).address))
+      enqueueFetch(base58Encode(deriveLaneRentVaultPda(entry.poolId, entry.outLaneId).address))
       for (const slot of listReferencedPageSlots(entry.pages)) {
         enqueueFetch(slot.pda)
       }
     }
+    for (const s of verdict.setupAtas) {
+      enqueueFetch(base58Encode(s.ata))
+    }
 
-    const [bhRes, preAccounts] = await Promise.all([
+    const [bhRes, preCtx] = await Promise.all([
       rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
         { commitment: 'confirmed' },
       ]),
-      fetchMultipleAccounts(rpcUrl, preFetchAddresses),
+      fetchMultipleAccountsWithContext(rpcUrl, preFetchAddresses),
     ])
 
+    let preSlot = preCtx.slot
+    const preAccounts = [...preCtx.accounts]
     const fetchedMap = new Map<string, FetchedAccountMeta | null>()
+    const preAccountInfoMap = new Map<string, { bytes: Uint8Array; lamports: number; owner: string } | null>()
     preFetchAddresses.forEach((addr, idx) => {
-      const acc = preAccounts[idx]
+      const acc = preAccounts[idx] ?? null
+      preAccountInfoMap.set(addr, acc)
       fetchedMap.set(addr, acc ? { bytes: acc.bytes, owner: acc.owner } : null)
     })
 
-    const preRelayerLamports = BigInt(preAccounts[0]?.lamports ?? 0)
-    const preFeeUnits = verdict.watchedRelayerFeeAta
-      ? readSplTokenAccountAmount(preAccounts[1]?.bytes ?? null)
-      : 0n
-
     // 3. Auto-prepend deduplicated `OpenPage` (Tag 2, reimbursed from `LaneRentVault`) for any missing
-    //    primary or rollover page PDAs across all lanes touched by the single ix or batch.
+    //    primary or genuinely near-rollover page PDAs across all lanes touched by the single ix or batch.
     const pagePlan = planBatchMissingOpenPageIxs({
       payerB58: relayer.pubkeyB58,
       entries: verdict.audrenInstructions.map((entry) => ({
@@ -1281,7 +1314,28 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
 
     // 6. Pre-flight simulation on Solana RPC before committing lamports:
     //    measures exact SOL outflow and exact fee token/SOL inflow directly from Solana runtime.
-    const sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, watchAddresses)
+    let sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, watchAddresses)
+
+    // For zero-protocol-fee (`relayerFee === 0`) allowlisted aggregator swaps, pin pre-balance read
+    // and simulation to the exact same `context.slot` (retrying once if the slot ticked between calls)
+    // so concurrent inflows into the relayer fee ATA between slots can never be replayed as fee credit.
+    if (
+      !sim.err &&
+      verdict.isZeroFeeAuditedRouterSwap &&
+      verdict.watchedRelayerFeeAta &&
+      preSlot !== null &&
+      sim.slot !== null &&
+      sim.slot !== preSlot
+    ) {
+      const refreshed = await fetchMultipleAccountsWithContext(rpcUrl, watchAddresses)
+      const refreshedSim = await simulateV1Transaction(rpcUrl, signed.wireBytes, watchAddresses)
+      preSlot = refreshed.slot
+      for (let wi = 0; wi < watchAddresses.length; wi++) {
+        preAccounts[wi] = refreshed.accounts[wi] ?? null
+      }
+      sim = refreshedSim
+    }
+
     if (sim.err) {
       await guard.release({
         ipHash,
@@ -1321,7 +1375,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         502,
       )
     }
-    if (verdict.watchedRelayerFeeAta && !sim.accounts[1]) {
+    if (watchedFeeAtaIdx >= 0 && !sim.accounts[watchedFeeAtaIdx]) {
       await guard.release({
         ipHash,
         cluster,
@@ -1339,36 +1393,166 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         502,
       )
     }
+    if (watchedNativeRecipientIdx >= 0 && !sim.accounts[watchedNativeRecipientIdx]) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: true,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: 'Simulation failed to return post-execution relayer native SOL fee recipient state',
+          code: 'SIMULATION_INCOMPLETE',
+        },
+        502,
+      )
+    }
 
+    // Compute deterministic protocol-side `minExpectedCostLamports` floor strictly from parsed tx
+    // structure + live rent/PoolState so concurrent SOL inflows into `relayerPubkey` between
+    // `preSlot` and `simSlot` can NEVER erase simulated outflow.
+    const cachedRent = getCachedLiveRentSchedule(rpcUrl)
+    const nullifierRentFloorUnit = cachedRent?.nullifierRentLamports ?? 890_880n
+    const ataRentFloorUnit = cachedRent?.ataRentLamports ?? 2_039_280n
+    const subRentFloor = cachedRent?.subtreePageRentLamports ?? 58_340_000n
+    const srRentFloor = cachedRent?.subrootPageRentLamports ?? 68_140_000n
+    const memoRentFloor = cachedRent?.memoPageRentLamports ?? 72_149_760n
+    const nfPageRentFloor = cachedRent?.nfPageRentLamports ?? 68_140_000n
+    const divCeil = (a: bigint, b: bigint) => (a + b - 1n) / b
+
+    const poolAcc = preAccountInfoMap.get(pool0PdaB58)
+    let poolNoteRentUnit = cachedRent?.pageRentPerNoteLamports ?? 0n
+    let poolNfRentUnit = cachedRent?.nfPageRentPerNfLamports ?? 0n
+    if (poolAcc && poolAcc.owner === AUDREN_PROGRAM_ID_STR && poolAcc.bytes.length > 0) {
+      try {
+        const decodedPool = decodePoolState(poolAcc.bytes)
+        poolNoteRentUnit =
+          decodedPool.noteRentFee > 0n
+            ? deterministicNoteRentFee(decodedPool.noteRentFee, subRentFloor, srRentFloor, memoRentFloor)
+            : 0n
+        const livePerNf = divCeil(nfPageRentFloor, BigInt(NF_PER_PAGE))
+        poolNfRentUnit = decodedPool.nfRentFee < livePerNf ? decodedPool.nfRentFee : livePerNf
+      } catch {
+        // Ignore malformed mock pool bytes; cached rent defaults remain active
+      }
+    }
+
+    const totalOutputs = verdict.audrenInstructions.reduce((sum, ix) => sum + ix.outputCount, 0)
+    const uncreatedSetupAtasCount = verdict.setupAtas.filter(
+      (s) => preAccountInfoMap.get(base58Encode(s.ata)) === null,
+    ).length
+
+    // Track per-lane available `LaneRentVault` balance to compute exact unsubsidized OpenPage deficit floor
+    let openPageDeficitFloor = 0n
+    const laneVaultAvail = new Map<string, bigint>()
+    for (const openIx of pagePlan.openPageIxs) {
+      const vaultPdaB58 = base58Encode(openIx.accounts[3]!.pubkey)
+      const vaultAcc = preAccountInfoMap.get(vaultPdaB58)
+      if (!vaultAcc) continue
+      if (!laneVaultAvail.has(vaultPdaB58)) {
+        const rawVault = BigInt(vaultAcc.lamports)
+        laneVaultAvail.set(
+          vaultPdaB58,
+          rawVault > nullifierRentFloorUnit ? rawVault - nullifierRentFloorUnit : 0n,
+        )
+      }
+      const pageKind = openIx.data[1]!
+      const pageRent =
+        pageKind === OPEN_PAGE_KIND_SUBTREE
+          ? subRentFloor
+          : pageKind === OPEN_PAGE_KIND_SUBROOT
+            ? srRentFloor
+            : pageKind === OPEN_PAGE_KIND_MEMO
+              ? memoRentFloor
+              : nfPageRentFloor
+      const pagePdaB58 = base58Encode(openIx.accounts[4]!.pubkey)
+      const existingPageLamports = BigInt(preAccountInfoMap.get(pagePdaB58)?.lamports ?? 0)
+      const needed = pageRent > existingPageLamports ? pageRent - existingPageLamports : 0n
+      const avail = laneVaultAvail.get(vaultPdaB58) ?? 0n
+      const subsidy = avail < needed ? avail : needed
+      laneVaultAvail.set(vaultPdaB58, avail - subsidy)
+      openPageDeficitFloor += needed - subsidy
+    }
+
+    const minExpectedCostLamports =
+      5_000n +
+      cappedPriority +
+      BigInt(verdict.nullifiers.length) * (nullifierRentFloorUnit + poolNfRentUnit) +
+      BigInt(uncreatedSetupAtasCount) * ataRentFloorUnit +
+      BigInt(totalOutputs) * poolNoteRentUnit +
+      openPageDeficitFloor
+
+    const preRelayerLamports = BigInt(preAccounts[0]?.lamports ?? 0)
     const postRelayerLamports = BigInt(sim.accounts[0].lamports)
-    const rawOutflowLamports =
-      preRelayerLamports > postRelayerLamports ? preRelayerLamports - postRelayerLamports : 0n
-    // Enforce a minimum gas floor (5,000 signature + priority fee) when not offset by unwrap SOL fee
-    const minBaselineLamports = 5_000n + cappedPriority
-    const simulatedCostLamports =
-      verdict.nativeSolFeeToRelayer > 0n
-        ? rawOutflowLamports
-        : rawOutflowLamports > minBaselineLamports
-          ? rawOutflowLamports
-          : minBaselineLamports
-
-    // Measure exact SPL/Token-2022 fee tokens earned by the relayer during simulation
-    const postFeeUnits =
-      verdict.watchedRelayerFeeAta && sim.accounts[1]
-        ? readSplTokenAccountAmount(sim.accounts[1].bytes)
+    const samePayerNativeFee =
+      verdict.nativeSolFeeToRelayer > 0n && verdict.nativeSolFeeRecipient === relayer.pubkeyB58
+    // Gross SOL outflow before native SOL fee offset:
+    //   - When unwrapWsol credits the tx fee-payer directly (`samePayerNativeFee`), add back the
+    //     protocol-enforced `nativeSolFeeToRelayer` to recover exact gross tx debit.
+    const rawOutflowLamports = samePayerNativeFee
+      ? preRelayerLamports + verdict.nativeSolFeeToRelayer > postRelayerLamports
+        ? preRelayerLamports + verdict.nativeSolFeeToRelayer - postRelayerLamports
         : 0n
-    const simulatedFeeUnits = postFeeUnits > preFeeUnits ? postFeeUnits - preFeeUnits : 0n
+      : preRelayerLamports > postRelayerLamports
+        ? preRelayerLamports - postRelayerLamports
+        : 0n
+    const simulatedCostLamports =
+      rawOutflowLamports > minExpectedCostLamports ? rawOutflowLamports : minExpectedCostLamports
 
-    // Dynamically value simulated fee earnings in lamports (Modes 1 single/batch, 2, & 3!)
+    // Measure & strictly cap SPL/Token-2022 fee tokens earned by the relayer during simulation:
+    //   - Protocol-native `relayerFee > 0n` (Mode 2 / Mode 3): capped strictly at parsed `relayerFee`
+    //     so concurrent token inflows between `preSlot` and `simSlot` can never inflate fee credit.
+    //   - Zero-protocol-fee (`relayerFee === 0n`) allowlisted router swap: requires `sim.slot === preSlot`
+    //     so concurrent token inflows between slots can never be replayed.
+    const preFeeUnits =
+      watchedFeeAtaIdx >= 0 ? readSplTokenAccountAmount(preAccounts[watchedFeeAtaIdx]?.bytes ?? null) : 0n
+    const postFeeUnits =
+      watchedFeeAtaIdx >= 0 && sim.accounts[watchedFeeAtaIdx]
+        ? readSplTokenAccountAmount(sim.accounts[watchedFeeAtaIdx]!.bytes)
+        : 0n
+    const rawSimulatedFeeUnits = postFeeUnits > preFeeUnits ? postFeeUnits - preFeeUnits : 0n
+    let simulatedFeeUnits = 0n
+    if (verdict.transactMeta && verdict.transactMeta.relayerFee > 0n && !verdict.transactMeta.unwrapWsol) {
+      simulatedFeeUnits =
+        rawSimulatedFeeUnits > verdict.transactMeta.relayerFee
+          ? verdict.transactMeta.relayerFee
+          : rawSimulatedFeeUnits
+    } else if (verdict.execMeta && verdict.execMeta.relayerFee > 0n) {
+      simulatedFeeUnits =
+        rawSimulatedFeeUnits > verdict.execMeta.relayerFee
+          ? verdict.execMeta.relayerFee
+          : rawSimulatedFeeUnits
+    } else if (verdict.isZeroFeeAuditedRouterSwap) {
+      simulatedFeeUnits =
+        preSlot !== null && sim.slot !== null && sim.slot === preSlot ? rawSimulatedFeeUnits : 0n
+    }
+
+    // Dynamically value verified fee earnings in lamports (Modes 1 single/batch, 2, & 3!)
+    // Enforces `SELF_PAY_FEE_MINTS` allowlist, `parseMintSafetyInfo` (via `hasUnsafeSelfPayExt`),
+    // AND conservative `2x` active Token-2022 `TransferFeeConfig` haircut at submit time.
     let feeEquivalentLamports = 0n
     let combinedCm2SingleMint: string | null = null
     let combinedCm2SingleMintAmount = 0n
 
     if (verdict.nativeSolFeeToRelayer > 0n) {
-      // Mode 2 atomic `WITHDRAW_FLAG_UNWRAP_WSOL` paid lamports directly to `relayerPubkey`!
-      feeEquivalentLamports = verdict.nativeSolFeeToRelayer
+      // Mode 2 atomic `WITHDRAW_FLAG_UNWRAP_WSOL` pays lamports directly to a configured relayer pool pubkey.
+      if (samePayerNativeFee) {
+        feeEquivalentLamports = verdict.nativeSolFeeToRelayer
+      } else if (watchedNativeRecipientIdx >= 0 && sim.accounts[watchedNativeRecipientIdx]) {
+        const preRecipLamports = BigInt(preAccounts[watchedNativeRecipientIdx]?.lamports ?? 0)
+        const postRecipLamports = BigInt(sim.accounts[watchedNativeRecipientIdx]!.lamports)
+        const recipDelta =
+          postRecipLamports > preRecipLamports ? postRecipLamports - preRecipLamports : 0n
+        feeEquivalentLamports =
+          recipDelta > verdict.nativeSolFeeToRelayer ? verdict.nativeSolFeeToRelayer : recipDelta
+      }
     } else if (verdict.shieldedCm2Fees.length > 0) {
-      // Mode 1 Private Transfer (single or multi-ix merge batch): sum all FVK-verified shielded `cm2` fee notes!
+      // Mode 1 Private Transfer (single or multi-ix merge batch): sum FVK-verified shielded `cm2` fee notes
+      // strictly for allowlisted, safety-vetted `SELF_PAY_FEE_MINTS`.
       const amountByMint = new Map<string, bigint>()
       for (const fee of verdict.shieldedCm2Fees) {
         amountByMint.set(fee.mint, (amountByMint.get(fee.mint) ?? 0n) + fee.amount)
@@ -1378,19 +1562,33 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         combinedCm2SingleMint = onlyMint!
         combinedCm2SingleMintAmount = onlyAmt!
       }
-      const wsolAmt = amountByMint.get(WSOL_MINT_STR) ?? 0n
-      feeEquivalentLamports += wsolAmt
+      if (cfg.selfPayFeeMints.has(WSOL_MINT_STR)) {
+        const wsolAmt = amountByMint.get(WSOL_MINT_STR) ?? 0n
+        feeEquivalentLamports += wsolAmt
+      }
 
-      const otherMints = Array.from(amountByMint.keys()).filter((m) => m !== WSOL_MINT_STR)
-      if (otherMints.length > 0 && cluster === 'mainnet') {
-        const [mintMetas, prices] = await Promise.all([
-          fetchMintMetas(rpcUrl, otherMints),
-          fetchMintPricesUsd(env, [WSOL_MINT_STR, ...otherMints]),
+      const otherAllowedMints = Array.from(amountByMint.keys()).filter(
+        (m) => m !== WSOL_MINT_STR && cfg.selfPayFeeMints.has(m),
+      )
+      if (otherAllowedMints.length > 0 && cluster === 'mainnet') {
+        const [mintMetasWithData, prices] = await Promise.all([
+          fetchMintMetasWithData(rpcUrl, otherAllowedMints),
+          fetchMintPricesUsd(env, [WSOL_MINT_STR, ...otherAllowedMints]),
         ])
         const solUsd = prices[WSOL_MINT_STR]
         if (solUsd && solUsd > 0) {
-          for (const cm2Mint of otherMints) {
-            const feeMeta = mintMetas[cm2Mint]
+          const needsEpoch = otherAllowedMints.some((m) => {
+            const entry = mintMetasWithData[m]
+            return (
+              entry?.meta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR &&
+              entry.rawBytes !== null &&
+              entry.rawBytes.byteLength > 166
+            )
+          })
+          const currentEpoch = needsEpoch ? await fetchCurrentEpoch(rpcUrl) : 0n
+          for (const cm2Mint of otherAllowedMints) {
+            const entry = mintMetasWithData[cm2Mint]
+            const feeMeta = entry?.meta
             const feeUsdPrice = prices[cm2Mint]
             const cm2Amt = amountByMint.get(cm2Mint) ?? 0n
             if (
@@ -1401,21 +1599,34 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
               feeUsdPrice > 0 &&
               cm2Amt > 0n
             ) {
-              const feeUsd = (Number(cm2Amt) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
-              feeEquivalentLamports += BigInt(Math.max(0, Math.floor((feeUsd / solUsd) * 1e9)))
+              const { netAmount } = applyToken2022FeeHaircut({
+                tokenProgram: feeMeta.tokenProgram,
+                mintData: entry?.rawBytes ?? null,
+                currentEpoch,
+                grossAmount: cm2Amt,
+              })
+              if (netAmount > 0n) {
+                const feeUsd = (Number(netAmount) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
+                feeEquivalentLamports += BigInt(Math.max(0, Math.floor((feeUsd / solUsd) * 1e9)))
+              }
             }
           }
         }
       }
-    } else if (simulatedFeeUnits > 0n && verdict.watchedRelayerFeeMint) {
+    } else if (
+      simulatedFeeUnits > 0n &&
+      verdict.watchedRelayerFeeMint &&
+      cfg.selfPayFeeMints.has(verdict.watchedRelayerFeeMint)
+    ) {
       if (verdict.watchedRelayerFeeMint === WSOL_MINT_STR) {
         feeEquivalentLamports = simulatedFeeUnits
       } else if (cluster === 'mainnet') {
-        const [mintMetas, prices] = await Promise.all([
-          fetchMintMetas(rpcUrl, [verdict.watchedRelayerFeeMint]),
+        const [mintMetasWithData, prices] = await Promise.all([
+          fetchMintMetasWithData(rpcUrl, [verdict.watchedRelayerFeeMint]),
           fetchMintPricesUsd(env, [WSOL_MINT_STR, verdict.watchedRelayerFeeMint]),
         ])
-        const feeMeta = mintMetas[verdict.watchedRelayerFeeMint]
+        const entry = mintMetasWithData[verdict.watchedRelayerFeeMint]
+        const feeMeta = entry?.meta
         const solUsd = prices[WSOL_MINT_STR]
         const feeUsdPrice = prices[verdict.watchedRelayerFeeMint]
         if (
@@ -1427,26 +1638,37 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
           solUsd > 0 &&
           feeUsdPrice > 0
         ) {
-          const feeUsd = (Number(simulatedFeeUnits) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
-          const feeSol = feeUsd / solUsd
-          feeEquivalentLamports = BigInt(Math.max(0, Math.floor(feeSol * 1e9)))
+          const needsEpoch =
+            feeMeta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR &&
+            entry?.rawBytes !== null &&
+            entry.rawBytes.byteLength > 166
+          const currentEpoch = needsEpoch ? await fetchCurrentEpoch(rpcUrl) : 0n
+          const { netAmount } = applyToken2022FeeHaircut({
+            tokenProgram: feeMeta.tokenProgram,
+            mintData: entry?.rawBytes ?? null,
+            currentEpoch,
+            grossAmount: simulatedFeeUnits,
+          })
+          if (netAmount > 0n) {
+            const feeUsd = (Number(netAmount) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
+            const feeSol = feeUsd / solUsd
+            feeEquivalentLamports = BigInt(Math.max(0, Math.floor(feeSol * 1e9)))
+          }
         }
       }
     }
 
-    // Net lamports subsidized by the relay (strict 100% coverage required for `isSelfPaying`):
-    //   - For `unwrap_wsol` Withdraw fees, `simulatedCostLamports` is ALREADY post-fee net outflow.
-    //   - For SPL/Token-2022 & shielded cm2 fees, subtract `feeEquivalentLamports` from `simulatedCostLamports`.
-    const netSponsoredLamports =
-      verdict.nativeSolFeeToRelayer > 0n
-        ? simulatedCostLamports
-        : simulatedCostLamports > feeEquivalentLamports
-          ? simulatedCostLamports - feeEquivalentLamports
-          : 0n
+    // Apply `cfg.selfPayMarginBps` (`>= 10000`) at submit time: `isSelfPaying` requires verified
+    // haircut fee value >= `ceil(simulatedCostLamports * selfPayMarginBps / 10000)`.
+    const marginBps = BigInt(Math.max(cfg.selfPayMarginBps, 10_000))
+    const requiredSelfPayLamports = (simulatedCostLamports * marginBps + 9_999n) / 10_000n
     const isSelfPaying =
-      verdict.nativeSolFeeToRelayer > 0n
-        ? netSponsoredLamports === 0n
-        : feeEquivalentLamports > 0n && netSponsoredLamports === 0n
+      feeEquivalentLamports > 0n && feeEquivalentLamports >= requiredSelfPayLamports
+    const netSponsoredLamports = isSelfPaying
+      ? 0n
+      : simulatedCostLamports > feeEquivalentLamports
+        ? simulatedCostLamports - feeEquivalentLamports
+        : requiredSelfPayLamports - feeEquivalentLamports
 
     // Hard per-tx outflow safety ceiling (protects against runaway sponsored rent creation)
     const MAX_TX_OUTFLOW_LAMPORTS = 50_000_000n // 0.05 SOL hard per-tx sponsored ceiling
@@ -1460,7 +1682,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         ipHash,
         cluster,
         nullifiers: verdict.nullifiers,
-        recordFailure: false,
+        recordFailure: true,
       })
       lockHeld = false
       return json(
@@ -1474,18 +1696,19 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
-    // Multi-instruction private `Transact` batches (2..=4 merges) require combined relayer fees
-    // to cover total simulated cost (all instructions + any auto-prepended `OpenPage` instructions).
+    // Never allow unvetted (non-allowlisted) mint withdrawals to siphon relayer SOL into attacker-owned
+    // `isWithdrawRecipientAta` setupAtas without self-pay coverage.
     if (
-      verdict.audrenInstructions.length > 1 &&
+      verdict.hasWithdrawRecipientAta &&
       !isSelfPaying &&
-      (fvkInfo !== null || !cfg.allowMicroSwapSubsidy)
+      verdict.transactMeta?.mint &&
+      !cfg.selfPayFeeMints.has(verdict.transactMeta.mint)
     ) {
       await guard.release({
         ipHash,
         cluster,
         nullifiers: verdict.nullifiers,
-        recordFailure: false,
+        recordFailure: true,
       })
       lockHeld = false
       return json(
@@ -1493,7 +1716,31 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         cfg.corsOrigins,
         {
           error:
-            'Combined shielded cm2 relayer fees across multi-instruction batch did not cover simulated Solana rent/gas (including any auto-prepended OpenPage instructions).',
+            'Withdraw recipient ATA setup for non-allowlisted mints cannot be funded by the relay without allowlisted self-pay coverage.',
+          code: 'FEE_REQUIRED',
+          simulatedCostLamports: simulatedCostLamports.toString(),
+          feeEquivalentLamports: feeEquivalentLamports.toString(),
+        },
+        402,
+      )
+    }
+
+    // Multi-instruction private `Transact` batches (2..=4 merges) UNCONDITIONALLY require
+    // `isSelfPaying === true` (regardless of whether `*_RELAYER_FVK_JSON` or `allowMicroSwapSubsidy` is set).
+    if (verdict.audrenInstructions.length > 1 && !isSelfPaying) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: true,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error:
+            'Combined shielded cm2 relayer fees across multi-instruction batch did not cover simulated Solana rent/gas (including margin and any auto-prepended OpenPage instructions).',
           code: 'FEE_REQUIRED',
           simulatedCostLamports: simulatedCostLamports.toString(),
           feeEquivalentLamports: feeEquivalentLamports.toString(),
@@ -1507,7 +1754,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         ipHash,
         cluster,
         nullifiers: verdict.nullifiers,
-        recordFailure: false,
+        recordFailure: true,
       })
       lockHeld = false
       return json(
@@ -1618,7 +1865,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       simulatedCostLamports: simulatedCostLamports.toString(),
       simulatedFeeUnits:
         verdict.nativeSolFeeToRelayer > 0n
-          ? verdict.nativeSolFeeToRelayer.toString()
+          ? feeEquivalentLamports.toString()
           : verdict.shieldedCm2Fees.length > 0
             ? (combinedCm2SingleMint !== null
                 ? combinedCm2SingleMintAmount
@@ -1633,7 +1880,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
             : verdict.watchedRelayerFeeMint,
       simulatedFeeAccount:
         verdict.nativeSolFeeToRelayer > 0n
-          ? relayer.pubkeyB58
+          ? verdict.nativeSolFeeRecipient ?? relayer.pubkeyB58
           : verdict.shieldedCm2Fees.length > 0
             ? fvkInfo?.shieldedAddress ?? null
             : verdict.watchedRelayerFeeAta,

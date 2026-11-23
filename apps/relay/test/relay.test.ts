@@ -76,14 +76,31 @@ import {
   exportFullViewingKey,
   frToBeBytes,
 } from '@audren/sdk'
-import { DEFAULT_ALLOWED_PRE_IX_PROGRAMS, getRelayerFvk, loadPolicyConfig, type Env } from '../src/env'
+import {
+  DEFAULT_ALLOWED_PRE_IX_PROGRAMS,
+  DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS,
+  DEFAULT_SELF_PAY_FEE_MINTS,
+  getRelayerFvk,
+  loadPolicyConfig,
+  type Env,
+} from '../src/env'
+import { runAutoRefill, runMaintenanceCrank } from '../src/cron/refill'
 import { okxAdapter } from '../src/aggregators/okx'
 import { findExcludedCpiVenue } from '../src/aggregators/registry'
 import { titanAdapter } from '../src/aggregators/titan'
 import { FirewallError, validateRelaySubmission } from '../src/policy/firewall'
 import { computeNativeFeeQuote, computeSwapFeePlan } from '../src/policy/pricing'
-import { parseExecEscrowMeta, parseTransactMeta } from '../src/solana/audren'
-import { evaluateCheckpointState, fetchPoolCheckpointSnapshot } from '../src/solana/checkpoint'
+import {
+  parseExecEscrowMeta,
+  parseMintSafetyInfo,
+  parseTransactMeta,
+  planMissingOpenPageIxs,
+} from '../src/solana/audren'
+import {
+  evaluateCheckpointState,
+  fetchPoolCheckpointSnapshot,
+  publishCheckpointIfNeeded,
+} from '../src/solana/checkpoint'
 import {
   base58Decode,
   fromBase64,
@@ -92,9 +109,14 @@ import {
   readU64le,
   toBase64,
   toHex,
+  u64le,
   utf8,
 } from '../src/solana/codec'
-import { computeSwapInputTransferFee, fetchLiveRentSchedule } from '../src/solana/rpc'
+import {
+  applyToken2022FeeHaircut,
+  computeSwapInputTransferFee,
+  fetchLiveRentSchedule,
+} from '../src/solana/rpc'
 
 // Provide a lightweight stub for Cloudflare's `cloudflare:workers` built-in module when
 // exercising the full Worker HTTP router (`src/index.ts`) and `RelayGuard` DO inside Node's test runner.
@@ -168,9 +190,15 @@ function createSqliteDoHarness(preInitSql?: string) {
     },
   }
 
+  const scheduledAlarms: number[] = []
   let initPromise: Promise<void> = Promise.resolve()
   const ctx = {
-    storage: { sql },
+    storage: {
+      sql,
+      async setAlarm(t: number | Date) {
+        scheduledAlarms.push(typeof t === 'number' ? t : t.getTime())
+      },
+    },
     blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
       const p = fn()
       initPromise = p.then(() => undefined)
@@ -178,7 +206,7 @@ function createSqliteDoHarness(preInitSql?: string) {
     },
   } as unknown as DurableObjectState
 
-  return { db, ctx, ready: () => initPromise }
+  return { db, ctx, scheduledAlarms, ready: () => initPromise }
 }
 
 const relayerSecret = new Uint8Array(32).fill(0x42)
@@ -1009,11 +1037,16 @@ async function withMockFetch<T>(
 // 1. RelayGuard DO Privacy Hardening (ephemeral daily salt + zero ip_hash on nullifiers)
 // ============================================================================
 
-test('RelayGuard DO: ephemeral per-day 32-byte random IP salt (not derived from pubkey) and ZERO ip_hash on inflight_nullifiers', async () => {
+test('RelayGuard DO: strictly in-memory ephemeral daily IP salt (zero SQLite salt), domain separation (relay vs ckpt), UTC midnight alarm, and ZERO ip_hash on inflight_nullifiers', async () => {
   const RelayGuard = await getRelayGuardClass()
 
-  // Test fresh DO + legacy table migration (pre-populated with old `ip_hash` column!)
+  // Test fresh DO + legacy migrations (pre-populated legacy `daily_ip_salts` table AND `inflight_nullifiers.ip_hash`!)
   const harness = createSqliteDoHarness(`
+    CREATE TABLE daily_ip_salts (
+      day TEXT PRIMARY KEY,
+      salt_hex TEXT NOT NULL
+    );
+    INSERT INTO daily_ip_salts (day, salt_hex) VALUES ('2026-11-22', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     CREATE TABLE inflight_nullifiers (
       nullifier TEXT PRIMARY KEY,
       ip_hash TEXT NOT NULL,
@@ -1023,7 +1056,14 @@ test('RelayGuard DO: ephemeral per-day 32-byte random IP salt (not derived from 
   const guard = new RelayGuard(harness.ctx, {} as Env)
   await harness.ready()
 
-  // 1. Verify `inflight_nullifiers` schema has ZERO `ip_hash` column after constructor migration
+  // 1. Verify legacy `daily_ip_salts` table was scrubbed (ZERO salt persisted to SQLite!)
+  const saltTables = harness.db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_ip_salts'")
+    .all()
+  assert.equal(saltTables.length, 0, 'daily_ip_salts must NOT exist in DO SQLite storage')
+  assert.ok(harness.scheduledAlarms.length >= 1, 'UTC midnight alarm must be scheduled on init')
+
+  // 2. Verify `inflight_nullifiers` schema has ZERO `ip_hash` column after constructor migration
   const cols = harness.db
     .prepare('PRAGMA table_info(inflight_nullifiers)')
     .all() as Array<{ name: string }>
@@ -1031,43 +1071,50 @@ test('RelayGuard DO: ephemeral per-day 32-byte random IP salt (not derived from 
   assert.deepEqual(colNames, ['nullifier', 'expires_at'])
   assert.ok(!colNames.includes('ip_hash'), 'inflight_nullifiers must NEVER contain ip_hash')
 
-  // 2. Verify ephemeral daily 32-byte random salt rotates by UTC day and NEVER equals pubkey-derived hash
+  // 3. Verify ephemeral in-memory daily salt rotates by UTC day, domain-separates relay vs ckpt,
+  //    and NEVER equals pubkey-derived hash
   const clientIp = '203.0.113.42'
   const day1Ms = Date.UTC(2026, 10, 22, 12, 0, 0)
   const day2Ms = Date.UTC(2026, 10, 23, 0, 5, 0)
-  const hashDay1A = await guard.hashClientIp(clientIp, day1Ms)
-  const hashDay1B = await guard.hashClientIp(clientIp, day1Ms + 60_000)
-  assert.equal(hashDay1A, hashDay1B, 'same IP on same UTC day must hash deterministically')
+  const hashDay1A = await guard.hashClientIp(clientIp, day1Ms, 'relay')
+  const hashDay1B = await guard.hashClientIp(clientIp, day1Ms + 60_000, 'relay')
+  assert.equal(hashDay1A, hashDay1B, 'same IP + domain on same UTC day must hash deterministically')
   assert.equal(hashDay1A.length, 32)
+
+  // Domain separation: `relay` vs `ckpt` MUST produce distinct hashes for the same IP on the same UTC day
+  const ckptHashDay1 = await guard.hashClientIp(clientIp, day1Ms, 'ckpt')
+  assert.equal(ckptHashDay1.length, 32)
+  assert.notEqual(ckptHashDay1, hashDay1A, 'relay and ckpt IP hashes must be domain-separated')
 
   // Must NEVER match legacy pubkey-salted hash
   const legacyPubkeyHash = toHex(sha256(utf8(`${clientIp}|${relayerB58}`))).slice(0, 32)
   assert.notEqual(hashDay1A, legacyPubkeyHash)
 
-  // Verify persisted 32-byte (64-hex) random salt exists in `daily_ip_salts`
-  const saltsDay1 = harness.db
-    .prepare('SELECT day, salt_hex FROM daily_ip_salts')
-    .all() as Array<{ day: string; salt_hex: string }>
-  assert.equal(saltsDay1.length, 1)
-  assert.equal(saltsDay1[0]!.day, '2026-11-22')
-  assert.match(saltsDay1[0]!.salt_hex, /^[0-9a-f]{64}$/)
-
-  // Day 2 rotation: generates fresh salt, purges Day 1 salt, produces different hash for same IP
-  const hashDay2 = await guard.hashClientIp(clientIp, day2Ms)
+  // Day 2 rollover via UTC alarm + rollover purges Day 1 salt and produces a different hash
+  const alarmsBeforeRollover = harness.scheduledAlarms.length
+  await guard.runUtcRolloverMaintenance(day2Ms)
+  assert.ok(harness.scheduledAlarms.length > alarmsBeforeRollover, 'alarm rollover must reschedule next UTC midnight')
+  const hashDay2 = await guard.hashClientIp(clientIp, day2Ms, 'relay')
   assert.notEqual(hashDay2, hashDay1A, 'UTC day rollover must rotate ephemeral salt')
-  const saltsDay2 = harness.db
-    .prepare('SELECT day, salt_hex FROM daily_ip_salts')
-    .all() as Array<{ day: string; salt_hex: string }>
-  assert.equal(saltsDay2.length, 1, 'prior day salt must be purged on rotation')
-  assert.equal(saltsDay2[0]!.day, '2026-11-23')
-  assert.notEqual(saltsDay2[0]!.salt_hex, saltsDay1[0]!.salt_hex)
 
-  // 3. Verify `begin()` reserves all nullifiers atomically with ZERO IP association stored
+  // Even after generating Day 2 salt, SQLite STILL has zero `daily_ip_salts` table
+  assert.equal(
+    harness.db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_ip_salts'")
+      .all().length,
+    0,
+  )
+
+  // 4. Verify `begin()` (relay domain) and `checkCheckpointRateLimit()` (ckpt domain) produce distinct ipHashes
   const nfA = base58Encode(new Uint8Array(32).fill(0x51))
   const nfB = base58Encode(new Uint8Array(32).fill(0x52))
   const beginRes = await guard.begin({ clientIp, nullifiers: [nfA, nfB] })
   assert.equal(beginRes.allowed, true)
   assert.ok(beginRes.ipHash && beginRes.ipHash.length === 32)
+  const ckptRateRes = await guard.checkCheckpointRateLimit({ clientIp, cluster: 'mainnet' })
+  assert.equal(ckptRateRes.allowed, true)
+  assert.ok(ckptRateRes.ipHash && ckptRateRes.ipHash.length === 32)
+  assert.notEqual(beginRes.ipHash, ckptRateRes.ipHash, 'begin() and checkCheckpointRateLimit() must domain-separate ipHash')
 
   const nfRows = harness.db
     .prepare('SELECT * FROM inflight_nullifiers ORDER BY nullifier')
@@ -3093,6 +3140,1872 @@ test('fetchPoolCheckpointSnapshot scans remaining ring slots when firstBatch onl
       assert.ok(snap)
       assert.equal(multiCallsRecent, 1)
       assert.equal(snap.latestCkpt?.epochId, 905n)
+    },
+  )
+})
+
+// ============================================================================
+// 7. v1.2.1 Security & Solvency Hardening Regression Suite (Findings #6 – #13)
+// ============================================================================
+
+const JUPITER_V6_ROUTER = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'
+
+function makeTokenAccountBytes(mintB58: string, ownerB58: string, amount: bigint): Uint8Array {
+  const buf = new Uint8Array(165)
+  buf.set(base58Decode(mintB58), 0)
+  buf.set(base58Decode(ownerB58), 32)
+  buf.set(u64le(amount), 64)
+  buf[108] = 1 // AccountState::Initialized
+  return buf
+}
+
+function makeClassicMintWithFreeze(decimals: number, freezeAuthFill: number): Uint8Array {
+  const buf = makeClassicMintBytes(decimals)
+  const dv = new DataView(buf.buffer)
+  dv.setUint32(46, 1, true) // COption::Some
+  buf.fill(freezeAuthFill, 50, 82)
+  return buf
+}
+
+function makeToken2022PausableMintBytes(decimals: number): Uint8Array {
+  // 82 B Mint + 83 B zero padding + 1 B AccountType(1 = Mint) + 4 B TLV header (type=26, len=33) + 33 B PausableConfig
+  const buf = new Uint8Array(166 + 4 + 33)
+  const dv = new DataView(buf.buffer)
+  buf[44] = decimals
+  buf[45] = 1
+  buf[165] = 1
+  dv.setUint16(166, 26, true) // ExtensionType::Pausable = 26
+  dv.setUint16(168, 33, true)
+  buf.fill(0x11, 170, 202)
+  buf[202] = 0
+  return buf
+}
+
+function makeToken2022MutableTransferFeeMintBytes(params: {
+  decimals: number
+  bps: number
+  mutableAuthority: boolean
+}): Uint8Array {
+  const buf = makeToken2022TransferFeeMintBytes({
+    decimals: params.decimals,
+    olderEpoch: 0n,
+    olderMaxFee: 10_000_000n,
+    olderBps: params.bps,
+    newerEpoch: 0n,
+    newerMaxFee: 10_000_000n,
+    newerBps: params.bps,
+  })
+  if (params.mutableAuthority) {
+    buf.fill(0x55, 170, 202) // non-zero transfer_fee_config_authority
+  }
+  return buf
+}
+
+function buildTestExecSwapIx(params: {
+  payerB58: string
+  routerProg: string
+  feeAta: string
+  feeAtaWritable: boolean
+  relayerFeeAmount?: bigint
+  feeOnOutput?: boolean
+  outMint?: string
+  outTokenProg?: string
+  feeRecipient?: string
+  nf0Seed?: number
+}) {
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const escrow = deriveEscrowPdaSync(0, 1).address
+  const outMint = params.outMint ?? USDC_MINT
+  const outTp = params.outTokenProg ?? CLASSIC_TOKEN_PROGRAM_ID
+  const vaultInAta = deriveAssociatedTokenAddressSync(vaultAuth, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID).address
+  const escrowInAta = deriveAssociatedTokenAddressSync(escrow, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID).address
+  const vaultOutAta = deriveAssociatedTokenAddressSync(vaultAuth, outMint, outTp).address
+  const escrowOutAta = deriveAssociatedTokenAddressSync(escrow, outMint, outTp).address
+
+  return buildExecViaEscrowInstruction({
+    payer: params.payerB58,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    escrowShard: 1,
+    changeMask: 0,
+    feeOnOutput: params.feeOnOutput ?? false,
+    inLeg: {
+      mint: WSOL_MINT,
+      vaultAta: vaultInAta,
+      escrowAta: escrowInAta,
+      tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    },
+    outLeg: {
+      mint: outMint,
+      vaultAta: vaultOutAta,
+      escrowAta: escrowOutAta,
+      tokenProgram: outTp,
+    },
+    relayerFeeAmount: params.relayerFeeAmount ?? 0n,
+    relayerFeeRecipient: params.feeRecipient,
+    proof192: dummyProof,
+    nf0: new Uint8Array(32).fill(params.nf0Seed ?? 0x61),
+    nf1: nf1NonZero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    amountIn: 500_000_000n,
+    minAmountOut: 10_000_000n,
+    outStealthOwner: new Uint8Array(32).fill(0x02),
+    outBlinding: new Uint8Array(32).fill(0x03),
+    dynMemoHead: new Uint8Array(34).fill(0x04),
+    dynMemoMask: new Uint8Array(72).fill(0x05),
+    routerProg: params.routerProg,
+    routerIxData: new Uint8Array([1, 2, 3]),
+    routerAccounts: [
+      { pubkey: params.feeAta, isSigner: false, isWritable: params.feeAtaWritable },
+    ],
+    changeMemos: new Uint8Array(0),
+  })
+}
+
+test('Finding #6: custom router zero-fee ExecViaEscrow earns zero simulated ATA fee credit; audited router requires writable fee ATA', async () => {
+  const worker = await getWorker()
+  const customRouter = base58Encode(new Uint8Array(32).fill(0x5a))
+  const relayerUsdcAta = deriveAssociatedTokenAddressSync(
+    relayerB58,
+    USDC_MINT,
+    CLASSIC_TOKEN_PROGRAM_ID,
+  ).address
+
+  // 1. Custom unaudited router with relayerFee === 0 and writable relayer ATA -> firewall does NOT watch ATA
+  const customIx = buildTestExecSwapIx({
+    payerB58: relayerB58,
+    routerProg: customRouter,
+    feeAta: relayerUsdcAta,
+    feeAtaWritable: true,
+    relayerFeeAmount: 0n,
+  })
+  const customVerdict = validateRelaySubmission(
+    { instructionDataB64: toBase64(customIx.data), accounts: customIx.accounts },
+    relayerPubkey,
+    allowedPre,
+    relayerFvk,
+  )
+  assert.equal(customVerdict.watchedRelayerFeeAta, null)
+  assert.equal(customVerdict.isZeroFeeAuditedRouterSwap, false)
+
+  // setupAtas for unaudited zero-fee router relayer fee ATA MUST be rejected
+  assert.throws(
+    () =>
+      validateRelaySubmission(
+        {
+          instructionDataB64: toBase64(customIx.data),
+          accounts: customIx.accounts,
+          setupAtas: [{ owner: relayerB58, mint: USDC_MINT, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID }],
+        },
+        relayerPubkey,
+        allowedPre,
+        relayerFvk,
+      ),
+    FirewallError,
+  )
+
+  // 2. Audited router (Jupiter v6) with relayerFee === 0 and READ-ONLY relayer ATA -> NOT watched!
+  const jupReadonlyIx = buildTestExecSwapIx({
+    payerB58: relayerB58,
+    routerProg: JUPITER_V6_ROUTER,
+    feeAta: relayerUsdcAta,
+    feeAtaWritable: false,
+    relayerFeeAmount: 0n,
+  })
+  const jupRoVerdict = validateRelaySubmission(
+    { instructionDataB64: toBase64(jupReadonlyIx.data), accounts: jupReadonlyIx.accounts },
+    relayerPubkey,
+    allowedPre,
+    relayerFvk,
+  )
+  assert.equal(jupRoVerdict.watchedRelayerFeeAta, null)
+  assert.equal(jupRoVerdict.isZeroFeeAuditedRouterSwap, false)
+
+  // 3. Audited router (Jupiter v6) with relayerFee === 0 and WRITABLE relayer ATA -> watched & marked zero-fee swap!
+  const jupWritableIx = buildTestExecSwapIx({
+    payerB58: relayerB58,
+    routerProg: JUPITER_V6_ROUTER,
+    feeAta: relayerUsdcAta,
+    feeAtaWritable: true,
+    relayerFeeAmount: 0n,
+  })
+  const jupWrVerdict = validateRelaySubmission(
+    { instructionDataB64: toBase64(jupWritableIx.data), accounts: jupWritableIx.accounts },
+    relayerPubkey,
+    allowedPre,
+    relayerFvk,
+  )
+  assert.equal(jupWrVerdict.watchedRelayerFeeAta, relayerUsdcAta)
+  assert.equal(jupWrVerdict.watchedRelayerFeeMint, USDC_MINT)
+  assert.equal(jupWrVerdict.isZeroFeeAuditedRouterSwap, true)
+
+  // 4. Env override `AUDITED_SWAP_ROUTER_PROGRAMS` can allowlist an operator custom router
+  const customCfg = loadPolicyConfig({ AUDITED_SWAP_ROUTER_PROGRAMS: customRouter } as Env)
+  assert.equal(customCfg.auditedSwapRouterPrograms.has(customRouter), true)
+  const customOverrideVerdict = validateRelaySubmission(
+    { instructionDataB64: toBase64(customIx.data), accounts: customIx.accounts },
+    relayerPubkey,
+    allowedPre,
+    relayerFvk,
+    { auditedSwapRouterPrograms: customCfg.auditedSwapRouterPrograms },
+  )
+  assert.equal(customOverrideVerdict.watchedRelayerFeeAta, relayerUsdcAta)
+  assert.equal(customOverrideVerdict.isZeroFeeAuditedRouterSwap, true)
+
+  // 5. End-to-end HTTP submit with custom router (`ALLOW_MICRO_SWAP_SUBSIDY: 'false'`) rejects with 402 + recordFailure=true
+  const mockRpc = 'https://mock-rpc.local/finding6-custom-router'
+  const guard = createMockGuard()
+  const env = {
+    RELAY_GUARD: guard.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+    ALLOW_MICRO_SWAP_SUBSIDY: 'false',
+  } as Env
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+  const accMap = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [deriveLanePdaSync(0, 0).address, { bytes: makeLaneStateBytes({ laneId: 0, nextLeaf: 2n, nfCount: 2n }), lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubtreePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubrootPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveMemoPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 72_149_760, owner: AUDREN_PROGRAM_ID }],
+    [deriveNfPagePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x41)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 500 },
+            value: addrs.map((a) => {
+              const hit = accMap.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 500 },
+            value: {
+              err: null,
+              logs: ['ExecViaEscrow OK'],
+              unitsConsumed: 220_000,
+              accounts: [{ lamports: 496_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }],
+            },
+          },
+        })
+      }
+      throw new Error(`Unexpected RPC method in Finding #6 test: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(customIx.data),
+            accounts: customIx.accounts,
+          }),
+        }),
+        env,
+      )
+      assert.equal(res.status, 402)
+      const errBody = (await res.json()) as { code: string; feeEquivalentLamports: string }
+      assert.equal(errBody.code, 'FEE_REQUIRED')
+      assert.equal(errBody.feeEquivalentLamports, '0')
+      assert.equal(guard.relayReleaseCalls[0]?.recordFailure, true)
+    },
+  )
+})
+
+test('Finding #7: unvetted junk fee-mints never earn self_paying credit, parseMintSafetyInfo rejects Pausable / mutable TransferFee / untrusted FreezeAuthority', async () => {
+  const worker = await getWorker()
+  const junkMint = base58Encode(new Uint8Array(32).fill(0x9b))
+  const cfg = loadPolicyConfig({} as Env)
+  assert.equal(cfg.selfPayFeeMints.has(junkMint), false)
+  assert.equal(cfg.selfPayFeeMints.has(USDC_MINT), true)
+  assert.equal(DEFAULT_SELF_PAY_FEE_MINTS.length, 12)
+  assert.ok(DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS.includes(JUPITER_V6_ROUTER))
+
+  // 1. `parseMintSafetyInfo` checks on raw mint account bytes
+  const pausableRes = parseMintSafetyInfo(
+    USDC_MINT,
+    TOKEN_2022_PROGRAM_ID,
+    makeToken2022PausableMintBytes(6),
+  )
+  assert.equal(pausableRes.safeForSelfPay, false)
+  assert.equal(pausableRes.hasPausableExt, true)
+
+  const mutableFeeRes = parseMintSafetyInfo(
+    USDC_MINT,
+    TOKEN_2022_PROGRAM_ID,
+    makeToken2022MutableTransferFeeMintBytes({ decimals: 6, bps: 100, mutableAuthority: true }),
+  )
+  assert.equal(mutableFeeRes.safeForSelfPay, false)
+  assert.equal(mutableFeeRes.hasMutableTransferFeeAuthority, true)
+
+  const immutableFeeRes = parseMintSafetyInfo(
+    USDC_MINT,
+    TOKEN_2022_PROGRAM_ID,
+    makeToken2022MutableTransferFeeMintBytes({ decimals: 6, bps: 100, mutableAuthority: false }),
+  )
+  assert.equal(immutableFeeRes.safeForSelfPay, true)
+
+  // Trusted regulated stablecoin (USDC) with FreezeAuthority is allowed; unknown mint with FreezeAuthority is rejected!
+  const usdcFreezeRes = parseMintSafetyInfo(
+    USDC_MINT,
+    CLASSIC_TOKEN_PROGRAM_ID,
+    makeClassicMintWithFreeze(6, 0x22),
+  )
+  assert.equal(usdcFreezeRes.safeForSelfPay, true)
+  assert.equal(usdcFreezeRes.hasFreezeAuthority, true)
+  assert.equal(usdcFreezeRes.hasUntrustedFreezeAuthority, false)
+
+  const customFreezeRes = parseMintSafetyInfo(
+    'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',
+    CLASSIC_TOKEN_PROGRAM_ID,
+    makeClassicMintWithFreeze(6, 0x22),
+  )
+  assert.equal(customFreezeRes.safeForSelfPay, false)
+  assert.equal(customFreezeRes.hasUntrustedFreezeAuthority, true)
+
+  // 2. Pricing refuses self_paying for non-allowlisted junk mint even with huge oracle price
+  const rentSchedule = {
+    nullifierRentLamports: 890_880n,
+    nfPageRentPerNfLamports: 113_567n,
+    pageRentPerNoteLamports: 1_500_000n,
+    ataRentLamports: 2_039_280n,
+    baseTxFeeLamports: 5_000n,
+    swapBaselineLamports: 2n * (890_880n + 113_567n) + 2n * 1_500_000n + 20_000n,
+    fetchedAt: Date.now(),
+  }
+  const junkSwapPlan = computeSwapFeePlan({
+    cfg,
+    rentSchedule,
+    outputMint: junkMint,
+    outputDecimals: 6,
+    estimatedOutAmount: 1_000_000_000n,
+    solPriceUsd: 150,
+    outputTokenPriceUsd: 100_000,
+    feeAccount: relayerB58,
+    feeAccountExists: true,
+  })
+  assert.equal(junkSwapPlan.billingMode, 'sponsored')
+  assert.equal(junkSwapPlan.platformFeeBps, 0)
+  assert.equal(junkSwapPlan.feeAccount, null)
+
+  const junkNativeQuote = computeNativeFeeQuote({
+    cluster: 'mainnet',
+    op: 'withdraw',
+    cfg,
+    rentSchedule,
+    feeMint: junkMint,
+    feeTokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    feeDecimals: 6,
+    amount: 1_000_000_000n,
+    feeRecipient: relayerB58,
+    feeRecipientExists: true,
+    solPriceUsd: 150,
+    feeTokenPriceUsd: 100_000,
+  })
+  assert.equal(junkNativeQuote.billingMode, 'sponsored')
+  assert.equal(junkNativeQuote.relayerFee, '0')
+
+  // 3. End-to-end HTTP submit: junk mint withdraw trying to drain SOL via `setupAtas: [recipientAta]`
+  //    with manipulated $1M Jupiter price MUST NOT earn self_paying credit and MUST reject with 402!
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const vaultJunkAta = deriveAssociatedTokenAddressSync(vaultAuth, junkMint, CLASSIC_TOKEN_PROGRAM_ID).address
+  const attackerWallet = base58Encode(new Uint8Array(32).fill(0xee))
+  const attackerJunkAta = deriveAssociatedTokenAddressSync(attackerWallet, junkMint, CLASSIC_TOKEN_PROGRAM_ID).address
+  const relayerJunkAta = deriveAssociatedTokenAddressSync(relayerB58, junkMint, CLASSIC_TOKEN_PROGRAM_ID).address
+
+  const withdrawJunkIx = buildTransactInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: false,
+    publicOutflow: { mint: junkMint, vaultAta: vaultJunkAta, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
+    proof192: dummyProof,
+    nf0: new Uint8Array(32).fill(0x71),
+    nf1: nf1NonZero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 1_000_000n,
+    relayerFeeAmount: 500_000n,
+    recipient: attackerJunkAta,
+    relayerFeeRecipient: relayerJunkAta,
+    memosBytes: new Uint8Array(0),
+  })
+
+  const mockRpc = 'https://mock-rpc.local/finding7-junk-mint'
+  const mockJup = 'https://mock-jup-f7.local'
+  const guard = createMockGuard()
+  const env = {
+    RELAY_GUARD: guard.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+    JUPITER_API_URL: mockJup,
+  } as Env
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+  const accMap = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [relayerJunkAta, { bytes: makeTokenAccountBytes(junkMint, relayerB58, 0n), lamports: 2_039_280, owner: CLASSIC_TOKEN_PROGRAM_ID }],
+    [deriveLanePdaSync(0, 0).address, { bytes: makeLaneStateBytes({ laneId: 0, nextLeaf: 1n, nfCount: 1n }), lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubtreePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubrootPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveMemoPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 72_149_760, owner: AUDREN_PROGRAM_ID }],
+    [deriveNfPagePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  await withMockFetch(
+    async (url, init) => {
+      if (url.startsWith(`${mockJup}/price/v3`)) {
+        return Response.json({ [WSOL_MINT]: { usdPrice: 150 }, [junkMint]: { usdPrice: 1_000_000 } })
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x42)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 600 },
+            value: addrs.map((a) => {
+              const hit = accMap.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 600 },
+            value: {
+              err: null,
+              logs: ['Withdraw OK'],
+              unitsConsumed: 160_000,
+              accounts: [
+                { lamports: 496_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] },
+                { lamports: 2_039_280, owner: CLASSIC_TOKEN_PROGRAM_ID, data: [toBase64(makeTokenAccountBytes(junkMint, relayerB58, 500_000n)), 'base64'] },
+              ],
+            },
+          },
+        })
+      }
+      throw new Error(`Unexpected RPC call in Finding #7 test: ${url} ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(withdrawJunkIx.data),
+            accounts: withdrawJunkIx.accounts,
+            setupAtas: [{ owner: attackerWallet, mint: junkMint, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID }],
+          }),
+        }),
+        env,
+      )
+      assert.equal(res.status, 402)
+      const errBody = (await res.json()) as { code: string; feeEquivalentLamports: string }
+      assert.equal(errBody.code, 'FEE_REQUIRED')
+      assert.equal(errBody.feeEquivalentLamports, '0')
+      assert.equal(guard.relayReleaseCalls[0]?.recordFailure, true)
+    },
+  )
+})
+
+test('Finding #8: deterministic minExpectedCostLamports defeats SOL inflow erasure, caps native relayerFee credit, and pins/retries zero-fee swap slot', async () => {
+  const worker = await getWorker()
+  const mockJup = 'https://mock-jup-f8.local'
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+  const poolPda = derivePoolPdaSync(0).address
+  const poolBytes = makePoolStateBytes({ noteRentFee: 1_000_000n, nfRentFee: 113_567n })
+  const relayerUsdcAta = deriveAssociatedTokenAddressSync(relayerB58, USDC_MINT, CLASSIC_TOKEN_PROGRAM_ID).address
+  const recipient = base58Encode(new Uint8Array(32).fill(0x88))
+  const recipientUsdcAta = deriveAssociatedTokenAddressSync(recipient, USDC_MINT, CLASSIC_TOKEN_PROGRAM_ID).address
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const vaultUsdcAta = deriveAssociatedTokenAddressSync(vaultAuth, USDC_MINT, CLASSIC_TOKEN_PROGRAM_ID).address
+
+  // Case A: SPL Withdraw where attacker sends concurrent +1 SOL to relayer AND +50 USDC to relayer ATA
+  // between preSlot and simSlot while only setting parsed relayerFee = 100_000 (0.10 USDC ~ 0.00066 SOL).
+  // Floor MUST stay >= minExpectedCostLamports AND credited fee MUST be capped at 100_000 USDC!
+  const withdrawIx = buildTransactInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: false,
+    publicOutflow: { mint: USDC_MINT, vaultAta: vaultUsdcAta, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
+    proof192: dummyProof,
+    nf0: new Uint8Array(32).fill(0x72),
+    nf1: nf1NonZero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 1_000_000n,
+    relayerFeeAmount: 100_000n,
+    recipient: recipientUsdcAta,
+    relayerFeeRecipient: relayerUsdcAta,
+    memosBytes: new Uint8Array(0),
+  })
+
+  const guardA = createMockGuard()
+  const mockRpcA = 'https://mock-rpc.local/finding8-cap-floor'
+  const envA = {
+    RELAY_GUARD: guardA.namespace,
+    MAINNET_RPC_URL: mockRpcA,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+    JUPITER_API_URL: mockJup,
+  } as Env
+  const accMapA = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [relayerUsdcAta, { bytes: makeTokenAccountBytes(USDC_MINT, relayerB58, 0n), lamports: 2_039_280, owner: CLASSIC_TOKEN_PROGRAM_ID }],
+    [poolPda, { bytes: poolBytes, lamports: 2_000_000, owner: AUDREN_PROGRAM_ID }],
+    [USDC_MINT, { bytes: makeClassicMintBytes(6), lamports: 2_000_000, owner: CLASSIC_TOKEN_PROGRAM_ID }],
+    [deriveLanePdaSync(0, 0).address, { bytes: makeLaneStateBytes({ laneId: 0, nextLeaf: 1n, nfCount: 1n }), lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubtreePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubrootPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveMemoPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 72_149_760, owner: AUDREN_PROGRAM_ID }],
+    [deriveNfPagePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  await withMockFetch(
+    async (url, init) => {
+      if (url.startsWith(`${mockJup}/price/v3`)) {
+        return Response.json({ [WSOL_MINT]: { usdPrice: 150 }, [USDC_MINT]: { usdPrice: 1 } })
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x43)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 700 },
+            value: addrs.map((a) => {
+              const hit = accMapA.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') {
+        // Concurrent +1 SOL inflow into relayer (erasing rawOutflow!) + 50 USDC inflow into fee ATA!
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 701 },
+            value: {
+              err: null,
+              logs: ['Withdraw OK'],
+              unitsConsumed: 150_000,
+              accounts: [
+                { lamports: 1_497_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] },
+                { lamports: 2_039_280, owner: CLASSIC_TOKEN_PROGRAM_ID, data: [toBase64(makeTokenAccountBytes(USDC_MINT, relayerB58, 50_000_000n)), 'base64'] },
+              ],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5Finding8WithdrawSig1111111111111111111111111' })
+      }
+      if (body.method === 'getSignatureStatuses') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: [{ slot: 702, err: null, confirmationStatus: 'confirmed' }] } })
+      }
+      throw new Error(`Unexpected RPC call in Finding #8A: ${url} ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(withdrawIx.data),
+            accounts: withdrawIx.accounts,
+            setupAtas: [{ owner: recipient, mint: USDC_MINT, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID }],
+          }),
+        }),
+        envA,
+      )
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as {
+        billingMode: string
+        simulatedCostLamports: string
+        simulatedFeeUnits: string
+        netSponsoredLamports: string
+      }
+      // minExpectedCostLamports = 5_000 + 5_000 + 2*(890_880 + 113_567) + 1*2_039_280 = 4_058_174
+      assert.equal(BigInt(body.simulatedCostLamports), 4_058_174n)
+      // Credited fee units MUST be capped at parsed relayerFee = 100_000 (NEVER inflated to 50_000_000!)
+      assert.equal(body.simulatedFeeUnits, '100000')
+      assert.equal(body.billingMode, 'sponsored')
+      assert.ok(BigInt(body.netSponsoredLamports) > 3_000_000n)
+    },
+  )
+
+  // Case B: Zero-fee allowlisted Jupiter swap (`relayerFee === 0n`):
+  //   - Slot mismatch (preSlot=800, simSlot=801) triggers 1 retry; if still mismatched (801 vs 802),
+  //     credits 0n fee and rejects with 402!
+  //   - If retry pins to same slot (801 vs 801), credits exact same-slot delta and succeeds self_paying!
+  const jupSwapIx = buildTestExecSwapIx({
+    payerB58: relayerB58,
+    routerProg: JUPITER_V6_ROUTER,
+    feeAta: relayerUsdcAta,
+    feeAtaWritable: true,
+    relayerFeeAmount: 0n,
+    nf0Seed: 0x73,
+  })
+
+  for (const retryMatchesSlot of [false, true]) {
+    const guardB = createMockGuard()
+    const mockRpcB = `https://mock-rpc.local/finding8-jup-${retryMatchesSlot}`
+    const envB = {
+      RELAY_GUARD: guardB.namespace,
+      MAINNET_RPC_URL: mockRpcB,
+      MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+      JUPITER_API_URL: mockJup,
+      ALLOW_MICRO_SWAP_SUBSIDY: 'false',
+    } as Env
+    let multiCall = 0
+    let simCall = 0
+
+    await withMockFetch(
+      async (url, init) => {
+        if (url.startsWith(`${mockJup}/price/v3`)) {
+          return Response.json({ [WSOL_MINT]: { usdPrice: 150 }, [USDC_MINT]: { usdPrice: 1 } })
+        }
+        const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+        if (body.method === 'getLatestBlockhash') {
+          return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x44)) } } })
+        }
+        if (body.method === 'getMultipleAccounts') {
+          const addrs = body.params[0] as string[]
+          const isMintLookup = addrs.length === 1 && addrs[0] === USDC_MINT
+          if (!isMintLookup) multiCall++
+          const slot = multiCall === 1 ? 800 : 801
+          return Response.json({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              context: { slot },
+              value: addrs.map((a) => {
+                const hit = accMapA.get(a)
+                return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+              }),
+            },
+          })
+        }
+        if (body.method === 'simulateTransaction') {
+          simCall++
+          const slot = simCall === 1 ? 801 : retryMatchesSlot ? 801 : 802
+          return Response.json({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              context: { slot },
+              value: {
+                err: null,
+                logs: ['Jupiter ExecViaEscrow OK'],
+                unitsConsumed: 280_000,
+                accounts: [
+                  { lamports: 496_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] },
+                  { lamports: 2_039_280, owner: CLASSIC_TOKEN_PROGRAM_ID, data: [toBase64(makeTokenAccountBytes(USDC_MINT, relayerB58, 2_000_000n)), 'base64'] },
+                ],
+              },
+            },
+          })
+        }
+        if (body.method === 'sendTransaction') {
+          return Response.json({ jsonrpc: '2.0', id: 1, result: '5Finding8JupSlotPinnedSig11111111111111111111' })
+        }
+        if (body.method === 'getSignatureStatuses') {
+          return Response.json({ jsonrpc: '2.0', id: 1, result: { value: [{ slot: 803, err: null, confirmationStatus: 'confirmed' }] } })
+        }
+        throw new Error(`Unexpected RPC call in Finding #8B: ${url} ${body.method}`)
+      },
+      async () => {
+        const res = await worker.fetch(
+          new Request('https://relay.audren.xyz/v1/relay/submit', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              cluster: 'mainnet',
+              instructionDataB64: toBase64(jupSwapIx.data),
+              accounts: jupSwapIx.accounts,
+            }),
+          }),
+          envB,
+        )
+        assert.equal(simCall, 2, 'slot mismatch must trigger exactly 1 retry')
+        if (!retryMatchesSlot) {
+          assert.equal(res.status, 402)
+          const errBody = (await res.json()) as { code: string; feeEquivalentLamports: string }
+          assert.equal(errBody.code, 'FEE_REQUIRED')
+          assert.equal(errBody.feeEquivalentLamports, '0')
+        } else {
+          assert.equal(res.status, 200)
+          const okBody = (await res.json()) as { billingMode: string; simulatedFeeUnits: string }
+          assert.equal(okBody.billingMode, 'self_paying')
+          assert.equal(okBody.simulatedFeeUnits, '2000000')
+        }
+      },
+    )
+  }
+})
+
+test('Finding #9: publishCheckpointIfNeeded simulates at processed commitment, retries Custom:6001, and never poisons checkpoint_locks when confirm=false', async () => {
+  const poolPda = derivePoolPdaSync(0).address
+  const lanePdas = [0, 1, 2, 3].map((l) => deriveLanePdaSync(0, l).address)
+  const poolBytes = makePoolStateBytes({ activeLanes: 4, ckptInterval: 8n, maxCkptAge: 3600n })
+  const ckptEpoch100 = makeCheckpointBytes({
+    slotIdx: 100,
+    epochId: 100n,
+    publishedSlot: 800n,
+    laneCounts: [1n, 0n, 0n, 0n],
+  })
+  const ckptPda100 = deriveCheckpointPdaSync(0, 100).address
+  const accMap = new Map<string, { bytes: Uint8Array; owner: string }>([
+    [poolPda, { bytes: poolBytes, owner: AUDREN_PROGRAM_ID }],
+    [lanePdas[0]!, { bytes: makeLaneStateBytes({ laneId: 0, nextLeaf: 2n }), owner: AUDREN_PROGRAM_ID }],
+    [lanePdas[1]!, { bytes: makeLaneStateBytes({ laneId: 1, nextLeaf: 0n }), owner: AUDREN_PROGRAM_ID }],
+    [lanePdas[2]!, { bytes: makeLaneStateBytes({ laneId: 2, nextLeaf: 0n }), owner: AUDREN_PROGRAM_ID }],
+    [lanePdas[3]!, { bytes: makeLaneStateBytes({ laneId: 3, nextLeaf: 0n }), owner: AUDREN_PROGRAM_ID }],
+    [ckptPda100, { bytes: ckptEpoch100, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  const simCommitments: string[] = []
+  let simCalls = 0
+  const lockReleases: Array<{ published: boolean; epoch?: number; signature?: string }> = []
+  const lock = {
+    async acquire() {
+      return { allowed: true }
+    },
+    async release(req: { published: boolean; epoch?: number; signature?: string }) {
+      lockReleases.push({ published: req.published, epoch: req.epoch, signature: req.signature })
+    },
+  }
+
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getAccountInfo') {
+        const hit = accMap.get(String(body.params[0]))
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: 5_000_000, owner: hit.owner } : null },
+        })
+      }
+      if (body.method === 'getSlot') {
+        // First call (confirmed snapshot): 808 (epoch 101); processed calls stay cleanly mid-epoch (809, 809)
+        return Response.json({ jsonrpc: '2.0', id: 1, result: 809 })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: addrs.map((a) => {
+              const hit = accMap.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: 5_000_000, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x31)) } } })
+      }
+      if (body.method === 'simulateTransaction') {
+        simCalls++
+        const opts = body.params[1] as { commitment?: string }
+        simCommitments.push(opts.commitment ?? 'missing')
+        // Simulate Custom:6001 on first attempt even while freshEpoch === publishEpoch -> retry MUST run!
+        if (simCalls === 1) {
+          return Response.json({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              context: { slot: 809 },
+              value: { err: { InstructionError: [0, { Custom: 6001 }] }, logs: ['InvalidPda'], unitsConsumed: 5_000, accounts: [] },
+            },
+          })
+        }
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 809 },
+            value: {
+              err: null,
+              logs: ['PublishCheckpoint OK'],
+              unitsConsumed: 18_000,
+              accounts: [{ lamports: 499_990_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5CronUnconfirmedCkptSig111111111111111111111' })
+      }
+      throw new Error(`Unexpected RPC call in Finding #9: ${body.method}`)
+    },
+    async () => {
+      const res = await publishCheckpointIfNeeded({
+        rpcUrl: 'https://mock-rpc.local/finding9-ckpt',
+        cluster: 'mainnet',
+        poolId: 0,
+        relayerSecret32: relayerSecret,
+        lock,
+        confirm: false,
+      })
+      assert.equal(res.status, 'published')
+      assert.equal(simCalls, 2, 'Custom:6001 with freshEpoch >= publishEpoch must retry simulation')
+      assert.deepEqual(simCommitments, ['processed', 'processed'])
+      // confirm=false MUST release lock with published=false so dropped cron txs never poison checkpoint_locks!
+      assert.equal(lockReleases.length, 1)
+      assert.equal(lockReleases[0]!.published, false)
+      assert.equal(lockReleases[0]!.epoch, undefined)
+      assert.equal(lockReleases[0]!.signature, undefined)
+    },
+  )
+})
+
+test('Finding #10: premature rollover OpenPage (flags=0x07 at nextLeaf=0, nfCount=0) is rejected', async () => {
+  const worker = await getWorker()
+  const outLaneId = 0
+  const lanePda = deriveLanePdaSync(0, outLaneId).address
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+
+  // Unit-level test on `planMissingOpenPageIxs`
+  const sub0 = deriveSubtreePdaSync(0, outLaneId, 0n).address
+  const sr0 = deriveSubrootPdaSync(0, outLaneId, 0n).address
+  const memo0 = deriveMemoPdaSync(0, outLaneId, 0n).address
+  const nf0Page = deriveNfPagePdaSync(0, outLaneId, 0n).address
+  const sub1 = deriveSubtreePdaSync(0, outLaneId, 1n).address
+  const memo1 = deriveMemoPdaSync(0, outLaneId, 1n).address
+  const nf1Page = deriveNfPagePdaSync(0, outLaneId, 1n).address
+
+  const prematureRes = planMissingOpenPageIxs({
+    payerB58: relayerB58,
+    poolId: 0,
+    outLaneId,
+    laneAcc: { bytes: makeLaneStateBytes({ laneId: outLaneId, nextLeaf: 0n, nfCount: 0n }), owner: AUDREN_PROGRAM_ID },
+    pages: { outSub: sub0, outRoot: sr0, outMemo: memo0, nfPage: nf0Page, nextSub: sub1, nextMemo: memo1, nextNf: nf1Page },
+    pageSlots: [
+      { slot: 'outSub', pda: sub0 },
+      { slot: 'outRoot', pda: sr0 },
+      { slot: 'outMemo', pda: memo0 },
+      { slot: 'nfPage', pda: nf0Page },
+      { slot: 'nextSub', pda: sub1 },
+      { slot: 'nextMemo', pda: memo1 },
+      { slot: 'nextNf', pda: nf1Page },
+    ],
+    pageAccs: [
+      { bytes: dummyPageBytes, owner: AUDREN_PROGRAM_ID },
+      { bytes: dummyPageBytes, owner: AUDREN_PROGRAM_ID },
+      { bytes: dummyPageBytes, owner: AUDREN_PROGRAM_ID },
+      { bytes: dummyPageBytes, owner: AUDREN_PROGRAM_ID },
+      null,
+      null,
+      null,
+    ],
+    outputCount: 2,
+    nullifierCount: 2,
+  })
+  assert.equal(prematureRes.ok, false)
+  assert.match(prematureRes.error, /Premature rollover OpenPage rejected/)
+
+  // HTTP /v1/relay/submit with flags=0x07 at leaf 0, nfCount 0 MUST reject with 400 INVALID_PAGE_PDA & zero sim calls
+  const prematureIx = buildTransactInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0b001,
+    assetMode: ASSET_MODE_PRIVATE,
+    rollover: { nextSubSeq: 1n, nextMemoSeq: 1n, nextNfSeq: 1n },
+    proof192: dummyProof,
+    nf0: new Uint8Array(32).fill(0x74),
+    nf1: nf1NonZero,
+    cm0: new Uint8Array(32).fill(0x12),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: new Uint8Array(MEMO_ENTRY_WIRE_LEN).fill(0x21),
+  })
+  const guard = createMockGuard()
+  const env = {
+    RELAY_GUARD: guard.namespace,
+    MAINNET_RPC_URL: 'https://mock-rpc.local/finding10-premature-openpage',
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+  } as Env
+  const accMap = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [lanePda, { bytes: makeLaneStateBytes({ laneId: outLaneId, nextLeaf: 0n, nfCount: 0n }), lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [sub0, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [sr0, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [memo0, { bytes: dummyPageBytes, lamports: 72_149_760, owner: AUDREN_PROGRAM_ID }],
+    [nf0Page, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  let simCalled = 0
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x45)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 900 },
+            value: addrs.map((a) => {
+              const hit = accMap.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') simCalled++
+      throw new Error(`Unexpected RPC method in Finding #10: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(prematureIx.data),
+            accounts: prematureIx.accounts,
+          }),
+        }),
+        env,
+      )
+      assert.equal(res.status, 400)
+      const errBody = (await res.json()) as { code: string; error: string }
+      assert.equal(errBody.code, 'INVALID_PAGE_PDA')
+      assert.match(errBody.error, /Premature rollover OpenPage/)
+      assert.equal(simCalled, 0)
+      assert.equal(guard.relayReleaseCalls[0]?.recordFailure, true)
+    },
+  )
+})
+
+test('Finding #11: multi-payer relayerPool pinning on quote endpoints + cross-payer Mode 2 & Mode 3 acceptance and exact signer matching', async () => {
+  const worker = await getWorker()
+  const poolSecrets = [
+    new Uint8Array(32).fill(0xa1),
+    new Uint8Array(32).fill(0xa2),
+    new Uint8Array(32).fill(0xa3),
+  ]
+  const poolPubkeys = poolSecrets.map((s) => ed25519.getPublicKey(s))
+  const poolB58 = poolPubkeys.map((pk) => base58Encode(pk))
+  const [p0, p1, p2] = poolB58 as [string, string, string]
+
+  // 1. Firewall accepts cross-payer Mode 2 unwrapWsol (accounts[0]=p1, feeRecipient=p2) and Mode 3 (accounts[0]=p2, feeAta=ATA(p0))
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const vaultWsolAta = deriveAssociatedTokenAddressSync(vaultAuth, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID).address
+  const recipient = base58Encode(new Uint8Array(32).fill(0x37))
+  const crossUnwrapIx = buildTransactInstruction({
+    payer: p1,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: true,
+    publicOutflow: { mint: WSOL_MINT, vaultAta: vaultWsolAta, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
+    proof192: dummyProof,
+    nf0: new Uint8Array(32).fill(0x75),
+    nf1: nf1NonZero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 500_000_000n,
+    relayerFeeAmount: 5_000_000n,
+    recipient,
+    relayerFeeRecipient: p2,
+    memosBytes: new Uint8Array(0),
+  })
+  const vUnwrap = validateRelaySubmission(
+    { instructionDataB64: toBase64(crossUnwrapIx.data), accounts: crossUnwrapIx.accounts },
+    poolPubkeys[1]!,
+    allowedPre,
+    null,
+    { relayerPoolPubkeys: poolPubkeys },
+  )
+  assert.equal(vUnwrap.nativeSolFeeToRelayer, 5_000_000n)
+  assert.equal(vUnwrap.nativeSolFeeRecipient, p2)
+
+  const p0UsdcAta = deriveAssociatedTokenAddressSync(p0, USDC_MINT, CLASSIC_TOKEN_PROGRAM_ID).address
+  const crossExecIx = buildTestExecSwapIx({
+    payerB58: p2,
+    routerProg: JUPITER_V6_ROUTER,
+    feeAta: p0UsdcAta,
+    feeAtaWritable: true,
+    relayerFeeAmount: 0n,
+    nf0Seed: 0x76,
+  })
+  const vExec = validateRelaySubmission(
+    { instructionDataB64: toBase64(crossExecIx.data), accounts: crossExecIx.accounts },
+    poolPubkeys[2]!,
+    allowedPre,
+    null,
+    { relayerPoolPubkeys: poolPubkeys },
+  )
+  assert.equal(vExec.watchedRelayerFeeAta, p0UsdcAta)
+  assert.equal(vExec.isZeroFeeAuditedRouterSwap, true)
+
+  // 2. HTTP /v1/fee-quote pins requested relayerPubkey=p2, and HTTP /v1/relay/submit signs with exact accounts[0]=p1
+  //    while verifying native SOL fee inflow to p2 (and rejects unknown accounts[0] with 400)!
+  const guard = createMockGuard()
+  const mockRpc = 'https://mock-rpc.local/finding11-multipayer'
+  const env = {
+    RELAY_GUARD: guard.namespace,
+    MAINNET_RPC_URL: mockRpc,
+    MAINNET_RELAYER_SECRETS_JSON: JSON.stringify(poolSecrets.map((s) => toBase64(s))),
+  } as Env
+  const poolPda = derivePoolPdaSync(0).address
+  const poolBytes = makePoolStateBytes({ noteRentFee: 1_000_000n, nfRentFee: 113_567n })
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+  const accMap = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [p1, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [p2, { bytes: new Uint8Array(0), lamports: 400_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [poolPda, { bytes: poolBytes, lamports: 2_000_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveLanePdaSync(0, 0).address, { bytes: makeLaneStateBytes({ laneId: 0, nextLeaf: 1n, nfCount: 1n }), lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubtreePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubrootPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveMemoPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 72_149_760, owner: AUDREN_PROGRAM_ID }],
+    [deriveNfPagePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  let sentWire: Uint8Array | null = null
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getMinimumBalanceForRentExemption') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: 890_880 })
+      }
+      if (body.method === 'getAccountInfo' && body.params[0] === poolPda) {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { value: { data: [toBase64(poolBytes), 'base64'], lamports: 2_000_000, owner: AUDREN_PROGRAM_ID } },
+        })
+      }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x46)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 950 },
+            value: addrs.map((a) => {
+              const hit = accMap.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 950 },
+            value: {
+              err: null,
+              logs: ['Cross-payer Withdraw OK'],
+              unitsConsumed: 145_000,
+              accounts: [
+                { lamports: 497_981_106, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }, // p1 paid ~2_018_894
+                { lamports: 405_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }, // p2 received 5_000_000
+              ],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        sentWire = fromBase64(String(body.params[0]))
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5MultiPayerSig1111111111111111111111111111111' })
+      }
+      if (body.method === 'getSignatureStatuses') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: [{ slot: 951, err: null, confirmationStatus: 'confirmed' }] } })
+      }
+      throw new Error(`Unexpected RPC method in Finding #11: ${body.method}`)
+    },
+    async () => {
+      // Pinning relayerPubkey=p2 on /v1/fee-quote returns p2 deterministically
+      const fqRes = await worker.fetch(
+        new Request(`https://relay.audren.xyz/v1/fee-quote?cluster=mainnet&op=withdraw&mint=${WSOL_MINT}&unwrapWsol=true&amount=500000000&relayerPubkey=${p2}`),
+        env,
+      )
+      assert.equal(fqRes.status, 200)
+      const fq = (await fqRes.json()) as { relayerPubkey: string; feeRecipient: string }
+      assert.equal(fq.relayerPubkey, p2)
+      assert.equal(fq.feeRecipient, p2)
+
+      // Submitting cross-payer withdraw signs with p1 and settles self_paying via p2's SOL inflow
+      const subRes = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(crossUnwrapIx.data),
+            accounts: crossUnwrapIx.accounts,
+          }),
+        }),
+        env,
+      )
+      assert.equal(subRes.status, 200)
+      const subBody = (await subRes.json()) as {
+        billingMode: string
+        relayerPubkey: string
+        simulatedFeeAccount: string
+        simulatedFeeUnits: string
+        netSponsoredLamports: string
+      }
+      assert.equal(subBody.billingMode, 'self_paying')
+      assert.equal(subBody.relayerPubkey, p1)
+      assert.equal(subBody.simulatedFeeAccount, p2)
+      assert.equal(subBody.simulatedFeeUnits, '5000000')
+      assert.equal(subBody.netSponsoredLamports, '0')
+      assert.ok(sentWire)
+      // Verify compiled v1 tx fee payer (bytes 42..74) is p1 and trailing Ed25519 signature verifies under p1!
+      assert.equal(base58Encode(sentWire.subarray(42, 74)), p1)
+      const msgBytes = sentWire.subarray(0, sentWire.length - 64)
+      const sigBytes = sentWire.subarray(sentWire.length - 64)
+      assert.equal(ed25519.verify(sigBytes, msgBytes, poolPubkeys[1]!), true)
+
+      // Unknown accounts[0] NOT in relayerPool MUST be rejected with 400 FIREWALL_REJECTED
+      const badAccs = crossUnwrapIx.accounts.map((a, i) => (i === 0 ? { ...a, pubkey: recipient } : a))
+      const badRes = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(crossUnwrapIx.data),
+            accounts: badAccs,
+          }),
+        }),
+        env,
+      )
+      assert.equal(badRes.status, 400)
+      const badBody = (await badRes.json()) as { code: string }
+      assert.equal(badBody.code, 'FIREWALL_REJECTED')
+    },
+  )
+})
+
+test('Finding #12: multi-ix batch unconditionally requires isSelfPaying=true even when FVK is unset, and caps each batch ix to outputCount <= 2', async () => {
+  const worker = await getWorker()
+  const makePrivIx = (seed: number, outputMask: number) => {
+    const outCount = (outputMask & 1) + ((outputMask >> 1) & 1) + ((outputMask >> 2) & 1)
+    const ix = buildTransactInstruction({
+      payer: relayerB58,
+      poolId: 0,
+      ckptSlotIdx: 0,
+      outLaneId: 0,
+      outSubSeq: 0n,
+      outRootSeq: 0n,
+      outMemoSeq: 0n,
+      outNfSeq: 0n,
+      outputMask,
+      assetMode: ASSET_MODE_PRIVATE,
+      proof192: dummyProof,
+      nf0: new Uint8Array(32).fill(0x20 + seed * 2),
+      nf1: new Uint8Array(32).fill(0x21 + seed * 2),
+      cm0: new Uint8Array(32).fill(0x31),
+      cm1: new Uint8Array(32).fill(0x32),
+      cm2: new Uint8Array(32).fill(0x33),
+      publicAmountOut: 0n,
+      relayerFeeAmount: 0n,
+      memosBytes: new Uint8Array(outCount * MEMO_ENTRY_WIRE_LEN).fill(0x41),
+    })
+    return { instructionDataB64: toBase64(ix.data), accounts: ix.accounts }
+  }
+
+  // 1. Multi-ix batch with outputCount === 3 (outputMask = 0b111) MUST be rejected by firewall!
+  assert.throws(
+    () =>
+      validateRelaySubmission(
+        { instructions: [makePrivIx(0, 0b001), makePrivIx(1, 0b111)] },
+        relayerPubkey,
+        allowedPre,
+        relayerFvk,
+      ),
+    (err: unknown) => err instanceof FirewallError && err.message.includes('at most 2 outputs'),
+  )
+
+  // 2. 2-ix batch submitted with MAINNET_RELAYER_FVK_JSON UNSET + ALLOW_MICRO_SWAP_SUBSIDY='true'
+  //    MUST still be rejected with 402 FEE_REQUIRED + recordFailure=true!
+  const guard = createMockGuard()
+  const env = {
+    RELAY_GUARD: guard.namespace,
+    MAINNET_RPC_URL: 'https://mock-rpc.local/finding12-no-fvk-batch',
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+    ALLOW_MICRO_SWAP_SUBSIDY: 'true',
+    // MAINNET_RELAYER_FVK_JSON deliberately unset!
+  } as Env
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+  const accMap = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [deriveLanePdaSync(0, 0).address, { bytes: makeLaneStateBytes({ laneId: 0, nextLeaf: 2n, nfCount: 2n }), lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubtreePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubrootPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveMemoPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 72_149_760, owner: AUDREN_PROGRAM_ID }],
+    [deriveNfPagePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x47)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 960 },
+            value: addrs.map((a) => {
+              const hit = accMap.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 960 },
+            value: {
+              err: null,
+              logs: ['Batch OK'],
+              unitsConsumed: 360_000,
+              accounts: [{ lamports: 495_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }],
+            },
+          },
+        })
+      }
+      throw new Error(`Unexpected RPC method in Finding #12: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructions: [makePrivIx(0, 0b001), makePrivIx(1, 0b001)],
+          }),
+        }),
+        env,
+      )
+      assert.equal(res.status, 402)
+      const errBody = (await res.json()) as { code: string }
+      assert.equal(errBody.code, 'FEE_REQUIRED')
+      assert.equal(guard.relayReleaseCalls[0]?.recordFailure, true)
+    },
+  )
+})
+
+test('Finding #13: submit-time margin + 2x Token-2022 TransferFee haircut, missing vault/escrow ATA rent in swap quote, deferred cm2 verification, and cron/refill hardening', async () => {
+  const worker = await getWorker()
+
+  // 1. `applyToken2022FeeHaircut` applies exact 2x active Token-2022 TransferFee haircut
+  const t22Immutable400Bps = makeToken2022MutableTransferFeeMintBytes({
+    decimals: 6,
+    bps: 400, // 4% per hop => 8% (2x) haircut!
+    mutableAuthority: false,
+  })
+  const hc = applyToken2022FeeHaircut({
+    tokenProgram: TOKEN_2022_PROGRAM_ID,
+    mintData: t22Immutable400Bps,
+    currentEpoch: 100n,
+    grossAmount: 1_000_000n,
+  })
+  assert.equal(hc.activeTransferFeeBps, 400)
+  assert.equal(hc.haircutAmount, 80_000n)
+  assert.equal(hc.netAmount, 920_000n)
+
+  // 2. Submit-time margin (`SELF_PAY_MARGIN_BPS = 11000`) + 2x T22 haircut + deferred cm2 verification + recordFailure on COST_CEILING_EXCEEDED
+  const t22FeeMint = base58Encode(new Uint8Array(32).fill(0xc4))
+  const relayerT22Ata = deriveAssociatedTokenAddressSync(relayerB58, t22FeeMint, TOKEN_2022_PROGRAM_ID).address
+  const vaultAuth = deriveVaultAuthPdaSync(0).address
+  const vaultT22Ata = deriveAssociatedTokenAddressSync(vaultAuth, t22FeeMint, TOKEN_2022_PROGRAM_ID).address
+  const recipient = base58Encode(new Uint8Array(32).fill(0x49))
+  const recipientT22Ata = deriveAssociatedTokenAddressSync(recipient, t22FeeMint, TOKEN_2022_PROGRAM_ID).address
+  const mockJup = 'https://mock-jup-f13.local'
+  const dummyPageBytes = new Uint8Array(64).fill(0x5a)
+
+  // Cost = 10_000_000 lamports (0.01 SOL = $1.50 at $150/SOL).
+  // With 1.1x margin, required net value = 11_000_000 lamports ($1.65).
+  // With 2x 4% = 8% T22 haircut, gross $1.70 (1_700_000 units at $1/token) nets $1.564 -> < $1.65 => NOT self_paying!
+  const withdrawT22Ix = buildTransactInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: false,
+    publicOutflow: { mint: t22FeeMint, vaultAta: vaultT22Ata, tokenProgram: TOKEN_2022_PROGRAM_ID },
+    proof192: dummyProof,
+    nf0: new Uint8Array(32).fill(0x78),
+    nf1: nf1NonZero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 10_000_000n,
+    relayerFeeAmount: 1_700_000n,
+    recipient: recipientT22Ata,
+    relayerFeeRecipient: relayerT22Ata,
+    memosBytes: new Uint8Array(0),
+  })
+
+  const guardHaircut = createMockGuard()
+  const mockRpcHaircut = 'https://mock-rpc.local/finding13-haircut'
+  const envHaircut = {
+    RELAY_GUARD: guardHaircut.namespace,
+    MAINNET_RPC_URL: mockRpcHaircut,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+    JUPITER_API_URL: mockJup,
+    SELF_PAY_FEE_MINTS: `${WSOL_MINT},${t22FeeMint}`,
+    SELF_PAY_MARGIN_BPS: '11000',
+  } as Env
+  const accMapHaircut = new Map<string, { bytes: Uint8Array; lamports: number; owner: string }>([
+    [relayerB58, { bytes: new Uint8Array(0), lamports: 500_000_000, owner: SYSTEM_PROGRAM_ID }],
+    [relayerT22Ata, { bytes: makeTokenAccountBytes(t22FeeMint, relayerB58, 0n), lamports: 2_039_280, owner: TOKEN_2022_PROGRAM_ID }],
+    [t22FeeMint, { bytes: t22Immutable400Bps, lamports: 2_000_000, owner: TOKEN_2022_PROGRAM_ID }],
+    [deriveLanePdaSync(0, 0).address, { bytes: makeLaneStateBytes({ laneId: 0, nextLeaf: 1n, nfCount: 1n }), lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubtreePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 58_340_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveSubrootPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+    [deriveMemoPdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 72_149_760, owner: AUDREN_PROGRAM_ID }],
+    [deriveNfPagePdaSync(0, 0, 0n).address, { bytes: dummyPageBytes, lamports: 68_140_000, owner: AUDREN_PROGRAM_ID }],
+  ])
+
+  await withMockFetch(
+    async (url, init) => {
+      if (url.startsWith(`${mockJup}/price/v3`)) {
+        return Response.json({ [WSOL_MINT]: { usdPrice: 150 }, [t22FeeMint]: { usdPrice: 1 } })
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getEpochInfo') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { epoch: 500 } })
+      }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x48)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 970 },
+            value: addrs.map((a) => {
+              const hit = accMapHaircut.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 970 },
+            value: {
+              err: null,
+              logs: ['T22 Withdraw OK'],
+              unitsConsumed: 150_000,
+              accounts: [
+                { lamports: 490_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }, // 10_000_000 outflow
+                { lamports: 2_039_280, owner: TOKEN_2022_PROGRAM_ID, data: [toBase64(makeTokenAccountBytes(t22FeeMint, relayerB58, 1_700_000n)), 'base64'] },
+              ],
+            },
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5HaircutWithdrawSig11111111111111111111111111' })
+      }
+      if (body.method === 'getSignatureStatuses') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: [{ slot: 971, err: null, confirmationStatus: 'confirmed' }] } })
+      }
+      throw new Error(`Unexpected RPC in Finding #13 haircut: ${url} ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(withdrawT22Ix.data),
+            accounts: withdrawT22Ix.accounts,
+          }),
+        }),
+        envHaircut,
+      )
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as { billingMode: string; netSponsoredLamports: string }
+      // Gross 1.70 USDC covers 100% of $1.50 cost, but after 2x 4% T22 haircut ($1.564) < 1.1x margin ($1.65) -> NOT self_paying!
+      assert.equal(body.billingMode, 'sponsored')
+      assert.ok(BigInt(body.netSponsoredLamports) > 0n)
+    },
+  )
+
+  // 3. COST_CEILING_EXCEEDED records failure (`recordFailure: true`)!
+  const guardCeil = createMockGuard()
+  const envCeil = {
+    RELAY_GUARD: guardCeil.namespace,
+    MAINNET_RPC_URL: 'https://mock-rpc.local/finding13-ceiling',
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+  } as Env
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getLatestBlockhash') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { blockhash: base58Encode(new Uint8Array(32).fill(0x49)) } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 975 },
+            value: addrs.map((a) => {
+              const hit = accMapHaircut.get(a)
+              return hit ? { data: [toBase64(hit.bytes), 'base64'], lamports: hit.lamports, owner: hit.owner } : null
+            }),
+          },
+        })
+      }
+      if (body.method === 'simulateTransaction') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            context: { slot: 975 },
+            value: {
+              err: null,
+              logs: ['Huge Outflow'],
+              unitsConsumed: 150_000,
+              accounts: [
+                { lamports: 400_000_000, owner: SYSTEM_PROGRAM_ID, data: ['', 'base64'] }, // 100_000_000 > 50_000_000 ceiling!
+                { lamports: 2_039_280, owner: TOKEN_2022_PROGRAM_ID, data: [toBase64(makeTokenAccountBytes(t22FeeMint, relayerB58, 0n)), 'base64'] },
+              ],
+            },
+          },
+        })
+      }
+      throw new Error(`Unexpected RPC in Finding #13 ceiling: ${body.method}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(withdrawT22Ix.data),
+            accounts: withdrawT22Ix.accounts,
+          }),
+        }),
+        envCeil,
+      )
+      assert.equal(res.status, 400)
+      const errBody = (await res.json()) as { code: string }
+      assert.equal(errBody.code, 'COST_CEILING_EXCEEDED')
+      assert.equal(guardCeil.relayReleaseCalls[0]?.recordFailure, true)
+    },
+  )
+
+  // 4. Deferred cm2 verification: rate-limited `guard.begin()` rejects 429 BEFORE RPC/cm2 crypto!
+  const { cm2, memo } = makeShieldedFeeCm2(3_000_000n, wsolMintBytes)
+  const privTransferIx = buildTransactInstruction({
+    payer: relayerB58,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0b100,
+    assetMode: ASSET_MODE_PRIVATE,
+    proof192: dummyProof,
+    nf0: new Uint8Array(32).fill(0x79),
+    nf1: nf1NonZero,
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2,
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: memo,
+  })
+  const blockingGuard = {
+    idFromName: () => ({} as DurableObjectId),
+    get: () => ({
+      async begin() {
+        return { allowed: false, status: 429, code: 'TOO_MANY_FAILURES', reason: 'Rate limited', retryAfterSec: 300 }
+      },
+    }),
+  } as unknown as Env['RELAY_GUARD']
+  let rpcCallsAfterRateLimit = 0
+  await withMockFetch(
+    async () => {
+      rpcCallsAfterRateLimit++
+      throw new Error('RPC should never be called when guard.begin() denies!')
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://relay.audren.xyz/v1/relay/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            cluster: 'mainnet',
+            instructionDataB64: toBase64(privTransferIx.data),
+            accounts: privTransferIx.accounts,
+          }),
+        }),
+        {
+          RELAY_GUARD: blockingGuard,
+          MAINNET_RPC_URL: 'https://mock-rpc.local/finding13-blocked',
+          MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+          MAINNET_RELAYER_FVK_JSON: JSON.stringify({
+            spendPkHex: toHex(relayerFvk.spendPk),
+            nkHex: toHex(relayerFvk.nk),
+            viewSkHex: toHex(relayerFvk.viewSk),
+            viewPkHex: toHex(relayerFvk.viewPk),
+          }),
+        } as Env,
+      )
+      assert.equal(res.status, 429)
+      assert.equal(rpcCallsAfterRateLimit, 0)
+    },
+  )
+
+  // 5. Missing vault/escrow ATA rent is priced into `/v1/swap/quote`!
+  const mockRpcSwapAta = 'https://mock-rpc.local/finding13-swap-ata-rent'
+  const poolPda = derivePoolPdaSync(0).address
+  const poolBytes = makePoolStateBytes({ noteRentFee: 1_000_000n, nfRentFee: 113_567n })
+  const guardSwap = createMockGuard()
+  const envSwap = {
+    RELAY_GUARD: guardSwap.namespace,
+    MAINNET_RPC_URL: mockRpcSwapAta,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+    JUPITER_API_URL: mockJup,
+  } as Env
+  await withMockFetch(
+    async (url, init) => {
+      if (url.startsWith(`${mockJup}/price/v3`)) {
+        return Response.json({ [WSOL_MINT]: { usdPrice: 150 }, [USDC_MINT]: { usdPrice: 1 } })
+      }
+      if (url.startsWith(`${mockJup}/swap/v1/quote`)) {
+        return Response.json({
+          inputMint: WSOL_MINT,
+          outputMint: USDC_MINT,
+          inAmount: '5000000000',
+          outAmount: '750000000',
+          otherAmountThreshold: '740000000',
+          slippageBps: 100,
+          routePlan: [{ swapInfo: { label: 'Raydium CLMM', inputMint: WSOL_MINT, outputMint: USDC_MINT, inAmount: '5000000000', outAmount: '750000000' }, percent: 100 }],
+        })
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getMinimumBalanceForRentExemption') {
+        const len = Number(body.params[0])
+        return Response.json({ jsonrpc: '2.0', id: 1, result: len === 165 ? 2_039_280 : len === 0 ? 890_880 : 60_000_000 })
+      }
+      if (body.method === 'getAccountInfo' && body.params[0] === poolPda) {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { data: [toBase64(poolBytes), 'base64'], lamports: 2_000_000, owner: AUDREN_PROGRAM_ID } } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        // Return mints as valid; for the 5-account ATA check [vaultIn, vaultOut, escrowIn, escrowOut, relayerFee],
+        // mark vaultOut & escrowOut (indices 1 & 3) as missing (`null`)!
+        if (addrs.includes(WSOL_MINT) || addrs.includes(USDC_MINT)) {
+          return Response.json({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              value: addrs.map((a) => ({
+                data: [toBase64(makeClassicMintBytes(a === WSOL_MINT ? 9 : 6)), 'base64'],
+                lamports: 2_000_000,
+                owner: CLASSIC_TOKEN_PROGRAM_ID,
+              })),
+            },
+          })
+        }
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: addrs.map((_a, idx) =>
+              idx === 1 || idx === 3
+                ? null
+                : { data: ['', 'base64'], lamports: 2_039_280, owner: CLASSIC_TOKEN_PROGRAM_ID },
+            ),
+          },
+        })
+      }
+      throw new Error(`Unexpected fetch in Finding #13 swap quote: ${url}`)
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request(`https://relay.audren.xyz/v1/swap/quote?cluster=mainnet&provider=jupiter&inputMint=${WSOL_MINT}&outputMint=${USDC_MINT}&amount=5000000000&shardId=0`),
+        envSwap,
+      )
+      assert.equal(res.status, 200)
+      const q = (await res.json()) as { feePlan: { billingMode: string; estimatedRelayCostLamports: string } }
+      assert.equal(q.feePlan.billingMode, 'self_paying')
+      // Must include 2 * 2_039_280 = 4_078_560 lamports on top of baseline swap rent!
+      const sched = await fetchLiveRentSchedule(mockRpcSwapAta)
+      assert.equal(
+        BigInt(q.feePlan.estimatedRelayCostLamports),
+        sched.swapBaselineLamports + 2n * 2_039_280n,
+      )
+    },
+  )
+
+  // 6. `runMaintenanceCrank` skips opening pages when `LaneRentVault` is underfunded!
+  const mockRpcCrank = 'https://mock-rpc.local/finding13-crank-underfunded'
+  const lane0Pda = deriveLanePdaSync(0, 0).address
+  const lane0VaultPda = deriveLaneRentVaultPdaSync(0, 0).address
+  const pool1LaneBytes = makePoolStateBytes({ activeLanes: 1, ckptInterval: 16n, maxCkptAge: 3600n })
+  const ckptUpToDate = makeCheckpointBytes({ slotIdx: 100, epochId: 100n, publishedSlot: 1600n, laneCounts: [1n] })
+  let crankSendCalls = 0
+
+  await withMockFetch(
+    async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getAccountInfo' && body.params[0] === poolPda) {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: { data: [toBase64(pool1LaneBytes), 'base64'], lamports: 2_000_000, owner: AUDREN_PROGRAM_ID } } })
+      }
+      if (body.method === 'getSlot') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: 1605 })
+      }
+      if (body.method === 'getMinimumBalanceForRentExemption') {
+        const len = Number(body.params[0])
+        return Response.json({ jsonrpc: '2.0', id: 1, result: len === 0 ? 890_880 : len === 165 ? 2_039_280 : 72_149_760 })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: addrs.map((a) => {
+              if (a === lane0Pda) {
+                return { data: [toBase64(makeLaneStateBytes({ laneId: 0, nextLeaf: 1n, nfCount: 0n })), 'base64'], lamports: 15_000_000, owner: AUDREN_PROGRAM_ID }
+              }
+              if (a === lane0VaultPda) {
+                // Empty/minimum-only LaneRentVault (0 available subsidy!)
+                return { data: ['', 'base64'], lamports: 890_880, owner: AUDREN_PROGRAM_ID }
+              }
+              if (a === deriveCheckpointPdaSync(0, 100).address) {
+                return { data: [toBase64(ckptUpToDate), 'base64'], lamports: 5_000_000, owner: AUDREN_PROGRAM_ID }
+              }
+              return null // All pages appear missing!
+            }),
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        crankSendCalls++
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5ShouldNeverSend1111111111111111111111111111' })
+      }
+      throw new Error(`Unexpected RPC in Finding #13 crank: ${body.method}`)
+    },
+    async () => {
+      const report = await runMaintenanceCrank(
+        {
+          MAINNET_RPC_URL: mockRpcCrank,
+          MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+        } as Env,
+        'mainnet',
+      )
+      assert.equal(report.openedPages.length, 0)
+      assert.equal(crankSendCalls, 0)
+      assert.ok(report.notes.some((n) => n.includes('LaneRentVault underfunded')))
+    },
+  )
+
+  // 7. `runAutoRefill` strictly restricts swaps to `SELF_PAY_FEE_MINTS` + `AUDITED_SWAP_ROUTER_PROGRAMS`!
+  const mockRpcRefill = 'https://mock-rpc.local/finding13-refill-allowlist'
+  const junkAirdropMint = base58Encode(new Uint8Array(32).fill(0xd7))
+  const evilRouter = base58Encode(new Uint8Array(32).fill(0xee))
+  const refillEnv = {
+    MAINNET_RPC_URL: mockRpcRefill,
+    MAINNET_RELAYER_SECRET_B64: toBase64(relayerSecret),
+    JUPITER_API_URL: mockJup,
+  } as Env
+  const refillCfg = loadPolicyConfig(refillEnv)
+  let refillSendCalls = 0
+  const quotedRefillInputMints: string[] = []
+
+  await withMockFetch(
+    async (url, init) => {
+      if (url.startsWith(`${mockJup}/price/v3`)) {
+        return Response.json({
+          [WSOL_MINT]: { usdPrice: 150 },
+          [USDC_MINT]: { usdPrice: 1 },
+          [junkAirdropMint]: { usdPrice: 500 },
+        })
+      }
+      if (url.startsWith(`${mockJup}/swap/v1/quote`)) {
+        const u = new URL(url)
+        quotedRefillInputMints.push(u.searchParams.get('inputMint') ?? '')
+        return Response.json({
+          inputMint: u.searchParams.get('inputMint'),
+          outputMint: WSOL_MINT,
+          inAmount: u.searchParams.get('amount'),
+          outAmount: '100000000',
+          otherAmountThreshold: '99000000',
+          slippageBps: 100,
+          routePlan: [{ swapInfo: { label: 'Orca Whirlpool', inputMint: USDC_MINT, outputMint: WSOL_MINT, inAmount: '15000000', outAmount: '100000000' }, percent: 100 }],
+        })
+      }
+      if (url.startsWith(`${mockJup}/swap/v1/swap-instructions`)) {
+        // Compromised/rogue aggregator returns an UNAUDITED router programId -> refill MUST reject it!
+        return Response.json({
+          swapInstruction: {
+            programId: evilRouter,
+            accounts: [{ pubkey: relayerB58, isSigner: true, isWritable: true }],
+            data: toBase64(new Uint8Array([1, 2, 3])),
+          },
+          addressLookupTableAddresses: [],
+        })
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as { method: string; params: unknown[] }
+      if (body.method === 'getBalance') {
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: 20_000_000 } }) // 0.02 SOL < 0.08 threshold
+      }
+      if (body.method === 'getTokenAccountsByOwner') {
+        const filter = body.params[1] as { programId: string }
+        if (filter.programId === CLASSIC_TOKEN_PROGRAM_ID) {
+          return Response.json({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              value: [
+                {
+                  pubkey: deriveAssociatedTokenAddressSync(relayerB58, junkAirdropMint, CLASSIC_TOKEN_PROGRAM_ID).address,
+                  account: { owner: CLASSIC_TOKEN_PROGRAM_ID, data: [toBase64(makeTokenAccountBytes(junkAirdropMint, relayerB58, 100_000_000n)), 'base64'] },
+                },
+                {
+                  pubkey: deriveAssociatedTokenAddressSync(relayerB58, USDC_MINT, CLASSIC_TOKEN_PROGRAM_ID).address,
+                  account: { owner: CLASSIC_TOKEN_PROGRAM_ID, data: [toBase64(makeTokenAccountBytes(USDC_MINT, relayerB58, 15_000_000n)), 'base64'] },
+                },
+              ],
+            },
+          })
+        }
+        return Response.json({ jsonrpc: '2.0', id: 1, result: { value: [] } })
+      }
+      if (body.method === 'getMultipleAccounts') {
+        const addrs = body.params[0] as string[]
+        return Response.json({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            value: addrs.map(() => ({ data: [toBase64(makeClassicMintBytes(6)), 'base64'], lamports: 2_000_000, owner: CLASSIC_TOKEN_PROGRAM_ID })),
+          },
+        })
+      }
+      if (body.method === 'sendTransaction') {
+        refillSendCalls++
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '5ShouldNeverSendRefill111111111111111111111' })
+      }
+      throw new Error(`Unexpected RPC in Finding #13 refill: ${url} ${body.method}`)
+    },
+    async () => {
+      const report = await runAutoRefill(refillEnv, refillCfg)
+      // Junk airdropped mint MUST NEVER even be quoted; USDC quote returned evilRouter -> MUST be skipped!
+      assert.deepEqual(quotedRefillInputMints, [USDC_MINT])
+      assert.equal(refillSendCalls, 0)
+      assert.equal(report.signatures.length, 0)
+      assert.ok(report.details.some((d) => d.includes('not in AUDITED_SWAP_ROUTER_PROGRAMS')))
     },
   )
 })

@@ -224,7 +224,12 @@ export class RelayGuard extends DurableObject<Env> {
    * UTC midnight Durable Object alarm: purges prior-day in-memory IP salts, prunes expired
    * rate-limit rows, and reschedules itself for the next UTC midnight.
    */
-  async alarm(nowMs: number = Date.now()): Promise<void> {
+  async alarm(): Promise<void> {
+    await this.runUtcRolloverMaintenance(Date.now())
+  }
+
+  /** Execute UTC rollover maintenance (purges prior-day in-memory IP salts & reschedules alarm). */
+  async runUtcRolloverMaintenance(nowMs: number = Date.now()): Promise<void> {
     const day = utcDayKey(nowMs)
     this.purgeStaleSalts(day)
     this.prune(nowMs)
