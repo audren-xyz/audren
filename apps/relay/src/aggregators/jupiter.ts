@@ -87,7 +87,7 @@ interface JupQuoteRaw extends Record<string, unknown> {
 // - Quantum / BisonFi: allowlist top-level callers and reject wrapping programs (Custom(9) / Custom(53))
 // - BinaryFi / Obsidian: levy unlisted top-level caller penalty fees that diverge from top-level quotes
 // - VaultLiquidUnstake / Sanctum Prop S: require System-owned signer lamports or keeper-signed direct swaps
-const JUPITER_CPI_EXCLUDED_DEXES = [
+export const JUPITER_CPI_EXCLUDED_DEXES = [
   'Kipseli',
   'Quantum',
   'BisonFi',

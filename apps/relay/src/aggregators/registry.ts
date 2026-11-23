@@ -2,10 +2,42 @@ import type { Env, RelayPolicyConfig } from '../env'
 import type { AggregatorId, AggregatorSelection, NormalizedQuote } from '../types'
 import { bedrockAdapter } from './bedrock'
 import { dflowAdapter } from './dflow'
-import { jupiterAdapter } from './jupiter'
+import { jupiterAdapter, JUPITER_CPI_EXCLUDED_DEXES } from './jupiter'
 import { okxAdapter } from './okx'
 import { titanAdapter } from './titan'
 import type { AdapterQuoteRequest, AggregatorAdapter } from './types'
+
+const CPI_EXCLUDED_VENUE_LIST = JUPITER_CPI_EXCLUDED_DEXES.split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+
+function normalizeVenueName(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+const CPI_EXCLUDED_NORMALIZED = CPI_EXCLUDED_VENUE_LIST.map((name) => ({
+  name,
+  norm: normalizeVenueName(name),
+}))
+
+/**
+ * Returns the first PDA-CPI-hostile venue label present in `quote.routePlan`, or `null`
+ * if every leg is safe to execute through Audren's `ExecViaEscrow` (`Tag 7`) PDA CPI.
+ */
+export function findExcludedCpiVenue(quote: Pick<NormalizedQuote, 'routePlan'>): string | null {
+  for (const leg of quote.routePlan ?? []) {
+    const label = leg?.swapInfo?.label?.trim()
+    if (!label) continue
+    const norm = normalizeVenueName(label)
+    if (!norm) continue
+    for (const ex of CPI_EXCLUDED_NORMALIZED) {
+      if (norm === ex.norm || norm.includes(ex.norm)) {
+        return label
+      }
+    }
+  }
+  return null
+}
 
 const ALL_ADAPTERS: readonly AggregatorAdapter[] = [
   jupiterAdapter,
@@ -63,6 +95,10 @@ export async function quoteWithSelection(
       throw new Error(`Aggregator "${chosen}" credentials are not configured on this relay`)
     }
     const quote = await adapter.quote(env, req)
+    const excluded = findExcludedCpiVenue(quote)
+    if (excluded) {
+      throw new Error(`Aggregator "${chosen}" routed via PDA-CPI-excluded venue "${excluded}"`)
+    }
     return {
       winner: quote,
       candidates: [{ provider: chosen, outAmount: quote.outAmount, latencyMs: quote.latencyMs }],
@@ -86,6 +122,15 @@ export async function quoteWithSelection(
   settled.forEach((res, idx) => {
     const id = active[idx]!.id
     if (res.status === 'fulfilled') {
+      const excluded = findExcludedCpiVenue(res.value)
+      if (excluded) {
+        candidates.push({
+          provider: id,
+          latencyMs: res.value.latencyMs,
+          error: `Rejected PDA-CPI-excluded venue "${excluded}"`,
+        })
+        return
+      }
       quotes.push(res.value)
       candidates.push({
         provider: id,

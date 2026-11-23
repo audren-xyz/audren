@@ -733,26 +733,29 @@ export function DevnetDemoExperience() {
                             )}
                           </p>
                         )}
-                        {sandboxNote.devnetSig && (
-                          <a
-                            href={solscanTx(sandboxNote.devnetSig, 'devnet')}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="lv-ledger-ext mono"
-                          >
-                            Devnet DepositSol {shortHash(sandboxNote.devnetSig, 8, 6)} <ArrowUpRight size={12} />
-                          </a>
-                        )}
-                        {sandboxNote.checkpointSig && (
-                          <a
-                            href={solscanTx(sandboxNote.checkpointSig, 'devnet')}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="lv-ledger-ext mono"
-                            style={{ marginLeft: '0.75rem' }}
-                          >
-                            Checkpoint {shortHash(sandboxNote.checkpointSig, 6, 4)} <ArrowUpRight size={12} />
-                          </a>
+                        {(sandboxNote.devnetSig || sandboxNote.checkpointSig) && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center' }}>
+                            {sandboxNote.devnetSig && (
+                              <a
+                                href={solscanTx(sandboxNote.devnetSig, 'devnet')}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="lv-ledger-ext mono"
+                              >
+                                Devnet DepositSol {shortHash(sandboxNote.devnetSig, 8, 6)} <ArrowUpRight size={12} />
+                              </a>
+                            )}
+                            {sandboxNote.checkpointSig && (
+                              <a
+                                href={solscanTx(sandboxNote.checkpointSig, 'devnet')}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="lv-ledger-ext mono"
+                              >
+                                Checkpoint {shortHash(sandboxNote.checkpointSig, 6, 4)} <ArrowUpRight size={12} />
+                              </a>
+                            )}
+                          </div>
                         )}
                       </div>
                     )}

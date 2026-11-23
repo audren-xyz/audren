@@ -27,6 +27,7 @@ import {
 } from '@audren/sdk'
 import { DEFAULT_ALLOWED_PRE_IX_PROGRAMS, getRelayerFvk, loadPolicyConfig } from '../src/env'
 import { okxAdapter } from '../src/aggregators/okx'
+import { findExcludedCpiVenue } from '../src/aggregators/registry'
 import { titanAdapter } from '../src/aggregators/titan'
 import { FirewallError, validateRelaySubmission } from '../src/policy/firewall'
 import { computeNativeFeeQuote, computeSwapFeePlan } from '../src/policy/pricing'
@@ -404,4 +405,28 @@ test('OKX and Titan swapInstructions skip SPL Token / Token-2022 wrapper instruc
     },
   })
   assert.equal(titanBuilt.swapInstruction.programId, routerProg)
+})
+
+test('findExcludedCpiVenue rejects BisonFi/Quantum/Kipseli and allows CPI-safe venues', () => {
+  const mkRoute = (label: string) => ({
+    routePlan: [
+      {
+        swapInfo: {
+          label,
+          inputMint: WSOL_MINT,
+          outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+          inAmount: '5000000',
+          outAmount: '350000',
+        },
+        percent: 100,
+      },
+    ],
+  })
+  assert.equal(findExcludedCpiVenue(mkRoute('BisonFi')), 'BisonFi')
+  assert.equal(findExcludedCpiVenue(mkRoute('BisonFi Predict')), 'BisonFi Predict')
+  assert.equal(findExcludedCpiVenue(mkRoute('Quantum')), 'Quantum')
+  assert.equal(findExcludedCpiVenue(mkRoute('Kipseli AMM')), 'Kipseli AMM')
+  assert.equal(findExcludedCpiVenue(mkRoute('ZeroFi')), null)
+  assert.equal(findExcludedCpiVenue(mkRoute('Raydium CLMM')), null)
+  assert.equal(findExcludedCpiVenue(mkRoute('Orca Whirlpool')), null)
 })

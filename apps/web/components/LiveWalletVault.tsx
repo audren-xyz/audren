@@ -858,6 +858,7 @@ export function LiveWalletVault() {
 
   // Live swap quote effect — strictly primitive dependencies!
   const selectedNoteDecimals = selectedNoteMeta.decimals
+  const selectedNoteShard = selectedNote ? Number(selectedNote.leafIndex % BigInt(NUM_ESCROW_SHARDS)) : 0
   const fetchSwapQuote = useCallback(
     async (
       inMint: string,
@@ -868,6 +869,7 @@ export function LiveWalletVault() {
       targetCluster: SolanaCluster,
       activeRelay: string,
       relayed: boolean,
+      shardId: number,
     ) => {
       if (inMint === NATIVE_SOL_MINT_STR || !isValidSolanaPubkey(outMint)) {
         setSwapQuoteOut(null)
@@ -892,6 +894,7 @@ export function LiveWalletVault() {
             outputMint: outMint,
             amount: rawAmt.toString(),
             slippageBps: slippage,
+            shardId,
             provider: 'auto',
             includeFee: false,
           })) as {
@@ -949,6 +952,7 @@ export function LiveWalletVault() {
         cluster,
         relayUrl,
         useRelayer,
+        selectedNoteShard,
       )
     }, 350)
     return () => clearTimeout(timer)
@@ -962,6 +966,7 @@ export function LiveWalletVault() {
     cluster,
     relayUrl,
     useRelayer,
+    selectedNoteShard,
     isSelectedNoteNativeSol,
     fetchSwapQuote,
   ])
