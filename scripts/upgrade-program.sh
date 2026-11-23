@@ -798,35 +798,46 @@ PY
     USE_TWO_STEP="${SOLANA_DEPLOY_TWO_STEP:-$([[ "$CLUSTER" == "mainnet" ]] && echo 1 || echo 0)}"
     echo "Step 1/${TOTAL_STEPS}: Upgrading $PROGRAM_ID on $CLUSTER (using $SOLANA_BIN, priority fee ${PRIORITY_FEE} micro-lamports, RPC mode)..."
     if [[ "$USE_TWO_STEP" == "1" ]]; then
-      BUF_KEYPAIR="$(mktemp /tmp/audren-buffer-XXXXXX.json)"
+      BUF_KEYPAIR="$(mktemp /tmp/audren-buffer-XXXXXX)"
       "$SOLANA_KEYGEN_BIN" new --no-bip39-passphrase --silent --force -o "$BUF_KEYPAIR" >/dev/null
       BUF_PUBKEY="$("$SOLANA_KEYGEN_BIN" pubkey "$BUF_KEYPAIR")"
-      echo "  [1a] Writing sBPFv3 ELF to buffer $BUF_PUBKEY via --use-rpc..."
-      if ! "$SOLANA_BIN" program write-buffer "$SO_PATH" \
-        --buffer "$BUF_KEYPAIR" \
-        --buffer-authority "$KEYPAIR" \
-        --keypair "$KEYPAIR" \
-        --use-rpc \
-        --max-sign-attempts 10 \
-        --with-compute-unit-price "$PRIORITY_FEE" \
-        --url "$RPC_URL"; then
-        echo "Error: write-buffer failed. Buffer keypair preserved at $BUF_KEYPAIR (pubkey: $BUF_PUBKEY)." >&2
-        echo "Resume with: \"$SOLANA_BIN\" program write-buffer \"$SO_PATH\" --buffer \"$BUF_KEYPAIR\" --buffer-authority \"$KEYPAIR\" --keypair \"$KEYPAIR\" --use-rpc --with-compute-unit-price \"$PRIORITY_FEE\" --url \"$RPC_URL\"" >&2
-        echo "Or reclaim rent with: \"$SOLANA_BIN\" program close \"$BUF_PUBKEY\" --authority \"$KEYPAIR\" --keypair \"$KEYPAIR\" --url \"$RPC_URL\"" >&2
+      echo "  [1a] Writing sBPFv3 ELF to buffer $BUF_PUBKEY via --use-rpc (--commitment confirmed)..."
+      BUF_OK=0
+      for attempt in 1 2 3; do
+        if "$SOLANA_BIN" program write-buffer "$SO_PATH" \
+          --buffer "$BUF_KEYPAIR" \
+          --buffer-authority "$KEYPAIR" \
+          --keypair "$KEYPAIR" \
+          --use-rpc \
+          --commitment confirmed \
+          --max-sign-attempts 10 \
+          --with-compute-unit-price "$PRIORITY_FEE" \
+          --url "$RPC_URL"; then
+          BUF_OK=1
+          break
+        fi
+        echo "  write-buffer attempt ${attempt} hit transient RPC lag; retrying same buffer in 4s..." >&2
+        sleep 4
+      done
+      if [[ "$BUF_OK" != "1" ]]; then
+        echo "Error: write-buffer failed after 3 attempts. Buffer keypair preserved at $BUF_KEYPAIR (pubkey: $BUF_PUBKEY)." >&2
+        echo "Reclaim rent via: solana program close \"$BUF_PUBKEY\" --authority \"\$AUDREN_KEYPAIR_PATH\" --keypair \"\$AUDREN_KEYPAIR_PATH\" --url \"\$MAINNET_RPC_URL\"" >&2
         exit 1
       fi
+      sleep 3
       echo "  [1b] Deploying verified buffer $BUF_PUBKEY to $PROGRAM_ID via --use-rpc..."
       if ! "$SOLANA_BIN" program deploy \
-        --buffer "$BUF_KEYPAIR" \
+        --buffer "$BUF_PUBKEY" \
         --program-id "$PROGRAM_ID" \
         --upgrade-authority "$KEYPAIR" \
         --keypair "$KEYPAIR" \
         --use-rpc \
+        --commitment confirmed \
         --max-sign-attempts 10 \
         --with-compute-unit-price "$PRIORITY_FEE" \
         --url "$RPC_URL"; then
         echo "Error: deploy from buffer $BUF_PUBKEY failed. Buffer keypair preserved at $BUF_KEYPAIR." >&2
-        echo "Retry deploy or reclaim rent via: \"$SOLANA_BIN\" program close \"$BUF_PUBKEY\" --authority \"$KEYPAIR\" --keypair \"$KEYPAIR\" --url \"$RPC_URL\"" >&2
+        echo "Reclaim rent via: solana program close \"$BUF_PUBKEY\" --authority \"\$AUDREN_KEYPAIR_PATH\" --keypair \"\$AUDREN_KEYPAIR_PATH\" --url \"\$MAINNET_RPC_URL\"" >&2
         exit 1
       fi
       rm -f "$BUF_KEYPAIR"
@@ -836,6 +847,7 @@ PY
         --upgrade-authority "$KEYPAIR" \
         --keypair "$KEYPAIR" \
         --use-rpc \
+        --commitment confirmed \
         --max-sign-attempts 10 \
         --with-compute-unit-price "$PRIORITY_FEE" \
         --url "$RPC_URL"

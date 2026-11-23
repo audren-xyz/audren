@@ -10,7 +10,7 @@ export const AUDREN = {
   version: '1.1.1',
   protocolVersion: 2,
   releaseTag: 'v1.1.1',
-  verifiedCommit: '62b5bdb44ce4fdacdac588f0d194802a7e625155',
+  verifiedCommit: '936cc659bd6286417a692e7970d3cbd91a49e9bd',
   vkProvenance:
     'Perpetual Powers of Tau (71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand #34194203 · Solana slot 472705896 · pre-audit)',
   circuitConstraints: 17_861,
@@ -43,19 +43,19 @@ export const AUDREN = {
   mainnetRelayer: 'H2JcTKgrP5Hqj7v2hTuz5u6Tt1VB8yrznotT62hhp3vY',
   devnetRelayer: 'G3tGgntjaDAcamZX2Jcgn616PrjArKYdGXv5C13MzMP',
   mainnet: {
-    slot: '472,711,630',
-    deployTx: 'nRkkTCQ3uNJT9amtqNjEbuifJr3RjjtSNjmEL4FQHAug8zHJcka3PPpaCw9ZPJEqHWoEBkFgMb7iUdZV54zy8DW',
+    slot: '472,733,615',
+    deployTx: '3qcXYo3Fv2saVQkNPs21mUS6XCs9mmRuWHhUE2ARvyLdLPXHMgnRUY8dTmse4gryVXDuHbo519W4CJ8whZrRATDe',
     initPoolTx: '28pu7RhUpAgb93tBpjp8yRnhBKrGgDNKWJnRY2hXaF2n44fuetUvUtvfaoQm7c2iqxtf5i6kFpWCkkaxexZmEnWK',
     depositTx: '3wig4kVwvqv9JLPVFSPyg3x2fXK9c1SxhHDGt93qGPrQp9SoskB2jDvKJqCwyXJ9squiTm25ieBXKgCL92TJXmGv',
     transferTx: '49zM3ztG8GGTYEPuob8FwMppD5j3KM1tutdnDdiZ4BUqeEvRidAzKY86HLFmQKyKh5hEgiaLbxn5M6aX7ZngYSqv',
-    swapTx: '2SzCHoaUiJNA6HgSM6FidVt1r5gM8PSMvMddBkT7xdfXtbwN3TqeXzjbW4JkL1RmcoZ41vopDXnPtDqzWWJ7DoNv',
-    withdrawTx: '4f7sceCnFQbRe1axhjBfnBSRmPxGErqLgLSfsipZDhujmnR8489TTgZ97eK4aUs43Gg1GeAQEGxdfgpBpyPo7UKK',
+    swapTx: '92MXqdzZ3H6PtskWH727q5eG1pxXfzVV22MkFYbietSQBj5Ao8EuKjC8ztMeL7Bt1VTEXkuU4V7UhR3ubnuiFHa',
+    withdrawTx: '4yxiG5BvcJR7bB8SrVfvhkupQciJHVwUsp2Un7jcuDYoBjYq3dWwZ7PWyKjH7HMnkxDCD7Z9eXKhj1tykDf1W53w',
   },
   devnet: {
-    slot: '525,223,275',
-    deployTx: '2TxWyayJxhpHo3ytZ3cnri86Uf8QpRaE2giApju9d7MfGMdVWk7opq1ymeV4Eu21LnCpqHMgFCpSfrfNtZZLXqgL',
-    transferTx: '3VMGXCx28Ap6SYtsC5HtXRSmcNqNgBXLRRLKoRvAFNptYT9CiJmTdC6Nd87kurD9UZURyXmi878yyekCpX2MYLxi',
-    withdrawTx: '66iDmmakWu9iuPGhXWaJZs8c53bc6Bm7gALhbcdZfGPuwxcxSmsGYta7zXhchpYcQhwqAHhx3trycPcUfQvXTf4m',
+    slot: '525,243,442',
+    deployTx: '3BgYvycgL3LXZjxxMb13JDXZC84ywHeKoXQMjKM2FiVsjVDaQ51Lb2tMoeR6UW3Sh4kqbSLoVrV6fiP8qZSzgUby',
+    transferTx: 'WpuUPq3hRfckC78hHSMFyM82Dj226Lh5L3jXs5Bt71xQ3jT63jNqdVWgg6tYPqzNRpn1LU4kUYr8XMQNLUweT1N',
+    withdrawTx: '34osxtbwqUPsVLb5hbzmx8TBqd6XPRnr8tdN72SWL2FNUQ5U7YwF3FVn4misE2XbA8BM7UVaxipo41i6DwZgSpen',
   },
 } as const
 
