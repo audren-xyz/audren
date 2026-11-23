@@ -21,10 +21,10 @@ export default function TermsPage() {
         {/* HERO */}
         <section className={`container ${styles.hero}`}>
           <Link href="/" className={styles.backLink}>
-            <ArrowLeft size={12} /> audren.xyz
+            <ArrowLeft size={13} /> audren.xyz
           </Link>
           <div className={styles.heroSingle}>
-            <h1>Protocol Terms</h1>
+            <h1>Protocol terms</h1>
             <p className={styles.heroLead}>
               Effective November 2026. Open-source software notice, self-custody responsibilities,
               and independent verification checklist for audren.xyz and the Audren Solana program.
@@ -36,7 +36,7 @@ export default function TermsPage() {
         <section className={`container ${styles.section}`}>
           <div className={styles.ledger3}>
             <article className={styles.ledgerCell}>
-              <span className={styles.cellIndex}>SCOPE</span>
+              <span className={styles.cellIndex}>Scope</span>
               <h3>Informational specification</h3>
               <p className={styles.cellLead}>
                 audren.xyz publishes open technical documentation, on-chain deployment records, an
@@ -50,7 +50,7 @@ export default function TermsPage() {
             </article>
 
             <article className={`${styles.ledgerCell} ${styles.ledgerCellHighlight}`}>
-              <span className={styles.cellIndex}>CUSTODY &amp; LICENSE</span>
+              <span className={styles.cellIndex}>Custody &amp; license</span>
               <h3>Non-custodial Apache-2.0 software</h3>
               <p className={styles.cellLead}>
                 Audren on-chain code and client libraries are released as non-custodial open-source
@@ -63,7 +63,7 @@ export default function TermsPage() {
             </article>
 
             <article className={styles.ledgerCell}>
-              <span className={styles.cellIndex}>PRE-AUDIT STATUS</span>
+              <span className={styles.cellIndex}>Pre-audit status</span>
               <h3>Independent verification</h3>
               <p className={styles.cellLead}>
                 Audren is in active pre-audit release using Groth16 keys derived from the official
@@ -103,7 +103,7 @@ export default function TermsPage() {
                 </thead>
                 <tbody>
                   <tr>
-                    <td><strong>Audren Program ID</strong></td>
+                    <td><span className={styles.tableLead}>Audren Program ID</span></td>
                     <td><code>{AUDREN.programId}</code></td>
                     <td>
                       <a href={solscanAddress(AUDREN.programId)} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -112,7 +112,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>ProgramData Account</strong></td>
+                    <td><span className={styles.tableLead}>ProgramData Account</span></td>
                     <td><code>{AUDREN.programData}</code></td>
                     <td>
                       <a href={solscanAddress(AUDREN.programData)} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -121,7 +121,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>Pool #0 (Permissionless)</strong></td>
+                    <td><span className={styles.tableLead}>Pool #0 (Permissionless)</span></td>
                     <td><code>{AUDREN.pool0Pda}</code></td>
                     <td>
                       <a href={solscanAddress(AUDREN.pool0Pda)} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -130,7 +130,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>Verified Build Hash ({AUDREN.releaseTag})</strong></td>
+                    <td><span className={styles.tableLead}>Verified Build Hash ({AUDREN.releaseTag})</span></td>
                     <td><code>{AUDREN.executableHash}</code></td>
                     <td>
                       <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -139,7 +139,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>Deployed ELF SHA-256 ({AUDREN.elfBytes.toLocaleString()} B)</strong></td>
+                    <td><span className={styles.tableLead}>Deployed ELF SHA-256 ({AUDREN.elfBytes.toLocaleString()} B)</span></td>
                     <td><code>{AUDREN.elfSha256}</code></td>
                     <td>
                       <a href={AUDREN.githubRelease} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -148,7 +148,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>Canonical Program IDL PDA</strong></td>
+                    <td><span className={styles.tableLead}>Canonical Program IDL PDA</span></td>
                     <td><code>{AUDREN.idlPda}</code></td>
                     <td>
                       <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -157,7 +157,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>Canonical Security Metadata PDA</strong></td>
+                    <td><span className={styles.tableLead}>Canonical Security Metadata PDA</span></td>
                     <td><code>{AUDREN.securityPda}</code></td>
                     <td>
                       <a href={explorerAddress(AUDREN.programId, 'security')} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -166,7 +166,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>Otter Verify PDA (Mainnet)</strong></td>
+                    <td><span className={styles.tableLead}>Otter Verify PDA (Mainnet)</span></td>
                     <td><code>{AUDREN.otterVerifyPda}</code></td>
                     <td>
                       <a href={AUDREN.osecVerifyStatusUrl} target="_blank" rel="noreferrer" className={styles.textLink}>

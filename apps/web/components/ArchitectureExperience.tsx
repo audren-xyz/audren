@@ -111,7 +111,7 @@ const MEMO_PAGE_MAP = [
     short: 'Hdr',
     field: 'MemoPageHeader',
     inScan: false,
-    bg: '#e6e2d7',
+    bg: '#ebe7dc',
     color: '#2b2d26',
     desc: 'AUD2MM03 magic, lane_id, bump, count (0..=112), pool_id, page_seq, created_slot, closed_slot.',
   },
@@ -144,7 +144,7 @@ const MEMO_PAGE_MAP = [
     short: 'ciphertexts',
     field: 'ciphertexts[112] (56 B each)',
     inScan: false,
-    bg: '#eaede6',
+    bg: '#e8efe8',
     color: '#1b2b22',
     desc: 'ChaCha20-Poly1305 encrypted (amount_u64 || mint_32) + 16 B tag (or XOR-masked AUD2DYN2 swap note).',
   },
@@ -167,7 +167,7 @@ export function ArchitectureExperience() {
             <ArrowLeft size={12} /> audren.xyz
           </Link>
           <div className={styles.heroSingle}>
-            <h1>Audren Cryptographic &amp; On-Chain Specification</h1>
+            <h1>Audren cryptographic and on-chain specification</h1>
             <p className={styles.heroLead}>
               Minimal frozen BN254 Groth16 circuit ({AUDREN.circuitConstraints.toLocaleString()}{' '}
               R1CS, 4-ary Depth-20 global MASP), 9 instructions, fixed &lt;10 KiB zero-realloc
@@ -188,29 +188,31 @@ export function ArchitectureExperience() {
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
               <span>Program ID ({AUDREN.releaseTag})</span>
-              <strong className="mono">
+              <span className={`${styles.heroMetaValue} mono`}>
                 <a href={solscanAddress(AUDREN.programId)} target="_blank" rel="noreferrer">
                   {AUDREN.programId.slice(0, 10)}…{AUDREN.programId.slice(-6)} <ArrowUpRight size={11} />
                 </a>
-              </strong>
+              </span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Frozen Circuit</span>
-              <strong className="mono">
+              <span>Frozen circuit</span>
+              <span className={`${styles.heroMetaValue} mono`}>
                 {AUDREN.circuitConstraints.toLocaleString()} R1CS · {AUDREN.proofBytes} B Groth16
-              </strong>
+              </span>
             </div>
             <div className={styles.heroMetaCell}>
               <span>Compiled ELF</span>
-              <strong className="mono">{AUDREN.elfBytes.toLocaleString()} B · sBPFv3</strong>
+              <span className={`${styles.heroMetaValue} mono`}>
+                {AUDREN.elfBytes.toLocaleString()} B · sBPFv3
+              </span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>On-Chain IDL &amp; Pool Capacity</span>
-              <strong className="mono">
+              <span>On-chain IDL &amp; capacity</span>
+              <span className={`${styles.heroMetaValue} mono`}>
                 <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer">
                   Codama 1.8.0 · 4²⁰ Notes <ArrowUpRight size={11} />
                 </a>
-              </strong>
+              </span>
             </div>
           </div>
         </section>
@@ -219,7 +221,7 @@ export function ArchitectureExperience() {
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>Structure-of-Arrays MemoPage (10,144 B) &amp; CompactWalletStore</h2>
+              <h2>Structure-of-Arrays MemoPage and CompactWalletStore</h2>
             </div>
             <p>
               Every on-chain account fits strictly below Solana’s 10,240 B CPI allocation cap with zero{' '}
@@ -227,14 +229,17 @@ export function ArchitectureExperience() {
               <code>MemoPage</code> (10,144 B), and <code>NullifierPage</code> (9,664 B, 600 × 16 B
               prefixes) via ordinary <code>getMultipleAccounts</code>, verify every decrypted memo
               against <code>SubtreePage</code>, freeze 12 intra-subtree siblings on sealed pages,
-              and discard raw pages permanently (<strong>1.28 MB</strong> local store at 10M pool
-              notes).
+              and discard raw pages permanently (
+              <span style={{ fontWeight: 500, color: '#161614' }}>1.28 MB</span> local store at 10M
+              pool notes).
             </p>
           </div>
 
           <div className={styles.diagramStagePaper}>
             <div className={styles.stageHead}>
-              <strong>Interactive MemoPage byte layout — click any region to inspect</strong>
+              <div className={styles.stageTitle}>
+                Interactive MemoPage byte layout (10,144 B; click any region to inspect)
+              </div>
               <span>Green highlight = 2-byte view_tags + X25519 ephemeral_pks (112 notes/page)</span>
             </div>
 
@@ -266,18 +271,19 @@ export function ArchitectureExperience() {
                 [{slice.offset}] · {slice.bytes}
               </code>
               <div>
-                <strong style={{ marginRight: 8 }}>{slice.field}</strong>
+                <span style={{ marginRight: 8, fontWeight: 500, color: '#161614' }}>
+                  {slice.field}
+                </span>
                 <span style={{ color: '#464a40' }}>{slice.desc}</span>
               </div>
               <span
-                className="mono"
                 style={{
-                  fontSize: 10.5,
-                  color: slice.inScan ? '#184433' : '#6a6d62',
-                  fontWeight: 600,
+                  fontSize: 12.5,
+                  color: slice.inScan ? '#184433' : '#5f6257',
+                  fontWeight: 500,
                 }}
               >
-                {slice.inScan ? 'FAST VIEW-TAG FILTER' : 'HEADER / AEAD PAYLOAD'}
+                {slice.inScan ? 'Fast view-tag filter' : 'Header or AEAD payload'}
               </span>
             </div>
           </div>
@@ -288,7 +294,7 @@ export function ArchitectureExperience() {
           <div className="container">
             <div className={styles.sectionIntro}>
               <div>
-                <h2>Measured sBPFv3 Compute Units</h2>
+                <h2>Measured sBPFv3 compute units</h2>
               </div>
               <p>
                 Measured directly against the compiled {AUDREN.elfBytes.toLocaleString()}-byte
@@ -300,7 +306,9 @@ export function ArchitectureExperience() {
 
             <div className={styles.diagramStagePaper}>
               <div className={styles.stageHead}>
-                <strong>CU consumption vs. 1,400,000 CU Solana transaction cap</strong>
+                <div className={styles.stageTitle}>
+                  CU consumption vs. 1,400,000 CU Solana transaction cap
+                </div>
                 <span>ExecViaEscrow leaves &gt;1.2M CU for external DeFi CPI</span>
               </div>
               <div className={styles.cuList}>
@@ -329,7 +337,7 @@ export function ArchitectureExperience() {
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>9 Instructions &amp; Frozen JoinSplit4AryCircuit</h2>
+              <h2>Nine instructions and the frozen JoinSplit4AryCircuit</h2>
             </div>
             <p>
               All 9 instructions settle in a single Solana Transaction v1 (<code>0x81</code>) with
@@ -387,7 +395,7 @@ export function ArchitectureExperience() {
           <div className="container">
             <div className={styles.sectionIntro}>
               <div>
-                <h2>Privacy scope, ceremony provenance &amp; security boundaries.</h2>
+                <h2>Privacy scope, ceremony provenance, and security boundaries.</h2>
               </div>
               <p>
                 Cryptographic unlinkability, provider metadata visibility, custody controls, and
@@ -397,8 +405,8 @@ export function ArchitectureExperience() {
 
             <div className={styles.ledger2}>
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>BOUNDARIES</span>
-                <h3>Public entry/exit &amp; effective anonymity</h3>
+                <span className={styles.cellIndex}>Boundaries</span>
+                <h3>Public entry, exit, and effective anonymity</h3>
                 <ul className={styles.dashList}>
                   <li>
                     Public deposits, public withdrawals, external DeFi CPI legs (
@@ -425,34 +433,41 @@ export function ArchitectureExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>CUSTODY &amp; CEREMONY</span>
-                <h3>Pause escape hatch, MPC setup &amp; pre-audit status</h3>
+                <span className={styles.cellIndex}>Custody and ceremony</span>
+                <h3>Pause escape hatch, ceremony setup, and pre-audit status</h3>
                 <ul className={styles.dashList}>
                   <li>
-                    <strong>Non-custodial pause bypass:</strong> <code>SetPaused</code> halts new
-                    deposits, private transfers, DeFi CPIs, and partial exits, while full 100%
-                    withdrawals (<code>output_mask == 0</code>, including WSOL unwrap) bypass the
-                    pause check.
+                    <span style={{ fontWeight: 500, color: '#161614' }}>
+                      Non-custodial pause bypass:
+                    </span>{' '}
+                    <code>SetPaused</code> halts new deposits, private transfers, DeFi CPIs, and
+                    partial exits, while full 100% withdrawals (<code>output_mask == 0</code>,
+                    including WSOL unwrap) bypass the pause check.
                   </li>
                   <li>
-                    <strong>Trusted setup provenance:</strong> Phase 1 uses the official Hermez/PSE
-                    Perpetual Powers of Tau (<code>powersOfTau28_hez_final_15.ptau</code>, 71+
-                    independent public contributors). Phase 2 applies verifiable BGM17 zeroized
-                    contributions + a live drand Quicknet (<code>#34194203</code>) &amp; Solana
-                    Mainnet finalized blockhash beacon (<code>ceremony/transcript.json</code>).
-                    Additional community Phase-2 contributions remain open pending independent audit.
+                    <span style={{ fontWeight: 500, color: '#161614' }}>
+                      Trusted setup provenance:
+                    </span>{' '}
+                    Phase 1 uses the official Hermez/PSE Perpetual Powers of Tau (
+                    <code>powersOfTau28_hez_final_15.ptau</code>, 71+ independent public
+                    contributors). Phase 2 applies verifiable BGM17 zeroized contributions plus a
+                    live drand Quicknet (<code>#34194203</code>) and Solana Mainnet finalized
+                    blockhash beacon (<code>ceremony/transcript.json</code>). Additional community
+                    Phase-2 contributions remain open pending independent audit.
                   </li>
                   <li>
-                    <strong>Upgrade authority &amp; issuers:</strong> The BPF upgrade authority
-                    remains mutable during pre-audit releases, and token issuers retain mint-level
-                    controls (freeze authority, transfer-hook rules).
+                    <span style={{ fontWeight: 500, color: '#161614' }}>
+                      Upgrade authority and issuers:
+                    </span>{' '}
+                    The BPF upgrade authority remains mutable during pre-audit releases, and token
+                    issuers retain mint-level controls (freeze authority, transfer-hook rules).
                   </li>
                 </ul>
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>SCALING &amp; DISCLOSURE</span>
-                <h3>4 → 8 → 16 append lanes &amp; two-mode compliance</h3>
+                <span className={styles.cellIndex}>Scaling and disclosure</span>
+                <h3>Append lane scaling and two-mode compliance</h3>
                 <ul className={styles.dashList}>
                   <li>
                     Pools launch with 4 active lanes (<code>~48M CU/slot</code> aggregate lane
@@ -465,14 +480,14 @@ export function ArchitectureExperience() {
                   </li>
                   <li>
                     Mode 2 <code>FullViewingKey</code> (<code>spend_pk, nk, view_sk, view_pk</code>)
-                    tracks both incoming notes AND outgoing spent nullifiers with zero spend
+                    tracks both incoming notes and outgoing spent nullifiers with zero spend
                     authority.
                   </li>
                 </ul>
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>RELAY CONTRACT</span>
+                <span className={styles.cellIndex}>Relay contract</span>
                 <h3>Three-mode pluggable privacy relay</h3>
                 <ul className={styles.dashList}>
                   <li>
@@ -504,10 +519,10 @@ export function ArchitectureExperience() {
         <section className={styles.closing}>
           <div className={`container ${styles.closingInner}`}>
             <div>
-              <h2>Ready to integrate?</h2>
+              <h2>Start integrating with the Audren SDKs.</h2>
               <p>
                 Start with our Rust, TypeScript (+ WASM prover), Swift (iOS), or Kotlin (Android)
-                SDK — all four verified byte-for-byte against <code>spec/test-vectors.json</code>.
+                SDK, all four verified byte-for-byte against <code>spec/test-vectors.json</code>.
               </p>
             </div>
             <div className={styles.closingActions}>

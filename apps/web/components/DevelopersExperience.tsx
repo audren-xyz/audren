@@ -135,6 +135,45 @@ val proof     = proveJoinsplitWitnessBytes(witness4611, rngSeed32)`,
   },
 }
 
+const PIPELINE_STEPS = [
+  {
+    x: 12,
+    tag: '1. Sync',
+    title: 'CompactWalletStore',
+    line1: 'getMultipleAccounts RPC',
+    line2: 'Freeze sealed siblings, drop pages',
+    foot: '1.28 MB @ 10M notes',
+    fill: '#faf8f3',
+  },
+  {
+    x: 247,
+    tag: '2. Prove',
+    title: 'BN254 Groth16 locally',
+    line1: '17,861 R1CS · 192 B proof',
+    line2: 'Bind ctx_hash and router accounts',
+    foot: 'spend_sk stays on device',
+    fill: '#f0ebe0',
+  },
+  {
+    x: 482,
+    tag: '3. Submit',
+    title: '1 Solana v1 tx (0x81)',
+    line1: 'Direct wallet fee payer',
+    line2: 'or pluggable privacy relay',
+    foot: '~103k–158k CU · 1 Tx v1',
+    fill: '#faf8f3',
+  },
+  {
+    x: 717,
+    tag: '4. Settle',
+    title: 'Confirm and verify',
+    line1: 'NullifierPage marks spends',
+    line2: 'Mode 1 receipt / Mode 2 FVK',
+    foot: 'Encrypted seed backup',
+    fill: '#faf8f3',
+  },
+] as const
+
 export function DevelopersExperience() {
   const [tab, setTab] = useState<SnippetId>('ts')
   const [copied, setCopied] = useState(false)
@@ -159,8 +198,8 @@ export function DevelopersExperience() {
           <div className={styles.heroSingle}>
             <h1>Build your own way in.</h1>
             <p className={styles.heroLead}>
-              No Audren account, API gate, or mandatory indexer. Four Apache-2.0 SDKs — Rust,
-              TypeScript (+ WASM Groth16 prover), Swift (iOS), and Kotlin (Android) — verified
+              No Audren account, API gate, or mandatory indexer. Four Apache-2.0 SDKs (Rust,
+              TypeScript with WASM Groth16 prover, Swift for iOS, and Kotlin for Android), verified
               byte-for-byte against <code>spec/test-vectors.json</code> on every CI run.
             </p>
           </div>
@@ -168,27 +207,27 @@ export function DevelopersExperience() {
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
               <span>Program ID ({AUDREN.releaseTag})</span>
-              <strong className="mono">
+              <span className={`${styles.heroMetaValue} mono`}>
                 <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer">
                   {AUDREN.programId.slice(0, 12)}…{AUDREN.programId.slice(-6)} <ArrowUpRight size={11} />
                 </a>
-              </strong>
+              </span>
             </div>
             <div className={styles.heroMetaCell}>
               <span>Published IDLs</span>
-              <strong>
+              <span className={styles.heroMetaValue}>
                 <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer">
                   Codama 1.8.0 &amp; Anchor <ArrowUpRight size={11} />
                 </a>
-              </strong>
+              </span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>4 Standardized SDKs</span>
-              <strong>Rust · TypeScript · Swift · Kotlin</strong>
+              <span>4 standardized SDKs</span>
+              <span className={styles.heroMetaValue}>Rust · TypeScript · Swift · Kotlin</span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Conformance &amp; License</span>
-              <strong>
+              <span>Conformance and license</span>
+              <span className={styles.heroMetaValue}>
                 <a
                   href={`${AUDREN.githubCore}/blob/main/spec/test-vectors.json`}
                   target="_blank"
@@ -197,16 +236,16 @@ export function DevelopersExperience() {
                   spec/test-vectors.json <ArrowUpRight size={11} />
                 </a>{' '}
                 · Apache-2.0
-              </strong>
+              </span>
             </div>
           </div>
         </section>
 
-        {/* ANIMATED INTEGRATION PIPELINE */}
+        {/* INTEGRATION PIPELINE */}
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>Zero-indexer integration, with explicit responsibilities.</h2>
+              <h2>Zero-indexer integration with explicit responsibilities.</h2>
             </div>
             <p>
               Ordinary Solana RPC keeps infrastructure minimal, while wallet recovery, encrypted
@@ -217,116 +256,102 @@ export function DevelopersExperience() {
 
           <div className={styles.diagramStage}>
             <div className={styles.stageHead}>
-              <strong>End-to-end client integration pipeline</strong>
+              <div className={styles.stageTitle}>End-to-end client integration pipeline</div>
               <span>Ordinary Solana RPC · Local Groth16 proving · Optional relay</span>
             </div>
             <svg
               className={styles.stageSvg}
-              viewBox="0 0 920 176"
+              viewBox="0 0 920 172"
               role="img"
               aria-label="Audren client integration pipeline: Sync CompactWalletStore via ordinary getMultipleAccounts, Generate 192 B BN254 Groth16 proof locally, Submit single Solana Transaction v1 directly or via pluggable relayer, Confirm settlement and freeze sealed siblings"
             >
-              <defs>
-                <filter id="dev-pulse-glow" x="-60%" y="-60%" width="220%" height="220%">
-                  <feGaussianBlur stdDeviation="2.5" result="b" />
-                  <feMerge>
-                    <feMergeNode in="b" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
-              </defs>
-
               {[
-                { x1: 205, x2: 245, begin: '0s' },
-                { x1: 440, x2: 480, begin: '0.85s' },
-                { x1: 675, x2: 715, begin: '1.7s' },
+                { x1: 209, x2: 243 },
+                { x1: 444, x2: 478 },
+                { x1: 679, x2: 713 },
               ].map((conn) => (
                 <g key={conn.x1}>
-                  <line x1={conn.x1} y1="84" x2={conn.x2} y2="84" stroke="#d5d0c3" strokeWidth="1.5" />
-                  <line x1={conn.x1} y1="84" x2={conn.x2} y2="84" stroke="#184433" strokeWidth="1.6" className={styles.flowDash} />
-                  <polygon points={`${conn.x2 + 3},84 ${conn.x2 - 5},79 ${conn.x2 - 5},89`} fill="#184433" />
-                  <circle r="3.4" fill="#184433" opacity="0" filter="url(#dev-pulse-glow)">
-                    <animateMotion
-                      dur="2.6s"
-                      begin={conn.begin}
-                      repeatCount="indefinite"
-                      path={`M ${conn.x1},84 L ${conn.x2},84`}
-                      calcMode="spline"
-                      keyTimes="0;1"
-                      keySplines="0.4 0 0.2 1"
-                    />
-                    <animate
-                      attributeName="opacity"
-                      values="0;1;1;0"
-                      keyTimes="0;0.15;0.82;1"
-                      dur="2.6s"
-                      begin={conn.begin}
-                      repeatCount="indefinite"
-                    />
-                  </circle>
+                  <line
+                    x1={conn.x1}
+                    y1="86"
+                    x2={conn.x2 - 4}
+                    y2="86"
+                    stroke="#b5b1a5"
+                    strokeWidth="1"
+                  />
+                  <path
+                    d={`M ${conn.x2 - 6} 82 L ${conn.x2 - 1} 86 L ${conn.x2 - 6} 90`}
+                    fill="none"
+                    stroke="#184433"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
                 </g>
               ))}
 
-              {[
-                {
-                  x: 12,
-                  tag: 'SYNC',
-                  title: 'CompactWalletStore',
-                  line1: 'getMultipleAccounts RPC',
-                  line2: 'Freeze sealed siblings, drop pages',
-                  foot: '1.28 MB @ 10M notes',
-                },
-                {
-                  x: 247,
-                  tag: 'PROVE',
-                  title: 'BN254 Groth16 locally',
-                  line1: '17,861 R1CS · 192 B proof',
-                  line2: 'Bind ctx_hash & router accounts',
-                  foot: 'spend_sk stays on device',
-                },
-                {
-                  x: 482,
-                  tag: 'SUBMIT',
-                  title: '1 Solana v1 tx (0x81)',
-                  line1: 'Direct wallet fee payer',
-                  line2: 'or pluggable privacy relay',
-                  foot: '~103k–158k CU · 1 Tx v1',
-                },
-                {
-                  x: 717,
-                  tag: 'SETTLE',
-                  title: 'Confirm & verify',
-                  line1: 'NullifierPage marks spends',
-                  line2: 'Mode 1 receipt / Mode 2 FVK',
-                  foot: 'Encrypted seed backup',
-                },
-              ].map((step) => (
+              {PIPELINE_STEPS.map((step) => (
                 <g key={step.tag}>
                   <rect
                     x={step.x}
-                    y="16"
+                    y="14"
                     width="193"
-                    height="140"
-                    rx="2"
-                    fill="#faf8f3"
-                    stroke="#184433"
-                    strokeWidth="1.3"
+                    height="144"
+                    rx="6"
+                    fill={step.fill}
+                    stroke="none"
                   />
-                  <rect x={step.x} y="16" width="193" height="3" fill="#184433" />
-                  <text x={step.x + 14} y="39" fill="#184433" fontSize="9.5" fontWeight="700" fontFamily="monospace" letterSpacing="0.8">
+                  <text
+                    x={step.x + 14}
+                    y="38"
+                    fill="#184433"
+                    fontSize="11"
+                    fontWeight="500"
+                  >
                     {step.tag}
                   </text>
-                  <text x={step.x + 14} y="59" fill="#121210" fontSize="13.5" fontWeight="700">
+                  <text
+                    x={step.x + 14}
+                    y="60"
+                    fill="#161614"
+                    fontSize="14"
+                    fontWeight="500"
+                  >
                     {step.title}
                   </text>
-                  <text x={step.x + 14} y="80" fill="#4f554b" fontSize="10.5">
+                  <text
+                    x={step.x + 14}
+                    y="82"
+                    fill="#4f5148"
+                    fontSize="10.5"
+                    fontWeight="400"
+                  >
                     {step.line1}
                   </text>
-                  <text x={step.x + 14} y="97" fill="#4f554b" fontSize="10.5">
+                  <text
+                    x={step.x + 14}
+                    y="99"
+                    fill="#4f5148"
+                    fontSize="10.5"
+                    fontWeight="400"
+                  >
                     {step.line2}
                   </text>
-                  <line x1={step.x + 14} y1="116" x2={step.x + 179} y2="116" stroke="#d5d0c3" strokeWidth="1" />
-                  <text x={step.x + 14} y="136" fill="#184433" fontSize="10" fontWeight="600">
+                  <line
+                    x1={step.x + 14}
+                    y1="118"
+                    x2={step.x + 179}
+                    y2="118"
+                    stroke="rgba(22, 22, 20, 0.1)"
+                    strokeWidth="1"
+                  />
+                  <text
+                    x={step.x + 14}
+                    y="138"
+                    fill="#184433"
+                    fontSize="10.5"
+                    fontWeight="500"
+                  >
                     {step.foot}
                   </text>
                 </g>
@@ -340,19 +365,19 @@ export function DevelopersExperience() {
           <div className="container">
             <div className={styles.sectionIntro}>
               <div>
-                <h2>Four languages. Zero cryptographic drift.</h2>
+                <h2>Four standardized SDKs with zero cryptographic drift.</h2>
               </div>
               <p>
                 Rust, TypeScript (+ WASM), Swift, and Kotlin share the exact same Circom BN254
                 Poseidon parameters, 17,861-R1CS Groth16 circuit, 90 B ChaCha20-Poly1305 memos, and{' '}
-                <code>audren_v2_*</code> PDAs — verified byte-for-byte in CI against{' '}
+                <code>audren_v2_*</code> PDAs, verified byte-for-byte in CI against{' '}
                 <code>spec/test-vectors.json</code>.
               </p>
             </div>
 
             <div className={styles.ledger2}>
               <article className={`${styles.ledgerCell} ${styles.ledgerCellHighlight}`}>
-                <span className={styles.cellIndex}>RUST · SERVICES &amp; CLIs</span>
+                <span className={styles.cellIndex}>Rust · Services and CLIs</span>
                 <h3><code>crates/client</code> &amp; <code>crates/audren-circuits</code></h3>
                 <p className={styles.cellLead}>
                   Canonical native proving client, frozen R1CS circuit, and zero-indexer{' '}
@@ -377,7 +402,7 @@ export function DevelopersExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>TYPESCRIPT · WEB, NODE 22+ &amp; WORKERS</span>
+                <span className={styles.cellIndex}>TypeScript · Web, Node 22+, and Workers</span>
                 <h3><code>@audren/sdk</code> + <code>@audren/sdk/prover</code></h3>
                 <p className={styles.cellLead}>
                   Zero-WASM pure-TS root entrypoint (runs natively in Cloudflare Workers) paired
@@ -401,7 +426,7 @@ export function DevelopersExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>SWIFT · iOS 15+ &amp; macOS 13+</span>
+                <span className={styles.cellIndex}>Swift · iOS 15+ and macOS 13+</span>
                 <h3><code>packages/swift</code> (<code>AudrenSDK</code>)</h3>
                 <p className={styles.cellLead}>
                   Native Swift Package generated via UniFFI directly over{' '}
@@ -427,7 +452,7 @@ export function DevelopersExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>KOTLIN · ANDROID API 24+ &amp; JVM 21+</span>
+                <span className={styles.cellIndex}>Kotlin · Android API 24+ and JVM 21+</span>
                 <h3><code>packages/kotlin</code> (<code>xyz.audren.sdk</code>)</h3>
                 <p className={styles.cellLead}>
                   Native Kotlin SDK generated via UniFFI + JNA over{' '}
@@ -493,7 +518,7 @@ export function DevelopersExperience() {
               <span>{snippet.file}</span>
               <button type="button" className={styles.copyBtn} onClick={copyCode}>
                 {copied ? <Check size={12} /> : <Copy size={12} />}
-                {copied ? 'COPIED' : 'COPY'}
+                {copied ? 'Copied' : 'Copy'}
               </button>
             </div>
             <pre className={styles.codePre}>
@@ -507,19 +532,19 @@ export function DevelopersExperience() {
           <div className="container">
             <div className={styles.ledger2}>
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>EXAMPLES &amp; ESCROW DEFI CPI</span>
-                <h3>Runnable examples across all 4 languages.</h3>
+                <span className={styles.cellIndex}>Examples and escrow DeFi CPI</span>
+                <h3>Runnable examples across all four languages</h3>
                 <p className={styles.cellLead}>
-                  <code>audren-xyz/examples</code> mirrors the canonical Audren flows — keys,
+                  <code>audren-xyz/examples</code> mirrors the canonical Audren flows (keys,
                   sub-accounts, pseudonymous DeFi Sessions (<code>B₀, B₁…</code>), ordinary-RPC{' '}
                   <code>CompactWalletStore</code> sync, local WASM/native Groth16 proving,
-                  selective disclosure, and <code>ExecViaEscrow</code> planning — in Rust,
+                  selective disclosure, and <code>ExecViaEscrow</code> planning) in Rust,
                   TypeScript, Swift, and Kotlin.
                 </p>
                 <ul className={styles.dashList}>
                   <li><code>ExecViaEscrow</code> (Tag 7) supports any compatible PDA-signing Token A → Token B CPI with input or output relayer fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>) and hardened pre/post escrow checks.</li>
                   <li>Self-paying <code>JoinSplit</code> (Tag 6) supports atomic <code>WITHDRAW_FLAG_UNWRAP_WSOL</code> to fund 0-SOL wallets or session keypairs, paired with zero-dust <code>DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code> sweeps.</li>
-                  <li>All four example suites import the official SDKs directly — zero duplicated cryptography.</li>
+                  <li>All four example suites import the official SDKs directly with zero duplicated cryptography.</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <a href={AUDREN.githubExamples} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -532,10 +557,10 @@ export function DevelopersExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>CHECKLIST</span>
-                <h3>Read before integrating.</h3>
+                <span className={styles.cellIndex}>Checklist</span>
+                <h3>Read before integrating</h3>
                 <p className={styles.cellLead}>
-                  Audren verifies proofs under Perpetual Powers of Tau (71+ contributors) +
+                  Audren verifies proofs under Perpetual Powers of Tau (71+ contributors) plus
                   verifiable BGM17 Phase-2 ceremony keys (<code>ceremony/transcript.json</code>) and
                   remains pre-audit with mutable upgrade authority pending independent security
                   review.

@@ -376,13 +376,13 @@ export function DevnetDemoExperience() {
       const res = await fetch('/api/devnet/checkpoint', { method: 'POST' })
       const j = (await res.json()) as { signature?: string; error?: string }
       if (!res.ok && !j.signature) {
-        // Checkpoint might already have rolled forward — still try re-syncing witness
+        // Checkpoint might already have rolled forward; still try re-syncing witness
         const retry = await syncLiveDevnetWitness(sandboxNote)
         if (!retry.awaitingCheckpoint) {
           setSandboxNote(retry)
           return
         }
-        throw new Error(j.error ?? `Devnet checkpoint HTTP ${res.status} — wait a few slots and retry`)
+        throw new Error(j.error ?? `Devnet checkpoint HTTP ${res.status}. Wait a few slots and retry.`)
       }
       const hydrated = await syncLiveDevnetWitness({
         ...sandboxNote,
@@ -587,16 +587,14 @@ export function DevnetDemoExperience() {
             <ArrowLeft size={13} /> audren.xyz
           </Link>
           <div className="demo-meta-tags mono">
-            <span>AUDREN {AUDREN.releaseTag}</span>
-            <span>BN254 GROTH16 · 192 B PROOF</span>
-            <span>4-ARY DEPTH-20 MASP</span>
+            <span>Audren {AUDREN.releaseTag}</span>
+            <span>BN254 Groth16 · 192 B proof</span>
+            <span>4-ary Depth-20 MASP</span>
           </div>
         </div>
 
         <header className="demo-header">
-          <h1>
-            Audren <em>Wallet &amp; Sandbox</em>
-          </h1>
+          <h1>Audren Wallet &amp; Sandbox</h1>
           <p>
             Connect a Solana wallet on Devnet or Mainnet, or run the zero-wallet Sandbox right in your
             browser to encrypt a 90-byte SoA note, generate a real 192-byte BN254 Groth16 proof in WASM,
@@ -611,7 +609,7 @@ export function DevnetDemoExperience() {
               className={`lv-cluster-btn ${mode === 'wallet' ? 'is-active' : ''}`}
               onClick={() => selectMode('wallet')}
             >
-              <Wallet size={14} /> Connect Wallet (Mainnet / Devnet)
+              <Wallet size={14} /> Connect wallet (Mainnet / Devnet)
             </button>
             <button
               type="button"
@@ -620,7 +618,7 @@ export function DevnetDemoExperience() {
               className={`lv-cluster-btn ${mode === 'sandbox' ? 'is-active' : ''}`}
               onClick={() => selectMode('sandbox')}
             >
-              <Cpu size={14} /> No-Wallet WASM Sandbox
+              <Cpu size={14} /> No-wallet WASM sandbox
             </button>
           </div>
         </header>
@@ -632,10 +630,10 @@ export function DevnetDemoExperience() {
             <div className="lv-topbar">
               <div className="lv-wallet-bar">
                 <span className="lv-wallet-pill mono">
-                  <Lock size={12} /> 100% Client-Side · <code>/wasm/audren_circuits.wasm</code>
+                  <Lock size={12} /> Client-side · <code>/wasm/audren_circuits.wasm</code>
                 </span>
                 <span className="lv-wallet-pill mono">
-                  17,861 R1CS · 2^15 FFT · 0 Indexers
+                  17,861 R1CS · 2^15 FFT · No indexer
                 </span>
               </div>
               <div className="lv-wallet-bar">
@@ -645,10 +643,10 @@ export function DevnetDemoExperience() {
                   onClick={() => setStrangerView((v) => !v)}
                 >
                   {strangerView ? <EyeOff size={13} /> : <Eye size={13} />}
-                  {strangerView ? 'Stranger View' : 'Owner View'}
+                  {strangerView ? 'Stranger view' : 'Owner view'}
                 </button>
                 <button type="button" className="lv-mini-btn" onClick={initSandboxKeys}>
-                  <RefreshCw size={12} /> New Ephemeral Keys
+                  <RefreshCw size={12} /> New ephemeral keys
                 </button>
               </div>
             </div>
@@ -664,14 +662,14 @@ export function DevnetDemoExperience() {
               <section className={`lv-card lv-private-card ${strangerView ? 'is-stranger' : ''}`}>
                 <div className="lv-card-head">
                   <span className="lv-ledger-kicker is-ok">
-                    {strangerView ? 'ON-CHAIN OBSERVER VIEW' : 'STEP 1 · EPHEMERAL IDENTITY'}
+                    {strangerView ? 'On-chain observer view' : 'Step 1 · Ephemeral identity'}
                   </span>
                 </div>
 
                 {keys && (
                   <div className="lv-simple-body">
                     <div className="lv-addr-row">
-                      <span className="mono">aud1… Address</span>
+                      <span className="mono">aud1… address</span>
                       <code className="mono">{shortHash(keys.address, 14, 10)}</code>
                       <button
                         type="button"
@@ -690,14 +688,14 @@ export function DevnetDemoExperience() {
                     <div className="lv-balance-list">
                       <div className="lv-balance-row">
                         <div>
-                          <strong>Spend Public Key (BN254 Fr)</strong>
+                          <span className="lv-row-title">Spend public key (BN254 Fr)</span>
                           <span className="mono">Poseidon2(DOMAIN_PK, spend_sk)</span>
                         </div>
                         <span className="mono">{shortHash(toHex(keys.spendPkBytes), 10, 8)}</span>
                       </div>
                       <div className="lv-balance-row">
                         <div>
-                          <strong>View Public Key (X25519)</strong>
+                          <span className="lv-row-title">View public key (X25519)</span>
                           <span className="mono">90 B SoA ChaCha20-Poly1305 ECDH</span>
                         </div>
                         <span className="mono">{shortHash(toHex(keys.viewPk), 10, 8)}</span>
@@ -708,20 +706,20 @@ export function DevnetDemoExperience() {
                       <div className="sb-mini-proof is-dark-proof">
                         <div className="sb-mini-proof-top">
                           <span className="mono">
-                            {sandboxNote.isLiveDevnet ? 'LIVE DEVNET NOTE' : 'LOCAL NOTE'} (LANE #{sandboxNote.laneId} · LEAF #{sandboxNote.leafIndex.toString()})
+                            {sandboxNote.isLiveDevnet ? 'Live Devnet note' : 'Local note'} (lane #{sandboxNote.laneId} · leaf #{sandboxNote.leafIndex.toString()})
                           </span>
-                          <span className="sb-confirmed-pill mono">POSEIDON VERIFIED</span>
+                          <span className="sb-confirmed-pill mono">Poseidon verified</span>
                         </div>
                         {strangerView ? (
                           <p className="mono">
-                            View Tag: 0x{toHex(sandboxNote.memo90.subarray(0, 2))} · Memo (90 B):{' '}
+                            View tag: 0x{toHex(sandboxNote.memo90.subarray(0, 2))} · Memo (90 B):{' '}
                             {shortHash(toHex(sandboxNote.memo90), 18, 12)} · Commitment:{' '}
                             {shortHash(toHex(frToBeBytes(sandboxNote.commitment)), 12, 8)}
                           </p>
                         ) : (
                           <p>
                             Decrypted locally with X25519 <code>view_sk</code>:{' '}
-                            <strong>{(Number(sandboxNote.amountLamports) / 1e9).toFixed(4)} SOL</strong>
+                            <span className="lv-strong">{(Number(sandboxNote.amountLamports) / 1e9).toFixed(4)} SOL</span>
                             {sandboxNote.superRoot !== null && (
                               <>
                                 {' '}
@@ -766,7 +764,7 @@ export function DevnetDemoExperience() {
               <section className="lv-card lv-simple-action">
                 <div className="lv-simple-body">
                   <div className="lv-field-block">
-                    <span className="lv-label">STEP 2 · SHIELD NOTE INTO GLOBAL 4-ARY TREE</span>
+                    <span className="lv-label">Step 2 · Shield note into global 4-ary tree</span>
                     <div className="lv-quick-pills">
                       {PRESET_AMOUNTS.map((p) => (
                         <button
@@ -786,7 +784,7 @@ export function DevnetDemoExperience() {
                         disabled={!keys || fundingDevnet}
                         onClick={() => handleShieldSandboxNote(false)}
                       >
-                        <KeyRound size={15} /> Shield Note Locally (Offline WASM Mode)
+                        <KeyRound size={15} /> Shield note locally (offline WASM)
                       </button>
                       {devnetRelayerAvailable && (
                         <button
@@ -796,7 +794,7 @@ export function DevnetDemoExperience() {
                           onClick={() => handleShieldSandboxNote(true)}
                         >
                           {fundingDevnet ? <Loader2 size={15} className="spin" /> : <ArrowUpRight size={15} />}
-                          Broadcast Live Devnet DepositSol
+                          Broadcast live Devnet DepositSol
                         </button>
                       )}
                     </div>
@@ -806,7 +804,7 @@ export function DevnetDemoExperience() {
                     <div className="lv-notice-bar is-warn">
                       <AlertCircle size={14} />
                       <span style={{ flex: 1 }}>
-                        Live Devnet note landed in Lane #{sandboxNote.laneId} (Leaf #{sandboxNote.leafIndex.toString()}). Publish a fresh Devnet checkpoint to reconstruct its real Depth-20 Merkle path.
+                        Live Devnet note landed in lane #{sandboxNote.laneId} (leaf #{sandboxNote.leafIndex.toString()}). Publish a fresh Devnet checkpoint to reconstruct its real Depth-20 Merkle path.
                       </span>
                       <button
                         type="button"
@@ -815,13 +813,13 @@ export function DevnetDemoExperience() {
                         onClick={handlePublishDevnetCheckpoint}
                       >
                         {publishingCkpt ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />}
-                        Publish Checkpoint
+                        Publish checkpoint
                       </button>
                     </div>
                   )}
 
                   <div className="lv-field-block">
-                    <span className="lv-label">STEP 3 · PROVE 192 B BN254 GROTH16 IN BROWSER WASM</span>
+                    <span className="lv-label">Step 3 · Prove 192 B BN254 Groth16 in browser WASM</span>
                     <div className="lv-unlock-actions">
                       <button
                         type="button"
@@ -832,7 +830,7 @@ export function DevnetDemoExperience() {
                         {proving ? <Loader2 size={15} className="spin" /> : <Cpu size={15} />}
                         {proving
                           ? 'Proving 17,861 R1CS in WASM…'
-                          : 'Prove 192 B Groth16 JoinSplit Locally'}
+                          : 'Prove 192 B Groth16 JoinSplit locally'}
                       </button>
                       {sandboxNote?.isLiveDevnet && !sandboxNote.awaitingCheckpoint && devnetRelayerAvailable && (
                         <button
@@ -842,7 +840,7 @@ export function DevnetDemoExperience() {
                           onClick={() => handleRunBrowserWasmProof(true)}
                         >
                           {proving ? <Loader2 size={15} className="spin" /> : <ArrowUpRight size={15} />}
-                          Prove &amp; Broadcast Live Devnet JoinSplit
+                          Prove &amp; broadcast live Devnet JoinSplit
                         </button>
                       )}
                     </div>
@@ -852,8 +850,8 @@ export function DevnetDemoExperience() {
                         <div className="lv-audit-head">
                           <h4>
                             {proofArtifact.joinSplitDevnetSig
-                              ? 'Live Devnet JoinSplit (Tag 6) Verified On-Chain'
-                              : '192-Byte BN254 Groth16 Proof Generated Locally'}
+                              ? 'Live Devnet JoinSplit (Tag 6) verified on-chain'
+                              : '192-byte BN254 Groth16 proof generated locally'}
                           </h4>
                           <span className="sb-confirmed-pill mono">{proofArtifact.elapsedMs} ms</span>
                         </div>
@@ -874,21 +872,21 @@ export function DevnetDemoExperience() {
                         <div className="lv-balance-list">
                           <div className="lv-balance-row">
                             <div>
-                              <strong>Proof Wire Bytes (pi_a || pi_b || pi_c)</strong>
+                              <span className="lv-row-title">Proof wire bytes (pi_a || pi_b || pi_c)</span>
                               <span className="mono">{proofArtifact.proofBytes} bytes · alt_bn128 pairing ready</span>
                             </div>
                             <code className="mono">{shortHash(proofArtifact.proofHex, 12, 10)}</code>
                           </div>
                           <div className="lv-balance-row">
                             <div>
-                              <strong>Nullifier nf0 (Key-Separated)</strong>
+                              <span className="lv-row-title">Nullifier nf0 (key-separated)</span>
                               <span className="mono">Poseidon4(DOMAIN_NULLIFIER, nk, cm, (lane &lt;&lt; 36) | leaf_idx)</span>
                             </div>
                             <code className="mono">{shortHash(proofArtifact.nf0Hex, 10, 8)}</code>
                           </div>
                           <div className="lv-balance-row">
                             <div>
-                              <strong>Output Commitments (cm0 / cm1)</strong>
+                              <span className="lv-row-title">Output commitments (cm0 / cm1)</span>
                               <span className="mono">
                                 {(Number(proofArtifact.recipientAmountLamports) / 1e9).toFixed(4)} +{' '}
                                 {(Number(proofArtifact.changeAmountLamports) / 1e9).toFixed(4)} SOL (hidden on-chain)
@@ -898,7 +896,7 @@ export function DevnetDemoExperience() {
                           </div>
                           <div className="lv-balance-row">
                             <div>
-                              <strong>Bound Fiat-Shamir ctx_hash</strong>
+                              <span className="lv-row-title">Bound Fiat-Shamir ctx_hash</span>
                               <span className="mono">SHA-256 masked to 253-bit Fr</span>
                             </div>
                             <code className="mono">{shortHash(proofArtifact.ctxHashHex, 10, 8)}</code>
@@ -909,7 +907,7 @@ export function DevnetDemoExperience() {
                   </div>
 
                   <div className="lv-field-block">
-                    <span className="lv-label">STEP 4 · MODE 1 SELECTIVE DISCLOSURE RECEIPT CHECK</span>
+                    <span className="lv-label">Step 4 · Mode 1 selective disclosure receipt check</span>
                     <div className="lv-receipt-actions">
                       <button
                         type="button"
@@ -917,7 +915,7 @@ export function DevnetDemoExperience() {
                         disabled={!sandboxNote}
                         onClick={() => handleCheckSelectiveDisclosure(false)}
                       >
-                        <ShieldCheck size={13} /> Verify Genuine Note Receipt
+                        <ShieldCheck size={13} /> Verify genuine note receipt
                       </button>
                       <button
                         type="button"
@@ -925,7 +923,7 @@ export function DevnetDemoExperience() {
                         disabled={!sandboxNote}
                         onClick={() => handleCheckSelectiveDisclosure(true)}
                       >
-                        <ShieldAlert size={13} /> Tamper Amount (+1 lamport)
+                        <ShieldAlert size={13} /> Tamper amount (+1 lamport)
                       </button>
                     </div>
                     {receiptValid !== null && (
@@ -934,10 +932,10 @@ export function DevnetDemoExperience() {
                         style={{ marginTop: '0.6rem' }}
                       >
                         {receiptValid
-                          ? 'VALID · Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, amount, blinding) matches on-chain leaf'
+                          ? 'Valid · Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, amount, blinding) matches on-chain leaf'
                           : receiptTampered
-                            ? 'REJECTED · 1-lamport tamper broke the Poseidon commitment binding immediately'
-                            : 'INVALID'}
+                            ? 'Rejected · 1-lamport tamper broke the Poseidon commitment binding immediately'
+                            : 'Invalid'}
                       </div>
                     )}
                   </div>
@@ -946,7 +944,7 @@ export function DevnetDemoExperience() {
             </div>
 
             <div className="lv-backup-meta mono">
-              <span>Canonical Program ID: </span>
+              <span>Canonical program ID: </span>
               <a href={solscanAddress(AUDREN.programId, 'devnet')} target="_blank" rel="noreferrer">
                 {AUDREN.programId}
               </a>

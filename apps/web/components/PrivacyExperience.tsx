@@ -13,10 +13,10 @@ export function PrivacyExperience() {
         {/* HERO */}
         <section className={`container ${styles.hero}`}>
           <Link href="/" className={styles.backLink}>
-            <ArrowLeft size={12} /> audren.xyz
+            <ArrowLeft size={13} /> audren.xyz
           </Link>
           <div className={styles.heroSingle}>
-            <h1>Privacy Notice</h1>
+            <h1>Privacy notice</h1>
             <p className={styles.heroLead}>
               Local key custody, on-chain privacy, and privacy from an infrastructure operator are
               three separate properties. This page maps exactly what stays on your device, what
@@ -40,75 +40,117 @@ export function PrivacyExperience() {
 
           <div className={styles.diagramStage}>
             <div className={styles.stageHead}>
-              <strong>Data boundary map — browser vs. infrastructure vs. Solana</strong>
-              <span>Spending keys never leave your device</span>
+              <span className={styles.stageTitle}>
+                Data boundary map: browser, infrastructure, and Solana
+              </span>
+              <span className={styles.stageMeta}>Spending keys never leave your device</span>
             </div>
             <svg
               className={styles.stageSvg}
-              viewBox="0 0 920 208"
+              viewBox="0 0 920 212"
               role="img"
-              aria-label="Three privacy boundaries: Your Device holds spend keys, view keys, session keypairs, local note decryption, and proof generation; RPC, Web Host & Optional Relay sees IP/connection metadata, RPC lookups, quotes, and anti-abuse hashes without spend keys; Solana Public Ledger records deposits, withdrawals, ExecViaEscrow DeFi CPI legs, session wallet activity, fee payers, and blinded transfer commitments"
+              aria-label="Three privacy boundaries: Your Device holds spend keys, view keys, session keypairs, local note decryption, and proof generation; RPC, Web Host and Optional Relay sees IP/connection metadata, RPC lookups, quotes, and anti-abuse hashes without spend keys; Solana Public Ledger records deposits, withdrawals, ExecViaEscrow DeFi CPI legs, session wallet activity, fee payers, and blinded transfer commitments"
             >
               {/* Connecting dashed tracks + animated data pulses */}
-              <line x1="286" y1="102" x2="322" y2="102" stroke="#d5d0c3" strokeWidth="1.5" />
-              <line x1="286" y1="102" x2="322" y2="102" stroke="#184433" strokeWidth="1.8" className={styles.flowDash} />
-              <polygon points="326,102 318,97 318,107" fill="#184433" />
-              <circle r="3.5" fill="#184433" opacity="0">
-                <animateMotion dur="2.4s" repeatCount="indefinite" path="M 286,102 L 322,102" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1" />
+              <line x1="286" y1="106" x2="322" y2="106" stroke="#c8d4c8" strokeWidth="1.5" />
+              <line x1="286" y1="106" x2="322" y2="106" stroke="#184433" strokeWidth="1.6" className={styles.flowDash} />
+              <polygon points="326,106 318,101 318,111" fill="#184433" />
+              <circle r="3.2" fill="#184433" opacity="0">
+                <animateMotion dur="2.4s" repeatCount="indefinite" path="M 286,106 L 322,106" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1" />
                 <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.82;1" dur="2.4s" repeatCount="indefinite" />
               </circle>
 
-              <line x1="600" y1="102" x2="636" y2="102" stroke="#e4d6c4" strokeWidth="1.5" />
-              <line x1="600" y1="102" x2="636" y2="102" stroke="#8b5e34" strokeWidth="1.8" className={styles.flowDash} />
-              <polygon points="640,102 632,97 632,107" fill="#8b5e34" />
-              <circle r="3.5" fill="#8b5e34" opacity="0">
-                <animateMotion dur="2.4s" begin="1.1s" repeatCount="indefinite" path="M 600,102 L 636,102" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1" />
+              <line x1="600" y1="106" x2="636" y2="106" stroke="#dfd3c0" strokeWidth="1.5" />
+              <line x1="600" y1="106" x2="636" y2="106" stroke="#6e4928" strokeWidth="1.6" className={styles.flowDash} />
+              <polygon points="640,106 632,101 632,111" fill="#6e4928" />
+              <circle r="3.2" fill="#6e4928" opacity="0">
+                <animateMotion dur="2.4s" begin="1.1s" repeatCount="indefinite" path="M 600,106 L 636,106" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1" />
                 <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.82;1" dur="2.4s" begin="1.1s" repeatCount="indefinite" />
               </circle>
 
               {/* Your Device */}
-              <rect x="12" y="16" width="274" height="174" rx="2" fill="#184433" />
-              <text x="28" y="39" fill="#c7dac8" fontSize="10" fontWeight="700" fontFamily="monospace" letterSpacing="0.6">
-                STAYS ON YOUR DEVICE
+              <rect x="12" y="16" width="274" height="180" rx="6" fill="#184433" />
+              <text x="28" y="40" fill="#cfe0d4" fontSize="11.5" fontWeight="500" fontFamily="var(--font-sans), sans-serif">
+                Stays on your device
               </text>
-              <text x="28" y="62" fill="#f4f1ea" fontSize="15" fontWeight="700">
+              <text x="28" y="64" fill="#faf8f3" fontSize="16" fontWeight="500" fontFamily="var(--font-serif), Georgia, serif">
                 Local keys &amp; prover
               </text>
-              <text x="28" y="88" fill="#e6efe4" fontSize="11">— Spend, nk &amp; view key derivation</text>
-              <text x="28" y="109" fill="#e6efe4" fontSize="11">— ChaCha20-Poly1305 memo scan</text>
-              <text x="28" y="130" fill="#e6efe4" fontSize="11">— BN254 Groth16 WASM proving</text>
-              <text x="28" y="151" fill="#e6efe4" fontSize="11">— CompactWalletStore &amp; receipts</text>
-              <text x="28" y="174" fill="#b9d1be" fontSize="9.8">Never sent in ordinary RPC or relay calls</text>
+              <circle cx="31" cy="87.5" r="2" fill="#9bc0a8" />
+              <text x="41" y="91" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Spend, nk &amp; view key derivation
+              </text>
+              <circle cx="31" cy="108.5" r="2" fill="#9bc0a8" />
+              <text x="41" y="112" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                ChaCha20-Poly1305 memo scan
+              </text>
+              <circle cx="31" cy="129.5" r="2" fill="#9bc0a8" />
+              <text x="41" y="133" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                BN254 Groth16 WASM proving
+              </text>
+              <circle cx="31" cy="150.5" r="2" fill="#9bc0a8" />
+              <text x="41" y="154" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                CompactWalletStore &amp; receipts
+              </text>
+              <text x="28" y="180" fill="#cfe0d4" fontSize="10.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Never sent in ordinary RPC or relay calls
+              </text>
 
               {/* Web Host / RPC / Relay */}
-              <rect x="326" y="16" width="274" height="174" rx="2" fill="#faf8f3" stroke="#184433" strokeWidth="1.3" />
-              <rect x="326" y="16" width="274" height="3" fill="#184433" />
-              <text x="342" y="39" fill="#55574e" fontSize="10" fontWeight="700" fontFamily="monospace" letterSpacing="0.6">
-                INFRASTRUCTURE OPERATORS
+              <rect x="326" y="16" width="274" height="180" rx="6" fill="#faf8f3" />
+              <text x="342" y="40" fill="#696b61" fontSize="11.5" fontWeight="500" fontFamily="var(--font-sans), sans-serif">
+                Infrastructure operators
               </text>
-              <text x="342" y="62" fill="#121210" fontSize="15" fontWeight="700">
+              <text x="342" y="64" fill="#161614" fontSize="16" fontWeight="500" fontFamily="var(--font-serif), Georgia, serif">
                 Web host, RPC &amp; relay
               </text>
-              <text x="342" y="88" fill="#3b3f36" fontSize="11">— Connection &amp; IP request metadata</text>
-              <text x="342" y="109" fill="#3b3f36" fontSize="11">— Account lookups &amp; swap quotes</text>
-              <text x="342" y="130" fill="#3b3f36" fontSize="11">— Hosted relay anti-abuse guard hashes</text>
-              <text x="342" y="151" fill="#3b3f36" fontSize="11">— Zero user spend or view keys</text>
-              <text x="342" y="174" fill="#6b6e62" fontSize="9.8">Switchable RPC &amp; pluggable relay URL</text>
+              <circle cx="345" cy="87.5" r="2" fill="#696b61" />
+              <text x="355" y="91" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Connection &amp; IP request metadata
+              </text>
+              <circle cx="345" cy="108.5" r="2" fill="#696b61" />
+              <text x="355" y="112" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Account lookups &amp; swap quotes
+              </text>
+              <circle cx="345" cy="129.5" r="2" fill="#696b61" />
+              <text x="355" y="133" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Hosted relay anti-abuse guard hashes
+              </text>
+              <circle cx="345" cy="150.5" r="2" fill="#696b61" />
+              <text x="355" y="154" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Zero user spend or view keys
+              </text>
+              <text x="342" y="180" fill="#696b61" fontSize="10.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Switchable RPC &amp; pluggable relay URL
+              </text>
 
               {/* Solana Ledger */}
-              <rect x="640" y="16" width="268" height="174" rx="2" fill="#f7efe3" stroke="#8b5e34" strokeWidth="1.3" />
-              <rect x="640" y="16" width="268" height="3" fill="#8b5e34" />
-              <text x="656" y="39" fill="#8b5e34" fontSize="10" fontWeight="700" fontFamily="monospace" letterSpacing="0.6">
-                PUBLIC SOLANA CHAIN
+              <rect x="640" y="16" width="268" height="180" rx="6" fill="#f0ebe0" />
+              <text x="656" y="40" fill="#6e4928" fontSize="11.5" fontWeight="500" fontFamily="var(--font-sans), sans-serif">
+                Public Solana chain
               </text>
-              <text x="656" y="62" fill="#121210" fontSize="15" fontWeight="700">
+              <text x="656" y="64" fill="#161614" fontSize="16" fontWeight="500" fontFamily="var(--font-serif), Georgia, serif">
                 On-chain visibility
               </text>
-              <text x="656" y="88" fill="#3b3f36" fontSize="11">— JoinSplit: hidden mint, amt &amp; key</text>
-              <text x="656" y="109" fill="#3b3f36" fontSize="11">— Deposit / Exit: public amounts</text>
-              <text x="656" y="130" fill="#3b3f36" fontSize="11">— DeFi CPI &amp; Bᵢ: public protocol legs</text>
-              <text x="656" y="151" fill="#3b3f36" fontSize="11">— Checkpoint, lane, fee payer &amp; timing</text>
-              <text x="656" y="174" fill="#6e4928" fontSize="9.8">Permanent public blockchain record</text>
+              <circle cx="659" cy="87.5" r="2" fill="#6e4928" />
+              <text x="669" y="91" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                JoinSplit: hidden mint, amt &amp; key
+              </text>
+              <circle cx="659" cy="108.5" r="2" fill="#6e4928" />
+              <text x="669" y="112" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Deposit / Exit: public amounts
+              </text>
+              <circle cx="659" cy="129.5" r="2" fill="#6e4928" />
+              <text x="669" y="133" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                DeFi CPI &amp; Bᵢ: public protocol legs
+              </text>
+              <circle cx="659" cy="150.5" r="2" fill="#6e4928" />
+              <text x="669" y="154" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Checkpoint, lane, fee payer &amp; timing
+              </text>
+              <text x="656" y="180" fill="#6e4928" fontSize="10.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
+                Permanent public blockchain record
+              </text>
             </svg>
           </div>
         </section>
@@ -118,7 +160,7 @@ export function PrivacyExperience() {
           <div className="container">
             <div className={styles.ledger3}>
               <article className={`${styles.ledgerCell} ${styles.ledgerCellHighlight}`}>
-                <span className={styles.cellIndex}>LOCAL CUSTODY</span>
+                <span className={styles.cellIndex}>Local custody</span>
                 <h3>Local keys &amp; exports</h3>
                 <ul className={styles.dashList}>
                   <li>The wallet derives keys, decrypts notes, creates spending proofs, and checks receipt openings locally in your browser.</li>
@@ -129,7 +171,7 @@ export function PrivacyExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>ON-CHAIN BOUNDARIES</span>
+                <span className={styles.cellIndex}>On-chain boundaries</span>
                 <h3>Intentional public entry &amp; exit</h3>
                 <ul className={styles.dashList}>
                   <li>A deposit from a public wallet exposes its funding account, token, amount, and output record.</li>
@@ -145,12 +187,12 @@ export function PrivacyExperience() {
               </article>
 
               <article className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>PROVIDERS &amp; RELAYS</span>
+                <span className={styles.cellIndex}>Providers &amp; relays</span>
                 <h3>Relayer &amp; host metadata</h3>
                 <ul className={styles.dashList}>
                   <li>Anyone can run a compatible relayer, or submit directly with your own fee payer. Neither choice provides network anonymity by itself.</li>
                   <li>The website proxies RPC, token metadata, and Direct Self-Pay routing through its Cloudflare Worker; wallet-mode relay calls go to your selected relay.</li>
-                  <li>The hosted relay stores IP-derived anti-abuse identifiers (salted with the public relay key — hashing is not anonymization), timestamps, sponsorship figures, and temporary associations with in-flight nullifiers.</li>
+                  <li>The hosted relay stores IP-derived anti-abuse identifiers (salted with the public relay key; hashing is not anonymization), timestamps, sponsorship figures, and temporary associations with in-flight nullifiers.</li>
                   <li>Expired guard records are pruned on cleanup, not guaranteed immediate deletion across every infrastructure log.</li>
                 </ul>
               </article>

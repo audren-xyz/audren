@@ -503,7 +503,7 @@ export function LiveWalletVault() {
           setSelectedNoteKey('')
           setLastReceipt(null)
           setErrorMsg(null)
-          setStatusMsg('Wallet account changed — unlock vault for the active account')
+          setStatusMsg('Wallet account changed. Unlock vault for the active account.')
           setSwapQuoteOut(null)
           setSwapQuoteRaw(null)
           setSwapQuoteProvider(null)
@@ -801,7 +801,7 @@ export function LiveWalletVault() {
     try {
       const freshSeed = crypto.getRandomValues(new Uint8Array(32))
       await unlockFromSeed(freshSeed, cluster, 'local', walletScope)
-      setStatusMsg('Ephemeral local Audren vault created — export an encrypted backup before closing')
+      setStatusMsg('Ephemeral local Audren vault created. Export an encrypted backup before closing.')
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
     } finally {
@@ -856,7 +856,7 @@ export function LiveWalletVault() {
     return 0n
   }, [poolInfo])
 
-  // Live swap quote effect — strictly primitive dependencies!
+  // Live swap quote effect: strictly primitive dependencies.
   const selectedNoteDecimals = selectedNoteMeta.decimals
   const selectedNoteShard = selectedNote ? Number(selectedNote.leafIndex % BigInt(NUM_ESCROW_SHARDS)) : 0
   const fetchSwapQuote = useCallback(
@@ -1092,7 +1092,7 @@ export function LiveWalletVault() {
         })
       }
       await refreshPoolAndBalances(cluster, connected?.address ?? null)
-      setStatusMsg('RootCheckpoint published — shielded notes are ready to spend')
+      setStatusMsg('RootCheckpoint published. Shielded notes are ready to spend.')
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
     } finally {
@@ -1110,7 +1110,7 @@ export function LiveWalletVault() {
     const ckptAddr = deriveCheckpointPdaSync(0, ckptSlotIdx, AUDREN_PROGRAM_ID).address
     const [ckptRaw] = await fetcher([ckptAddr])
     if (!ckptRaw) {
-      throw new Error(`RootCheckpoint #${ckptSlotIdx} not found — click Publish Checkpoint above`)
+      throw new Error(`RootCheckpoint #${ckptSlotIdx} not found. Click Publish checkpoint above.`)
     }
     const ckpt = decodeRootCheckpoint(ckptRaw)
     const laneCount = ckpt.laneCounts[note.laneId] ?? 0n
@@ -1294,7 +1294,7 @@ export function LiveWalletVault() {
         relayed: false,
         summary: `Shielded ${depositAmount} ${sym}${mintInfo?.isToken2022 ? ' (Token-2022)' : ''} into Lane #${laneId}`,
       })
-      setStatusMsg('Deposit confirmed — syncing CompactWalletStore…')
+      setStatusMsg('Deposit confirmed. Syncing CompactWalletStore…')
       await syncVault(keys, cluster, store, walletScope)
       await refreshPoolAndBalances(cluster, connected.address)
     } catch (err) {
@@ -1315,7 +1315,7 @@ export function LiveWalletVault() {
       const fetcher = createWorkerBatchFetcher(cluster)
       const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
       if (!snap.initialized || !snap.latestCheckpoint) {
-        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0 — click "Publish Checkpoint" above`)
+        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0. Click "Publish checkpoint" above.`)
       }
       const currentEpoch = BigInt(snap.currentEpoch ?? '0')
       const mintInfo = isNativeSol ? null : await resolveMintOnChain(cluster, mintStr, currentEpoch)
@@ -1600,7 +1600,7 @@ export function LiveWalletVault() {
             ? `Sent ${sendAmount} ${symbol} privately (192 B Groth16 · epoch #${ckpt.epochId.toString()})`
             : `Withdrew ${withdrawAmount} ${symbol}${isWsolUnwrap ? ' (atomic WSOL unwrap)' : ''}`,
       })
-      setStatusMsg('Confirmed — syncing CompactWalletStore…')
+      setStatusMsg('Confirmed. Syncing CompactWalletStore…')
       await syncVault(keys, cluster, store, walletScope)
       await refreshPoolAndBalances(cluster, connected?.address ?? null)
     } catch (err) {
@@ -1629,7 +1629,7 @@ export function LiveWalletVault() {
       const fetcher = createWorkerBatchFetcher(cluster)
       const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
       if (!snap.initialized || !snap.latestCheckpoint) {
-        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0 — click "Publish Checkpoint" above`)
+        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0. Click "Publish checkpoint" above.`)
       }
       const currentEpoch = BigInt(snap.currentEpoch ?? '0')
       const [inMintInfo, outMintInfo] = await Promise.all([
@@ -1984,7 +1984,7 @@ export function LiveWalletVault() {
         relayed: useRelayer,
         summary: `Swapped ${swapAmount} ${inSym} → ${getTokenMeta(swapOutMint).symbol} via isolated Escrow #${escrowShard} (${winningProvider})`,
       })
-      setStatusMsg('Swap confirmed — syncing CompactWalletStore…')
+      setStatusMsg('Swap confirmed. Syncing CompactWalletStore…')
       await syncVault(keys, cluster, store, walletScope)
       await refreshPoolAndBalances(cluster, connected?.address ?? null)
     } catch (err) {
@@ -2169,8 +2169,8 @@ export function LiveWalletVault() {
 
       <div className="lv-notice-bar is-warn">
         <AlertCircle size={15} />
-        <span>
-          <strong>Audren ({AUDREN.releaseTag}):</strong> 192 B BN254 Groth16 global 4-ary MASP (17,861 R1CS) ·
+        <span style={{ flex: 1 }}>
+          <span className="lv-strong">Audren ({AUDREN.releaseTag}):</span> 192 B BN254 Groth16 global 4-ary MASP (17,861 R1CS) ·
           Perpetual Powers of Tau + BGM17 ceremony (<code>{shortHash(AUDREN.pkCompressedSha256, 8, 6)}</code>) ·
           Pre-audit release (open for independent security audit &amp; additional community Phase-2 contributions).
         </span>
@@ -2179,9 +2179,7 @@ export function LiveWalletVault() {
       {!keys ? (
         <div className="lv-connect-sheet">
           <div className="lv-connect-copy">
-            <h2>
-              Non-custodial <em>Audren</em> Vault.
-            </h2>
+            <h2>Non-custodial Audren vault.</h2>
             <p>
               Derive your BN254 spend key, X25519 view key, and encrypted <code>CompactWalletStore</code>{' '}
               strictly inside your browser. Zero indexer, zero server-side key custody.
@@ -2190,22 +2188,22 @@ export function LiveWalletVault() {
               <li>
                 <span className="lv-step-dot">1</span>
                 <div>
-                  <strong>Connect any Wallet Standard extension</strong>
+                  <span className="lv-step-title">Connect any Wallet Standard extension</span>
                   <p>Sign one deterministic message to unlock your Audren vault keys, create an ephemeral local vault, or restore an encrypted backup.</p>
                 </div>
               </li>
               <li>
                 <span className="lv-step-dot">2</span>
                 <div>
-                  <strong>Sync via ordinary Solana RPC</strong>
+                  <span className="lv-step-title">Sync via ordinary Solana RPC</span>
                   <p>Reads <code>SubtreePage</code>, <code>MemoPage</code>, and <code>NullifierPage</code> PDAs in batched <code>getMultipleAccounts</code> calls; persists compact encrypted state in IndexedDB.</p>
                 </div>
               </li>
               <li>
                 <span className="lv-step-dot">3</span>
                 <div>
-                  <strong>Prove locally in browser WASM</strong>
-                  <p>Generates 192 B Groth16 proofs via <code>/wasm/audren_circuits.wasm</code> and submits via your chosen Privacy Relayer or Direct Self-Pay.</p>
+                  <span className="lv-step-title">Prove locally in browser WASM</span>
+                  <p>Generates 192 B Groth16 proofs via <code>/wasm/audren_circuits.wasm</code> and submits via your chosen Privacy Relayer or direct self-pay.</p>
                 </div>
               </li>
             </ul>
@@ -2224,7 +2222,7 @@ export function LiveWalletVault() {
                   >
                     {w.icon && <img src={w.icon} alt="" className="lv-wallet-icon" />}
                     <span className="lv-wallet-choice-text">
-                      <strong>{w.name}</strong>
+                      <span className="lv-wallet-choice-name">{w.name}</span>
                       <span>{connected?.name === w.name ? 'Connected' : 'Wallet Standard'}</span>
                     </span>
                   </button>
@@ -2245,7 +2243,7 @@ export function LiveWalletVault() {
                   onClick={handleUnlockWithWalletSignature}
                 >
                   {busy ? <Loader2 size={15} className="spin" /> : <KeyRound size={15} />}
-                  Unlock Vault with {connected.name}
+                  Unlock vault with {connected.name}
                 </button>
               )}
               <button
@@ -2254,12 +2252,12 @@ export function LiveWalletVault() {
                 disabled={busy}
                 onClick={handleCreateLocalVault}
               >
-                <Lock size={15} /> Create Ephemeral Local Vault
+                <Lock size={15} /> Create ephemeral local vault
               </button>
             </div>
 
-            <div className="lv-backup-box" style={{ marginTop: '0.85rem' }}>
-              <strong>Restore Encrypted Backup</strong>
+            <div className="lv-backup-box" style={{ marginTop: '0.5rem' }}>
+              <span className="lv-box-title">Restore encrypted backup</span>
               <p>Enter your backup passphrase and select an <code>audren-backup-*.json</code> file.</p>
               <div className="lv-backup-row">
                 <input
@@ -2275,7 +2273,7 @@ export function LiveWalletVault() {
                   disabled={busy || backupPassphrase.length < 8}
                   onClick={() => lockedFileInputRef.current?.click()}
                 >
-                  <Upload size={13} /> Restore File
+                  <Upload size={13} /> Restore file
                 </button>
                 <input
                   ref={lockedFileInputRef}
@@ -2293,7 +2291,7 @@ export function LiveWalletVault() {
             </div>
 
             {errorMsg && (
-              <div className="lv-error-bar" style={{ marginTop: '0.75rem' }}>
+              <div className="lv-error-bar" style={{ marginTop: '0.5rem' }}>
                 <AlertCircle size={14} />
                 <span>{errorMsg}</span>
               </div>
@@ -2306,7 +2304,7 @@ export function LiveWalletVault() {
             <div className="lv-card-head">
               <div>
                 <span className="lv-ledger-kicker is-ok">
-                  {strangerView ? 'WHAT SOLANA OBSERVERS SEE' : 'SHIELDED VAULT (LOCAL)'}
+                  {strangerView ? 'What Solana observers see' : 'Shielded vault (local)'}
                 </span>
               </div>
               <div className="lv-card-head-right">
@@ -2316,7 +2314,7 @@ export function LiveWalletVault() {
                   onClick={() => setStrangerView((v) => !v)}
                 >
                   {strangerView ? <EyeOff size={13} /> : <Eye size={13} />}
-                  {strangerView ? 'Stranger View' : 'Owner View'}
+                  {strangerView ? 'Stranger view' : 'Owner view'}
                 </button>
                 <button
                   type="button"
@@ -2334,7 +2332,7 @@ export function LiveWalletVault() {
             </div>
 
             {noteNeedsCheckpoint && (
-              <div className="lv-notice-bar is-warn" style={{ marginBottom: '0.75rem' }}>
+              <div className="lv-notice-bar is-warn">
                 <AlertCircle size={14} />
                 <span style={{ flex: 1 }}>
                   {slotsUntilNextCheckpoint > 0n
@@ -2347,7 +2345,7 @@ export function LiveWalletVault() {
                   disabled={busy || slotsUntilNextCheckpoint > 0n || (cluster === 'mainnet' && !connected)}
                   onClick={handlePublishCheckpoint}
                 >
-                  Publish Checkpoint
+                  Publish checkpoint
                 </button>
               </div>
             )}
@@ -2356,7 +2354,7 @@ export function LiveWalletVault() {
               {totalShieldedByMint.length === 0 ? (
                 <div className="lv-balance-row">
                   <div>
-                    <strong>No shielded notes yet</strong>
+                    <span className="lv-row-title">No shielded notes yet</span>
                     <span>Deposit SOL or SPL tokens below, or share your aud1… receive address</span>
                   </div>
                   <span className="lv-balance-amt mono">0.00</span>
@@ -2367,11 +2365,11 @@ export function LiveWalletVault() {
                   return (
                     <div key={m} className="lv-balance-row">
                       <div>
-                        <strong>{info.symbol}</strong>
+                        <span className="lv-row-title">{info.symbol}</span>
                         <span className="mono">{shortHash(m, 6, 4)}</span>
                       </div>
                       {strangerView ? (
-                        <span className="lv-redacted-bar mono">ENCRYPTED 90B MEMO</span>
+                        <span className="lv-redacted-bar mono">Encrypted 90 B memo</span>
                       ) : (
                         <span className="lv-balance-amt is-pine mono">
                           {formatUnits(total, info.decimals)} {info.symbol}
@@ -2386,23 +2384,23 @@ export function LiveWalletVault() {
             <div className="lv-pub-strip">
               <div className="lv-pub-strip-top">
                 <div className="lv-pub-val">
-                  <span>PUBLIC WALLET SOL</span>
-                  <strong className="mono">{formatUnits(pubSolLamports, 9)} SOL</strong>
+                  <span>Public wallet SOL</span>
+                  <span className="lv-pub-num mono">{formatUnits(pubSolLamports, 9)} SOL</span>
                 </div>
                 <div className="lv-pub-val">
-                  <span>UNSPENT NOTES</span>
-                  <strong className="mono">{unspentNotes.length}</strong>
+                  <span>Unspent notes</span>
+                  <span className="lv-pub-num mono">{unspentNotes.length}</span>
                 </div>
                 <div className="lv-pub-val">
-                  <span>RELAYER</span>
-                  <strong className="mono">{useRelayer ? new URL(relayUrl).host : 'Direct Self-Pay'}</strong>
+                  <span>Relayer</span>
+                  <span className="lv-pub-num mono">{useRelayer ? new URL(relayUrl).host : 'Direct self-pay'}</span>
                 </div>
               </div>
             </div>
 
             <div className="lv-private-foot">
               <div className="lv-addr-row">
-                <span className="mono">aud1 Receive Address</span>
+                <span className="mono">aud1 receive address</span>
                 <code className="mono">{shortHash(keys.address, 14, 10)}</code>
                 <button
                   type="button"
@@ -2453,7 +2451,7 @@ export function LiveWalletVault() {
                         }
                       }}
                     >
-                      Save Relay
+                      Save relay
                     </button>
                   </div>
                 )}
@@ -2466,10 +2464,10 @@ export function LiveWalletVault() {
               {(
                 [
                   ['deposit', 'Shield', 'Tag 3/4', ArrowDownToLine],
-                  ['send', 'Private Send', 'Tag 6', Send],
-                  ['swap', 'DeFi Swap', 'Tag 7', ArrowLeftRight],
+                  ['send', 'Private send', 'Tag 6', Send],
+                  ['swap', 'DeFi swap', 'Tag 7', ArrowLeftRight],
                   ['withdraw', 'Withdraw', 'Tag 6', ArrowUpFromLine],
-                  ['compliance', 'Receipts & Keys', 'Mode 1/2', FileKey2],
+                  ['compliance', 'Receipts & keys', 'Mode 1/2', FileKey2],
                 ] as const
               ).map(([id, title, sub, Icon]) => (
                 <button
@@ -2483,9 +2481,9 @@ export function LiveWalletVault() {
                     setErrorMsg(null)
                   }}
                 >
-                  <strong>
+                  <span className="lv-verb-title">
                     <Icon size={13} /> {title}
-                  </strong>
+                  </span>
                   <span className="mono">{sub}</span>
                 </button>
               ))}
@@ -2495,7 +2493,7 @@ export function LiveWalletVault() {
               {tab === 'deposit' && (
                 <>
                   <div className="lv-field-block">
-                    <label className="lv-label">Asset to Shield</label>
+                    <label className="lv-label">Asset to shield</label>
                     <select
                       className="lv-select mono"
                       value={depositMint}
@@ -2533,7 +2531,7 @@ export function LiveWalletVault() {
                           }}
                         />
                         <div>
-                          <strong>Wrap SOL &amp; Shield as WSOL (Swap-Ready)</strong>
+                          <span className="lv-checkbox-title">Wrap SOL &amp; shield as WSOL (swap-ready)</span>
                           <span>Wraps native SOL into SPL WSOL in the same transaction so the shielded note can execute Jupiter DeFi swaps (Tag 7) or unwrap back to SOL atomically.</span>
                         </div>
                       </label>
@@ -2545,7 +2543,7 @@ export function LiveWalletVault() {
                             onChange={(e) => setFeeFromAmount(e.target.checked)}
                           />
                           <div>
-                            <strong>Zero-dust sweep (DEPOSIT_FLAG_FEE_FROM_AMOUNT)</strong>
+                            <span className="lv-checkbox-title">Zero-dust sweep (DEPOSIT_FLAG_FEE_FROM_AMOUNT)</span>
                             <span>Deducts amortized page rent from the shielded amount so ephemeral wallets sweep cleanly to 0 lamports.</span>
                           </div>
                         </label>
@@ -2561,9 +2559,9 @@ export function LiveWalletVault() {
                     {busy ? <Loader2 size={15} className="spin" /> : <ArrowDownToLine size={15} />}
                     {connected
                       ? depositMint === NATIVE_SOL_MINT_STR && wrapSolToWsol
-                        ? 'Wrap SOL & Shield WSOL into Global Pool'
-                        : 'Shield into Global Pool'
-                      : 'Connect Wallet to Deposit'}
+                        ? 'Wrap SOL & shield WSOL into global pool'
+                        : 'Shield into global pool'
+                      : 'Connect wallet to deposit'}
                   </button>
                 </>
               )}
@@ -2571,7 +2569,7 @@ export function LiveWalletVault() {
               {(tab === 'send' || tab === 'swap' || tab === 'withdraw') && (
                 <>
                   <div className="lv-field-block">
-                    <label className="lv-label">Input Shielded Note</label>
+                    <label className="lv-label">Input shielded note</label>
                     <select
                       className="lv-select mono"
                       value={selectedNote ? `${selectedNote.laneId}:${selectedNote.leafIndex.toString()}` : ''}
@@ -2598,7 +2596,7 @@ export function LiveWalletVault() {
                   {tab === 'send' && (
                     <>
                       <div className="lv-field-block">
-                        <label className="lv-label">Recipient aud1… Stealth Address</label>
+                        <label className="lv-label">Recipient aud1… stealth address</label>
                         <input
                           type="text"
                           className="lv-input mono"
@@ -2638,7 +2636,7 @@ export function LiveWalletVault() {
                         onClick={() => handleJoinSplitAction('send')}
                       >
                         {busy ? <Loader2 size={15} className="spin" /> : <Send size={15} />}
-                        Prove 192 B Groth16 &amp; Send Privately
+                        Prove 192 B Groth16 &amp; send privately
                       </button>
                     </>
                   )}
@@ -2648,14 +2646,14 @@ export function LiveWalletVault() {
                       {isSelectedNoteNativeSol && (
                         <div className="lv-notice-bar is-warn">
                           <AlertCircle size={14} />
-                          <span>
+                          <span style={{ flex: 1 }}>
                             Jupiter <code>ExecViaEscrow</code> routes SPL / WSOL / Token-2022 notes from isolated escrow ATAs.
-                            Select a shielded <strong>WSOL</strong>, <strong>SPL</strong>, or <strong>Token-2022</strong> note — or shield SOL as WSOL using <em>Wrap SOL &amp; Shield as WSOL</em> on the Shield tab.
+                            Select a shielded <span className="lv-strong">WSOL</span>, <span className="lv-strong">SPL</span>, or <span className="lv-strong">Token-2022</span> note, or shield SOL as WSOL using <span className="lv-strong">Wrap SOL &amp; shield as WSOL</span> on the Shield tab.
                           </span>
                         </div>
                       )}
                       <div className="lv-field-block">
-                        <label className="lv-label">Output Token Mint ({swapOutMeta.symbol})</label>
+                        <label className="lv-label">Output token mint ({swapOutMeta.symbol})</label>
                         <input
                           type="text"
                           className="lv-input mono"
@@ -2665,7 +2663,7 @@ export function LiveWalletVault() {
                       </div>
                       <div className="lv-field-block">
                         <div className="lv-receipt-head">
-                          <label className="lv-label">Swap Input Amount ({selectedNoteMeta.symbol})</label>
+                          <label className="lv-label">Swap input amount ({selectedNoteMeta.symbol})</label>
                           {selectedNote && !isSelectedNoteNativeSol && (
                             <button
                               type="button"
@@ -2689,7 +2687,7 @@ export function LiveWalletVault() {
                         />
                       </div>
                       <div className="lv-field-block">
-                        <label className="lv-label">Slippage Tolerance (bps)</label>
+                        <label className="lv-label">Slippage tolerance (bps)</label>
                         <input
                           type="number"
                           className="lv-input mono"
@@ -2706,26 +2704,26 @@ export function LiveWalletVault() {
                           onChange={(e) => setSwapFeeOnOutput(e.target.checked)}
                         />
                         <div>
-                          <strong>Pay relayer from swap output (EXEC_FLAG_FEE_ON_OUTPUT)</strong>
-                          <span>Atomic post-CPI deduction from received output tokens when relayed with a non-zero relayer fee — zero upfront SOL needed.</span>
+                          <span className="lv-checkbox-title">Pay relayer from swap output (EXEC_FLAG_FEE_ON_OUTPUT)</span>
+                          <span>Atomic post-CPI deduction from received output tokens when relayed with a non-zero relayer fee, with no upfront SOL needed.</span>
                         </div>
                       </label>
                       <div className="lv-quote-card">
                         <div className="lv-quote-head">
                           <span>
-                            LIVE ESCROW QUOTE
-                            {swapQuoteProvider ? ` · ${swapQuoteProvider.toUpperCase()}` : ''}
+                            Live escrow quote
+                            {swapQuoteProvider ? ` · ${swapQuoteProvider}` : ''}
                           </span>
                           {swapQuoteLoading && <Loader2 size={13} className="spin" />}
                         </div>
                         {swapQuoteOut ? (
                           <div className="lv-quote-pair">
                             <div>
-                              <span>Estimated Output</span>
-                              <strong className="is-pine mono">
+                              <span>Estimated output</span>
+                              <span className="lv-quote-val is-pine mono">
                                 {formatUnits(BigInt(swapQuoteOut), swapOutMeta.decimals)}{' '}
                                 {swapOutMeta.symbol}
-                              </strong>
+                              </span>
                             </div>
                           </div>
                         ) : (
@@ -2743,7 +2741,7 @@ export function LiveWalletVault() {
                         onClick={handleShieldedSwap}
                       >
                         {busy ? <Loader2 size={15} className="spin" /> : <ArrowLeftRight size={15} />}
-                        Prove 192 B Groth16 &amp; Execute Shielded Swap
+                        Prove 192 B Groth16 &amp; execute shielded swap
                       </button>
                     </>
                   )}
@@ -2751,7 +2749,7 @@ export function LiveWalletVault() {
                   {tab === 'withdraw' && (
                     <>
                       <div className="lv-field-block">
-                        <label className="lv-label">Public Solana Recipient</label>
+                        <label className="lv-label">Public Solana recipient</label>
                         <input
                           type="text"
                           className="lv-input mono"
@@ -2762,7 +2760,7 @@ export function LiveWalletVault() {
                       </div>
                       <div className="lv-field-block">
                         <div className="lv-receipt-head">
-                          <label className="lv-label">Withdraw Amount ({selectedNoteMeta.symbol})</label>
+                          <label className="lv-label">Withdraw amount ({selectedNoteMeta.symbol})</label>
                           {selectedNote && (
                             <button
                               type="button"
@@ -2787,7 +2785,10 @@ export function LiveWalletVault() {
                       {useRelayer && withdrawFeePreview && (
                         <div className="lv-quote-card">
                           <div className="lv-quote-head">
-                            <span>RELAYER FEE PREVIEW · {withdrawFeePreview.billingMode.toUpperCase()}</span>
+                            <span>
+                              Relayer fee preview ·{' '}
+                              {withdrawFeePreview.billingMode === 'self_paying' ? 'Self-paying' : 'Sponsored'}
+                            </span>
                           </div>
                           <p className="lv-quote-loading mono">
                             Fee: {formatUnits(withdrawFeePreview.relayerFee, selectedNoteMeta.decimals)}{' '}
@@ -2803,7 +2804,7 @@ export function LiveWalletVault() {
                             onChange={(e) => setUnwrapWsol(e.target.checked)}
                           />
                           <div>
-                            <strong>Atomic WSOL → Native SOL unwrap (WITHDRAW_FLAG_UNWRAP_WSOL)</strong>
+                            <span className="lv-checkbox-title">Atomic WSOL → Native SOL unwrap (WITHDRAW_FLAG_UNWRAP_WSOL)</span>
                             <span>Uses a 1-shot <code>audren_v2_unwrap</code> PDA and works even while the pool is paused.</span>
                           </div>
                         </label>
@@ -2815,7 +2816,7 @@ export function LiveWalletVault() {
                         onClick={() => handleJoinSplitAction('withdraw')}
                       >
                         {busy ? <Loader2 size={15} className="spin" /> : <ArrowUpFromLine size={15} />}
-                        Prove 192 B Groth16 &amp; Withdraw
+                        Prove 192 B Groth16 &amp; withdraw
                       </button>
                     </>
                   )}
@@ -2826,14 +2827,14 @@ export function LiveWalletVault() {
                 <>
                   <div className="lv-receipt-drawer">
                     <div className="lv-receipt-head">
-                      <strong>Mode 1 · Single-Note Selective Disclosure Proof</strong>
+                      <span className="lv-box-title">Mode 1 · Single-note selective disclosure proof</span>
                       <button
                         type="button"
                         className="lv-mini-btn"
                         disabled={!selectedNote}
                         onClick={handleGenerateReceipt}
                       >
-                        Export Selected Note Proof
+                        Export selected note proof
                       </button>
                     </div>
                     <p className="lv-receipt-copy">
@@ -2851,13 +2852,13 @@ export function LiveWalletVault() {
                     />
                     <div className="lv-receipt-actions">
                       <button type="button" className="lv-mini-btn" onClick={handleVerifyReceipt}>
-                        <ShieldCheck size={13} /> Verify Receipt
+                        <ShieldCheck size={13} /> Verify receipt
                       </button>
                       {receiptVerdict && (
                         <span className={`lv-receipt-verdict ${receiptVerdict === 'valid' ? 'is-valid' : 'is-forged'}`}>
                           {receiptVerdict === 'valid'
-                            ? 'VALID · Poseidon commitment matches'
-                            : 'INVALID · Commitment mismatch or malformed'}
+                            ? 'Valid · Poseidon commitment matches'
+                            : 'Invalid · Commitment mismatch or malformed'}
                         </span>
                       )}
                     </div>
@@ -2865,7 +2866,7 @@ export function LiveWalletVault() {
 
                   <div className="lv-backup-box">
                     <div className="lv-receipt-head">
-                      <strong>Mode 2 · Read-Only FullViewingKey</strong>
+                      <span className="lv-box-title">Mode 2 · Read-only FullViewingKey</span>
                       <button type="button" className="lv-mini-btn" onClick={() => setShowFvk((v) => !v)}>
                         {showFvk ? 'Hide FVK' : 'Reveal FVK'}
                       </button>
@@ -2874,7 +2875,7 @@ export function LiveWalletVault() {
                       Grants read-only inbound &amp; outbound visibility (<code>spendPk, nk, viewSk, viewPk</code>) for treasury accounting without spend authority.
                     </p>
                     {showFvk && fvkExport && (
-                      <pre className="mono" style={{ fontSize: '0.74rem', overflowX: 'auto' }}>
+                      <pre className="mono" style={{ fontSize: '13px', overflowX: 'auto' }}>
                         {fvkExport}
                       </pre>
                     )}
@@ -2883,7 +2884,7 @@ export function LiveWalletVault() {
                   {defiSession && (
                     <div className="lv-backup-box">
                       <div className="lv-receipt-head">
-                        <strong>Pseudonymous DeFi Session Wallet (#{sessionIndex})</strong>
+                        <span className="lv-box-title">Pseudonymous DeFi session wallet (#{sessionIndex})</span>
                         <div className="lv-priority-btns">
                           <button
                             type="button"
@@ -2903,7 +2904,7 @@ export function LiveWalletVault() {
                       </div>
                       <p>
                         Deterministic Ed25519 keypair for stateful lending, perps, or CLMM positions.{' '}
-                        <strong>Boundary:</strong> funding via relayed Withdraw breaks the link to your main wallet, while external DeFi actions executed by this session wallet remain public on Solana.
+                        <span className="lv-strong">Boundary:</span> funding via relayed Withdraw breaks the link to your main wallet, while external DeFi actions executed by this session wallet remain public on Solana.
                       </p>
                       <div className="lv-addr-row">
                         <code className="mono">{defiSession.pubkeyBase58}</code>
@@ -2920,7 +2921,7 @@ export function LiveWalletVault() {
                   )}
 
                   <div className="lv-backup-box">
-                    <strong>Encrypted Vault Backup (PBKDF2-SHA256 + AES-256-GCM)</strong>
+                    <span className="lv-box-title">Encrypted vault backup (PBKDF2-SHA256 + AES-256-GCM)</span>
                     <p>Export or restore your Audren master seed. Local IndexedDB cache can also be cleared anytime.</p>
                     <div className="lv-backup-row">
                       <input
@@ -2959,7 +2960,7 @@ export function LiveWalletVault() {
                           setBackupStatus('Cleared local encrypted IndexedDB CompactWalletStore cache')
                         }}
                       >
-                        Clear Cache
+                        Clear cache
                       </button>
                     </div>
                     {backupStatus && <p className="lv-backup-status mono">{backupStatus}</p>}
@@ -2970,7 +2971,7 @@ export function LiveWalletVault() {
               {statusMsg && (
                 <div className="lv-notice-bar">
                   <ShieldCheck size={14} />
-                  <span>{statusMsg}</span>
+                  <span style={{ flex: 1 }}>{statusMsg}</span>
                 </div>
               )}
 
@@ -2996,8 +2997,8 @@ export function LiveWalletVault() {
                   </div>
                   <p>{lastReceipt.summary}</p>
                   <div className="lv-proof-badge is-hidden mono">
-                    {lastReceipt.relayed ? 'ZERO-SIGNER RELAYED' : 'DIRECT SELF-PAY'}
-                    {lastReceipt.proverMs !== undefined ? ` · WASM PROVER ${lastReceipt.proverMs} ms` : ''}
+                    {lastReceipt.relayed ? 'Zero-signer relayed' : 'Direct self-pay'}
+                    {lastReceipt.proverMs !== undefined ? ` · WASM prover ${lastReceipt.proverMs} ms` : ''}
                   </div>
                 </div>
               )}

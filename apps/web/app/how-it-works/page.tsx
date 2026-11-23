@@ -20,7 +20,7 @@ export default function HowItWorksPage() {
       <main>
         <section className={`container ${styles.hero}`}>
           <Link href="/" className={styles.backLink}>
-            <ArrowLeft size={12} /> audren.xyz
+            <ArrowLeft size={13} /> audren.xyz
           </Link>
           <div className={styles.heroSingle}>
             <h1>Public assets. Private ownership.</h1>
@@ -32,20 +32,26 @@ export default function HowItWorksPage() {
           </div>
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
-              <span>Receiving address</span>
-              <strong>1 reusable <code>aud1…</code> → 1-time stealth owners</strong>
+              <span className={styles.heroMetaLabel}>Receiving address</span>
+              <span className={styles.heroMetaValue}>
+                1 reusable <code>aud1…</code> → 1-time stealth owners
+              </span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Spend proof</span>
-              <strong>192 B BN254 Groth16 · 4<sup>20</sup> Global MASP</strong>
+              <span className={styles.heroMetaLabel}>Spend proof</span>
+              <span className={styles.heroMetaValue}>
+                192 B BN254 Groth16 · 4<sup>20</sup> Global MASP
+              </span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Wallet discovery</span>
-              <strong>Ordinary Solana RPC · Zero indexer</strong>
+              <span className={styles.heroMetaLabel}>Wallet discovery</span>
+              <span className={styles.heroMetaValue}>Ordinary Solana RPC · Zero indexer</span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Public boundaries</span>
-              <strong>Deposits, DEX legs, withdrawals &amp; fee payer</strong>
+              <span className={styles.heroMetaLabel}>Public boundaries</span>
+              <span className={styles.heroMetaValue}>
+                Deposits, DEX legs, withdrawals &amp; fee payer
+              </span>
             </div>
           </div>
         </section>

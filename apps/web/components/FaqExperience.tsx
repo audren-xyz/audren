@@ -59,7 +59,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'swaps',
     catLabel: 'DeFi & tokens',
     q: 'What Solana DeFi protocols work with ExecViaEscrow (Tag 7)?',
-    a: 'ExecViaEscrow is protocol-agnostic: any compatible PDA-signing Token A → Token B Solana CPI — DEX aggregators/AMMs (Jupiter, Titan, DFlow, OKX DEX, Raydium, Orca, Meteora), lending reserve deposits (kUSDC/kSOL), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), or permissionless RWA mint/redeem — executes atomically through 16 sharded escrow PDAs (~158k CU, leaving >1.2M CU for DeFi). It binds router_program and every router account in ctx_hash, enforces pre/post WatchedEscrowBuf owner/delegate/lamport checks, supports EXEC_FLAG_FEE_ON_OUTPUT, and commits the exact measured net vault delta.',
+    a: 'ExecViaEscrow is protocol-agnostic. Any compatible PDA-signing Token A → Token B Solana CPI, including DEX aggregators and AMMs (Jupiter, Titan, DFlow, OKX DEX, Raydium, Orca, Meteora), lending reserve deposits (kUSDC/kSOL), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), or permissionless RWA mint/redeem, executes atomically through 16 sharded escrow PDAs (~158k CU, leaving >1.2M CU for DeFi). It binds router_program and every router account in ctx_hash, enforces pre/post WatchedEscrowBuf owner/delegate/lamport checks, supports EXEC_FLAG_FEE_ON_OUTPUT, and commits the exact measured net vault delta.',
   },
   {
     id: 'defi-sessions',
@@ -80,7 +80,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'crypto',
     catLabel: 'Groth16 & RPC sync',
     q: 'Why does every Audren instruction fit in a single Solana Transaction v1?',
-    a: 'A compressed BN254 Groth16 proof is only 192 bytes (verified via Solana native alt_bn128 pairing syscalls in ~103k–160k CU). Together with Solana Transaction v1 (SIMD-0385, 0x81, 4,096 B limit and inline compute budget), every instruction — including JoinSplit and complex multi-hop ExecViaEscrow CPIs — settles atomically in one transaction without multi-step proof uploads.',
+    a: 'A compressed BN254 Groth16 proof is only 192 bytes (verified via Solana native alt_bn128 pairing syscalls in ~103k–160k CU). Together with Solana Transaction v1 (SIMD-0385, 0x81, 4,096 B limit and inline compute budget), every instruction, including JoinSplit and complex multi-hop ExecViaEscrow CPIs, settles atomically in one transaction without multi-step proof uploads.',
   },
   {
     id: 'scanning',
@@ -101,7 +101,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'custody',
     catLabel: 'Custody, MPC & audits',
     q: 'How do Mode 1 Selective Disclosure and Mode 2 Full Viewing Keys work?',
-    a: 'Mode 1 SelectiveDisclosureProof exports (stealth_owner, mint, amount, blinding) for a single chosen note and verifies in 1 Poseidon5 hash directly against SubtreePage while revealing zero keys. Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) uses key separation (nk = Poseidon2(10, spend_sk)) so watch-only wallets, hardware-signer setups, relayers, and auditors can track both incoming notes AND spent nullifiers with zero spend authority.',
+    a: 'Mode 1 SelectiveDisclosureProof exports (stealth_owner, mint, amount, blinding) for a single chosen note and verifies in 1 Poseidon5 hash directly against SubtreePage while revealing zero keys. Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) uses key separation (nk = Poseidon2(10, spend_sk)) so watch-only wallets, hardware-signer setups, relayers, and auditors can track both incoming notes and spent nullifiers with zero spend authority.',
   },
   {
     id: 'pause-mpc',
@@ -140,10 +140,10 @@ export function FaqExperience() {
       <main>
         <section className={`container ${styles.hero}`}>
           <Link href="/" className={styles.backLink}>
-            <ArrowLeft size={12} /> audren.xyz
+            <ArrowLeft size={13} /> audren.xyz
           </Link>
           <div className={styles.heroSingle}>
-            <h1>Frequently Asked Questions</h1>
+            <h1>Frequently asked questions</h1>
             <p className={styles.heroLead}>
               Direct engineering answers on Audren privacy boundaries, BN254 Groth16 proving,
               zero-indexer ordinary RPC sync, DeFi escrow isolation, and ceremony status.
@@ -152,20 +152,20 @@ export function FaqExperience() {
 
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
-              <span>Global MASP</span>
-              <strong>4²⁰ tree · TVL alone does not prove anonymity</strong>
+              <span className={styles.heroMetaLabel}>Global MASP</span>
+              <span className={styles.heroMetaValue}>4²⁰ tree · TVL alone does not prove anonymity</span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Zero indexer</span>
-              <strong>Ordinary Solana RPC · 1.28 MB @ 10M notes</strong>
+              <span className={styles.heroMetaLabel}>Zero indexer</span>
+              <span className={styles.heroMetaValue}>Ordinary Solana RPC · 1.28 MB @ 10M notes</span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Relayers &amp; custody</span>
-              <strong>Optional, permissionless, zero user spend keys</strong>
+              <span className={styles.heroMetaLabel}>Relayers &amp; custody</span>
+              <span className={styles.heroMetaValue}>Optional, permissionless, zero user spend keys</span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Ceremony &amp; audit</span>
-              <strong>Apache-2.0 · PPoT + BGM17 · Pre-audit</strong>
+              <span className={styles.heroMetaLabel}>Ceremony &amp; audit</span>
+              <span className={styles.heroMetaValue}>Apache-2.0 · PPoT + BGM17 · Pre-audit</span>
             </div>
           </div>
         </section>
@@ -187,7 +187,7 @@ export function FaqExperience() {
               ))}
             </div>
             <button type="button" className={styles.faqToggleBtn} onClick={toggleAll}>
-              {allOpen ? 'COLLAPSE ALL' : 'EXPAND ALL'}
+              {allOpen ? 'Collapse all' : 'Expand all'}
             </button>
           </div>
 
@@ -212,7 +212,7 @@ export function FaqExperience() {
                         flexShrink: 0,
                         transform: isOpen ? 'rotate(180deg)' : 'none',
                         transition: 'transform 160ms ease',
-                        color: '#55574e',
+                        color: '#696b61',
                       }}
                     />
                   </button>

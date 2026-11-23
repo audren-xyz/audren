@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { ArrowLeft, ArrowRight, ArrowUpRight, Eye, EyeOff } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ArrowUpRight } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { SiteFooter } from '@/components/SiteFooter'
 import styles from '@/components/SubpageShell.module.css'
@@ -144,9 +144,9 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
 
 const PEER_PROTOCOLS = [
   {
-    tag: 'SOLANA RINGS',
+    tag: 'Solana rings',
     name: 'Helius Privacy Rings',
-    lead: 'Supports existing SOL, SPL and Token-2022 assets, self-custody, and programmable escrow, with published independent program and circuit reviews.',
+    lead: 'Supports existing SOL, SPL, and Token-2022 assets, self-custody, and programmable escrow, with published independent program and circuit reviews.',
     points: [
       'Default confidential ring exposes sender and recipient; anonymous custom rings are a separate mode with separate availability and audit scope.',
       'Documented anonymous-ring integration uses delegated viewing access for sync (no spend authority).',
@@ -161,12 +161,12 @@ const PEER_PROTOCOLS = [
     ],
   },
   {
-    tag: 'GROTH16 MERKLE',
+    tag: 'Groth16 Merkle',
     name: 'Privacy Cash',
     lead: 'Groth16 membership proofs over asset-specific Merkle trees with published independent audits and ephemeral-wallet Jupiter routing.',
     points: [
       'Tree-based membership proofs do not publish a small explicit ring of candidate inputs.',
-      'Documented swap flow withdraws to an ephemeral wallet, trades on Jupiter, and reshields — concealing the primary wallet while keeping DEX trade details public.',
+      'Documented swap flow withdraws to an ephemeral wallet, trades on Jupiter, and reshields, concealing the primary wallet while keeping DEX trade details public.',
       'Existing assets, local proving, and deposit-to-withdrawal unlinking are not unique to Audren.',
       'Actual privacy still depends on public boundaries, timing, and external observations.',
     ],
@@ -176,7 +176,7 @@ const PEER_PROTOCOLS = [
     ],
   },
   {
-    tag: 'DEDICATED L1S',
+    tag: 'Dedicated L1s',
     name: 'Monero & Zcash',
     lead: 'Dedicated privacy networks rather than direct integrations for existing Solana assets.',
     points: [
@@ -192,12 +192,12 @@ const PEER_PROTOCOLS = [
     ],
   },
   {
-    tag: 'ENCLAVES & MPC',
+    tag: 'Enclaves and MPC',
     name: 'Nimbus, Umbra & Arcium',
     lead: 'Enclave and MPC privacy infrastructure targeting broader computation models beyond payment proofs.',
     points: [
       'Do not conflate historical Umbra SDK documentation with Nimbus’s current architecture.',
-      'Nimbus documents attester/enclave dependencies and an emergency exit with distinct privacy and availability properties.',
+      'Nimbus documents attester and enclave dependencies and an emergency exit with distinct privacy and availability properties.',
       'Arcium targets general multi-party computation (MPC) on private inputs with cluster honesty and availability assumptions.',
       'Additional infrastructure can enable capabilities payment-only pools do not provide.',
     ],
@@ -234,16 +234,16 @@ export function CompareExperience() {
             </div>
             <div className={styles.diagramStagePaper}>
               <div className={styles.stageHead}>
-                <strong>Native Confidential Balances scope</strong>
+                <div className={styles.stageTitle}>Native Confidential Balances scope</div>
                 <span>Token-2022 extension</span>
               </div>
-              <p style={{ margin: '0 0 12px', fontSize: 13, lineHeight: 1.6, color: '#464a40' }}>
+              <p className={styles.cellLead} style={{ marginBottom: 12 }}>
                 Solana’s native Confidential Balances encrypt transfer amounts on configured
                 Token-2022 mints while account relationships and mint identity remain visible.
               </p>
               <a
                 className={styles.textLink}
-                style={{ fontSize: 12.5 }}
+                style={{ fontSize: 14 }}
                 href="https://solana.com/docs/tokens/extensions/confidential-transfer/integration-guide"
                 target="_blank"
                 rel="noreferrer"
@@ -299,11 +299,13 @@ export function CompareExperience() {
                 {active.rows.map((row) => (
                   <tr
                     key={row.method}
-                    style={row.highlight ? { background: '#f1f5ee' } : undefined}
+                    style={row.highlight ? { background: '#e8efe8' } : undefined}
                   >
                     <td>
-                      <strong style={{ display: 'block', color: '#121210' }}>{row.method}</strong>
-                      <span style={{ fontSize: 11.5, color: '#5d6056' }}>{row.sub}</span>
+                      <span className={styles.tableLead} style={{ display: 'block' }}>
+                        {row.method}
+                      </span>
+                      <span style={{ fontSize: 13, color: '#5d6056' }}>{row.sub}</span>
                     </td>
                     <td>
                       <span
@@ -314,13 +316,7 @@ export function CompareExperience() {
                               ? styles.visPublic
                               : styles.visPartial
                         }
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
                       >
-                        {row.senderRecipient.state === 'hidden' ? (
-                          <EyeOff size={12} />
-                        ) : (
-                          <Eye size={12} />
-                        )}
                         {row.senderRecipient.text}
                       </span>
                     </td>
@@ -354,7 +350,7 @@ export function CompareExperience() {
           </div>
 
           <p className={styles.editorialNote}>
-            <strong>{active.headline}.</strong> {active.note}
+            <span className={styles.noteLead}>{active.headline}.</span> {active.note}
           </p>
         </section>
 
@@ -367,7 +363,7 @@ export function CompareExperience() {
               </div>
               <p>
                 The meaningful distinction is the cryptographic mechanism, operational dependencies,
-                and review evidence — not a claim that other systems cannot provide privacy.
+                and review evidence, not a claim that other systems cannot provide privacy.
               </p>
             </div>
 
@@ -405,7 +401,7 @@ export function CompareExperience() {
         <section className={`container ${styles.section}`}>
           <div className={styles.sectionIntro}>
             <div>
-              <h2>Designed boundaries, measured privacy.</h2>
+              <h2>Separate designed boundaries from measured privacy.</h2>
             </div>
             <p>
               Evaluate chain-observer privacy, provider visibility, custody and upgrade controls,
@@ -416,7 +412,7 @@ export function CompareExperience() {
 
           <div className={styles.ledger4}>
             <div className={styles.ledgerCell}>
-              <span className={styles.cellIndex}>ANONYMITY SET</span>
+              <span className={styles.cellIndex}>Anonymity set</span>
               <h3>Global tree ≠ automatic privacy</h3>
               <p className={styles.cellLead}>
                 A global 4²⁰ Merkle tree eliminates small ring leaks, but timing, public entry/exit
@@ -424,7 +420,7 @@ export function CompareExperience() {
               </p>
             </div>
             <div className={styles.ledgerCell}>
-              <span className={styles.cellIndex}>LIQUIDITY</span>
+              <span className={styles.cellIndex}>Liquidity</span>
               <h3>TVL ≠ privacy</h3>
               <p className={styles.cellLead}>
                 More independently owned, plausible activity may help. Raw dollars or TVL alone do
@@ -432,7 +428,7 @@ export function CompareExperience() {
               </p>
             </div>
             <div className={styles.ledgerCell}>
-              <span className={styles.cellIndex}>ACCOUNTING</span>
+              <span className={styles.cellIndex}>Accounting</span>
               <h3>Vault assets ≠ solvency</h3>
               <p className={styles.cellLead}>
                 Inspectable SOL and SPL vault accounts show held assets. They do not independently
@@ -440,7 +436,7 @@ export function CompareExperience() {
               </p>
             </div>
             <div className={styles.ledgerCell}>
-              <span className={styles.cellIndex}>ASSURANCE</span>
+              <span className={styles.cellIndex}>Assurance</span>
               <h3>Ceremony &amp; audit</h3>
               <p className={styles.cellLead}>
                 Audren freezes one minimal 17,861-R1CS circuit anchored to Perpetual Powers of Tau
@@ -467,7 +463,7 @@ export function CompareExperience() {
 
             <div className={styles.ledger3}>
               <div className={`${styles.ledgerCell} ${styles.ledgerCellHighlight}`}>
-                <span className={styles.cellIndex}>ASSETS</span>
+                <span className={styles.cellIndex}>Assets</span>
                 <h3>Existing assets</h3>
                 <p className={styles.cellLead}>
                   Original SOL, classic SPL, and transferable Token-2022 enter unified custody
@@ -475,7 +471,7 @@ export function CompareExperience() {
                 </p>
               </div>
               <div className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>PROVING</span>
+                <span className={styles.cellIndex}>Proving</span>
                 <h3>Local Groth16 proving</h3>
                 <p className={styles.cellLead}>
                   Clients generate 192 B BN254 Groth16 proofs locally (native Rust/Swift/Kotlin or
@@ -483,16 +479,16 @@ export function CompareExperience() {
                 </p>
               </div>
               <div className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>DISCOVERY</span>
+                <span className={styles.cellIndex}>Discovery</span>
                 <h3>Ordinary Solana RPC only</h3>
                 <p className={styles.cellLead}>
                   <code>CompactWalletStore</code> scans sequential pages via{' '}
                   <code>getMultipleAccounts</code>, freezes sealed siblings, and discards raw pages
-                  (1.28 MB @ 10M notes) — zero mandatory indexer or CDN.
+                  (1.28 MB @ 10M notes) with no mandatory indexer or CDN.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>SURFACE</span>
+                <span className={styles.cellIndex}>Surface</span>
                 <h3>Unified workflow</h3>
                 <p className={styles.cellLead}>
                   Deposit, transfer, merge notes, execute compatible DeFi CPIs, withdraw or fund
@@ -500,7 +496,7 @@ export function CompareExperience() {
                 </p>
               </div>
               <div className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>OPENNESS</span>
+                <span className={styles.cellIndex}>Openness</span>
                 <h3>Open integration</h3>
                 <p className={styles.cellLead}>
                   Integrate the Apache-2.0 source, run a compatible client, or host your own relay
@@ -508,7 +504,7 @@ export function CompareExperience() {
                 </p>
               </div>
               <div className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>DISCLOSURE</span>
+                <span className={styles.cellIndex}>Disclosure</span>
                 <h3>Pre-audit transparency</h3>
                 <p className={styles.cellLead}>
                   Audren remains pre-audit with a mutable upgrade authority. Read the exact
