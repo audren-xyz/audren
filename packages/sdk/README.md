@@ -7,8 +7,13 @@ Unified TypeScript ESM SDK for **Audren** (`AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB
 
 ## Install
 
+`@audren/sdk` is not yet published to npm. Build it from the repository and add it as a local dependency:
+
 ```bash
-pnpm add @audren/sdk
+git clone https://github.com/audren-xyz/audren
+pnpm --dir audren/packages/sdk install
+pnpm --dir audren/packages/sdk build
+pnpm add file:./audren/packages/sdk
 ```
 
 ## Quick Example
@@ -34,8 +39,10 @@ const store = new CompactWalletStore(0);
 const fetchBatch = createSolanaRpcBatchFetcher(process.env.SOLANA_RPC_URL!);
 await syncCompactStoreWithRpc({ store, fvk, fetchBatch });
 
-// Local BN254 Groth16 WASM prover (Node.js or Browser Web Worker)
+// Local BN254 Groth16 WASM prover. In Node.js, init() reads the bundled wasm and
+// 3.93 MB proving key; in a browser, serve both files and pass their URLs.
 const prover = await AudrenWasmProver.init();
+// const prover = await AudrenWasmProver.init({ wasmUrl: '/wasm/audren_circuits.wasm', pkUrl: '/wasm/audren_joinsplit.pk' });
 ```
 
 ## Verify Locally

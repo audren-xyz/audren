@@ -54,9 +54,14 @@ export default function TermsPage() {
               <h3>Non-custodial Apache-2.0 software</h3>
               <p className={styles.cellLead}>
                 Audren on-chain code and client libraries are released as non-custodial open-source
-                software under the Apache-2.0 license.
+                software under the Apache-2.0 license: under the deployed program, no operator key can
+                spend your notes.
               </p>
               <ul className={styles.dashList}>
+                <li>During pre-audit releases, the program&rsquo;s upgrade authority can replace the program code, including its custody logic. Verify the deployed hash below before use.</li>
+                <li>The pool authority cannot spend notes, but it can pause deposits and private spends (full exits stay open) and change checkpoint timing within fixed bounds. Because every spend needs a recent checkpoint, extreme settings could delay exits.</li>
+                <li>Both authorities are currently one operator key (<code style={{ wordBreak: 'break-all' }}>{AUDREN.operatorAuthority}</code>), not a multisig.</li>
+                <li>Token issuers keep their own controls: a freeze authority, permanent delegate, pausable mint, or upgradable transfer hook applies to the shared vault account for that token and so to every Audren holder of it.</li>
                 <li>Users and institutions are solely responsible for safeguarding master seeds, viewing keys, and auditor keys.</li>
                 <li>Users are solely responsible for tax reporting and regulatory compliance within their jurisdictions.</li>
               </ul>
@@ -67,9 +72,13 @@ export default function TermsPage() {
               <h3>Independent verification</h3>
               <p className={styles.cellLead}>
                 Audren is in active pre-audit release using Groth16 keys derived from the official
-                Hermez/PSE Perpetual Powers of Tau (71+ contributors) plus Audren&rsquo;s verifiable
-                BGM17 Phase-2 ceremony (<code>ceremony/transcript.json</code>), with a mutable
-                Solana BPF upgrade authority until external third-party security audits conclude.
+                Hermez Perpetual Powers of Tau (54 contributions plus a beacon) plus Audren&rsquo;s
+                two-contribution BGM17 Phase-2 ceremony (<code>ceremony/transcript.json</code>). Both
+                Phase-2 contributions were made by Audren, so until an independent contributor joins,
+                proof soundness depends on Audren having destroyed those secrets. No
+                independent audit has been published yet, and the Solana upgrade authority remains
+                mutable during pre-audit releases; any decision to revoke it will be announced
+                separately.
               </p>
               <ul className={styles.dashList}>
                 <li>Before committing capital, review the sBPFv3 source code and Groth16 circuit in <code>audren-xyz/audren</code> and verify deployed ProgramData hashes on-chain.</li>
@@ -121,7 +130,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><span className={styles.tableLead}>Pool #0 (Permissionless)</span></td>
+                    <td><span className={styles.tableLead}>Pool #0 (open to anyone; has a pool authority)</span></td>
                     <td><code>{AUDREN.pool0Pda}</code></td>
                     <td>
                       <a href={solscanAddress(AUDREN.pool0Pda)} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -139,7 +148,7 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><span className={styles.tableLead}>Verified Build Hash ({AUDREN.releaseTag})</span></td>
+                    <td><span className={styles.tableLead}>Verified Build Hash ({AUDREN.deployedReleaseTag})</span></td>
                     <td><code>{AUDREN.executableHash}</code></td>
                     <td>
                       <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer" className={styles.textLink}>
@@ -151,7 +160,7 @@ export default function TermsPage() {
                     <td><span className={styles.tableLead}>Deployed ELF SHA-256 ({AUDREN.elfBytes.toLocaleString()} B)</span></td>
                     <td><code>{AUDREN.elfSha256}</code></td>
                     <td>
-                      <a href={AUDREN.githubRelease} target="_blank" rel="noreferrer" className={styles.textLink}>
+                      <a href={AUDREN.deployedReleaseUrl} target="_blank" rel="noreferrer" className={styles.textLink}>
                         GitHub Release <ArrowUpRight size={12} />
                       </a>
                     </td>

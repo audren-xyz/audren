@@ -23,19 +23,19 @@ export const RAIL_FLOWS: readonly RailFlow[] = [
     id: 'dex',
     tab: 'DEX swap',
     stops: ['Escrow shard', 'DEX route'],
-    stopNotes: ['1 of 16, signs the CPI', 'Jupiter, Orca, Raydium…'],
+    stopNotes: ['1 of 16, signs the CPI', 'Jupiter, DFlow, OKX'],
     chips: ['sealed note', '100 USDC', 'SOL ≥ min out', 'sealed note'],
     caption:
-      'Your note pays a shared escrow, the escrow trades on a public DEX, and the output is sealed back into the pool in the same transaction.',
+      'Your note pays a shared escrow, the escrow trades through a public aggregator route, and the output is sealed back into the pool in the same transaction. This is the flow the app ships today.',
   },
   {
     id: 'lend',
     tab: 'Lending',
     stops: ['Escrow shard', 'Lending reserve'],
     stopNotes: ['1 of 16, signs the CPI', 'Supplies USDC'],
-    chips: ['sealed note', '100 USDC', 'kUSDC receipt', 'sealed note'],
+    chips: ['sealed note', '100 USDC', 'collateral token', 'sealed note'],
     caption:
-      'Supply to a lending reserve and keep the interest-bearing receipt token as a private note.',
+      'Possible through the SDK (not yet exercised on Mainnet): supply to a lending reserve in one escrow-signed call and keep its interest-bearing collateral token as a private note.',
   },
   {
     id: 'vault',
@@ -43,23 +43,23 @@ export const RAIL_FLOWS: readonly RailFlow[] = [
     stops: ['Escrow shard', 'Yield vault'],
     stopNotes: ['1 of 16, signs the CPI', 'Deposits the asset'],
     chips: ['sealed note', '100 USDC', 'vault shares', 'sealed note'],
-    caption: 'Enter a yield vault and hold its share tokens privately until you exit the same way.',
+    caption: 'Possible through the SDK (not yet exercised on Mainnet): enter a vault that mints share tokens in one call, and hold the shares privately until you exit the same way.',
   },
   {
     id: 'stake',
     tab: 'Liquid staking',
-    stops: ['Escrow shard', 'Stake pool'],
-    stopNotes: ['1 of 16, signs the CPI', 'Stakes SOL'],
+    stops: ['Escrow shard', 'LST route'],
+    stopNotes: ['1 of 16, signs the CPI', 'Swaps WSOL for JitoSOL'],
     chips: ['sealed note', '2 WSOL', 'JitoSOL', 'sealed note'],
-    caption: 'Turn shielded SOL into a liquid staking token without a public wallet ever holding it.',
+    caption: 'Swap shielded SOL into a liquid staking token through an aggregator route, without a wallet linked to you ever holding it.',
   },
   {
     id: 'lp',
-    tab: 'Perp LP · RWA',
-    stops: ['Escrow shard', 'Mint / redeem'],
-    stopNotes: ['1 of 16, signs the CPI', 'JLP or treasury vault'],
+    tab: 'Perp LP',
+    stops: ['Escrow shard', 'JLP route'],
+    stopNotes: ['1 of 16, signs the CPI', 'Buys or sells JLP'],
     chips: ['sealed note', '100 USDC', 'JLP', 'sealed note'],
-    caption: 'Mint or redeem pool tokens and tokenized treasuries that pay out a standard SPL receipt.',
+    caption: 'Buy or sell perp liquidity tokens such as JLP through an aggregator route and hold them as a private note.',
   },
   {
     id: 'session',
@@ -68,7 +68,7 @@ export const RAIL_FLOWS: readonly RailFlow[] = [
     stopNotes: ['Pays its own fee', 'Borrow or trade perps'],
     chips: ['sealed note', '2 SOL', 'positions public', 'swept back'],
     caption:
-      'Stateful protocols use a fresh session wallet: fund it from the pool with zero prior SOL, trade in public, then sweep every lamport back.',
+      'Stateful protocols use a fresh session wallet: fund it from the pool with zero prior SOL, trade in public, then sweep the rest back with a public deposit. The exit, the positions and the sweep are linked through that wallet.',
   },
 ]
 
@@ -131,7 +131,7 @@ export function EscrowRail() {
             { title: flow.stops[1], note: flow.stopNotes[1] },
             {
               title: 'Shared pool',
-              note: flow.id === 'session' ? '0-dust deposit back' : 'Fresh sealed note',
+              note: flow.id === 'session' ? 'Public deposit → new note' : 'Fresh sealed note',
             },
           ].map((node, idx) => (
             <div

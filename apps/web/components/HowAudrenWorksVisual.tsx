@@ -54,9 +54,9 @@ const FLOWS: FlowDefinition[] = [
     id: 'public-to-private',
     tabTitle: 'Public → Private',
     tabSub: 'Anyone pays your aud1… in any token',
-    exampleHeadline: 'Alice pays your aud1… address 500 USDC from a regular Phantom wallet',
+    exampleHeadline: 'Alice pays your aud1… address 500 USDC, signing with her regular Phantom wallet',
     exampleNote:
-      'Alice does not need an Audren account or a zero-knowledge proof. Works for Native SOL, any Classic SPL token, or any transferable Token-2022 mint.',
+      'Alice does not need an Audren account or a zero-knowledge proof: an SDK integration builds the deposit to your address and her wallet only signs it. (The Audren web app currently shields only into your own vault.) Works for native SOL, classic SPL tokens, and supported Token-2022 mints.',
     txHref: solscanTx(AUDREN.mainnet.depositTx, 'mainnet'),
     txLabel: 'Inspect real Mainnet deposit',
     demoHref: '/demo',
@@ -68,7 +68,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Alice picks 500 USDC and pastes your aud1…',
         packetLabel: '500 USDC + aud1…',
         detail:
-          'Alice enters your reusable Bech32m aud1… private address and chooses 500 USDC, SOL, BONK, or any transferable Token-2022 mint. Zero ZK proof generation is required: she signs a single unified Deposit (Tag 3) transaction (native SOL wraps atomically via SyncNative into WSOL alongside Classic SPL and Token-2022).',
+          'Alice enters your reusable Bech32m aud1… private address and chooses 500 USDC, SOL, BONK, or a supported Token-2022 mint. No ZK proof is needed: she signs one Deposit (Tag 3) transaction and pays network fees plus a small per-note rent contribution (native SOL wraps atomically into WSOL via SyncNative).',
         cryptoTag: 'Tag 3 Unified Deposit · 0 ZK proofs · 1 standard wallet signature',
       },
       {
@@ -84,7 +84,7 @@ const FLOWS: FlowDefinition[] = [
         actor: 'Global 4-ary MASP Pool #0',
         title: 'Tokens enter the unified vault; leaf appends to lane',
         shortLabel: '500 USDC → Unified vault · cm → SubtreePage',
-        packetLabel: '4^20 Global Tree (16 lanes)',
+        packetLabel: '4^20 Global Tree (4 of 16 lanes active)',
         detail:
           'Solana transfers 500 USDC into Audren’s canonical vault_auth ATA, computes cm = Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, net_received, blinding) on-chain, updates the active lane’s 4-ary Depth-18 frontier, and writes the 106 B SoA memo entry to MemoPage (10,240 B, 96 notes/page).',
         cryptoTag: 'Unified Pool #0 · Net-delta Token-2022 solvency · 4→8→16 lanes',
@@ -95,7 +95,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'CompactWalletStore scans MemoPages and freezes siblings',
         packetLabel: '+500 USDC Private',
         detail:
-          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts, checks the 2-byte view tag (skipping 65,535/65,536 stranger memos instantly), verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages permanently.',
+          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts and checks each memo’s 2-byte view tag (one cheap key exchange per memo; about 65,535 of every 65,536 stranger memos are skipped without decryption). It verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages. The note is spendable once a RootCheckpoint covering it is published (on demand; checkpoints are at least 8 slots apart).',
         cryptoTag: 'Ordinary Solana RPC · Zero indexer · 1.28 MB store @ 10M notes',
       },
     ],
@@ -109,8 +109,8 @@ const FLOWS: FlowDefinition[] = [
       {
         label: 'Recipient (You)',
         visibility: 'hidden',
-        badge: 'Hidden',
-        value: 'One-time Poseidon stealth owner in place of the reusable recipient address',
+        badge: 'Not directly linked',
+        value: 'A fresh one-time owner key is published instead of your aud1… address. The deposit note itself (key, token, amount) is public; no on-chain field names your aud1… address, but matching amounts and timing can still link it',
       },
       {
         label: 'Link to other payments',
@@ -132,9 +132,9 @@ const FLOWS: FlowDefinition[] = [
     tabSub: 'Pay an aud1… with a separate fee payer',
     exampleHeadline: 'You send 500 USDC from your Private Balance to Bob’s aud1… address',
     exampleNote:
-      'This relayed private-transfer example conceals the spent record, uses a fresh recipient key, and blinds the token and amount. The relay fee payer and transaction metadata are public.',
+      'This relayed private transfer hides which notes were spent, uses a fresh recipient key, and hides the token and amount from on-chain observers. The relay sees your IP and the token it quotes a fee for; the relay fee payer and transaction metadata are public.',
     txHref: solscanTx(AUDREN.mainnet.transferTx, 'mainnet'),
-    txLabel: 'Inspect Mainnet private send (0 user signers)',
+    txLabel: 'Inspect a self-paid Mainnet private send',
     demoHref: '/demo',
     demoLabel: 'Try Private Send live',
     steps: [
@@ -144,7 +144,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'BN254 Groth16 over 20-level 4-ary super_root',
         packetLabel: '192 B Groth16 Proof',
         detail:
-          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in a dedicated WASM Web Worker against a recent RootCheckpoint: “I own 1 or 2 unspent notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and their key-separated nullifiers have never been spent.”',
+          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in a dedicated WASM Web Worker against a recent RootCheckpoint: “I own 1 or 2 notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and these are their correctly derived, key-separated nullifiers.” Solana then rejects the spend if either nullifier was already recorded.',
         cryptoTag: 'Tag 5 Transact · 17,861 R1CS · Key-separated nk nullifiers',
       },
       {
@@ -159,10 +159,10 @@ const FLOWS: FlowDefinition[] = [
       {
         actor: 'Open privacy relayer',
         title: 'Relayer pays gas while your wallet never signs',
-        shortLabel: '1 Solana v1 tx · Optional shielded cm2 fee note',
+        shortLabel: '1 Solana v1 tx · Sponsored or private cm2 fee note',
         packetLabel: 'Relayed Solana v1 Tx',
         detail:
-          'Your browser sends the finished proof to relay.audren.xyz (or your own self-hosted relay). For private transfers, the optional relayer fee settles as shielded output cm2 verified via the relayer’s read-only FullViewingKey (up to 4 parallel 2 → 1 merges fit in one Solana Transaction v1). Your public wallet never signs.',
+          'Your browser sends the finished proof to relay.audren.xyz (or your own self-hosted relay). The hosted relay currently sponsors private transfers and takes no fee note. A relay that charges a fee is paid as a private output (cm2) that it checks with its own read-only viewing key, so it learns the fee’s token and amount (not the amount sent to Bob). Any relay sees your IP. Your public wallet never signs.',
         cryptoTag: 'Solana Tx v1 (0x81) · ~130k–160k CU · Zero user wallet signers',
       },
       {
@@ -179,8 +179,8 @@ const FLOWS: FlowDefinition[] = [
       {
         label: 'Sender wallet',
         visibility: 'hidden',
-        badge: 'Absent (0 signers)',
-        value: 'Signed only by the relayer; your wallet never appears on the transaction',
+        badge: 'Absent when relayed',
+        value: 'When relayed, only the relayer signs and your wallet never appears; if you self-pay, your wallet is the fee payer',
       },
       {
         label: 'Recipient (Bob)',
@@ -205,12 +205,12 @@ const FLOWS: FlowDefinition[] = [
   {
     id: 'private-swap',
     tabTitle: 'Shielded DeFi',
-    tabSub: 'ExecViaEscrow: swap, lend, stake in 1 tx',
-    exampleHeadline: 'Swap, lend, stake, or mint yield tokens from your Private Balance in 1 tx',
+    tabSub: 'ExecViaEscrow: private-balance swaps in 1 tx',
+    exampleHeadline: 'Swap from your Private Balance in 1 tx (lending and vaults via the SDK)',
     exampleNote:
-      'Tag 6 ExecViaEscrow is protocol-agnostic across SPL and Token-2022: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA vaults. External DeFi mints, amounts, and output record remain public.',
+      'Tag 6 ExecViaEscrow can call any compatible Token A → Token B program. The hosted relay quotes swaps through Jupiter, DFlow, and OKX, and self-hosted relays can add Titan (aggregators that route across DEXs such as Raydium, Orca, and Meteora); LSTs are bought through those aggregator routes. Lending supply or vault deposits can be targeted with the SDK’s generic builder when the target program fits one escrow-signed call; they are not in the app and have not yet been exercised on Mainnet. The DeFi call, its mints, amounts, and the resulting note remain public.',
     txHref: solscanTx(AUDREN.mainnet.swapTx, 'mainnet'),
-    txLabel: 'Inspect ExecViaEscrow transaction',
+    txLabel: 'Inspect a relayed ExecViaEscrow swap (0 user signers)',
     demoHref: '/demo',
     demoLabel: 'Try Shielded DeFi live',
     steps: [
@@ -234,20 +234,20 @@ const FLOWS: FlowDefinition[] = [
       },
       {
         actor: 'Protocol-agnostic DeFi CPI',
-        title: 'Execute any Token A → Token B Solana program',
-        shortLabel: 'DEX · Lending Supply · LST · Yield Vault · RWA',
+        title: 'Execute one compatible Token A → Token B program call',
+        shortLabel: 'Aggregator swap today · other one-call programs via SDK',
         packetLabel: 'DeFi Fill ≥ min_out',
         detail:
-          'Inside the same Solana Transaction v1, Audren invokes the target Solana program via PDA CPI, leaving >1.2M CU for multi-hop DEXs, lending reserves, liquid staking, or vaults. If net output falls below min_amount_out, the entire transaction reverts cleanly.',
+          'Inside the same Solana Transaction v1, Audren invokes the target Solana program via PDA CPI, leaving >1.2M CU for multi-hop aggregator routes or other single-call programs. If net output falls below min_amount_out, the entire transaction reverts cleanly.',
         cryptoTag: 'Any stateless Token A → Token B CPI · min_amount_out enforced',
       },
       {
         actor: 'Auto-reshielded on-chain',
-        title: 'Exact output settles to your XOR-masked dynamic note',
+        title: 'Exact output settles into a fresh note for you',
         shortLabel: 'Measured net vault delta committed on-chain',
         packetLabel: 'Private Token B Note',
         detail:
-          'Audren measures the exact vault balance delta received, settles any EXEC_FLAG_FEE_ON_OUTPUT relayer fee, sweeps every remaining atom into the canonical vault ATA, and writes a domain-separated 72 B XOR-masked AUD1DYN1 dynamic memo (zero plaintext markers at rest) plus a Poseidon5 commitment to your stealth owner.',
+          'Audren measures the exact vault balance delta received, settles any EXEC_FLAG_FEE_ON_OUTPUT relayer fee, sweeps every remaining atom into the canonical vault ATA, and writes the output note to your fresh one-time owner key with a 72 B AUD1DYN1 memo so your wallet can find it. That note’s token and amount are public; its link to your aud1… address and its later spend stay private.',
         cryptoTag: 'Measured net delta · Token-2022 safe · 72 B AUD1DYN1 dynamic memo',
       },
     ],
@@ -262,7 +262,7 @@ const FLOWS: FlowDefinition[] = [
         label: 'Your public wallet',
         visibility: 'hidden',
         badge: 'Absent',
-        value: 'Relayer paid gas (reimbursed natively); shared escrow PDA signed the DeFi CPI',
+        value: 'Relayer paid gas (it can be reimbursed from the input or output; this swap paid no relay fee); shared escrow PDA signed the DeFi CPI',
       },
       {
         label: 'Public unshield step',
@@ -279,8 +279,8 @@ const FLOWS: FlowDefinition[] = [
       {
         label: 'New token or yield receipt',
         visibility: 'hidden',
-        badge: 'Ownership private',
-        value: 'Reshielded immediately to your fresh Poseidon stealth owner inside Pool #0',
+        badge: 'Owner private',
+        value: 'Lands in Pool #0 as an identifiable note under a fresh one-time key; who owns it and when it is spent stay private',
       },
     ],
   },
@@ -288,11 +288,11 @@ const FLOWS: FlowDefinition[] = [
     id: 'prove-or-exit',
     tabTitle: 'Receipt / Exit & Sessions',
     tabSub: 'Selective disclosure, unwrap WSOL, or DeFi sessions',
-    exampleHeadline: 'Prove 1 invoice, self-pay an exit, or fund a 0-SOL DeFi session wallet',
+    exampleHeadline: 'Prove one payment, self-pay an exit, or fund a 0-SOL DeFi session wallet',
     exampleNote:
       'Export a Mode 1 SelectiveDisclosureProof (1 Poseidon5 check) or Mode 2 FullViewingKey, exit with self-paying native fees and atomic WSOL → SOL unwrap, or fund a deterministic session wallet (B_0, B_1…) for stateful borrow or perp protocols and sweep every remaining lamport back with zero dust.',
     txHref: solscanTx(AUDREN.mainnet.withdrawTx, 'mainnet'),
-    txLabel: 'Inspect Go Public withdrawal',
+    txLabel: 'Inspect a self-paid Mainnet withdrawal',
     demoHref: '/demo?mode=sandbox',
     demoLabel: 'Test Receipts & Exit Flows',
     steps: [
@@ -311,13 +311,13 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Mode 1 = 1 Poseidon hash · Mode 2 = FullViewingKey',
         packetLabel: 'Receipt / FVK JSON',
         detail:
-          'Mode 1 SelectiveDisclosureProof discloses (mint, amount, blinding, stealth_owner) for strictly 1 chosen note verified in 1 Poseidon5 check against SubtreePage (zero keys shared). Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) tracks both incoming notes and spent nullifiers with zero spend authority.',
+          'Mode 1 SelectiveDisclosureProof opens one chosen note (mint, amount, blinding, one-time owner key, pool position) and is checked with one Poseidon5 hash against SubtreePage, with no keys shared. It proves that payment exists on-chain, not who holds it now: the sender knows the same opening. Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) shows incoming notes and spends with zero spend authority.',
         cryptoTag: 'Zero spend_sk shared · Mode 1 single-note · Mode 2 key-separated nk',
       },
       {
         actor: 'Self-paying exit and unwrap',
         title: 'Native relayer fee plus atomic WSOL → Native SOL',
-        shortLabel: 'Tag 5 Transact · WITHDRAW_FLAG_UNWRAP_WSOL · Pause-immune',
+        shortLabel: 'Tag 5 Transact · WITHDRAW_FLAG_UNWRAP_WSOL · Full exits pass pause',
         packetLabel: 'Direct Native SOL',
         detail:
           'Withdraw SOL or any SPL token to any wallet or deterministic DeFi Session keypair B_i with zero prior gas: pay relayer_fee natively from the withdrawn note and unwrap WSOL straight into Native SOL in one instruction via an ephemeral audren_unwrap PDA (full exit bypasses SetPaused).',
@@ -329,22 +329,28 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Tag 3 Deposit(NATIVE_SOL | FEE_FROM_AMOUNT) → 0 lamports',
         packetLabel: '0-Dust Reshield',
         detail:
-          'After closing a stateful borrow or perp position on a session wallet B_i, sweep 100% of remaining SOL back into the pool with unified Deposit (DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT): the protocol deducts deterministic LaneRentVault rent from the deposit itself, leaving 0 lamports behind. Remember that stateful DeFi positions opened by B_i remain public on Solana.',
+          'After closing a stateful borrow or perp position on a session wallet B_i, sweep 100% of remaining SOL back into the pool with unified Deposit (DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT): the protocol deducts the deterministic LaneRentVault rent from the deposit itself, leaving 0 lamports behind once B_i has closed its token accounts. B_i’s funding exit, its DeFi positions, and this sweep are public and linked to each other through B_i.',
         cryptoTag: 'Tag 3 Deposit · NATIVE_SOL + FEE_FROM_AMOUNT · 0-lamport sweep',
       },
     ],
     solscan: [
       {
+        label: 'Exit recipient, token, and amount',
+        visibility: 'visible',
+        badge: 'Public at exit',
+        value: 'The receiving wallet, token, withdrawn amount, and relayer fee are visible; which pool note paid for it is not',
+      },
+      {
         label: 'Rest of your balance',
         visibility: 'hidden',
         badge: 'Hidden',
-        value: 'Receipt reveals strictly 1 chosen payment and nothing else',
+        value: 'A receipt opens only the one payment you choose; your other notes stay private',
       },
       {
         label: 'Self-paying exit and unwrap',
         visibility: 'verified',
         badge: '1 tx, 0-SOL bootstrap',
-        value: 'Relayer reimbursed natively; WSOL unwraps atomically to Native SOL',
+        value: 'A relay can take its fee in SOL from the withdrawal; WSOL unwraps atomically to Native SOL',
       },
       {
         label: 'Stateful DeFi session positions',
@@ -376,7 +382,7 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
     question: 'Can anyone spend the same private note twice?',
     verdict: 'Rejected by Nullifier PDAs',
     answer:
-      'Every note derives one deterministic nullifier Poseidon4(4, nk, cm, global_leaf_index). The first spend initializes a permanent 0-byte Solana NullifierPDA and appends a 16-byte prefix to NullifierPage for zero-indexer wallet sync. Replays fail immediately at Solana’s runtime.',
+      'Every note derives one deterministic nullifier Poseidon4(4, nk, cm, global_leaf_index). The first spend initializes a permanent 0-byte Solana NullifierPDA and appends a 16-byte prefix to NullifierPage for zero-indexer wallet sync. A replay finds the PDA already exists, so the program rejects it (NullifierAlreadyUsed · 6012) and the whole transaction reverts.',
     primitive: 'Key-separated nk = Poseidon2(10, spend_sk) · NullifierPDA + NullifierPage',
   },
   {
@@ -390,9 +396,9 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
   {
     tag: 'Setup and ceremony',
     question: 'What is the Groth16 trusted-setup provenance?',
-    verdict: 'Perpetual PTAU (71+) · BGM17 · Pre-audit',
+    verdict: 'Hermez PPoT (54 + beacon) · BGM17 · Pre-audit',
     answer:
-      'Audren freezes one minimal 17,861-constraint JoinSplit4AryCircuit capable of scaling 4→8→16 lanes without ever re-running a ceremony. Phase 1 uses Hermez/PSE Perpetual Powers of Tau (71+ independent public contributors) and Phase 2 uses verifiable BGM17 zeroized contributions plus a live drand Quicknet and Solana Mainnet beacon (ceremony/transcript.json). External security audit is pending prior to freezing upgrade authority.',
+      'Audren freezes one minimal 17,861-constraint JoinSplit4AryCircuit capable of scaling 4→8→16 lanes without re-running a ceremony for new lanes. Phase 1 uses the Hermez Perpetual Powers of Tau file powersOfTau28_hez_final_15.ptau (54 public contributions plus a beacon). Phase 2 currently has 2 verifiable BGM17 contributions generated by the Audren release environment, sealed with a public drand Quicknet and Solana Mainnet beacon (ceremony/transcript.json). Soundness assumes at least one Phase-2 contributor destroyed their secret, and today both are Audren. Independent contributions are open (adopted only through a program upgrade); no external audit has been published, and the upgrade authority stays mutable during pre-audit releases.',
     primitive: 'BN254 Groth16 (vk_id = 0) · 192 B proof · 3.93 MB compressed PK',
   },
   {
@@ -408,8 +414,8 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
     question: 'Can Audren, a relayer, or a viewing-key holder steal or freeze funds?',
     verdict: 'Full-note exit bypasses pause',
     answer:
-      'Pool authority cannot spend shielded notes. Full withdrawals (output_mask == 0, including atomic WSOL unwrap) bypass SetPaused. Relayers cannot alter ctx_hash-bound outputs or router accounts. FullViewingKey (spend_pk, nk, view_sk, view_pk) is strictly read-only. Token issuer controls and mutable upgrade authority remain separate risks.',
-    primitive: 'ctx_hash-bound outputs · Pause-immune full exit · Key separation',
+      'Pool authority cannot spend shielded notes. Full withdrawals (output_mask == 0, including atomic WSOL unwrap) bypass SetPaused. Relayers cannot alter ctx_hash-bound outputs or router accounts. FullViewingKey (spend_pk, nk, view_sk, view_pk) is strictly read-only. Token issuer controls, the pool authority’s power over checkpoint timing, and the mutable upgrade authority (one operator key today) remain separate risks.',
+    primitive: 'ctx_hash-bound outputs · Full exits pass pause · Key separation',
   },
   {
     tag: 'Atomic escrow',

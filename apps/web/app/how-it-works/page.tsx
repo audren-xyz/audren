@@ -27,7 +27,7 @@ export default function HowItWorksPage() {
             <p className={styles.heroLead}>
               The shared vault holds original Solana assets while your device holds the spending
               key. Step through one reusable <code>aud1…</code> address, four real-world flows, and
-              the six checks Solana enforces on-chain.
+              the checks the Audren program runs before any spend settles.
             </p>
           </div>
           <div className={styles.heroMetaStrip}>

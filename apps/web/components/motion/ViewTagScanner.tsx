@@ -9,20 +9,20 @@ import h from './HowScenes.module.css'
 
 const MEMOS = 96
 const MATCHES: Record<number, { amount: string; source: string }> = {
-  29: { amount: '+500 USDC', source: 'Deposit from Alice' },
-  70: { amount: '+2 SOL', source: 'Private transfer' },
+  29: { amount: '+500 USDC', source: 'memo: invoice-114' },
+  70: { amount: '+2 SOL', source: 'memo: payment' },
 }
 
 const STEPS = [
   {
     label: 'Download page',
     caption:
-      'Your device downloads a whole MemoPage of 96 encrypted memos through an ordinary RPC call. The RPC cannot tell which memo, if any, is yours.',
+      'Your device downloads a whole MemoPage of 96 encrypted memos through an ordinary RPC call. The RPC cannot tell which memo, if any, is yours, though it still sees your IP and that you are syncing Audren.',
   },
   {
     label: 'Check view tags',
     caption:
-      'Each memo carries a 2-byte view tag. Your view key predicts the tag for memos meant for you, so 65,535 of every 65,536 strangers are skipped without decrypting.',
+      'Each memo carries a 2-byte view tag. Your view key and the memo’s one-time key give the tag it would carry if it were yours; about 65,535 of every 65,536 strangers fail this cheap check and are never decrypted.',
   },
   {
     label: 'Decrypt matches',
@@ -106,8 +106,8 @@ export function ViewTagScanner() {
         <p className={h.scanTally}>
           {step >= 2 ? (
             <>
-              <strong>96</strong> memos checked · <strong>94</strong> skipped by tag ·{' '}
-              <strong>2</strong> opened
+              <span>96</span> memos checked · <span>94</span> skipped by tag ·{' '}
+              <span>2</span> opened
             </>
           ) : step === 1 ? (
             'Comparing tags…'

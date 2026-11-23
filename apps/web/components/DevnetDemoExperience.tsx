@@ -656,7 +656,7 @@ export function DevnetDemoExperience() {
             <ArrowLeft size={13} /> audren.xyz
           </Link>
           <div className="demo-meta-tags mono">
-            <span>Audren {AUDREN.releaseTag}</span>
+            <span>Audren {AUDREN.deployedReleaseTag}</span>
             <span>BN254 Groth16 · 192 B proof</span>
             <span>4-ary Depth-20 MASP</span>
           </div>
@@ -666,7 +666,7 @@ export function DevnetDemoExperience() {
           <h1>Audren Wallet &amp; Sandbox</h1>
           <p>
             Connect a Solana wallet on Devnet or Mainnet, or run the zero-wallet Sandbox right in your
-            browser to encrypt a versioned 72-byte SoA note (106 B wire entry), generate a real 192-byte
+            browser to encrypt a 72-byte memo (a 106 B on-chain entry), generate a real 192-byte
             BN254 Groth16 proof in a dedicated Web Worker, broadcast live on Devnet, and verify a Mode 1
             selective disclosure receipt.
           </p>
@@ -956,7 +956,7 @@ export function DevnetDemoExperience() {
                           </div>
                           <div className="lv-balance-row">
                             <div>
-                              <span className="lv-row-title">Output commitments (cm0 / cm1)</span>
+                              <span className="lv-row-title">Output commitments (cm0 / cm1 shown, cm2 padded)</span>
                               <span className="mono">
                                 {(Number(proofArtifact.recipientAmountLamports) / 1e9).toFixed(4)} +{' '}
                                 {(Number(proofArtifact.changeAmountLamports) / 1e9).toFixed(4)} SOL (hidden on-chain)

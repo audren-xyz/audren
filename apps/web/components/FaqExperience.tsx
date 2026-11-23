@@ -21,107 +21,142 @@ const FAQS: readonly FaqItem[] = [
   {
     id: 'boundaries',
     category: 'privacy',
-    catLabel: 'Privacy & global MASP',
-    q: 'Are public deposits, withdrawals and optional relayers design choices?',
-    a: 'Yes. Deposits expose the funding account, token, amount, and appended leaf. Withdrawals expose the destination, token, and amount; external DeFi CPIs expose the target program, mints, and routed amounts. Audren conceals which historical note(s) in the global 4^20 Multi-Asset Shielded Pool fund a spend. Anyone can run a compatible relayer, or submit directly via any Solana RPC.',
+    catLabel: 'Privacy',
+    q: 'What does Audren hide, and what stays public?',
+    a: 'In a private transfer, observers cannot see which notes you spent, who receives, which token, or how much. Some things stay public by design: a deposit shows the depositing wallet, token, and amount; a withdrawal shows the destination, token, and amount; a DeFi call shows the external program, tokens, and routed amounts; and every transaction shows its fee payer and timing. If you pay fees from your own wallet instead of through a relayer, your wallet appears as the fee payer. Audren hides which earlier note in the shared pool funded a spend.',
   },
   {
     id: 'tvl',
     category: 'privacy',
-    catLabel: 'Privacy & global MASP',
-    q: 'Does a global Merkle tree or high TVL guarantee absolute anonymity?',
-    a: 'No. Proving membership over the entire historical 4^20 global pool eliminates small ring-selection leaks, and private transfers default to a uniform padded shape (2 nullifiers, 3 encrypted outputs with output_mask = 0b111, randomized append lane, automatic 2-input coin selection, and up to 4 parallel 2 → 1 private Transact merges per Solana Transaction v1), with an opt-in omit_nf1 economy mode that saves rent while exposing 1-input arity. Timing correlation, public entry/exit amounts, and IP/RPC metadata still narrow practical anonymity. More independent, plausible pool activity helps; raw TVL alone does not establish anonymity.',
-  },
-  {
-    id: 'solvency',
-    category: 'custody',
-    catLabel: 'Custody, MPC & audits',
-    q: 'Do public vault balances prove solvency?',
-    a: 'No. Inspectable WSOL and SPL vault accounts show held assets, not all private liabilities. The 17,861-R1CS Groth16 conservation/range constraints and net-receipt accounting enforce on-chain accounting rules under the circuit and implementation assumptions, but are not a substitute for an independent third-party audit and broader community Phase-2 ceremony contributions.',
+    catLabel: 'Privacy',
+    q: 'How large is my anonymity set? Does a big pool or high TVL guarantee anonymity?',
+    a: 'No. Your anonymity set is the real notes in the pool that could plausibly be yours, not the tree’s capacity (4^20, about 1.1 trillion leaves) or the pool’s TVL. The pool is young, so that set is small today; the live note count is at audren.xyz/api/pool. Private transfers default to one uniform shape (2 nullifiers, 3 outputs, random append lane) so 1-input and 2-input spends look alike. Opt-in economy mode (omit_nf1) saves rent but shows a 1-input spend, and a transaction holding several merges is recognizable as a consolidation. Timing, public entry and exit amounts, and IP or RPC metadata can still narrow the set. More independent activity helps; TVL alone does not.',
   },
   {
     id: 'solscan',
     category: 'privacy',
-    catLabel: 'Privacy & global MASP',
-    q: 'What appears on Solscan for a private Transact transfer versus a deposit or exit?',
-    a: 'A default private Transact (Tag 5, ASSET_MODE_PRIVATE) emits a uniform padded footprint: checkpoint root, randomized output append lane, 2 nullifiers, 3 opaque 32 B commitments, 3 × 106 B encrypted SoA memos (72 B ChaCha20-Poly1305 AEAD ciphertexts), and the fee payer (relayer, which quotes flat per-mint fees without seeing transfer amounts). Opt-in omit_nf1 mode uses 1 nullifier on single-input spends to reduce rent. Sender identity, recipient stealth owner, token mint, and amount remain hidden. Deposits, public withdrawals, and external DeFi CPIs expose their public boundary mints and amounts.',
+    catLabel: 'Privacy',
+    q: 'What appears on Solscan for a private transfer?',
+    a: 'A default private Transact (Tag 5) shows the checkpoint root it proves against, a randomly chosen append lane, 2 nullifiers, 3 opaque 32-byte commitments, 3 encrypted 106-byte memos, the 192-byte proof, and the fee payer. The sender, recipient, token, and amount are not shown. The relayer you use is not blind: it learns the token (from the fee quote), sees your IP address, and checks any fee note owed to it, but it never learns the amount sent or the recipient.',
+  },
+  {
+    id: 'relayer-down',
+    category: 'privacy',
+    catLabel: 'Privacy',
+    q: 'What if the relayer is down or out of funds?',
+    a: 'Relayers are optional and replaceable. You can point the wallet at any compatible relay, self-host the open-source relay in apps/relay, or submit with your own wallet as fee payer (Direct Self-Pay), which publicly shows your wallet as the fee payer. Checkpoints are permissionless, so anyone can publish one. Direct wallet transactions use Solana’s smaller v0 format (1,232 B), so very large swap routes or merge batches may need a relay, which submits Transaction v1 (4,096 B).',
+  },
+  {
+    id: 'authority',
+    category: 'custody',
+    catLabel: 'Custody, setup & audits',
+    q: 'What can the pool authority and the upgrade authority do?',
+    a: 'Today both roles are held by one operator key (3WzAUV…67bV; full address on the Terms page), not a multisig. Neither authority can spend your notes under the deployed program. The pool authority can pause the pool, which blocks deposits, private transfers, partial withdrawals, and ExecViaEscrow; full withdrawals (output_mask == 0, including WSOL unwrap; the app drops its padding note while paused), checkpoints, and page openings keep working. It can also change checkpoint timing (interval and age limit) and rent-fee caps within fixed bounds, activate lanes, transfer authority in two steps, or renounce it (only while unpaused). Because every spend, including a full exit, needs a recent checkpoint, extreme checkpoint settings could delay or block exits; a change that freezes the interval after InitPool is written but not yet deployed. The program upgrade authority is stronger: it can replace the program code, including its custody logic. It stays mutable during pre-audit releases; any decision to revoke it will be announced separately. You can check the deployed build hash on the Terms page.',
+  },
+  {
+    id: 'pause-mpc',
+    category: 'custody',
+    catLabel: 'Custody, setup & audits',
+    q: 'Is Audren audited, and how was the trusted setup run?',
+    a: 'Audren has no independent third-party audit yet. Its Groth16 setup has two phases. Phase 1 reuses the Hermez Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau: 54 public contributions plus a beacon). Phase 2, specific to Audren’s circuit, so far has two contributions generated by the Audren release environment, sealed with a public drand Quicknet and Solana Mainnet beacon (ceremony/transcript.json). A beacon adds no secrecy, so until independent contributors join, Phase-2 soundness relies on Audren having discarded its contribution secrets; a leaked secret would allow forged proofs. Anyone can verify the transcript and contribute (ceremony/README.md); a new contribution produces a new verifying key, which protects the live pool only after a program upgrade adopts it.',
+  },
+  {
+    id: 'signing',
+    category: 'custody',
+    catLabel: 'Custody, setup & audits',
+    q: 'Is it safe to sign the Audren vault message?',
+    a: 'Only on audren.xyz or a copy you host yourself. When you unlock with a browser wallet, the signature over the Audren Vault Key Derivation message becomes your Audren key. The message names the cluster and your wallet but not the website, so any site that gets you to sign the same text can derive the same keys and spend your private notes.',
+  },
+  {
+    id: 'recovery',
+    category: 'custody',
+    catLabel: 'Custody, setup & audits',
+    q: 'How do I recover my funds?',
+    a: 'Your notes live on-chain; recovering means re-deriving your keys and rescanning. A vault unlocked with a browser wallet is re-derived by signing the same Audren message with the same wallet on the same cluster (Devnet and Mainnet keys differ). A vault created in the browser is recoverable only from its encrypted backup file and passphrase (PBKDF2-SHA256 with 600,000 iterations, then AES-256-GCM); the seed is never stored in the browser. Wallet-derived keys are SHA-256 of that signature, so they only come back if your wallet signs the same message identically every time: unlock twice and compare your aud1… address before depositing. Wallet-derived vaults rescan the whole pool; a browser vault rescans from its birthday slot. Download a browser vault’s backup before depositing, because closing the tab without it loses the keys. Rescanning uses ordinary RPC; no server stores your notes or keys.',
+  },
+  {
+    id: 'solvency',
+    category: 'custody',
+    catLabel: 'Custody, setup & audits',
+    q: 'Do public vault balances prove solvency?',
+    a: 'No. Anyone can inspect the WSOL and SPL vault accounts, but they show assets held, not every private liability. The circuit’s conservation and range checks and the program’s net-receipt accounting enforce the rules on-chain, but only under the circuit, implementation, and trusted-setup assumptions above, and they are not a substitute for an independent audit.',
+  },
+  {
+    id: 'compliance',
+    category: 'custody',
+    catLabel: 'Custody, setup & audits',
+    q: 'How do receipts (Mode 1) and full viewing keys (Mode 2) work?',
+    a: 'A Mode 1 SelectiveDisclosureProof opens one chosen note (token, amount, one-time owner key, blinding, and its position in the pool), and anyone can check it with one Poseidon5 hash against the commitment on-chain, with no keys shared. It proves that payment exists on-chain; it does not prove who holds the note now or that it is unspent, and the sender knows the same opening. A Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) lets a watch-only wallet, auditor, or relayer see every incoming note and spend of that key, past and future, with no ability to spend. It cannot be revoked once shared.',
   },
   {
     id: 'dex',
     category: 'swaps',
     catLabel: 'DeFi & tokens',
-    q: 'What Solana DeFi protocols work with ExecViaEscrow (Tag 6)?',
-    a: 'ExecViaEscrow is protocol-agnostic across SPL and Token-2022. Any compatible PDA-signing Token A → Token B Solana CPI, including DEX aggregators and AMMs (Jupiter, Titan, DFlow, OKX DEX, Raydium, Orca, Meteora), lending reserve deposits (kUSDC/kSOL), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), or permissionless RWA mint/redeem, executes atomically through a randomly selected shard across 16 sharded audren_escrow PDAs (~158k CU, leaving >1.2M CU for DeFi). It binds router_program and every router account in ctx_hash, enforces pre/post WatchedEscrowBuf owner/delegate/lamport checks, supports EXEC_FLAG_FEE_ON_OUTPUT, and commits the exact measured net vault delta.',
+    q: 'Which DeFi protocols work with ExecViaEscrow (Tag 6)?',
+    a: 'Today the hosted relay routes swaps through DEX aggregators (Jupiter, DFlow, and OKX), direct self-pay in the app uses Jupiter, and self-hosted relays can also enable Titan or Bedrock. Those aggregators reach AMMs such as Raydium, Orca, and Meteora and can buy LSTs or JLP. The instruction itself is protocol-agnostic: any program that takes Token A from the shared escrow and returns Token B in one escrow-signed call can be targeted with the SDK’s generic ExecViaEscrow builder, such as a lending-reserve deposit or a vault that mints shares. Those flows are not in the app and have not yet been exercised on Mainnet. The program binds the router program, every router account, the minimum output, and the relayer fee into ctx_hash, checks that the escrow accounts were not altered, and reshields exactly what arrived (~158k CU of Audren overhead, leaving >1.2M CU for the route).',
   },
   {
     id: 'defi-sessions',
     category: 'swaps',
     catLabel: 'DeFi & tokens',
-    q: 'How do self-paying WSOL unwrap and deterministic Private DeFi Sessions work?',
-    a: 'For stateful DeFi protocols requiring a persistent user account (borrowing, perp margin, CLMM LP), SDKs derive deterministic Ed25519 session keypairs (B_0, B_1…) via HKDF-SHA256("audren/v1/defi_session"). You fund a 0-SOL session wallet in one relayed Tag 5 Transact using WITHDRAW_FLAG_UNWRAP_WSOL (unwrapping WSOL atomically into Native SOL via audren_unwrap PDA, pause-immune on full exit), and sweep every remaining lamport back with unified Tag 3 Deposit (DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT) leaving zero dust. Important: all positions and transactions executed by B_i on external DeFi protocols remain public on Solana.',
+    q: 'How do session wallets work for borrowing or perps?',
+    a: 'Protocols that keep a per-user account (borrowing, perp margin, concentrated LP) need a persistent signer, so the SDKs derive deterministic session wallets (B_0, B_1…) from your seed via HKDF-SHA256("audren/v1/defi_session"). You fund a 0-SOL session wallet with one relayed withdrawal that unwraps WSOL to SOL atomically (WITHDRAW_FLAG_UNWRAP_WSOL), use it in public, then sweep the rest back with a Deposit (DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT) that leaves no dust. These wallets are pseudonymous, not private: the funding withdrawal, every position, and the sweep are public and linked through the session wallet, and amounts and timing can tie them back to your pool activity.',
   },
   {
     id: 'tokens',
     category: 'swaps',
     catLabel: 'DeFi & tokens',
-    q: 'Which tokens and Token-2022 extensions does Audren support?',
-    a: 'Native SOL, Classic SPL, and transferable Token-2022 mints all share the single global 4^20 MASP with no Audren wrapper token. Native SOL wraps atomically via SyncNative on Deposit into the canonical WSOL vault ATA and unwraps atomically on Transact (WITHDRAW_FLAG_UNWRAP_WSOL), giving SOL the exact same unified SPL custody model as USDC and Token-2022. Deposits and ExecViaEscrow measure exact net vault balance deltas (safe for TransferFeeConfig), and trailing TransferHook accounts are sanitized before CPI. Issuer controls (freeze authority, permanent delegate, hook policies) still apply.',
-  },
-  {
-    id: 'single-tx',
-    category: 'crypto',
-    catLabel: 'Groth16 & RPC sync',
-    q: 'Why does every Audren instruction fit in a single Solana Transaction v1?',
-    a: 'One frozen 17,861-R1CS circuit (3.93 MB compressed proving key) produces a 192-byte compressed BN254 Groth16 proof generated locally in a dedicated browser Web Worker or native mobile SDK and verified on-chain via Solana native alt_bn128 pairing syscalls in ~103k–160k CU. Together with Solana Transaction v1 (SIMD-0385, 0x81, 4,096 B limit and inline compute budget), every instruction, including Transact (with up to 4 parallel 2 → 1 private merges per transaction) and complex multi-hop ExecViaEscrow CPIs, settles atomically in one transaction without multi-step proof uploads.',
+    q: 'Which tokens work, and which carry extra risk?',
+    a: 'Native SOL (held as WSOL), classic SPL tokens, and transferable Token-2022 tokens share one pool with no Audren wrapper token. Deposits credit the amount the vault actually received, so fee-on-transfer tokens are safe, and transfer-hook accounts are sanitized before any CPI. One caveat matters for every holder: all deposits of a token sit in one shared vault account, and Audren does not block mints whose issuer keeps a freeze authority (USDC has one), a permanent delegate, a pausable mint, or an upgradable transfer hook. If an issuer uses those powers on the vault, every Audren holder of that token is affected at once. Non-transferable tokens cannot move, and fee-on-transfer tokens deliver less than the requested amount on withdrawal.',
   },
   {
     id: 'scanning',
     category: 'crypto',
-    catLabel: 'Groth16 & RPC sync',
-    q: 'How do wallets sync and build Merkle proofs with zero mandatory indexer?',
-    a: 'CompactWalletStore runs a 2-pass sync over ordinary Solana RPC getMultipleAccounts with zero mandatory indexer or Forester. In default strict privacy mode, Pass 1 reads SubtreeRootPage (9,664 B, 300 finalized subtree roots = 126 KB per 1M notes), fetches full 10,240 B MemoPages (96 notes/page) in uniform batches (with uniform newly-synced SubtreePage fetches on incremental syncs of 25 pages or fewer, and deterministic wallet-keyed decoy-padded SubtreePage batches on larger catch-up and witness reconstruction), and verifies commitments to freeze 12 intra-subtree siblings without letting the RPC learn which page matched. Pass 2 always streams NullifierPages (9,664 B, 600 × 16 B prefixes) unconditionally to lane head without early-exit, matching only the wallet’s own unspent note prefixes and discarding stranger prefixes immediately, keeping local storage bounded at 1.28 MB at 10M pool notes while building Merkle proofs 100% offline. For bandwidth-constrained cold recovery over a self-hosted or trusted RPC, opt-in fast mode enables 3,328 B SoA dataSlice ([0..3,328]) scanning on catch-ups exceeding 25 pages, with the explicit tradeoff that targeted hit re-fetches reveal matched pages to the RPC.',
+    catLabel: 'Proofs, sync & costs',
+    q: 'How does a wallet find its payments without an indexer?',
+    a: 'Your device reads the pool’s pages directly with ordinary Solana RPC getMultipleAccounts. It downloads full 10,240 B MemoPages (96 encrypted memos each), checks each memo’s 2-byte view tag, decrypts only the matches, and re-hashes every decrypted note against the commitment on-chain so a forged memo cannot add balance. It then streams NullifierPages to see which of its notes were spent. In the default strict mode, full pages hide which memo is yours, and on large catch-ups the tree page you need is fetched inside a fixed batch of 16 pages (or every sealed page, while fewer than 16 exist). Local storage stays small (~1.28 MB at 10M notes), but a cold sync from the beginning downloads every memo and nullifier page; a birthday slot skips pages older than your wallet. Opt-in fast mode reads only the first 3,328 B of each page on catch-ups over 25 pages, at the cost of revealing which pages matched to the RPC. In the web app, those RPC requests pass through the audren.xyz worker.',
   },
   {
     id: 'rent-checkpoints',
     category: 'crypto',
-    catLabel: 'Groth16 & RPC sync',
-    q: 'How fast are checkpoints, and what does NullifierPDA rent cost?',
-    a: 'New deposits and notes become spendable after the next RootCheckpoint publication. Because PoolState sets ckpt_interval = 16 slots (~6.4 seconds), the open-source relayer exposes permissionless on-demand POST /v1/checkpoint (plus a 2-minute maintenance crank), so fresh notes checkpoint in ~6.4 seconds without waiting on a slow cron or linking your personal wallet as fee payer. On rent, Audren avoids a permissioned Forester by storing permanent 0-byte NullifierPDAs plus amortized page rent (~0.002–0.0046 SOL/tx depending on 1 vs 2 nullifiers and output count, compared to ~5,000 lamports with Forester-compressed nullifiers); on-chain checks read SysvarRent dynamically, so per-transaction cost scales down automatically if Solana lowers rent.',
+    catLabel: 'Proofs, sync & costs',
+    q: 'When does a new note become spendable, and what does each spend cost in rent?',
+    a: 'A new note becomes spendable once a RootCheckpoint covering it is published. Pool #0 currently uses ckpt_interval = 8 slots (about 3.2 seconds). Checkpoints are published on demand, not every 8 slots: the open-source relayer publishes one through permissionless POST /v1/checkpoint (plus a 2-minute maintenance crank), which usually takes seconds while the relay is funded. If it is not, any wallet can publish a checkpoint itself for a transaction fee (plus one-time rent if that ring entry does not exist yet). A spend must reference a checkpoint at most 1,800 slots (about 12 minutes) old; if yours has expired, publish or request a fresh one and prove again. Each spend also pays permanent rent: 0-byte NullifierPDAs plus amortized page rent, roughly 0.0007 SOL for a 1-nullifier full exit up to about 0.0036 SOL for a default 2-nullifier, 3-output transfer at current Mainnet rent. The program reads SysvarRent live, so the cost follows Solana’s rent.',
+  },
+  {
+    id: 'costs',
+    category: 'crypto',
+    catLabel: 'Proofs, sync & costs',
+    q: 'What does using Audren cost?',
+    a: 'The protocol charges no fee of its own. Every transaction pays Solana’s network fee, and every spend pays permanent rent for its nullifier and note accounts (see the rent answer above); a native SOL deposit must exceed the per-note rent fee of about 0.0007 SOL. Relays set their own prices and the wallet shows the quote before you sign. The hosted relay’s current policy is published at relay.audren.xyz/v1/info: private transfers are sponsored with no fee, limited to 12 per hour and 25 per day per IP within a 0.05 SOL daily sponsorship budget; swaps and relayed withdrawals can carry a relay fee that starts at 0.25% and rises to cover the relay’s rent and gas (capped at 4.5%), and small transactions may be sponsored instead. Aggregator routes add their own price impact.',
+  },
+  {
+    id: 'single-tx',
+    category: 'crypto',
+    catLabel: 'Proofs, sync & costs',
+    q: 'Does every Audren action fit in one transaction?',
+    a: 'Audren uses one frozen 17,861-constraint circuit (3.93 MB proving key) that produces a 192-byte BN254 Groth16 proof on your device, in a browser Web Worker or a native SDK. Solana verifies it with its native alt_bn128 syscalls in ~103k–160k CU. Through a relayer, which submits Solana Transaction v1 (4,096 B with inline compute budget), every instruction, including up to 4 parallel 2 → 1 merges and multi-hop ExecViaEscrow routes, settles in one transaction with no multi-step proof upload. Direct wallet submission uses v0 (1,232 B), where large swap routes or merge batches may not fit.',
   },
   {
     id: 'scaling',
     category: 'crypto',
-    catLabel: 'Groth16 & RPC sync',
-    q: 'How do 4 → 8 → 16 append lanes scale throughput without changing the circuit?',
-    a: 'The frozen 4-ary Depth-20 circuit permanently reserves 16 lane slots (2 top super-root levels over 16 Depth-18 lane trees). Pools launch with 4 active lanes (~48M CU/slot aggregate lane ceiling) and expand monotonically to 8 or 16 lanes via InitLane with zero circuit changes, zero ceremony re-runs, and zero migration of existing notes.',
-  },
-  {
-    id: 'compliance',
-    category: 'custody',
-    catLabel: 'Custody, MPC & audits',
-    q: 'How do Mode 1 Selective Disclosure and Mode 2 Full Viewing Keys work?',
-    a: 'Mode 1 SelectiveDisclosureProof exports (stealth_owner, mint, amount, blinding) for a single chosen note and verifies in 1 Poseidon5 hash directly against SubtreePage while revealing zero keys. Mode 2 FullViewingKey (spend_pk, nk, view_sk, view_pk) uses key separation (nk = Poseidon2(10, spend_sk)) so watch-only wallets, hardware-signer setups, relayers, and auditors can track both incoming notes and spent nullifiers with zero spend authority.',
-  },
-  {
-    id: 'pause-mpc',
-    category: 'custody',
-    catLabel: 'Custody, MPC & audits',
-    q: 'What is the Groth16 trusted-setup status, pause escape hatch, and audit status?',
-    a: 'Audren freezes one minimal 17,861-R1CS circuit and anchors vk_id = 0 to the official Hermez/PSE Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 71+ independent public contributors) plus Audren’s verifiable BGM17 Phase-2 ceremony (zeroized OS CSPRNG + live drand Quicknet #34194203 and Solana Mainnet finalized blockhash beacon, published in ceremony/transcript.json). Additional community Phase-2 contributions remain open, full 100% withdrawals (output_mask == 0, including WSOL unwrap) bypass SetPaused, and an independent third-party audit is pending prior to revoking BPF upgrade authority.',
+    catLabel: 'Proofs, sync & costs',
+    q: 'How do append lanes scale throughput without changing the circuit?',
+    a: 'The frozen 4-ary depth-20 tree reserves 16 lane slots: two top levels over 16 depth-18 lane trees. Writes to different lanes do not contend for the same account, so more lanes allow more parallel appends. Pools launch with 4 active lanes, and the pool authority activates more one at a time up to 16 via InitLane, with no circuit change, no new ceremony, and no migration of existing notes. Nullifiers are pool-wide, so a note cannot be spent twice through different lanes.',
   },
 ]
 
 const CATEGORIES: { id: CategoryId; label: string }[] = [
   { id: 'all', label: `All questions (${FAQS.length})` },
-  { id: 'privacy', label: 'Privacy & global MASP' },
+  { id: 'privacy', label: 'Privacy' },
+  { id: 'custody', label: 'Custody, setup & audits' },
   { id: 'swaps', label: 'DeFi & tokens' },
-  { id: 'crypto', label: 'Groth16 & RPC sync' },
-  { id: 'custody', label: 'Custody, MPC & audits' },
+  { id: 'crypto', label: 'Proofs, sync & costs' },
 ]
 
 export function FaqExperience() {
   const [cat, setCat] = useState<CategoryId>('all')
-  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set(['boundaries', 'tvl', 'scanning']))
+  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set(['boundaries', 'tvl', 'pause-mpc']))
 
   const visible = cat === 'all' ? FAQS : FAQS.filter((f) => f.category === cat)
   const allOpen = visible.every((f) => openIds.has(f.id))
@@ -152,27 +187,27 @@ export function FaqExperience() {
           <div className={styles.heroSingle}>
             <h1>Frequently asked questions</h1>
             <p className={styles.heroLead}>
-              Direct engineering answers on Audren privacy boundaries, BN254 Groth16 proving,
-              zero-indexer ordinary RPC sync, DeFi escrow isolation, and ceremony status.
+              Straight answers on what Audren hides and what it does not, how proofs and wallet sync
+              work, DeFi through the escrow, recovery, authorities, and audit status.
             </p>
           </div>
 
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
-              <span className={styles.heroMetaLabel}>Global MASP</span>
-              <span className={styles.heroMetaValue}>4²⁰ tree · TVL alone does not prove anonymity</span>
+              <span className={styles.heroMetaLabel}>Anonymity set</span>
+              <span className={styles.heroMetaValue}>Real pool notes, not 4²⁰ capacity or TVL</span>
             </div>
             <div className={styles.heroMetaCell}>
               <span className={styles.heroMetaLabel}>Zero indexer</span>
-              <span className={styles.heroMetaValue}>Ordinary Solana RPC · 1.28 MB @ 10M notes</span>
+              <span className={styles.heroMetaValue}>Ordinary Solana RPC · ~1.28 MB kept @ 10M notes</span>
             </div>
             <div className={styles.heroMetaCell}>
               <span className={styles.heroMetaLabel}>Relayers &amp; checkpoints</span>
-              <span className={styles.heroMetaValue}>Optional, ~6.4s POST /v1/checkpoint, zero spend keys</span>
+              <span className={styles.heroMetaValue}>Optional · on-demand checkpoints (8-slot epochs) · no spend keys</span>
             </div>
             <div className={styles.heroMetaCell}>
               <span className={styles.heroMetaLabel}>Ceremony &amp; audit</span>
-              <span className={styles.heroMetaValue}>Apache-2.0 · PPoT + BGM17 · Pre-audit</span>
+              <span className={styles.heroMetaValue}>Apache-2.0 · Phase 2 Audren-only so far · No audit yet</span>
             </div>
           </div>
         </section>

@@ -53,23 +53,23 @@ const SCENES: Record<PoolCaseId, readonly [StepDef, StepDef, StepDef]> = {
   pay: [
     {
       caption:
-        'Your 500 USDC sits in the shared pool as one sealed note among everyone else’s. Only your device holds the key that can spend it.',
+        'Your 800 USDC sits in the shared pool as one sealed note among everyone else’s. Only your device holds the key that can spend it.',
       packets: [],
-      device: { note: '500 USDC note' },
+      device: { note: '800 USDC note' },
       outB: { title: 'Bob’s device', body: 'Shares a reusable aud1… address. Nothing received yet.', tone: 'private' },
     },
     {
       caption:
-        'Your device builds a 192-byte proof that it owns unspent notes in this pool, without saying which. Every transfer records two spent marks, padded if needed, so all transfers look alike.',
+        'Your device builds a 192-byte proof that it owns unspent notes in this pool, without saying which. By default every transfer records two spent marks, padded if needed, so transfers look alike.',
       packets: [{ id: 'proof', from: 'device', to: 'pool', label: '192 B proof', tone: 'proof' }],
       pulse: true,
       spend: 2,
-      device: { note: '500 USDC note', detail: 'Proving locally…' },
+      device: { note: '800 USDC note', detail: 'Proving locally…' },
       outB: { title: 'Bob’s device', body: 'Shares a reusable aud1… address. Nothing received yet.', tone: 'private' },
     },
     {
       caption:
-        'Solana accepts the proof, records the spend, and adds three sealed notes: Bob’s payment, your change and a zero-value pad. Only Bob’s device can open his.',
+        'Solana accepts the proof, records the spend, and adds three sealed notes: Bob’s 420 USDC, your change (380 USDC, less any relay fee), and a zero-value pad or the relay’s fee note. Only Bob can spend his.',
       packets: [
         {
           id: 'memo',
@@ -77,11 +77,11 @@ const SCENES: Record<PoolCaseId, readonly [StepDef, StepDef, StepDef]> = {
           to: 'outB',
           label: 'sealed note',
           tone: 'sealed',
-          settle: { label: '+500 USDC', tone: 'key' },
+          settle: { label: '+420 USDC', tone: 'key' },
         },
       ],
       append: 3,
-      device: { note: 'Change note', detail: 'Hidden on-chain' },
+      device: { note: '380 USDC change', detail: 'Hidden on-chain' },
       outB: {
         title: 'Bob’s device',
         body: 'Scanning new notes…',
@@ -101,14 +101,14 @@ const SCENES: Record<PoolCaseId, readonly [StepDef, StepDef, StepDef]> = {
           to: 'outA',
           label: 'sealed note',
           tone: 'sealed',
-          settle: { label: '100 USDC', tone: 'public' },
+          settle: { label: '1 SOL', tone: 'public' },
         },
       ],
       pulse: true,
       spend: 2,
-      device: { note: '100 USDC note', detail: 'Proof sent via relayer' },
+      device: { note: '1 SOL note', detail: 'Proof sent via relayer' },
       outA: { title: 'Escrow shard 7 of 16', body: 'Shared by every user', tone: 'public' },
-      outB: { title: 'DeFi program', body: 'Swap · lend · stake', tone: 'public' },
+      outB: { title: 'DeFi program', body: 'Aggregator swap', tone: 'public' },
     },
     {
       caption:
@@ -118,29 +118,29 @@ const SCENES: Record<PoolCaseId, readonly [StepDef, StepDef, StepDef]> = {
           id: 'tok',
           from: 'outA',
           to: 'outB',
-          label: '100 USDC',
+          label: '1 SOL',
           tone: 'public',
-          settle: { label: '0.47 JitoSOL', tone: 'public' },
+          settle: { label: '~0.8 JitoSOL', tone: 'public' },
         },
       ],
-      device: { note: '100 USDC note', detail: 'Spent' },
+      device: { note: '1 SOL note', detail: 'Spent' },
       outA: { title: 'Escrow shard 7 of 16', body: 'Shared by every user', tone: 'public' },
       outB: { title: 'DeFi program', body: 'Running the trade…', settled: 'Output ≥ your minimum', tone: 'public' },
     },
     {
       caption:
-        'Audren measures exactly what came back and seals it into a fresh note that only you can spend. No public wallet ever held it.',
+        'Audren measures exactly what came back and seals it into a fresh note that only you can spend, next to a change note (a zero-value pad if nothing is left). No wallet linked to you ever held it.',
       packets: [
         {
           id: 'tok',
           from: 'outB',
           to: 'pool',
-          label: '0.47 JitoSOL',
+          label: '~0.8 JitoSOL',
           tone: 'public',
           settle: { label: 'sealed note', tone: 'sealed' },
         },
       ],
-      append: 1,
+      append: 2,
       device: { note: 'JitoSOL note', detail: 'Hidden on-chain' },
       outA: { title: 'Escrow shard 7 of 16', body: 'Emptied again', tone: 'public' },
       outB: { title: 'DeFi program', body: 'Trade settled', tone: 'public' },
@@ -153,7 +153,7 @@ const SCENES: Record<PoolCaseId, readonly [StepDef, StepDef, StepDef]> = {
       packets: [{ id: 'proof', from: 'device', to: 'pool', label: '192 B proof', tone: 'proof' }],
       pulse: true,
       spend: 2,
-      device: { note: '1.26 SOL note', detail: 'Proving locally…' },
+      device: { note: '1.254 SOL note', detail: 'Proving locally…' },
       outA: { title: 'Relayer', body: 'Pays the network fee', tone: 'public' },
       outB: { title: 'Fresh wallet', body: '0 SOL, never used', tone: 'public' },
     },
@@ -165,21 +165,21 @@ const SCENES: Record<PoolCaseId, readonly [StepDef, StepDef, StepDef]> = {
           id: 'sol',
           from: 'poolL',
           to: 'poolL',
-          label: '1.26 WSOL',
+          label: '1.254 WSOL',
           tone: 'public',
           settle: { label: '1.25 SOL', tone: 'public' },
         },
-        { id: 'fee', from: 'poolR', to: 'outA', label: '0.01 SOL fee', tone: 'fee' },
+        { id: 'fee', from: 'poolR', to: 'outA', label: '0.004 SOL fee', tone: 'fee' },
       ],
-      device: { note: '1.26 SOL note', detail: 'Spent' },
+      device: { note: '1.254 SOL note', detail: 'Spent' },
       outA: { title: 'Relayer', body: 'Pays the network fee', settled: 'Reimbursed from payout', tone: 'public' },
       outB: { title: 'Fresh wallet', body: '0 SOL, never used', tone: 'public' },
     },
     {
       caption:
-        '1.25 SOL lands publicly in a fresh wallet that needed no SOL beforehand. A zero-value pad note makes a full exit look like a partial one; amount and timing can still hint at a link.',
+        '1.25 SOL lands publicly in a fresh wallet that needed no SOL beforehand. A zero-value pad note makes a full exit look like a partial one (the app drops the pad while the pool is paused so the exit can still settle); amount and timing can still hint at a link.',
       packets: [
-        { id: 'fee', from: 'outA', to: 'outA', label: '0.01 SOL fee', tone: 'fee' },
+        { id: 'fee', from: 'outA', to: 'outA', label: '0.004 SOL fee', tone: 'fee' },
         { id: 'sol', from: 'pool', to: 'outB', label: '1.25 SOL', tone: 'public' },
       ],
       append: 1,
@@ -198,7 +198,7 @@ const SCENES: Record<PoolCaseId, readonly [StepDef, StepDef, StepDef]> = {
     },
     {
       caption:
-        'The accountant hashes it once and finds the identical commitment already on Solana. A match proves this exact note exists on-chain.',
+        'The accountant hashes it once and finds the identical commitment already on Solana. A match proves this exact note was created on-chain; it does not show whether it is still unspent or who holds it now.',
       packets: [{ id: 'hash', from: 'outB', to: 'pool', label: 'Poseidon5 hash', tone: 'proof' }],
       match: true,
       device: { note: '500 USDC · invoice 114', detail: 'Shared one note' },

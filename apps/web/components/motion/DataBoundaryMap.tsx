@@ -27,17 +27,17 @@ const ZONES = [
     items: [
       'Connection & IP request metadata',
       'Account lookups & swap quotes',
-      'Ephemeral daily salted rate limits',
+      'Relay: daily-salted IP rate limits',
       'Zero user spend or view keys',
     ],
-    foot: 'Switchable RPC & pluggable relay URL',
+    foot: 'Pluggable relay · RPC via the site host (self-host to change)',
   },
   {
     id: 'chain',
     kicker: 'Public Solana chain',
     title: 'On-chain visibility',
     items: [
-      'Transact: hidden mint, amount & key',
+      'Private transfer: hidden mint, amount & key',
       'Deposit / Exit: public amounts',
       'DeFi CPI & Bᵢ: public protocol legs',
       'Checkpoint, lane, fee payer & timing',
@@ -57,7 +57,7 @@ const STEPS = [
     label: 'Requests',
     focus: 'infra',
     caption:
-      'To sync and fetch quotes, your browser talks to the web host, an RPC and optionally a relay. They can see your IP and which accounts you read, never your keys.',
+      'To sync and fetch quotes, your browser talks to the web host (which forwards RPC reads) and optionally a relay. They can see your IP, which accounts you read and any public wallet you connect, never your keys.',
   },
   {
     label: 'Transactions',

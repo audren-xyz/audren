@@ -28,7 +28,7 @@ export const metadata: Metadata = {
     template: '%s · Audren',
   },
   description:
-    'Private transfers protect the sender, recipient, token and amount. Use existing Solana assets and keep your spending keys. Explore the open protocol on Mainnet.',
+    'Relayed private transfers protect the sender, recipient, token and amount. Use existing Solana assets and keep your spending keys. Explore the open protocol on Mainnet.',
   alternates: { canonical: '/' },
   openGraph: {
     title: 'Audren · Private payments on Solana',

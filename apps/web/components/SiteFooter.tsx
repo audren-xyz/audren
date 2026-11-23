@@ -22,7 +22,7 @@ export function SiteFooter({ current }: { current?: NavSection }) {
             <span className="brand-name">Audren</span>
           </Link>
           <p className="footer-tagline">
-            Private transfers, protocol-agnostic shielded DeFi, and selective receipts on Solana.
+            Private transfers, private-balance swaps, and selective receipts on Solana.
             Self-custodial, Apache-2.0 open source, pre-audit.
           </p>
           <a
@@ -65,7 +65,7 @@ export function SiteFooter({ current }: { current?: NavSection }) {
         <div className="footer-links-group">
           <h4>On-Chain Accounts</h4>
           <a href={explorerAddress(AUDREN.programId, 'verified-build')} target="_blank" rel="noreferrer">
-            Verified Build ({AUDREN.releaseTag}) <ArrowUpRight size={12} />
+            Verified Build ({AUDREN.deployedReleaseTag}) <ArrowUpRight size={12} />
           </a>
           <a href={explorerAddress(AUDREN.programId, 'idl')} target="_blank" rel="noreferrer">
             On-Chain Program IDL <ArrowUpRight size={12} />

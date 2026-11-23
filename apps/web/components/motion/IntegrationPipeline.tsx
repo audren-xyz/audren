@@ -21,10 +21,10 @@ const WIRE = [
 ] as const
 
 const CAPTIONS = [
-  'Sync: your app pulls public pages with getMultipleAccounts and keeps its own notes plus compact tree hashes, about 1.28 MB even at 10M pool notes.',
+  'Sync: your app pulls public pages with getMultipleAccounts and keeps its own notes plus compact tree hashes, about 1.28 MB even at 10M pool notes, and drops the raw pages.',
   'Prove: the Groth16 proof is built locally. The spending key and the note details never go over the network.',
-  'Submit: one Solana Transaction v1 goes out, signed by your own wallet as fee payer or handed to any relayer you choose.',
-  'Settle: once confirmed, spent marks land on NullifierPage and your app freezes the sibling hashes it needs, then drops the raw pages.',
+  'Submit: one transaction goes out, signed by your own wallet as fee payer (which shows your wallet) or handed to any relayer you choose.',
+  'Settle: once confirmed, the spent marks land on-chain; your next sync marks the inputs spent and picks up the new change note.',
 ] as const
 
 /** Sync → Prove → Submit → Settle, showing what crosses the network at each stage. */

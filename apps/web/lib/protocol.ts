@@ -98,9 +98,15 @@ export const AUDREN = {
   version: '1.2.1',
   protocolVersion: 1,
   releaseTag: 'v1.2.1',
+  // The release actually running on Mainnet (the build verifiedCommit / executableHash / elfSha256 describe).
+  // It can trail `version` while a newer source release awaits its deploy ceremony.
+  deployedReleaseTag: 'v1.2.0',
+  deployedReleaseUrl: 'https://github.com/audren-xyz/audren/releases/tag/v1.2.0',
+  // Holds both the program upgrade authority and the Pool #0 authority (a single key, not a multisig).
+  operatorAuthority: '3WzAUVNX5tm9gJWS2Y2Vg3wMnAtTm23fFX2jHaYy67bV',
   verifiedCommit: 'b60ec029f42551eb4f9678783dee1b73f9ea9f28',
   vkProvenance:
-    'Perpetual Powers of Tau (71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand #34194203 · Solana slot 472705896 · pre-audit)',
+    'Hermez Perpetual Powers of Tau (54 contributions + beacon) + Audren BGM17 Phase-2 Ceremony (2 contributions · drand #34194203 · Solana slot 472705896 · pre-audit)',
   circuitConstraints: 17_861,
   circuitFftDomain: 32_768,
   proofBytes: 192,
@@ -340,7 +346,7 @@ export const MEASURED_CU_ROWS = [
     ix: 'PublishCheckpoint (Tag 4)',
     cu: 16_844,
     maxCu: 44_480,
-    note: 'Permissionless 256-slot RootCheckpoint ring across 4 (16.8k CU), 8 (23.6k CU), or 16 (44.5k CU) active lanes',
+    note: 'Permissionless 256-entry RootCheckpoint ring across 4 (16.8k CU), 8 (23.6k CU), or 16 (44.5k CU) active lanes',
   },
   {
     ix: 'Deposit · SOL & SPL / Token-2022 (Tag 3)',

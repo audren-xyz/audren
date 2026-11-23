@@ -11,7 +11,7 @@ const CHECKS = [
   { id: 'root', label: 'Proof uses a recent checkpoint root' },
   { id: 'proof', label: 'Groth16 proof verifies: ownership, balance, 64-bit ranges, bound outputs' },
   { id: 'nullifier', label: 'Record spent marks (fails if a mark already exists)' },
-  { id: 'defi', label: 'DeFi leg: escrow untouched, output ≥ minimum' },
+  { id: 'defi', label: 'DeFi leg: escrow accounts unaltered, output ≥ minimum' },
   { id: 'settle', label: 'Write the new sealed notes' },
 ] as const
 
@@ -33,7 +33,7 @@ const ATTEMPTS: readonly Attempt[] = [
     failAt: -1,
     skip: [3],
     verdict:
-      'Every check passes. Two spent marks are recorded and three fresh sealed notes are appended.',
+      'Every check passes. With the default padded shape, two spent marks are recorded and three fresh sealed notes are appended.',
   },
   {
     id: 'replay',

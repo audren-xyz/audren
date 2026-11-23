@@ -15,13 +15,13 @@ const INSTRUCTIONS = [
     tag: '0x00',
     name: 'InitPool',
     summary:
-      'Create PoolState (128 B, audren_pool) with ring-wrap deadlock guard (max_ckpt_age < 255 * ckpt_interval; ckpt_interval = 16 slots on Mainnet) and canonical vault_auth PDA bump.',
+      'Create PoolState (128 B, audren_pool) with ring-wrap deadlock guard (max_ckpt_age < 255 * ckpt_interval; Pool #0 uses ckpt_interval = 8 slots) and canonical vault_auth PDA bump.',
   },
   {
     tag: '0x01',
     name: 'InitLane',
     summary:
-      'Authority-signed monotonic lane initializer (active_lanes = 4 → 8 → 16) creating LaneTreeState (1,824 B), LaneRentVault, and seq-0 SubtreePage/SubtreeRootPage/MemoPage/NullifierPage PDAs.',
+      'Authority-signed lane initializer that activates one lane at a time (4 at launch, up to 16), creating LaneTreeState (1,824 B), LaneRentVault, and seq-0 SubtreePage/SubtreeRootPage/MemoPage/NullifierPage PDAs.',
   },
   {
     tag: '0x02',
@@ -33,13 +33,13 @@ const INSTRUCTIONS = [
     tag: '0x03',
     name: 'Deposit',
     summary:
-      'Unified entry for Native SOL (atomic SyncNative wrap into canonical WSOL vault ATA with optional DEPOSIT_FLAG_FEE_FROM_AMOUNT zero-dust sweep), Classic SPL, and Token-2022 (~42k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe), validates sanitized TransferHook accounts, updates the lane 4-ary frontier, and appends a 106 B SoA memo.',
+      'Unified entry for Native SOL (atomic SyncNative wrap into canonical WSOL vault ATA with optional DEPOSIT_FLAG_FEE_FROM_AMOUNT zero-dust sweep), Classic SPL, and Token-2022 (~48k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe), validates sanitized TransferHook accounts, updates the lane 4-ary frontier, and appends a 106 B SoA memo.',
   },
   {
     tag: '0x04',
     name: 'PublishCheckpoint',
     summary:
-      'Permissionless 256-slot cyclic RootCheckpoint (704 B) publisher hashing all active lane roots (plus Z[18] for unactivated lanes) into one global 4-ary Depth-20 super_root (16.8k / 23.6k / 44.5k CU for 4 / 8 / 16 lanes; ~6.4s on-demand via relayer POST /v1/checkpoint matching ckpt_interval = 16 slots).',
+      'Permissionless 256-entry cyclic RootCheckpoint ring (704 B each) publisher hashing all active lane roots (plus Z[18] for unactivated lanes) into one global 4-ary Depth-20 super_root (16.8k / 23.6k / 44.5k CU for 4 / 8 / 16 lanes; on demand via relayer POST /v1/checkpoint, at most once per 8-slot epoch on Pool #0).',
   },
   {
     tag: '0x05',
@@ -63,7 +63,7 @@ const INSTRUCTIONS = [
     tag: '0x08',
     name: 'UpdatePool',
     summary:
-      'Authority-signed governance instruction supporting parameter updates (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool), 2-step authority transfer via pending_authority, and permanent authority renouncement (forbidden while paused).',
+      'Authority-signed governance instruction supporting parameter updates (ckpt_interval and max_ckpt_age within ring-safe bounds, note_rent_fee, nf_rent_fee), 2-step authority transfer via pending_authority, and permanent authority renouncement (forbidden while paused).',
   },
 ] as const
 
@@ -193,7 +193,7 @@ export function ArchitectureExperience() {
 
           <div className={styles.heroMetaStrip}>
             <div className={styles.heroMetaCell}>
-              <span>Program ID ({AUDREN.releaseTag})</span>
+              <span>Program ID ({AUDREN.deployedReleaseTag})</span>
               <span className={`${styles.heroMetaValue} mono`}>
                 <a href={solscanAddress(AUDREN.programId)} target="_blank" rel="noreferrer">
                   {AUDREN.programId.slice(0, 10)}…{AUDREN.programId.slice(-6)} <ArrowUpRight size={11} />
@@ -237,12 +237,13 @@ export function ArchitectureExperience() {
               B <code>MemoPage</code>s (96 notes/page) in uniform batches (with uniform newly-synced{' '}
               <code>SubtreePage</code> fetches on incremental syncs of 25 pages or fewer, and
               deterministic wallet-keyed decoy-padded <code>SubtreePage</code> batches on larger
-              catch-up and witness reconstruction) so the RPC never learns which page matched; Pass
+              catch-up and witness reconstruction) so the RPC cannot tell which memo is yours and the
+              tree page you need hides among decoys; Pass
               2 always streams <code>NullifierPage</code>s (9,664 B, 600 × 16 B prefixes)
               unconditionally to lane head without early-exit, matching only owned unspent notes and
               discarding stranger prefixes permanently (
-              <span style={{ fontWeight: 500, color: '#161614' }}>1.28 MB</span> local store at 10M
-              pool notes). Opt-in <code>fast</code> mode enables 3,328 B SoA <code>dataSlice</code>{' '}
+              <span style={{ fontWeight: 500, color: '#161614' }}>~1.28 MB</span> kept locally at 10M
+              pool notes, though a cold sync still downloads every memo and nullifier page). Opt-in <code>fast</code> mode enables 3,328 B SoA <code>dataSlice</code>{' '}
               scanning (<code>[0..3,328]</code>) on large historical catch-up (&gt;25 pages) for
               self-hosted or trusted RPCs, trading RPC hit-visibility for lower bandwidth.
             </p>
@@ -317,8 +318,8 @@ export function ArchitectureExperience() {
                 <h2>Measured sBPFv3 compute units</h2>
               </div>
               <p>
-                Measured directly against the compiled {AUDREN.elfBytes.toLocaleString()}-byte
-                sBPFv3 ELF using native Solana <code>sol_poseidon</code> and{' '}
+                Measured in the LiteSVM end-to-end suite against the compiled{' '}
+                {AUDREN.elfBytes.toLocaleString()}-byte sBPFv3 ELF, using native Solana <code>sol_poseidon</code> and{' '}
                 <code>alt_bn128</code> pairing syscalls over Solana Transaction v1 (
                 <code>0x81</code>).
               </p>
@@ -333,17 +334,19 @@ export function ArchitectureExperience() {
               </div>
               <div ref={cuRef} className={styles.cuList} data-inview={!hydrated || cuSeen ? 'true' : 'false'}>
                 {MEASURED_CU_ROWS.map((row, rowIdx) => {
-                  const pct = Math.max(2, Math.min(100, (row.cu / MAX_TX_CU) * 100))
+                  const pct = Math.max(2, Math.min(100, (row.maxCu / MAX_TX_CU) * 100))
                   return (
                     <div key={row.ix} className={styles.cuRow}>
                       <span className={styles.cuName}>{row.ix}</span>
-                      <div className={styles.cuTrack} aria-label={`${row.ix}: ${row.cu.toLocaleString()} CU`}>
+                      <div className={styles.cuTrack} aria-label={`${row.ix}: ${row.cu.toLocaleString()} to ${row.maxCu.toLocaleString()} CU`}>
                         <div
                           className={`${styles.cuFill} ${pct > 65 ? styles.cuFillHigh : ''}`}
                           style={{ '--cu': (pct / 100).toFixed(3), '--i': rowIdx } as CSSProperties}
                         />
                       </div>
-                      <span className={styles.cuVal}>{row.cu.toLocaleString()} CU</span>
+                      <span className={styles.cuVal}>
+                        {Math.round(row.cu / 1000)}k–{Math.round(row.maxCu / 1000)}k CU
+                      </span>
                       <span className={styles.cuNote}>{row.note}</span>
                     </div>
                   )
@@ -360,8 +363,10 @@ export function ArchitectureExperience() {
               <h2>Nine instructions and the frozen JoinSplit4AryCircuit</h2>
             </div>
             <p>
-              All 9 instructions settle in a single Solana Transaction v1 (<code>0x81</code>) with
-              no multi-tx upload buffers. One frozen <code>vk_id = 0</code> circuit (3.93 MB
+              Every instruction settles in one transaction with no multi-tx upload buffers: relays
+              submit Solana Transaction v1 (<code>0x81</code>, 4,096 B), and direct wallet
+              submission uses v0 (1,232 B), where very large swap routes or merge batches need a
+              relay. One frozen <code>vk_id = 0</code> circuit (3.93 MB
               compressed proving key, 2<sup>15</sup> FFT domain) covers private transfers, public
               exits, atomic WSOL unwrap, and protocol-agnostic DeFi CPIs while scaling monotonically
               across 4 → 8 → 16 append lanes.
@@ -444,9 +449,10 @@ export function ArchitectureExperience() {
                     saves 1 permanent <code>NullifierPDA</code> rent while exposing 1-input arity.
                   </li>
                   <li>
-                    Audren pays permanent <code>NullifierPDA</code> plus amortized page rent
-                    (~0.002–0.0046 SOL/tx vs 5,000-lamport Forester-compressed nullifiers) instead
-                    of relying on a permissioned Forester; on-chain{' '}
+                    Each spend&rsquo;s fee payer (your wallet or a sponsoring relay) pays permanent{' '}
+                    <code>NullifierPDA</code> plus amortized page rent
+                    (~0.0007–0.0036 SOL/tx at current rent) instead of relying on a permissioned
+                    Forester; on-chain{' '}
                     <code>rent_minimum_balance</code> reads <code>SysvarRent</code> dynamically so
                     cost scales down automatically if Solana lowers rent.
                   </li>
@@ -478,19 +484,25 @@ export function ArchitectureExperience() {
                     <span style={{ fontWeight: 500, color: '#161614' }}>
                       Trusted setup provenance:
                     </span>{' '}
-                    Phase 1 uses the official Hermez/PSE Perpetual Powers of Tau (
-                    <code>powersOfTau28_hez_final_15.ptau</code>, 71+ independent public
-                    contributors). Phase 2 applies verifiable BGM17 zeroized contributions plus a
-                    live drand Quicknet (<code>#34194203</code>) and Solana Mainnet finalized
-                    blockhash beacon (<code>ceremony/transcript.json</code>). Additional community
-                    Phase-2 contributions remain open pending independent audit.
+                    Phase 1 uses the Hermez Perpetual Powers of Tau (
+                    <code>powersOfTau28_hez_final_15.ptau</code>, 54 public contributions plus a
+                    beacon). Phase 2 applies two BGM17 contributions, both generated by the Audren
+                    release environment, plus a live drand Quicknet (<code>#34194203</code>) and
+                    Solana Mainnet slot <code>472705896</code> blockhash beacon (
+                    <code>ceremony/transcript.json</code>). The transcript is verifiable, but no
+                    one outside can verify that the contribution secrets were destroyed, so until an
+                    independent contributor joins, soundness relies on Audren. A new contribution
+                    protects the live pool only after a program upgrade adopts its verifying key.
                   </li>
                   <li>
                     <span style={{ fontWeight: 500, color: '#161614' }}>
                       Upgrade authority and issuers:
                     </span>{' '}
-                    The BPF upgrade authority remains mutable during pre-audit releases, and token
-                    issuers retain mint-level controls (freeze authority, transfer-hook rules).
+                    The BPF upgrade authority remains mutable during pre-audit releases and, like
+                    the Pool #0 authority, is held by one operator key (
+                    <code>3WzAUV…67bV</code>), not a multisig. Token issuers retain mint-level
+                    controls (freeze authority, permanent delegate, pausable mint, upgradable
+                    transfer hook) over the shared vault account.
                   </li>
                 </ul>
               </article>
@@ -500,8 +512,8 @@ export function ArchitectureExperience() {
                 <h3>Append lane scaling and two-mode compliance</h3>
                 <ul className={styles.dashList}>
                   <li>
-                    Pools launch with 4 active lanes (<code>~48M CU/slot</code> aggregate lane
-                    ceiling) and expand monotonically to 8 or 16 lanes via <code>InitLane</code>{' '}
+                    Pools launch with 4 active lanes, so appends to different lanes do not contend
+                    for one write lock, and expand monotonically to 8 or 16 lanes via <code>InitLane</code>{' '}
                     with zero circuit changes and zero migration of existing notes.
                   </li>
                   <li>
@@ -522,21 +534,21 @@ export function ArchitectureExperience() {
                 <ul className={styles.dashList}>
                   <li>
                     Clients submit directly through any Solana RPC or via{' '}
-                    <code>{AUDREN.relayUrl}</code> / a self-hosted relay supporting rotating
-                    fee-payer pools (<code>&gt;= active_lanes</code> signers).
+                    <code>{AUDREN.relayUrl}</code> / a self-hosted relay, which can rotate a pool of
+                    fee-payer keys (one key on the hosted relay today).
                   </li>
                   <li>
-                    Supports Mode 1 shielded <code>cm2</code> transfer fees (flat per-mint quotes
+                    Can charge private-transfer fees as a shielded <code>cm2</code> note (flat per-mint quotes
                     defaulting to 2-nullifier spends with zero plaintext transfer amount sent to the
                     relayer, verified via read-only FVK, plus up to 4 parallel 2 → 1 private{' '}
                     <code>Transact</code> merges per Transaction v1), Mode 2 public withdraw fees,
                     and Mode 3 <code>ExecViaEscrow</code> input/output fees (
-                    <code>EXEC_FLAG_FEE_ON_OUTPUT</code>) over random escrow shards.
+                    <code>EXEC_FLAG_FEE_ON_OUTPUT</code>) over random escrow shards. The hosted relay
+                    currently sponsors private transfers with no fee note.
                   </li>
                   <li>
-                    Permissionless on-demand <code>POST /v1/checkpoint</code> (~6.4s cadence
-                    matching <code>ckpt_interval = 16</code> slots, plus a 2-minute maintenance
-                    crank) checkpoints fresh notes without linking the user’s personal wallet; rate
+                    Permissionless on-demand <code>POST /v1/checkpoint</code> (at most once per
+                    8-slot epoch on Pool #0, plus a 2-minute maintenance crank) checkpoints fresh notes without linking the user’s personal wallet; rate
                     limits use an ephemeral daily secret IP-hash salt never stored alongside
                     nullifiers, and relayers hold zero spend keys and cannot alter{' '}
                     <code>ctx_hash</code>-bound outputs or router accounts.

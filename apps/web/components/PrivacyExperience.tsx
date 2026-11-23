@@ -71,7 +71,7 @@ export function PrivacyExperience() {
                 <ul className={styles.dashList}>
                   <li>A deposit from a public wallet exposes its funding account, token, amount, and output record.</li>
                   <li>A withdrawal exposes its destination, token, and amount; <code>ExecViaEscrow</code> exposes the target DeFi program, mints, routed amounts, and output record; any stateful borrow or perp position opened by a deterministic session wallet (<code>Bᵢ</code>) remains public on that Solana protocol.</li>
-                  <li>Private Transfer proofs conceal the selected input note and blind token and amount commitments with a fresh recipient key, while checkpoint roots, output lanes, nullifiers, timing, and fee payers remain public.</li>
+                  <li>Private transfer proofs hide the spent input note and keep the token and amount inside commitments under a fresh recipient key, while checkpoint roots, output lanes, nullifiers, timing, and the fee payer remain public. If you pay fees yourself, your wallet is that fee payer.</li>
                   <li>Concealing input selection does not guarantee that public information or external observations cannot connect transactions.</li>
                 </ul>
                 <div className={styles.cellFoot}>
@@ -86,9 +86,10 @@ export function PrivacyExperience() {
                 <h3>Relayer &amp; host metadata</h3>
                 <ul className={styles.dashList}>
                   <li>Anyone can run a compatible relayer, or submit directly with your own fee payer. Neither choice provides network anonymity by itself.</li>
-                  <li>The website proxies RPC, token metadata, and Direct Self-Pay routing through its Cloudflare Worker; wallet-mode relay calls go to your selected relay.</li>
-                  <li>The hosted relay rate-limits submissions using IP hashes derived with an ephemeral daily rotating secret salt that is never stored alongside spent nullifiers (rate-limit hashing is not network anonymization; timestamps and sponsorship figures are still observed during processing).</li>
-                  <li>Expired guard records are pruned on cleanup, not guaranteed immediate deletion across every infrastructure log.</li>
+                  <li>The web app sends its RPC reads, token metadata, swap quotes, and directly paid transactions through the audren.xyz Cloudflare Worker; relayed spends go to the relay you select. That worker sees your IP together with your connected public wallet address (balance lookup), the pool pages your wallet reads, transactions you broadcast directly, and swap quote details (tokens and amount). To avoid it, self-host the app or use an SDK with your own RPC.</li>
+                  <li>The hosted relay rate-limits by a truncated SHA-256 of your IP and a random salt held only in memory and replaced every UTC day. Hashed-IP events (operation type, sponsorship amount, timestamp) are kept about 25 hours; in-flight nullifiers are kept 45 seconds with no IP attached. The relay still sees your IP and your transaction together while processing it.</li>
+                  <li>The hosted relay has Cloudflare Workers request logging enabled; those logs follow Cloudflare’s retention, separate from the relay’s own rate-limit records.</li>
+                  <li>audren.xyz and the hosted relay are run by the same operator, so with the default settings one party can connect your IP, connected wallet, page reads, and relayed spends. Once you type an amount to send, the wallet asks the relay for a fee quote that names the token (not the amount). Swap quotes are forwarded to the selected aggregator (Jupiter, DFlow, or OKX). A relay you choose yourself, or your own RPC, splits these views.</li>
                 </ul>
               </article>
             </div>
