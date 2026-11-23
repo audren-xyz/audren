@@ -84,7 +84,7 @@ const POOL_CASES: readonly PoolCase[] = [
       },
       {
         phase: 'External CPI',
-        headline: 'Any Solana DeFi program',
+        headline: 'One external program call',
         detail: 'Aggregator route (other programs via SDK)',
       },
       {
@@ -256,7 +256,7 @@ function PrivacyComparisonCard() {
         <div className={`${styles.comparisonRow} ${styles.audrenRow}`} style={at(1.3)}>
           <div className={styles.rowName}>
             <span className={styles.rowTitle}>Audren Global MASP</span>
-            <span className={styles.rowMeta}>SOL, Classic SPL, Token&#8209;2022</span>
+            <span className={styles.rowMeta}>Relayed · SOL, SPL, Token&#8209;2022</span>
           </div>
           <div className={styles.people}>
             <span className={styles.swap} style={at(1.9)} aria-hidden="true">
@@ -797,16 +797,22 @@ export function LandingExperience() {
                   across SOL, Classic SPL, and transferable Token-2022
                 </li>
                 <li>
-                  Zero mandatory indexer or Forester (CompactWalletStore is 1.28 MB at 10M notes);
-                  full exits including atomic WSOL unwrap bypass pause
+                  No mandatory indexer or Forester (~1.28 MB kept at 10M notes); anyone can publish
+                  the checkpoints spends prove against, and full exits including atomic WSOL unwrap
+                  bypass pause
                 </li>
                 <li>
                   Atomic ExecViaEscrow CPI (~158k–189k CU) reaches live aggregator liquidity today
                   without per-protocol circuits (external DeFi leg stays public)
                 </li>
                 <li>
-                  Pre-audit release with permanent nullifier and page rent (~0.0007–0.0036 SOL/tx at
-                  current rent); Phase-2 ceremony has only Audren’s contributions so far
+                  No protocol fee and no on-chain sign-up to receive. Each spend pays permanent
+                  nullifier and page rent (~0.0007–0.0036 SOL at current rent), read live from
+                  Solana, so rent cuts (6,960 → 5,080 lamports per byte so far) lower it with no
+                  program upgrade
+                </li>
+                <li>
+                  Pre-audit release; the Phase-2 ceremony has only Audren’s contributions so far
                 </li>
               </ul>
             </article>
