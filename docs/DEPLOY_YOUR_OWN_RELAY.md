@@ -2,11 +2,11 @@
 
 Audren is **100% relayer-agnostic**. Anyone can run an independent Privacy Relayer in under 5 minutes on Cloudflare Workers (free or paid plan) with zero shared credentials, zero trust in `relay.audren.xyz`, and full support for all three fee settlement modes:
 
-1. **Private Transfers (`JoinSplit` Tag 6, `ASSET_MODE_PRIVATE`)** — collects an encrypted shielded `cm2` fee note verified instantaneously in the Worker via a read-only `FullViewingKey` (zero spend authority in hot Worker memory).
-2. **Public Withdrawals (`JoinSplit` Tag 6, `ASSET_MODE_SOL` / `ASSET_MODE_SPL` / `WITHDRAW_FLAG_UNWRAP_WSOL`)** — collects an explicit on-chain `relayer_fee` directly to the relayer fee recipient.
-3. **Shielded DeFi Execution (`ExecViaEscrow` Tag 7)** — routes through Jupiter, Bedrock, DFlow, Titan, or OKX via isolated `escrow` shards with input-leg or post-CPI output-leg (`EXEC_FLAG_FEE_ON_OUTPUT`) fee deduction.
+1. **Private Transfers (`Transact` Tag 5, `ASSET_MODE_PRIVATE`)** — collects an encrypted shielded `cm2` fee note verified instantaneously in the Worker via a read-only `FullViewingKey` (zero spend authority in hot Worker memory).
+2. **Public Withdrawals (`Transact` Tag 5, `ASSET_MODE_PUBLIC` + optional `WITHDRAW_FLAG_UNWRAP_WSOL`)** — collects an explicit on-chain `relayer_fee` directly to the relayer fee recipient (or atomic unwrapped Native SOL).
+3. **Shielded DeFi Execution (`ExecViaEscrow` Tag 6)** — routes through Jupiter, Bedrock, DFlow, Titan, or OKX via isolated `escrow` shards with input-leg or post-CPI output-leg (`EXEC_FLAG_FEE_ON_OUTPUT`) fee deduction.
 
-A relayer **never** receives user spending keys or viewing keys — its strict firewall rejects `DepositSol` (`Tag 3`) and `DepositSpl` (`Tag 4`), requires the relayer to be the sole signer (`accounts[0]`), and runs a permissionless cron (`PublishCheckpoint` + `OpenPage`) to keep checkpoints fresh.
+A relayer **never** receives user spending keys or viewing keys — its strict firewall rejects `Deposit` (`Tag 3`) and admin instructions (`InitPool`, `InitLane`, `SetPaused`, `UpdatePool`), requires the relayer to be the sole signer (`accounts[0]`), and runs a permissionless cron (`PublishCheckpoint` Tag 4 + `OpenPage` Tag 2) to keep checkpoints fresh.
 
 ---
 

@@ -5,7 +5,7 @@ import {
   listAggregators,
   quoteWithSelection,
 } from './aggregators/registry'
-import { runAutoRefill, runV2MaintenanceCrank } from './cron/refill'
+import { runAutoRefill, runMaintenanceCrank } from './cron/refill'
 import {
   getRelayerFvk,
   getRelayerSecretsB64,
@@ -13,19 +13,31 @@ import {
   loadPolicyConfig,
   type Env,
 } from './env'
-import { FirewallError, validateRelaySubmission } from './policy/firewall'
+import {
+  FirewallError,
+  MAX_BATCH_INSTRUCTIONS,
+  validateRelaySubmission,
+} from './policy/firewall'
 import { RelayGuard } from './policy/guard-do'
 import { computeNativeFeeQuote, computeSwapFeePlan, fetchMintPricesUsd } from './policy/pricing'
 import {
+  ASSET_MODE_PRIVATE,
+  ASSET_MODE_PUBLIC,
   AUDREN_PROGRAM_ID,
   AUDREN_PROGRAM_ID_STR,
-  MAX_ESCROW_SHARDS,
+  NUM_ESCROW_SHARDS,
   PROTOCOL_VERSION,
+  TAG_DEPOSIT,
+  TAG_EXEC_VIA_ESCROW,
+  TAG_PUBLISH_CHECKPOINT,
+  TAG_TRANSACT,
   deriveEscrowPda,
   deriveLanePda,
   deriveVaultAuthPda,
   listReferencedPageSlots,
-  planMissingOpenPageIxs,
+  pickRandomEscrowShard,
+  planBatchMissingOpenPageIxs,
+  type FetchedAccountMeta,
 } from './solana/audren'
 import {
   CheckpointError,
@@ -33,7 +45,7 @@ import {
   type CheckpointLockAdapter,
 } from './solana/checkpoint'
 import {
-  SYSTEM_PROGRAM_ID_STR,
+  CLASSIC_TOKEN_PROGRAM_ID_STR,
   WSOL_MINT_STR,
   base58Decode,
   base58Encode,
@@ -44,7 +56,6 @@ import {
   isValidPubkey,
   readSplTokenAccountAmount,
   toBase64,
-  toHex,
   utf8,
 } from './solana/codec'
 import {
@@ -136,12 +147,36 @@ function getGuardStub(env: Env): DurableObjectStub<RelayGuard> {
   return env.RELAY_GUARD.get(id)
 }
 
-function hashClientIp(request: Request, salt: string): string {
-  const ip =
+function extractClientIp(request: Request): string {
+  return (
     request.headers.get('cf-connecting-ip') ??
     request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
     'unknown'
-  return toHex(sha256(utf8(`${ip}|${salt}`))).slice(0, 32)
+  )
+}
+
+function pickUniformIndex(length: number): number {
+  if (length <= 1) return 0
+  const maxUnbiased = Math.floor(0x1_0000_0000 / length) * length
+  const buf = new Uint32Array(1)
+  for (;;) {
+    crypto.getRandomValues(buf)
+    const v = buf[0]!
+    if (v < maxUnbiased) return v % length
+  }
+}
+
+function resolveShardId(
+  raw: unknown,
+): { ok: true; shardId: number } | { ok: false; error: string } {
+  if (raw === undefined || raw === null || raw === '') {
+    return { ok: true, shardId: pickRandomEscrowShard() }
+  }
+  const n = Number(raw)
+  if (!Number.isFinite(n)) {
+    return { ok: false, error: 'shardId must be a finite integer' }
+  }
+  return { ok: true, shardId: Math.min(Math.max(Math.trunc(n), 0), NUM_ESCROW_SHARDS - 1) }
 }
 
 function sanitizeError(err: unknown, fallback: string): string {
@@ -177,8 +212,9 @@ function getRelayerPubkeyForCluster(
   if (requestedPubkeyB58) {
     const matched = pool.find((r) => r.pubkeyB58 === requestedPubkeyB58)
     if (matched) return matched
+    return pool[0]!
   }
-  return pool[0]!
+  return pool[pickUniformIndex(pool.length)]!
 }
 
 // ============================================================================
@@ -193,7 +229,7 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
   const clusterInfo = async (cluster: Cluster) => {
     const rpcUrl = getRpcUrl(env, cluster)
     const pool = getRelayerPoolForCluster(env, cluster)
-    const relayer = pool[0] ?? null
+    const relayer = pool.length > 0 ? pool[pickUniformIndex(pool.length)]! : null
     const fvkInfo = getRelayerFvk(env, cluster)
     if (!rpcUrl || !relayer) {
       return {
@@ -245,8 +281,9 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
     clusters: { mainnet, devnet },
     supportedOperations: {
       transfer: {
-        tag: 6,
-        assetMode: 0,
+        tag: TAG_TRANSACT,
+        assetMode: ASSET_MODE_PRIVATE,
+        maxBatchSize: MAX_BATCH_INSTRUCTIONS,
         shieldedCm2Fee: activeCluster.relayerShieldedAddress !== null,
         flatFee: true,
         requiresAmount: false,
@@ -255,14 +292,19 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
         sponsored: true,
       },
       withdraw: {
-        tag: 6,
+        tag: TAG_TRANSACT,
+        assetMode: ASSET_MODE_PUBLIC,
+        defaultNullifiers: 2,
+        supportsOmitNf1: true,
         selfPaying: true,
         nativeRelayerFee: true,
         supportsUnwrapWsol: true,
         sponsored: true,
       },
       exec_escrow: {
-        tag: 7,
+        tag: TAG_EXEC_VIA_ESCROW,
+        defaultNullifiers: 2,
+        supportsOmitNf1: true,
         selfPaying: true,
         nativeRelayerFee: true,
         supportsFeeOnOutput: true,
@@ -270,14 +312,14 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
         microSwapSubsidy: cfg.allowMicroSwapSubsidy,
       },
       checkpoint: {
-        tag: 5,
+        tag: TAG_PUBLISH_CHECKPOINT,
         permissionless: true,
         endpoint: '/v1/checkpoint',
       },
       deposit: {
-        tags: [3, 4],
+        tags: [TAG_DEPOSIT],
         sponsored: false,
-        reason: 'Deposits (DepositSol / DepositSpl) are naturally public; sign directly.',
+        reason: 'Deposits (Deposit Tag 3) are naturally public; sign directly.',
       },
     },
     allowedPreIxPrograms: Array.from(cfg.allowedPreIxPrograms),
@@ -332,16 +374,23 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       : rawOp === 'transfer'
         ? 'transfer'
         : 'withdraw'
-  const rawMint = (u.searchParams.get('mint') ?? 'native').trim()
+  const rawMint = (u.searchParams.get('mint') ?? WSOL_MINT_STR).trim()
+  if (!isValidPubkey(rawMint)) {
+    return json(request, cfg.corsOrigins, { error: 'Invalid mint pubkey' }, 400)
+  }
   const unwrapWsol = u.searchParams.get('unwrapWsol') === 'true'
+  if (op === 'withdraw' && unwrapWsol && rawMint !== WSOL_MINT_STR) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      { error: `unwrapWsol is only valid when mint is WSOL (${WSOL_MINT_STR})` },
+      400,
+    )
+  }
   const feeOnOutput = u.searchParams.get('feeOnOutput') === 'true'
   const rawOmitNf1 = u.searchParams.get('omitNf1')?.trim().toLowerCase()
-  const omitNf1 =
-    rawOmitNf1 === 'true' || rawOmitNf1 === '1'
-      ? true
-      : rawOmitNf1 === 'false' || rawOmitNf1 === '0'
-        ? false
-        : op !== 'transfer'
+  // Default `omitNf1 = false` (2 nullifiers) across ALL ops (`transfer`, `withdraw`, `exec_escrow`).
+  const omitNf1 = rawOmitNf1 === 'true' || rawOmitNf1 === '1'
   const rawOutputs = u.searchParams.get('outputCount')
   const hasChange = u.searchParams.get('hasChange') === 'true'
   const outputCount =
@@ -361,6 +410,17 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
     ? Math.min(6, Math.max(0, Number(rawMissingAtas)))
     : 0
 
+  let shardId: number | undefined
+  let escrowPda: string | undefined
+  if (op === 'exec_escrow') {
+    const resolved = resolveShardId(u.searchParams.get('shardId'))
+    if (!resolved.ok) {
+      return json(request, cfg.corsOrigins, { error: resolved.error }, 400)
+    }
+    shardId = resolved.shardId
+    escrowPda = base58Encode(deriveEscrowPda(0, shardId).address)
+  }
+
   // For private transfers (`op === 'transfer'`), `amount` is optional and completely ignored
   // (never read, validated, logged, or persisted) — fees are flat per mint.
   let amount: bigint | undefined
@@ -373,20 +433,18 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
   }
 
   const rpcUrl = getRpcUrl(env, cluster)
-  const relayer = getRelayerPubkeyForCluster(env, cluster)
+  const requestedRelayer = u.searchParams.get('relayerPubkey')?.trim() || undefined
+  const relayer = getRelayerPubkeyForCluster(env, cluster, requestedRelayer)
   const fvkInfo = getRelayerFvk(env, cluster)
   if (!rpcUrl) {
     return json(request, cfg.corsOrigins, { error: `${cluster} RPC is not configured` }, 503)
   }
 
-  const isNativeSolFee =
-    rawMint === 'native' ||
-    rawMint === SYSTEM_PROGRAM_ID_STR ||
-    (op === 'withdraw' && unwrapWsol)
   const feeSide = op === 'transfer' ? 'shielded_cm2' : feeOnOutput ? 'out' : 'in'
 
   try {
-    if (isNativeSolFee) {
+    // Atomic WSOL unwrap withdraw pays relayer fee directly in native SOL lamports to `relayerPubkey`.
+    if (op === 'withdraw' && unwrapWsol) {
       const [rentSchedule, prices] = await Promise.all([
         fetchLiveRentSchedule(rpcUrl),
         cluster === 'mainnet'
@@ -398,15 +456,16 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         op,
         cfg,
         rentSchedule,
-        isNativeSolFee: true,
+        unwrapWsol: true,
         feeSide,
-        feeMint: SYSTEM_PROGRAM_ID_STR,
+        feeMint: WSOL_MINT_STR,
         feeTokenProgram: null,
         feeDecimals: 9,
         amount,
         outputCount,
         omitNf1,
         missingAtaCount,
+        relayerPubkey: relayer?.pubkeyB58 ?? null,
         feeRecipient: relayer?.pubkeyB58 ?? null,
         feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
         feeRecipientExists: relayer !== null,
@@ -416,9 +475,37 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       return json(request, cfg.corsOrigins, quote)
     }
 
-    if (!isValidPubkey(rawMint)) {
-      return json(request, cfg.corsOrigins, { error: 'Invalid mint pubkey' }, 400)
+    // Fast path for shielded WSOL transfers (WSOL is canonical Classic SPL with 9 decimals, 1:1 SOL).
+    if (op === 'transfer' && rawMint === WSOL_MINT_STR) {
+      const [rentSchedule, prices] = await Promise.all([
+        fetchLiveRentSchedule(rpcUrl),
+        cluster === 'mainnet'
+          ? fetchMintPricesUsd(env, [WSOL_MINT_STR])
+          : Promise.resolve({} as Record<string, number>),
+      ])
+      const quote = computeNativeFeeQuote({
+        cluster,
+        op,
+        cfg,
+        rentSchedule,
+        unwrapWsol: false,
+        feeSide,
+        feeMint: WSOL_MINT_STR,
+        feeTokenProgram: CLASSIC_TOKEN_PROGRAM_ID_STR,
+        feeDecimals: 9,
+        outputCount,
+        omitNf1,
+        missingAtaCount,
+        relayerPubkey: relayer?.pubkeyB58 ?? null,
+        feeRecipient: null,
+        feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
+        feeRecipientExists: true,
+        solPriceUsd: prices[WSOL_MINT_STR] ?? null,
+        feeTokenPriceUsd: prices[WSOL_MINT_STR] ?? null,
+      })
+      return json(request, cfg.corsOrigins, quote)
     }
+
     const [mintMetas, rentSchedule, prices] = await Promise.all([
       fetchMintMetas(rpcUrl, [rawMint]),
       fetchLiveRentSchedule(rpcUrl),
@@ -451,7 +538,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       op,
       cfg,
       rentSchedule,
-      isNativeSolFee: false,
+      unwrapWsol: false,
       feeSide,
       feeMint: rawMint,
       feeTokenProgram: meta.tokenProgram,
@@ -461,9 +548,12 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       omitNf1,
       missingAtaCount,
       hasUnsafeSelfPayExt: meta.hasUnsafeSelfPayExt,
+      relayerPubkey: relayer?.pubkeyB58 ?? null,
       feeRecipient,
       feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
       feeRecipientExists,
+      shardId,
+      escrowPda,
       solPriceUsd: prices[WSOL_MINT_STR] ?? null,
       feeTokenPriceUsd: prices[rawMint] ?? null,
     })
@@ -483,6 +573,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
     amount?: string
     slippageBps?: number | string
     shardId?: number | string
+    relayerPubkey?: string
     onlyDirectRoutes?: boolean | string
     maxAccounts?: number | string
     includeFee?: boolean | string
@@ -498,6 +589,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       amount: u.searchParams.get('amount') ?? undefined,
       slippageBps: u.searchParams.get('slippageBps') ?? undefined,
       shardId: u.searchParams.get('shardId') ?? undefined,
+      relayerPubkey: u.searchParams.get('relayerPubkey') ?? undefined,
       onlyDirectRoutes: u.searchParams.get('onlyDirectRoutes') ?? undefined,
       maxAccounts: u.searchParams.get('maxAccounts') ?? undefined,
       includeFee: u.searchParams.get('includeFee') ?? undefined,
@@ -535,11 +627,11 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
   }
   const slippageBps = Math.min(Math.max(Math.trunc(rawSlippage), 1), 5000)
 
-  const rawShard = params.shardId === undefined ? 0 : Number(params.shardId)
-  if (!Number.isFinite(rawShard)) {
-    return json(request, cfg.corsOrigins, { error: 'shardId must be a finite integer' }, 400)
+  const resolvedShard = resolveShardId(params.shardId)
+  if (!resolvedShard.ok) {
+    return json(request, cfg.corsOrigins, { error: resolvedShard.error }, 400)
   }
-  const shardId = Math.min(Math.max(Math.trunc(rawShard), 0), MAX_ESCROW_SHARDS - 1)
+  const shardId = resolvedShard.shardId
   const onlyDirectRoutes =
     params.onlyDirectRoutes === false || params.onlyDirectRoutes === 'false' ? false : true
   let maxAccounts: number | undefined
@@ -562,7 +654,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
   }
   const providerSelection = parseProvider(params.provider)
 
-  const relayer = getRelayerPubkeyForCluster(env, cluster)
+  const relayer = getRelayerPubkeyForCluster(env, cluster, params.relayerPubkey?.trim() || undefined)
   const escrowPubkey = base58Encode(deriveEscrowPda(0, shardId).address)
 
   try {
@@ -728,6 +820,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       quote: quoteResult.winner,
       candidates: quoteResult.candidates,
       feePlan,
+      relayerPubkey: relayer?.pubkeyB58 ?? null,
       escrowPda: escrowPubkey,
       shardId,
       grossInputAmount: inputTransferFee.grossInputAmount,
@@ -752,6 +845,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
     inputMint?: string
     outputMint?: string
     shardId?: number
+    relayerPubkey?: string
     includeFee?: boolean
   }
   try {
@@ -790,16 +884,16 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
     return json(request, cfg.corsOrigins, { error: 'Invalid inputMint or outputMint' }, 400)
   }
 
-  const rawShard = body.shardId === undefined ? 0 : Number(body.shardId)
-  if (!Number.isFinite(rawShard)) {
-    return json(request, cfg.corsOrigins, { error: 'shardId must be a finite integer' }, 400)
+  const resolvedShard = resolveShardId(body.shardId)
+  if (!resolvedShard.ok) {
+    return json(request, cfg.corsOrigins, { error: resolvedShard.error }, 400)
   }
-  const shardId = Math.min(Math.max(Math.trunc(rawShard), 0), MAX_ESCROW_SHARDS - 1)
+  const shardId = resolvedShard.shardId
   const escrowBytes = deriveEscrowPda(0, shardId).address
   const vaultAuthBytes = deriveVaultAuthPda(0).address
   const escrowPubkey = base58Encode(escrowBytes)
   const vaultAuthPubkey = base58Encode(vaultAuthBytes)
-  const relayer = getRelayerPubkeyForCluster(env, cluster)
+  const relayer = getRelayerPubkeyForCluster(env, cluster, body.relayerPubkey?.trim() || undefined)
 
   // Detect whether the quote carries a platformFeeBps > 0
   const rawPlatformFee = body.quoteResponse.platformFee as { feeBps?: number } | null | undefined
@@ -904,6 +998,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
       cluster,
       provider: built.provider,
       shardId,
+      relayerPubkey: relayer?.pubkeyB58 ?? null,
       escrowPda: escrowPubkey,
       vaultAuth: vaultAuthPubkey,
       inputMint,
@@ -944,9 +1039,11 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   const cluster = parseCluster(body.cluster, 'mainnet')
   const rpcUrl = getRpcUrl(env, cluster)
   const requestedPayer =
-    Array.isArray(body.accounts) && typeof body.accounts[0]?.pubkey === 'string'
-      ? body.accounts[0]!.pubkey
-      : undefined
+    Array.isArray(body.instructions) && typeof body.instructions[0]?.accounts?.[0]?.pubkey === 'string'
+      ? body.instructions[0]!.accounts[0]!.pubkey
+      : Array.isArray(body.accounts) && typeof body.accounts[0]?.pubkey === 'string'
+        ? body.accounts[0]!.pubkey
+        : undefined
   const relayer = getRelayerPubkeyForCluster(env, cluster, requestedPayer)
   const fvkInfo = getRelayerFvk(env, cluster)
   if (!rpcUrl || !relayer) {
@@ -959,7 +1056,8 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     )
   }
 
-  // 1. Strict Zero-Trust Audren Firewall (permits JoinSplit Tag 6 & ExecViaEscrow Tag 7; rejects Deposits)
+  // 1. Strict Zero-Trust Audren v1 Firewall (permits Transact Tag 5, 1..=4 private Transact batches,
+  //    & ExecViaEscrow Tag 6; enforces vk_id === 0 and canonical ATAs; rejects Deposit Tag 3)
   let verdict: ReturnType<typeof validateRelaySubmission>
   try {
     verdict = validateRelaySubmission(
@@ -975,7 +1073,11 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     return json(request, cfg.corsOrigins, { error: sanitizeError(err, 'Firewall error') }, 400)
   }
 
-  const rawCu = body.computeUnitLimit === undefined ? 850_000 : Number(body.computeUnitLimit)
+  const defaultCu =
+    verdict.audrenInstructions.length > 1
+      ? Math.min(verdict.audrenInstructions.length * 320_000, 1_400_000)
+      : 850_000
+  const rawCu = body.computeUnitLimit === undefined ? defaultCu : Number(body.computeUnitLimit)
   if (!Number.isFinite(rawCu) || rawCu < 0) {
     return json(request, cfg.corsOrigins, { error: 'computeUnitLimit must be a non-negative number' }, 400)
   }
@@ -987,11 +1089,12 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   const parsedPriority = BigInt(rawPriorityStr)
   const cappedPriority = parsedPriority > 50_000n ? 50_000n : parsedPriority
 
-  const ipHash = hashClientIp(request, relayer.pubkeyB58)
+  const clientIp = extractClientIp(request)
   const guard = getGuardStub(env)
 
-  // Pre-simulation guard: deduplicate concurrent nullifiers and block failure floods before RPC
-  const beginDecision = await guard.begin({ ipHash, nullifiers: verdict.nullifiers })
+  // Pre-simulation guard: hashes IP inside DO using ephemeral daily 32-byte random salt,
+  // atomically deduplicates all nullifiers across the single ix or batch without linking IP to nullifiers.
+  const beginDecision = await guard.begin({ clientIp, nullifiers: verdict.nullifiers })
   if (!beginDecision.allowed) {
     return json(
       request,
@@ -1007,20 +1110,31 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         : undefined,
     )
   }
+  const ipHash = beginDecision.ipHash ?? ''
 
   let lockHeld = true
   let reservationId: string | undefined
   try {
-    // 2. Fetch blockhash + pre-simulation balances + LaneTreeState + primary/rollover page PDAs
-    //    in ONE parallel RPC batch (zero extra round-trip).
+    // 2. Fetch blockhash + pre-simulation balances + all touched LaneTreeStates + all primary/rollover
+    //    page PDAs across the instruction(s) in ONE parallel RPC batch (zero extra round-trip).
     const watchAddresses = [relayer.pubkeyB58]
     if (verdict.watchedRelayerFeeAta) watchAddresses.push(verdict.watchedRelayerFeeAta)
 
-    const lanePdaB58 = base58Encode(deriveLanePda(verdict.poolId, verdict.outLaneId).address)
-    const pageSlots = listReferencedPageSlots(verdict.pages)
-    const laneFetchIdx = watchAddresses.length
-    const pagesFetchStartIdx = laneFetchIdx + 1
-    const preFetchAddresses = [...watchAddresses, lanePdaB58, ...pageSlots.map((p) => p.pda)]
+    const preFetchAddresses: string[] = [...watchAddresses]
+    const seenFetch = new Set<string>(watchAddresses)
+    const enqueueFetch = (addr: string) => {
+      if (!seenFetch.has(addr)) {
+        seenFetch.add(addr)
+        preFetchAddresses.push(addr)
+      }
+    }
+
+    for (const entry of verdict.audrenInstructions) {
+      enqueueFetch(base58Encode(deriveLanePda(entry.poolId, entry.outLaneId).address))
+      for (const slot of listReferencedPageSlots(entry.pages)) {
+        enqueueFetch(slot.pda)
+      }
+    }
 
     const [bhRes, preAccounts] = await Promise.all([
       rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
@@ -1029,21 +1143,29 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       fetchMultipleAccounts(rpcUrl, preFetchAddresses),
     ])
 
+    const fetchedMap = new Map<string, FetchedAccountMeta | null>()
+    preFetchAddresses.forEach((addr, idx) => {
+      const acc = preAccounts[idx]
+      fetchedMap.set(addr, acc ? { bytes: acc.bytes, owner: acc.owner } : null)
+    })
+
     const preRelayerLamports = BigInt(preAccounts[0]?.lamports ?? 0)
     const preFeeUnits = verdict.watchedRelayerFeeAta
       ? readSplTokenAccountAmount(preAccounts[1]?.bytes ?? null)
       : 0n
 
-    // 3. Auto-prepend `OpenPage` (Tag 2, reimbursed from `LaneRentVault`) for any missing primary
-    //    or rollover page PDA after verifying canonical PDA derivation against `LaneTreeState`.
-    const pagePlan = planMissingOpenPageIxs({
+    // 3. Auto-prepend deduplicated `OpenPage` (Tag 2, reimbursed from `LaneRentVault`) for any missing
+    //    primary or rollover page PDAs across all lanes touched by the single ix or batch.
+    const pagePlan = planBatchMissingOpenPageIxs({
       payerB58: relayer.pubkeyB58,
-      poolId: verdict.poolId,
-      outLaneId: verdict.outLaneId,
-      laneAcc: preAccounts[laneFetchIdx] ?? null,
-      pages: verdict.pages,
-      pageSlots,
-      pageAccs: pageSlots.map((_, idx) => preAccounts[pagesFetchStartIdx + idx] ?? null),
+      entries: verdict.audrenInstructions.map((entry) => ({
+        poolId: entry.poolId,
+        outLaneId: entry.outLaneId,
+        outputCount: entry.outputCount,
+        nullifierCount: entry.nullifiers.length,
+        pages: entry.pages,
+      })),
+      fetchedAccounts: fetchedMap,
     })
     if (!pagePlan.ok) {
       await guard.release({
@@ -1061,7 +1183,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
-    // 4. Build full instruction list (setupAtas + OpenPage Tag 2 + allowlisted preInstructions + Audren ix)
+    // 4. Build full instruction list (setupAtas + OpenPage Tag 2 + allowlisted preInstructions + Audren ix(s))
     const instructions: SolanaInstruction[] = []
 
     for (const s of verdict.setupAtas) {
@@ -1080,16 +1202,18 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       instructions.push(openIx)
     }
 
-    // Prepend strictly-allowlisted zero-signer DeFi refresh cranks (Tag 7 only)
+    // Prepend strictly-allowlisted zero-signer DeFi refresh cranks (Tag 6 only)
     for (const preIx of verdict.preInstructions) {
       instructions.push(preIx)
     }
 
-    instructions.push({
-      programId: AUDREN_PROGRAM_ID,
-      accounts: verdict.decodedAccounts,
-      data: verdict.ixData,
-    })
+    for (const entry of verdict.audrenInstructions) {
+      instructions.push({
+        programId: AUDREN_PROGRAM_ID,
+        accounts: entry.decodedAccounts,
+        data: entry.ixData,
+      })
+    }
 
     const baseCu = Math.max(Math.trunc(rawCu), 200_000)
     const requestedCu =
@@ -1098,11 +1222,31 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       pagePlan.openPageIxs.length * 20_000
     const cuLimit = Math.min(requestedCu, 1_400_000)
 
-    // 5. Compile & sign Solana v1 (0x81) single transaction
-    const signed = buildAndSignV1Transaction(relayer.secret32, bhRes.value.blockhash, instructions, {
-      computeUnitLimit: cuLimit,
-      priorityFeeLamports: cappedPriority,
-    })
+    // 5. Compile & sign Solana v1 (0x81) single transaction (strictly <= 4,096 B and <= 64 accounts)
+    let signed: ReturnType<typeof buildAndSignV1Transaction>
+    try {
+      signed = buildAndSignV1Transaction(relayer.secret32, bhRes.value.blockhash, instructions, {
+        computeUnitLimit: cuLimit,
+        priorityFeeLamports: cappedPriority,
+      })
+    } catch (txErr) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: true,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: sanitizeError(txErr, 'Transaction exceeds Solana v1 size or account limits'),
+          code: 'TX_TOO_LARGE',
+        },
+        400,
+      )
+    }
 
     // 6. Pre-flight simulation on Solana RPC before committing lamports:
     //    measures exact SOL outflow and exact fee token/SOL inflow directly from Solana runtime.
@@ -1168,8 +1312,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     const postRelayerLamports = BigInt(sim.accounts[0].lamports)
     const rawOutflowLamports =
       preRelayerLamports > postRelayerLamports ? preRelayerLamports - postRelayerLamports : 0n
-    // Enforce a minimum gas floor (5,000 signature + priority fee) when not offset by native SOL fee
-    // and cap maximum per-tx relayer outflow to protect against runaway rent creation.
+    // Enforce a minimum gas floor (5,000 signature + priority fee) when not offset by unwrap SOL fee
     const minBaselineLamports = 5_000n + cappedPriority
     const simulatedCostLamports =
       verdict.nativeSolFeeToRelayer > 0n
@@ -1178,26 +1321,6 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
           ? rawOutflowLamports
           : minBaselineLamports
 
-    const MAX_TX_OUTFLOW_LAMPORTS = 50_000_000n // 0.05 SOL hard per-tx safety ceiling
-    if (simulatedCostLamports > MAX_TX_OUTFLOW_LAMPORTS) {
-      await guard.release({
-        ipHash,
-        cluster,
-        nullifiers: verdict.nullifiers,
-        recordFailure: false,
-      })
-      lockHeld = false
-      return json(
-        request,
-        cfg.corsOrigins,
-        {
-          error: `Simulated relayer SOL outflow (${simulatedCostLamports.toString()} lamports) exceeds per-tx safety ceiling`,
-          code: 'COST_CEILING_EXCEEDED',
-        },
-        400,
-      )
-    }
-
     // Measure exact SPL/Token-2022 fee tokens earned by the relayer during simulation
     const postFeeUnits =
       verdict.watchedRelayerFeeAta && sim.accounts[1]
@@ -1205,35 +1328,52 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         : 0n
     const simulatedFeeUnits = postFeeUnits > preFeeUnits ? postFeeUnits - preFeeUnits : 0n
 
-    // Dynamically value simulated fee earnings in lamports (Modes 1, 2 & 3!)
+    // Dynamically value simulated fee earnings in lamports (Modes 1 single/batch, 2, & 3!)
     let feeEquivalentLamports = 0n
+    let combinedCm2SingleMint: string | null = null
+    let combinedCm2SingleMintAmount = 0n
+
     if (verdict.nativeSolFeeToRelayer > 0n) {
-      // Mode 2/3 Native SOL or `unwrap_wsol` Withdraw paid lamports directly to `relayerPubkey`!
+      // Mode 2 atomic `WITHDRAW_FLAG_UNWRAP_WSOL` paid lamports directly to `relayerPubkey`!
       feeEquivalentLamports = verdict.nativeSolFeeToRelayer
-    } else if (verdict.shieldedCm2Fee) {
-      // Mode 1 Private Transfer: shielded `cm2` fee note cryptographically verified via read-only FVK!
-      const { mint: cm2Mint, amount: cm2Amt } = verdict.shieldedCm2Fee
-      if (cm2Mint === SYSTEM_PROGRAM_ID_STR || cm2Mint === WSOL_MINT_STR) {
-        feeEquivalentLamports = cm2Amt
-      } else if (cluster === 'mainnet') {
+    } else if (verdict.shieldedCm2Fees.length > 0) {
+      // Mode 1 Private Transfer (single or multi-ix merge batch): sum all FVK-verified shielded `cm2` fee notes!
+      const amountByMint = new Map<string, bigint>()
+      for (const fee of verdict.shieldedCm2Fees) {
+        amountByMint.set(fee.mint, (amountByMint.get(fee.mint) ?? 0n) + fee.amount)
+      }
+      if (amountByMint.size === 1) {
+        const [[onlyMint, onlyAmt]] = Array.from(amountByMint.entries())
+        combinedCm2SingleMint = onlyMint!
+        combinedCm2SingleMintAmount = onlyAmt!
+      }
+      const wsolAmt = amountByMint.get(WSOL_MINT_STR) ?? 0n
+      feeEquivalentLamports += wsolAmt
+
+      const otherMints = Array.from(amountByMint.keys()).filter((m) => m !== WSOL_MINT_STR)
+      if (otherMints.length > 0 && cluster === 'mainnet') {
         const [mintMetas, prices] = await Promise.all([
-          fetchMintMetas(rpcUrl, [cm2Mint]),
-          fetchMintPricesUsd(env, [WSOL_MINT_STR, cm2Mint]),
+          fetchMintMetas(rpcUrl, otherMints),
+          fetchMintPricesUsd(env, [WSOL_MINT_STR, ...otherMints]),
         ])
-        const feeMeta = mintMetas[cm2Mint]
         const solUsd = prices[WSOL_MINT_STR]
-        const feeUsdPrice = prices[cm2Mint]
-        if (
-          feeMeta &&
-          feeMeta.isValidMint &&
-          !feeMeta.hasUnsafeSelfPayExt &&
-          solUsd &&
-          feeUsdPrice &&
-          solUsd > 0 &&
-          feeUsdPrice > 0
-        ) {
-          const feeUsd = (Number(cm2Amt) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
-          feeEquivalentLamports = BigInt(Math.max(0, Math.floor((feeUsd / solUsd) * 1e9)))
+        if (solUsd && solUsd > 0) {
+          for (const cm2Mint of otherMints) {
+            const feeMeta = mintMetas[cm2Mint]
+            const feeUsdPrice = prices[cm2Mint]
+            const cm2Amt = amountByMint.get(cm2Mint) ?? 0n
+            if (
+              feeMeta &&
+              feeMeta.isValidMint &&
+              !feeMeta.hasUnsafeSelfPayExt &&
+              feeUsdPrice &&
+              feeUsdPrice > 0 &&
+              cm2Amt > 0n
+            ) {
+              const feeUsd = (Number(cm2Amt) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
+              feeEquivalentLamports += BigInt(Math.max(0, Math.floor((feeUsd / solUsd) * 1e9)))
+            }
+          }
         }
       }
     } else if (simulatedFeeUnits > 0n && verdict.watchedRelayerFeeMint) {
@@ -1264,8 +1404,8 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     }
 
     // Net lamports subsidized by the relay (strict 100% coverage required for `isSelfPaying`):
-    //   - For Native SOL / `unwrap_wsol` Withdraw fees, `simulatedCostLamports` is ALREADY post-fee net outflow.
-    //   - For SPL/Token-2022 fees, subtract `feeEquivalentLamports` from `simulatedCostLamports`.
+    //   - For `unwrap_wsol` Withdraw fees, `simulatedCostLamports` is ALREADY post-fee net outflow.
+    //   - For SPL/Token-2022 & shielded cm2 fees, subtract `feeEquivalentLamports` from `simulatedCostLamports`.
     const netSponsoredLamports =
       verdict.nativeSolFeeToRelayer > 0n
         ? simulatedCostLamports
@@ -1276,6 +1416,60 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       verdict.nativeSolFeeToRelayer > 0n
         ? netSponsoredLamports === 0n
         : feeEquivalentLamports > 0n && netSponsoredLamports === 0n
+
+    // Hard per-tx outflow safety ceiling (protects against runaway sponsored rent creation)
+    const MAX_TX_OUTFLOW_LAMPORTS = 50_000_000n // 0.05 SOL hard per-tx sponsored ceiling
+    const maxRawOutflowLamports =
+      isSelfPaying && pagePlan.openPageIxs.length > 0 ? 300_000_000n : MAX_TX_OUTFLOW_LAMPORTS
+    if (
+      netSponsoredLamports > MAX_TX_OUTFLOW_LAMPORTS ||
+      simulatedCostLamports > maxRawOutflowLamports
+    ) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: false,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: `Simulated relayer SOL outflow (${simulatedCostLamports.toString()} lamports) exceeds per-tx safety ceiling`,
+          code: 'COST_CEILING_EXCEEDED',
+        },
+        400,
+      )
+    }
+
+    // Multi-instruction private `Transact` batches (2..=4 merges) require combined relayer fees
+    // to cover total simulated cost (all instructions + any auto-prepended `OpenPage` instructions).
+    if (
+      verdict.audrenInstructions.length > 1 &&
+      !isSelfPaying &&
+      (fvkInfo !== null || !cfg.allowMicroSwapSubsidy)
+    ) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: false,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error:
+            'Combined shielded cm2 relayer fees across multi-instruction batch did not cover simulated Solana rent/gas (including any auto-prepended OpenPage instructions).',
+          code: 'FEE_REQUIRED',
+          simulatedCostLamports: simulatedCostLamports.toString(),
+          feeEquivalentLamports: feeEquivalentLamports.toString(),
+        },
+        402,
+      )
+    }
 
     if (verdict.execMeta && !isSelfPaying && !cfg.allowMicroSwapSubsidy) {
       await guard.release({
@@ -1299,7 +1493,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
-    // 6. Post-simulation guard: atomically reserve simulated net sponsored cost against daily budget & IP limits
+    // 7. Post-simulation guard: atomically reserve simulated net sponsored cost against daily budget & IP limits
     const reservation = await guard.authorizeSpend({
       ipHash,
       cluster,
@@ -1331,7 +1525,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     }
     reservationId = reservation.reservationId
 
-    // 7. Broadcast & confirm on Solana via RPC
+    // 8. Broadcast & confirm on Solana via RPC
     const sentSig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
       toBase64(signed.wireBytes),
       { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
@@ -1359,7 +1553,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       throw confErr
     }
 
-    // 8. Commit EXACT simulated cost into SQLite Durable Object & clear pending reservation
+    // 9. Commit EXACT simulated cost into SQLite Durable Object & clear pending reservation
     await guard.commit({
       reservationId,
       ipHash,
@@ -1380,6 +1574,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       ok: true,
       cluster,
       opKind: verdict.opKind,
+      instructionCount: verdict.audrenInstructions.length,
       billingMode: isSelfPaying ? 'self_paying' : 'sponsored',
       txVersion: signed.version,
       txWireBytes: signed.wireLen,
@@ -1393,19 +1588,22 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       simulatedFeeUnits:
         verdict.nativeSolFeeToRelayer > 0n
           ? verdict.nativeSolFeeToRelayer.toString()
-          : verdict.shieldedCm2Fee
-            ? verdict.shieldedCm2Fee.amount.toString()
+          : verdict.shieldedCm2Fees.length > 0
+            ? (combinedCm2SingleMint !== null
+                ? combinedCm2SingleMintAmount
+                : feeEquivalentLamports
+              ).toString()
             : simulatedFeeUnits.toString(),
       simulatedFeeMint:
         verdict.nativeSolFeeToRelayer > 0n
-          ? SYSTEM_PROGRAM_ID_STR
-          : verdict.shieldedCm2Fee
-            ? verdict.shieldedCm2Fee.mint
+          ? WSOL_MINT_STR
+          : verdict.shieldedCm2Fees.length > 0
+            ? combinedCm2SingleMint ?? WSOL_MINT_STR
             : verdict.watchedRelayerFeeMint,
       simulatedFeeAccount:
         verdict.nativeSolFeeToRelayer > 0n
           ? relayer.pubkeyB58
-          : verdict.shieldedCm2Fee
+          : verdict.shieldedCm2Fees.length > 0
             ? fvkInfo?.shieldedAddress ?? null
             : verdict.watchedRelayerFeeAta,
       netSponsoredLamports: netSponsoredLamports.toString(),
@@ -1493,9 +1691,9 @@ async function handleCheckpoint(request: Request, env: Env): Promise<Response> {
     )
   }
 
-  const ipHash = hashClientIp(request, relayer.pubkeyB58)
+  const clientIp = extractClientIp(request)
   const guard = getGuardStub(env)
-  const rateDecision = await guard.checkCheckpointRateLimit({ ipHash, cluster })
+  const rateDecision = await guard.checkCheckpointRateLimit({ clientIp, cluster })
   if (!rateDecision.allowed) {
     return json(
       request,
@@ -1652,10 +1850,10 @@ export default {
         runAutoRefill(env, cfg).then((report) => {
           console.log('[audren-relay cron refill]', JSON.stringify(report))
         }),
-        runV2MaintenanceCrank(env, 'mainnet', ckptLock).then((crank) => {
+        runMaintenanceCrank(env, 'mainnet', ckptLock).then((crank) => {
           console.log('[audren-relay cron crank mainnet]', JSON.stringify(crank))
         }),
-        runV2MaintenanceCrank(env, 'devnet', ckptLock).then((crank) => {
+        runMaintenanceCrank(env, 'devnet', ckptLock).then((crank) => {
           console.log('[audren-relay cron crank devnet]', JSON.stringify(crank))
         }),
       ]).catch((err) => {

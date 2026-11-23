@@ -63,17 +63,17 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Alice picks 500 USDC and pastes your aud1…',
         packetLabel: '500 USDC + aud1…',
         detail:
-          'Alice enters your reusable aud1… private address and chooses 500 USDC, SOL, BONK, or any transferable Token-2022 mint. Zero ZK proof generation is required: she signs a standard DepositSol (Tag 3) or DepositSpl (Tag 4) transaction.',
-        cryptoTag: 'Tag 3 / Tag 4 Deposit · 0 ZK proofs · 1 standard wallet signature',
+          'Alice enters your reusable Bech32m aud1… private address and chooses 500 USDC, SOL, BONK, or any transferable Token-2022 mint. Zero ZK proof generation is required: she signs a single unified Deposit (Tag 3) transaction (native SOL wraps atomically via SyncNative into WSOL alongside Classic SPL and Token-2022).',
+        cryptoTag: 'Tag 3 Unified Deposit · 0 ZK proofs · 1 standard wallet signature',
       },
       {
         actor: 'One-time stealth box',
-        title: 'Fresh Poseidon stealth owner and 90 B memo',
+        title: 'Fresh Poseidon stealth owner and 106 B memo',
         shortLabel: 'stealth = Poseidon3(2, spend_pk, tweak)',
-        packetLabel: 'Note cm + 90 B Memo',
+        packetLabel: 'Note cm + 106 B Memo',
         detail:
-          'Alice’s wallet performs X25519 ECDH with your view public key, derives a deterministic tweak and blinding scalar, computes stealth_owner = Poseidon3(DOMAIN_STEALTH, spend_pk, tweak), and encrypts (amount, mint) into a 90-byte ChaCha20-Poly1305 memo with a 2-byte view tag.',
-        cryptoTag: 'X25519 ECDH · 2-byte view_tag · ChaCha20-Poly1305 (90 B SoA)',
+          'Alice’s wallet performs X25519 ECDH with your view public key (rejecting low-order points), derives a deterministic tweak and blinding scalar, computes stealth_owner = Poseidon3(DOMAIN_STEALTH, spend_pk, tweak), and encrypts (amount, mint, version, 14 B payment_id) into a 72-byte ChaCha20-Poly1305 AEAD ciphertext with (view_tag || epk) bound as AAD (106 B SoA entry).',
+        cryptoTag: 'X25519 ECDH · 2-byte view_tag · ChaCha20-Poly1305 AEAD (72 B ct / 106 B SoA)',
       },
       {
         actor: 'Global 4-ary MASP Pool #0',
@@ -81,7 +81,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: '500 USDC → Unified vault · cm → SubtreePage',
         packetLabel: '4^20 Global Tree (16 lanes)',
         detail:
-          'Solana transfers 500 USDC into Audren’s unified vault ATA, computes cm = Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, net_received, blinding) on-chain, updates the active lane’s 4-ary Depth-18 frontier, and writes the 90 B memo to MemoPage.',
+          'Solana transfers 500 USDC into Audren’s canonical vault_auth ATA, computes cm = Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, net_received, blinding) on-chain, updates the active lane’s 4-ary Depth-18 frontier, and writes the 106 B SoA memo entry to MemoPage (10,240 B, 96 notes/page).',
         cryptoTag: 'Unified Pool #0 · Net-delta Token-2022 solvency · 4→8→16 lanes',
       },
       {
@@ -139,8 +139,8 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'BN254 Groth16 over 20-level 4-ary super_root',
         packetLabel: '192 B Groth16 Proof',
         detail:
-          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in WASM against a recent RootCheckpoint: “I own 1 or 2 unspent notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and their key-separated nullifiers have never been spent.”',
-        cryptoTag: 'Tag 6 JoinSplit · 17,861 R1CS · Key-separated nk nullifiers',
+          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in a dedicated WASM Web Worker against a recent RootCheckpoint: “I own 1 or 2 unspent notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and their key-separated nullifiers have never been spent.”',
+        cryptoTag: 'Tag 5 Transact · 17,861 R1CS · Key-separated nk nullifiers',
       },
       {
         actor: 'Hidden asset and amount',
@@ -157,16 +157,16 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: '1 Solana v1 tx · Optional shielded cm2 fee note',
         packetLabel: 'Relayed Solana v1 Tx',
         detail:
-          'Your browser sends the finished proof to relay.audren.xyz (or your own self-hosted relay). For private transfers, the optional relayer fee can settle as shielded output cm2 verified via the relayer’s read-only FullViewingKey. Your public wallet never signs.',
+          'Your browser sends the finished proof to relay.audren.xyz (or your own self-hosted relay). For private transfers, the optional relayer fee settles as shielded output cm2 verified via the relayer’s read-only FullViewingKey (up to 4 parallel 2 → 1 merges fit in one Solana Transaction v1). Your public wallet never signs.',
         cryptoTag: 'Solana Tx v1 (0x81) · ~130k–160k CU · Zero user wallet signers',
       },
       {
         actor: 'Bob’s private balance',
-        title: 'Opaque commitments and 90 B memos land on Solana',
+        title: 'Opaque commitments and 106 B memos land on Solana',
         shortLabel: 'Bob gets 500 USDC · You keep hidden change',
         packetLabel: 'Bob +500 · Your Change',
         detail:
-          'Solana verifies the 192 B Groth16 proof via native alt_bn128 pairing syscalls, locks NullifierPDA(s) and appends 16 B prefixes to NullifierPage, and writes the new commitments and 90 B SoA memos to your chosen append lane.',
+          'Solana verifies the 192 B Groth16 proof via native alt_bn128 pairing syscalls, locks NullifierPDA(s) and appends 16 B prefixes to NullifierPage, and writes the new commitments and 106 B SoA memos to your chosen append lane.',
         cryptoTag: 'alt_bn128 syscall verified · 16 B NullifierPage sync',
       },
     ],
@@ -203,7 +203,7 @@ const FLOWS: FlowDefinition[] = [
     tabSub: 'ExecViaEscrow: swap, lend, stake in 1 tx',
     exampleHeadline: 'Swap, lend, stake, or mint yield tokens from your Private Balance in 1 tx',
     exampleNote:
-      'Tag 7 ExecViaEscrow is protocol-agnostic: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA vaults. External DeFi mints, amounts, and output record remain public.',
+      'Tag 6 ExecViaEscrow is protocol-agnostic across SPL and Token-2022: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA vaults. External DeFi mints, amounts, and output record remain public.',
     txHref: solscanTx(AUDREN.mainnet.swapTx, 'mainnet'),
     txLabel: 'Inspect ExecViaEscrow transaction',
     demoHref: '/demo',
@@ -216,16 +216,16 @@ const FLOWS: FlowDefinition[] = [
         packetLabel: '192 B Groth16 Proof',
         detail:
           'Your browser proves ownership of 1–2 global pool notes, binds router_program, every router account (pubkey + is_writable), min_amount_out, and relayer_fee inside ctx_hash, and optionally pays the relayer from the input or output leg (EXEC_FLAG_FEE_ON_OUTPUT).',
-        cryptoTag: 'Tag 7 ExecViaEscrow · ctx_hash-bound router_accounts · ~158k CU',
+        cryptoTag: 'Tag 6 ExecViaEscrow · ctx_hash-bound router_accounts · ~158k CU',
       },
       {
         actor: 'Shared escrow shard',
         title: 'Program unlocks into isolated sharded PDA',
-        shortLabel: 'Unified vault → Sharded swap_escrow (0..15)',
+        shortLabel: 'Unified vault ATA → Sharded audren_escrow (0..15)',
         packetLabel: 'Token A → Escrow PDA',
         detail:
-          'Audren verifies the 192 B Groth16 proof, locks nullifiers, snapshots pre-CPI owners, delegates, and lamports in WatchedEscrowBuf, and moves exact amount_in into one of 16 sharded escrow PDAs. Only the escrow PDA signs the external CPI.',
-        cryptoTag: 'Sharded swap_escrow PDA (0..15) · WatchedEscrowBuf firewall',
+          'Audren verifies the 192 B Groth16 proof, locks nullifiers, snapshots pre-CPI owners, delegates, and lamports in WatchedEscrowBuf, and moves exact amount_in into a randomly chosen shard among 16 sharded escrow PDAs. Only the escrow PDA signs the external CPI.',
+        cryptoTag: 'Sharded audren_escrow PDA (0..15) · WatchedEscrowBuf firewall',
       },
       {
         actor: 'Protocol-agnostic DeFi CPI',
@@ -242,8 +242,8 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Measured net vault delta committed on-chain',
         packetLabel: 'Private Token B Note',
         detail:
-          'Audren measures the exact vault balance delta received, settles any EXEC_FLAG_FEE_ON_OUTPUT relayer fee, sweeps every remaining atom into the unified vault, and writes an XOR-masked AUD2DYN2 dynamic memo (zero plaintext markers at rest) plus a Poseidon5 commitment to your stealth owner.',
-        cryptoTag: 'Measured net delta · Token-2022 safe · Zero-plaintext dynamic memo',
+          'Audren measures the exact vault balance delta received, settles any EXEC_FLAG_FEE_ON_OUTPUT relayer fee, sweeps every remaining atom into the canonical vault ATA, and writes a domain-separated 72 B XOR-masked AUD1DYN1 dynamic memo (zero plaintext markers at rest) plus a Poseidon5 commitment to your stealth owner.',
+        cryptoTag: 'Measured net delta · Token-2022 safe · 72 B AUD1DYN1 dynamic memo',
       },
     ],
     solscan: [
@@ -297,7 +297,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'SubtreePage records cm = Poseidon5(3, stealth, asset, amt, r)',
         packetLabel: 'On-Chain Leaf cm',
         detail:
-          'Every deposit, private JoinSplit, and shielded DeFi settlement writes a canonical 32-byte Poseidon5 commitment into a fixed 8,256 B SubtreePage PDA. Confirmed leaf commitments are append-only; note the deployment remains upgradeable during pre-audit.',
+          'Every Deposit, private Transact, and ExecViaEscrow settlement writes a canonical 32-byte Poseidon5 commitment into a fixed 8,256 B SubtreePage PDA. Confirmed leaf commitments are append-only; note the deployment remains upgradeable during pre-audit.',
         cryptoTag: 'Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, amount, blinding)',
       },
       {
@@ -312,20 +312,20 @@ const FLOWS: FlowDefinition[] = [
       {
         actor: 'Self-paying exit and unwrap',
         title: 'Native relayer fee plus atomic WSOL → Native SOL',
-        shortLabel: 'Tag 6 JoinSplit · WITHDRAW_FLAG_UNWRAP_WSOL · Pause-immune',
+        shortLabel: 'Tag 5 Transact · WITHDRAW_FLAG_UNWRAP_WSOL · Pause-immune',
         packetLabel: 'Direct Native SOL',
         detail:
-          'Withdraw SOL or any SPL token to any wallet or deterministic DeFi Session keypair B_i with zero prior gas: pay relayer_fee natively from the withdrawn note and unwrap WSOL straight into Native SOL in one instruction via an ephemeral audren_v2_unwrap PDA (full exit bypasses SetPaused).',
-        cryptoTag: 'Tag 6 JoinSplit · WITHDRAW_FLAG_UNWRAP_WSOL · ~103k–148k CU',
+          'Withdraw SOL or any SPL token to any wallet or deterministic DeFi Session keypair B_i with zero prior gas: pay relayer_fee natively from the withdrawn note and unwrap WSOL straight into Native SOL in one instruction via an ephemeral audren_unwrap PDA (full exit bypasses SetPaused).',
+        cryptoTag: 'Tag 5 Transact · WITHDRAW_FLAG_UNWRAP_WSOL · ~103k–148k CU',
       },
       {
         actor: 'Zero-dust session sweep',
         title: 'Return every lamport back to the pool',
-        shortLabel: 'Tag 3 DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT) → 0 lamports',
+        shortLabel: 'Tag 3 Deposit(NATIVE_SOL | FEE_FROM_AMOUNT) → 0 lamports',
         packetLabel: '0-Dust Reshield',
         detail:
-          'After closing a stateful borrow or perp position on a session wallet B_i, sweep 100% of remaining SOL back into the pool with DepositSol(fee_from_amount=true): the protocol deducts deterministic LaneRentVault rent from the deposit itself, leaving 0 lamports behind. Remember that stateful DeFi positions opened by B_i remain public on Solana.',
-        cryptoTag: 'Tag 3 DepositSol · DEPOSIT_FLAG_FEE_FROM_AMOUNT · 0-lamport sweep',
+          'After closing a stateful borrow or perp position on a session wallet B_i, sweep 100% of remaining SOL back into the pool with unified Deposit (DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT): the protocol deducts deterministic LaneRentVault rent from the deposit itself, leaving 0 lamports behind. Remember that stateful DeFi positions opened by B_i remain public on Solana.',
+        cryptoTag: 'Tag 3 Deposit · NATIVE_SOL + FEE_FROM_AMOUNT · 0-lamport sweep',
       },
     ],
     solscan: [
@@ -387,16 +387,16 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
     question: 'What is the Groth16 trusted-setup provenance?',
     verdict: 'Perpetual PTAU (71+) · BGM17 · Pre-audit',
     answer:
-      'Audren freezes one minimal 17,861-constraint JoinSplit circuit capable of scaling 4→8→16 lanes without ever re-running a ceremony. Phase 1 uses Hermez/PSE Perpetual Powers of Tau (71+ independent public contributors) and Phase 2 uses verifiable BGM17 zeroized contributions plus a live drand Quicknet and Solana Mainnet beacon (ceremony/transcript.json). External security audit is pending prior to freezing upgrade authority.',
-    primitive: 'BN254 Groth16 (vk_id = 0) · 192 B proof · 3.75 MB compressed PK',
+      'Audren freezes one minimal 17,861-constraint JoinSplit4AryCircuit capable of scaling 4→8→16 lanes without ever re-running a ceremony. Phase 1 uses Hermez/PSE Perpetual Powers of Tau (71+ independent public contributors) and Phase 2 uses verifiable BGM17 zeroized contributions plus a live drand Quicknet and Solana Mainnet beacon (ceremony/transcript.json). External security audit is pending prior to freezing upgrade authority.',
+    primitive: 'BN254 Groth16 (vk_id = 0) · 192 B proof · 3.93 MB compressed PK',
   },
   {
     tag: 'Stealth keys',
     question: 'Can anyone link two payments sent to my aud1… address?',
     verdict: 'Fresh Poseidon stealth owners',
     answer:
-      'Audren instructions never write your reusable 65-byte aud1… address on-chain. Each sender derives a unique X25519 shared secret, computes stealth_owner = Poseidon3(2, spend_pk, tweak), and encrypts a 90 B ChaCha20-Poly1305 memo. Timing, public amounts, and external metadata can still correlate payments.',
-    primitive: 'X25519 ECDH · Poseidon3 stealth · 2-byte view tag · ChaCha20-Poly1305',
+      'Audren instructions never write your reusable 114-character Bech32m aud1… address on-chain. Each sender derives a unique X25519 shared secret (rejecting low-order points), computes stealth_owner = Poseidon3(2, spend_pk, tweak), and encrypts a versioned 72 B ChaCha20-Poly1305 AEAD memo (106 B SoA wire entry). Timing, public amounts, and external metadata can still correlate payments.',
+    primitive: 'X25519 ECDH · Poseidon3 stealth · 2-byte view tag · 72 B AEAD (106 B SoA)',
   },
   {
     tag: 'Custody',
@@ -411,8 +411,8 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
     question: 'Can a shielded DeFi CPI hijack escrow accounts or steal slippage?',
     verdict: 'Escrow firewall · Exact delta',
     answer:
-      'During ExecViaEscrow (Tag 7), Audren binds router_program, every router account (pubkey + is_writable), min_amount_out, and relayer_fee inside ctx_hash, snapshots pre/post owner, delegate, close_authority, and lamports on escrow and token accounts, supports EXEC_FLAG_FEE_ON_OUTPUT, and commits the exact measured vault delta on-chain.',
-    primitive: 'ExecViaEscrow (Tag 7) · WatchedEscrowBuf firewall · ~158k CU',
+      'During ExecViaEscrow (Tag 6), Audren binds router_program, every router account (pubkey + is_writable), min_amount_out, and relayer_fee inside ctx_hash, snapshots pre/post owner, delegate, close_authority, and lamports on escrow and token accounts, supports EXEC_FLAG_FEE_ON_OUTPUT, and commits the exact measured vault delta on-chain.',
+    primitive: 'ExecViaEscrow (Tag 6) · WatchedEscrowBuf firewall · ~158k CU',
   },
 ]
 
@@ -457,7 +457,7 @@ export function HowAudrenWorksVisual() {
 
   const copySampleAddress = () => {
     const sample =
-      'aud1Bzeekem3VfwxvTueYbWyZvRxvon9eD8duQLdj3FPEEZZe12BggMChombGhV3Ywujmet3YSXSoMd7jkd3WBaisnvF'
+      'aud1qyy8j5pa6dnmqs9asr5u8cne6577wuy4a2yednkw5lre7xjfmlczddgk44pa6mf3ujjcgjgemvuwq2a44dcxgjjnp54jmk0dw5krjjcdppvea6'
     navigator.clipboard?.writeText(sample).catch(() => {})
     setCopiedSample(true)
     window.setTimeout(() => setCopiedSample(false), 1600)
@@ -483,20 +483,23 @@ export function HowAudrenWorksVisual() {
                 </h3>
               </div>
               <span className="mono" style={{ fontSize: 12, color: '#55574e' }}>
-                Derived locally · 65-byte payload (0x02 | spend_pk | view_pk)
+                BIP-350 Bech32m (114 chars) · 65-byte payload (0x01 | spend_pk | view_pk) + checksum
               </span>
             </div>
 
             <div className="aud-addr-specimen">
-              <div className="aud-addr-string mono" aria-label="Anatomy of an Audren private address">
-                <span className="aud-seg is-prefix" title="Audren protocol prefix">
+              <div className="aud-addr-string mono" aria-label="Anatomy of an Audren BIP-350 Bech32m private address">
+                <span className="aud-seg is-prefix" title="BIP-350 Bech32m human-readable prefix (hrp = aud) and separator">
                   aud1
                 </span>
-                <span className="aud-seg is-spend" title="Version 0x02 + 32-byte BN254 Poseidon Spend Public Key">
-                  Bzeekem3VfwxvTueYbWyZvRxvon9eD8duQLdj3FPEEZZ
+                <span className="aud-seg is-spend" title="Version 0x01 + 32-byte BN254 Poseidon Spend Public Key (5-bit Bech32m)">
+                  qyy8j5pa6dnmqs9asr5u8cne6577wuy4a2yednkw5lre7xjfmlczd
                 </span>
-                <span className="aud-seg is-view" title="32-byte X25519 View Public Key">
-                  e12BggMChombGhV3Ywujmet3YSXSoMd7jkd3WBaisnvF
+                <span className="aud-seg is-view" title="32-byte X25519 View Public Key (5-bit Bech32m)">
+                  dgk44pa6mf3ujjcgjgemvuwq2a44dcxgjjnp54jmk0dw5krjjcd
+                </span>
+                <span className="aud-seg is-prefix" title="6-character BIP-350 Bech32m typo-detecting checksum">
+                  ppvea6
                 </span>
               </div>
               <button
@@ -529,11 +532,12 @@ export function HowAudrenWorksVisual() {
                       color: 'var(--ink)',
                     }}
                   >
-                    aud1 · Protocol tag
+                    aud1 + checksum · BIP-350 Bech32m
                   </h4>
                   <p>
-                    Identifies a reusable Audren stealth address. Unlike a normal Solana pubkey,
-                    it is not an ordinary Solana account address that an explorer can look up.
+                    114-character lowercase Bech32m encoding (<code>hrp = &quot;aud&quot;</code>,
+                    version <code>0x01</code>) with a built-in 6-character typo-detecting checksum.
+                    Unlike a normal Solana pubkey, explorers cannot look up balances from it.
                   </p>
                 </div>
               </div>

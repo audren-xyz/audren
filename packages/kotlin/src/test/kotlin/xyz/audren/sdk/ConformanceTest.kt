@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -27,7 +28,7 @@ class ConformanceTest {
         val pid = v.getString("program_id")
         assertEquals(pid, canonicalProgramId())
 
-        // 1. Keys, Subaccounts, FVK, aud1 address, DeFi sessions
+        // 1. Keys, Subaccounts, FVK, BIP-350 Bech32m aud1 address, DeFi sessions
         val aliceVec = v.getJSONObject("alice")
         val aliceSeed = hexToBytes(aliceVec.getString("seed_hex"))
         val alice = deriveKeysFromSeed(aliceSeed)
@@ -53,10 +54,12 @@ class ConformanceTest {
         val s3 = deriveDefiSessionKeypair(aliceSeed, 3u)
         assertEquals(v.getJSONObject("defi_session_3").getString("pubkey_b58"), s3.pubkeyB58)
 
-        // 2. Asset ID & 13 Canonical PDAs
+        // 2. Asset ID & 12 Canonical v1 PDAs
+        val memoVec = v.getJSONObject("memo")
+        val wsolMint = hexToBytes(memoVec.getString("mint_hex"))
         assertEquals(
-            v.getJSONObject("asset_ids").getString("native_sol_asset_id_hex"),
-            bytesToHex(deriveAssetIdBytes(ByteArray(32)))
+            v.getJSONObject("asset_ids").getString("wsol_asset_id_hex"),
+            bytesToHex(deriveAssetIdBytes(wsolMint))
         )
         val p = v.getJSONObject("pdas")
         val poolId = p.getLong("pool_id").toUInt()
@@ -67,7 +70,6 @@ class ConformanceTest {
         val nf = hexToBytes(p.getString("nullifier_hex"))
 
         assertEquals(p.getJSONObject("pool").getString("address"), derivePoolPda(pid, poolId).address)
-        assertEquals(p.getJSONObject("sol_vault").getString("address"), deriveSolVaultPda(pid, poolId).address)
         assertEquals(p.getJSONObject("vault_auth").getString("address"), deriveVaultAuthPda(pid, poolId).address)
         assertEquals(p.getJSONObject("lane").getString("address"), deriveLanePda(pid, poolId, laneId).address)
         assertEquals(p.getJSONObject("lane_rent").getString("address"), deriveLaneRentPda(pid, poolId, laneId).address)
@@ -80,26 +82,32 @@ class ConformanceTest {
         assertEquals(p.getJSONObject("escrow").getString("address"), deriveEscrowPda(pid, poolId, shardId).address)
         assertEquals(p.getJSONObject("unwrap").getString("address"), deriveUnwrapPda(pid, poolId, nf).address)
 
-        // 3. Memo Crypto + FVK Verify + Selective Disclosure
-        val memoVec = v.getJSONObject("memo")
+        // 3. Versioned 106 B Memo Crypto + FVK Verify + Low-Order X25519 + Selective Disclosure
+        val paymentId = hexToBytes(memoVec.getString("payment_id_hex"))
         val enc = encryptNoteMemo(
             alice.spendPk,
             alice.viewPk,
             hexToBytes(memoVec.getString("eph_secret_hex")),
             memoVec.getLong("amount").toULong(),
-            hexToBytes(memoVec.getString("mint_hex"))
+            wsolMint,
+            paymentId
         )
-        assertEquals(memoVec.getString("memo_90_hex"), bytesToHex(enc.memo90))
+        assertEquals(memoVec.getString("memo_106_hex"), bytesToHex(enc.memo106))
         assertEquals(memoVec.getString("commitment_hex"), bytesToHex(enc.commitment))
 
-        val dec = decryptAndVerifyMemoEntry(fvk, enc.memo90, enc.commitment)
+        val dec = decryptAndVerifyMemoEntry(fvk, enc.memo106, enc.commitment)
         assertNotNull(dec)
         assertEquals(memoVec.getLong("amount").toULong(), dec.amount)
+        assertEquals(memoVec.getString("payment_id_hex"), bytesToHex(dec.paymentId))
+
+        val lowVec = v.getJSONObject("low_order_x25519")
+        assertFalse(checkMemoViewTag(fvk, ByteArray(2), hexToBytes(lowVec.getString("all_zero_epk_hex"))))
+        assertFalse(checkMemoViewTag(fvk, ByteArray(2), hexToBytes(lowVec.getString("order_8_epk_hex"))))
 
         val bobVpk = hexToBytes(v.getJSONObject("bob").getString("view_pk_hex"))
-        val dynM = prepareDynamicSwapMemo(bobVpk, ByteArray(32) { 0x44 })
+        val dynM = prepareDynamicSwapMemo(bobVpk, hexToBytes(memoVec.getString("dyn_eph_secret_hex")))
         assertEquals(memoVec.getString("dyn_head_34_hex"), bytesToHex(dynM.dynHead34))
-        assertEquals(memoVec.getString("dyn_mask_56_hex"), bytesToHex(dynM.dynMask56))
+        assertEquals(memoVec.getString("dyn_mask_72_hex"), bytesToHex(dynM.dynMask72))
 
         val sdVec = v.getJSONObject("selective_disclosure")
         val sd = FfiSelectiveDisclosureProof(
@@ -115,10 +123,11 @@ class ConformanceTest {
         assertTrue(verifySelectiveDisclosureProof(sd, enc.commitment))
 
         // 4. Context Hash & Account Decoders
-        val ctxPriv = computeJoinsplitCtxHashFfi(
-            FfiJoinSplitCtxHashParams(
+        val ctxPriv = computeTransactCtxHashFfi(
+            FfiTransactCtxHashParams(
                 programId = pid,
                 poolId = 0u,
+                vkId = 0u,
                 outLaneId = 2u,
                 outputMask = 7u,
                 assetMode = 0u,
@@ -128,17 +137,19 @@ class ConformanceTest {
                 publicAssetId = ByteArray(32),
                 publicAmountOut = 0uL,
                 relayerFeeAmount = 0uL,
-                memosBytes = enc.memo90
+                memosBytes = enc.memo106
             )
         )
         assertEquals(
-            v.getJSONObject("ctx_hashes").getString("joinsplit_private_ctx_hash_hex"),
+            v.getJSONObject("ctx_hashes").getString("transact_private_ctx_hash_hex"),
             bytesToHex(ctxPriv)
         )
 
-        val ps = decodePoolStateAccount(hexToBytes(v.getJSONObject("pool_state").getString("raw_hex")))
+        val psVec = v.getJSONObject("pool_state")
+        val ps = decodePoolStateAccount(hexToBytes(psVec.getString("raw_hex")))
         assertEquals(4u.toUByte(), ps.activeLanes)
         assertEquals(8uL, ps.ckptInterval)
+        assertEquals(psVec.getString("pending_authority_b58"), ps.pendingAuthorityB58)
 
         val ck = decodeRootCheckpointAccount(hexToBytes(v.getString("checkpoint_raw_hex")))
         assertEquals(13u.toUShort(), ck.slotIdx)
@@ -174,10 +185,10 @@ class ConformanceTest {
             for (i in 0 until 8) b[24 + i] = ((x ushr ((7 - i) * 8)) and 0xff).toByte()
         }
         val g16 = v.getJSONObject("groth16")
-        val solAsset = hexToBytes(v.getJSONObject("asset_ids").getString("native_sol_asset_id_hex"))
+        val wsolAsset = hexToBytes(v.getJSONObject("asset_ids").getString("wsol_asset_id_hex"))
         val w = java.io.ByteArrayOutputStream(4611)
         w.write(hexToBytes(g16.getString("super_root_hex")))
-        w.write(solAsset)
+        w.write(wsolAsset)
         w.write(ByteArray(32))
         w.write(u64Le(0L))
         w.write(u64Le(0L))
@@ -187,7 +198,7 @@ class ConformanceTest {
         // Input 0: real note at lane 2, leaf 5
         w.write(alice.spendSk)
         w.write(enc.tweak)
-        w.write(solAsset)
+        w.write(wsolAsset)
         w.write(u64Le(memoVec.getLong("amount")))
         w.write(enc.blinding)
         w.write(0) // is_dummy = false
@@ -204,25 +215,25 @@ class ConformanceTest {
         // Input 1: dummy
         w.write(alice.spendSk)
         w.write(ByteArray(32))
-        w.write(solAsset)
+        w.write(wsolAsset)
         w.write(u64Le(0L))
         w.write(u64Be32(0x5555L))
         w.write(1) // is_dummy = true
         w.write(ByteArray(20 + 20 * 3 * 32))
 
         // Outputs 0, 1, 2
-        w.write(hexToBytes("297407e33a8667d5d8235b00a22b34f66113f3d1b9c5486704f12647a0ee1041"))
-        w.write(solAsset)
+        w.write(hexToBytes(g16.getString("out0_stealth_owner_hex")))
+        w.write(wsolAsset)
         w.write(u64Le(1_000_000L))
         w.write(u64Be32(0x201L))
 
-        w.write(hexToBytes("20944e988ecb9bf1ad2edbbc8b782ff1695fcd197058948fdf9ef6426fa55528"))
-        w.write(solAsset)
+        w.write(hexToBytes(g16.getString("out1_stealth_owner_hex")))
+        w.write(wsolAsset)
         w.write(u64Le(500_000L))
         w.write(u64Be32(0x202L))
 
         w.write(ByteArray(32))
-        w.write(solAsset)
+        w.write(wsolAsset)
         w.write(u64Le(0L))
         w.write(u64Be32(0x203L))
 

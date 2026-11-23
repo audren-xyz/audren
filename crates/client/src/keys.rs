@@ -1,4 +1,5 @@
-//! Canonical Audren key hierarchy, `aud1...` stealth addresses, compact `90 B` SoA note memos,
+//! Canonical Audren v1 key hierarchy, BIP-350 Bech32m `aud1...` stealth addresses,
+//! versioned `106 B` SoA note memos (`72 B` AEAD ciphertext with `34 B` header AAD),
 //! Mode 1 `SelectiveDisclosureProof`, Mode 2 `FullViewingKey` (`spend_pk`, `nk`, `view_sk`, `view_pk`),
 //! and deterministic `DefiSessionKeypair` for stateful account-bound Solana DeFi.
 
@@ -11,9 +12,18 @@ use audren_circuits::{
     },
     poseidon::{fr_from_be_bytes_strict, fr_to_be_bytes},
 };
-use audren_core::layout::{DYN_MEMO_HEAD_LEN, DYN_MEMO_MAGIC, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN};
+use audren_core::{
+    instruction::{
+        KDF_DOMAIN_BLIND, KDF_DOMAIN_DYN_BLIND, KDF_DOMAIN_DYN_MASK, KDF_DOMAIN_DYN_TWEAK,
+        KDF_DOMAIN_MEMO_KEY, KDF_DOMAIN_MEMO_NONCE, KDF_DOMAIN_TWEAK, KDF_DOMAIN_VIEW_TAG,
+    },
+    layout::{
+        DYN_MEMO_HEAD_LEN, DYN_MEMO_MAGIC, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_PAYMENT_ID_LEN,
+        MEMO_PLAINTEXT_LEN, MEMO_VERSION_V1,
+    },
+};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Nonce,
 };
 use ed25519_dalek::SigningKey;
@@ -25,8 +35,117 @@ use x25519_dalek::{PublicKey as X25519Pub, StaticSecret as X25519Sec};
 
 use crate::ClientError;
 
-const ADDR_VERSION_V2: u8 = 0x02;
-const ADDR_PREFIX: &str = "aud1";
+const ADDR_VERSION_V1: u8 = 0x01;
+const ADDR_HRP: &str = "aud";
+const BECH32M_CONST: u32 = 0x2bc8_30a3;
+const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const MAX_BECH32M_LEN: usize = 128;
+
+const HKDF_SALT_ROOT: &[u8] = b"audren/v1/root";
+const HKDF_INFO_SPEND_SK: &[u8] = b"audren/v1/spend_sk";
+const HKDF_INFO_VIEW_SK: &[u8] = b"audren/v1/view_sk";
+const HKDF_SALT_SUBACCOUNT: &[u8] = b"audren/v1/subaccount";
+const HKDF_SALT_DEFI_SESSION: &[u8] = b"audren/v1/defi_session";
+
+// =============================================================================
+// Canonical BIP-350 Bech32m (zero dependencies, up to 128 chars for 65 B payload)
+// =============================================================================
+
+fn bech32_polymod(values: &[u8]) -> u32 {
+    const GEN: [u32; 5] = [
+        0x3b6a_57b2,
+        0x2650_8e6d,
+        0x1ea1_19fa,
+        0x3d42_33dd,
+        0x2a14_62b3,
+    ];
+    let mut chk: u32 = 1;
+    for &v in values {
+        let top = chk >> 25;
+        chk = ((chk & 0x01ff_ffff) << 5) ^ u32::from(v);
+        for (i, &g) in GEN.iter().enumerate() {
+            if ((top >> i) & 1) != 0 {
+                chk ^= g;
+            }
+        }
+    }
+    chk
+}
+
+fn bech32_hrp_expand(hrp: &str) -> Vec<u8> {
+    let bytes = hrp.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 2 + 1);
+    for &b in bytes {
+        out.push(b >> 5);
+    }
+    out.push(0);
+    for &b in bytes {
+        out.push(b & 31);
+    }
+    out
+}
+
+fn bech32m_create_checksum(hrp: &str, data: &[u8]) -> [u8; 6] {
+    let mut values = bech32_hrp_expand(hrp);
+    values.extend_from_slice(data);
+    values.extend_from_slice(&[0u8; 6]);
+    let polymod = bech32_polymod(&values) ^ BECH32M_CONST;
+    let mut out = [0u8; 6];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = ((polymod >> (5 * (5 - i))) & 31) as u8;
+    }
+    out
+}
+
+fn bech32m_verify_checksum(hrp: &str, data_with_checksum: &[u8]) -> bool {
+    let mut values = bech32_hrp_expand(hrp);
+    values.extend_from_slice(data_with_checksum);
+    bech32_polymod(&values) == BECH32M_CONST
+}
+
+fn convert_bits(
+    data: &[u8],
+    from_bits: u32,
+    to_bits: u32,
+    pad: bool,
+) -> Result<Vec<u8>, ClientError> {
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let maxv: u32 = (1 << to_bits) - 1;
+    let max_acc: u32 = (1 << (from_bits + to_bits - 1)) - 1;
+    let mut out = Vec::with_capacity((data.len() * from_bits as usize).div_ceil(to_bits as usize));
+
+    for &value in data {
+        let v = u32::from(value);
+        if (v >> from_bits) != 0 {
+            return Err(ClientError::InvalidEncoding("invalid bech32m bit group"));
+        }
+        acc = ((acc << from_bits) | v) & max_acc;
+        bits += from_bits;
+        while bits >= to_bits {
+            bits -= to_bits;
+            out.push(((acc >> bits) & maxv) as u8);
+        }
+    }
+
+    if pad {
+        if bits > 0 {
+            out.push(((acc << (to_bits - bits)) & maxv) as u8);
+        }
+    } else if bits >= from_bits || ((acc << (to_bits - bits)) & maxv) != 0 {
+        return Err(ClientError::InvalidEncoding(
+            "non-zero trailing pad bits in bech32m",
+        ));
+    }
+    Ok(out)
+}
+
+fn bech32_char_value(b: u8) -> Option<u8> {
+    BECH32_CHARSET
+        .iter()
+        .position(|&c| c == b)
+        .map(|pos| pos as u8)
+}
 
 /// Full Audren shielded keypair derived deterministically from a 32-byte master seed.
 #[derive(Clone)]
@@ -41,16 +160,16 @@ pub struct AudrenKeys {
 impl AudrenKeys {
     /// Derive `(spend_sk, spend_pk, nk, view_sk, view_pk)` from a 32-byte master seed via HKDF-SHA256.
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        let hk = Hkdf::<Sha256>::new(Some(b"audren/v2/root"), seed);
+        let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_ROOT), seed);
 
         let mut spend_raw = [0u8; 32];
-        hk.expand(b"audren/v2/spend_sk", &mut spend_raw)
+        hk.expand(HKDF_INFO_SPEND_SK, &mut spend_raw)
             .expect("32-byte HKDF expand");
         let spend_masked = audren_core::mask_to_fr_be(spend_raw);
         let spend_sk = Fr::from_be_bytes_mod_order(&spend_masked);
 
         let mut view_sk = [0u8; 32];
-        hk.expand(b"audren/v2/view_sk", &mut view_sk)
+        hk.expand(HKDF_INFO_VIEW_SK, &mut view_sk)
             .expect("32-byte HKDF expand");
         let vsec = X25519Sec::from(view_sk);
         let vpub = X25519Pub::from(&vsec);
@@ -69,7 +188,7 @@ impl AudrenKeys {
         if account_index == 0 {
             return Self::from_seed(seed);
         }
-        let hk = Hkdf::<Sha256>::new(Some(b"audren/v2/subaccount"), seed);
+        let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_SUBACCOUNT), seed);
         let mut child = [0u8; 32];
         hk.expand(&account_index.to_le_bytes(), &mut child)
             .expect("32-byte HKDF expand");
@@ -83,7 +202,7 @@ impl AudrenKeys {
         Self::from_seed(&seed)
     }
 
-    /// Public `aud1...` stealth meta-address (accepts SOL, Classic SPL, and Token-2022).
+    /// Public BIP-350 Bech32m `aud1...` stealth meta-address (accepts SOL/WSOL, Classic SPL, and Token-2022).
     pub fn address(&self) -> AudrenAddress {
         AudrenAddress {
             spend_pk: fr_to_be_bytes(&self.spend_pk),
@@ -107,11 +226,11 @@ impl AudrenKeys {
     ///
     /// **Privacy Boundary (Honest Threat Model):** Each `session_index` produces an independent
     /// pseudonymous Solana wallet unlinkable to the user's primary public wallet or other sessions
-    /// (when funded via relayed `JoinSplit` Withdraw and swept back via zero-dust `DepositSol`).
-    /// However, all positions and transactions executed BY that session wallet on external DeFi
-    /// protocols remain public on Solana.
+    /// (when funded via relayed `Transact` WSOL unwrap and swept back via zero-dust
+    /// `Deposit(DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT)`). However, all positions
+    /// and transactions executed BY that session wallet on external DeFi protocols remain public on Solana.
     pub fn derive_defi_session_keypair(seed: &[u8; 32], session_index: u32) -> DefiSessionKeypair {
-        let hk = Hkdf::<Sha256>::new(Some(b"audren/v2/defi_session"), seed);
+        let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_DEFI_SESSION), seed);
         let mut secret_seed = [0u8; 32];
         hk.expand(&session_index.to_le_bytes(), &mut secret_seed)
             .expect("32-byte HKDF expand");
@@ -134,7 +253,8 @@ pub struct DefiSessionKeypair {
     pub pubkey: [u8; 32],
 }
 
-/// Public Audren stealth address (`aud1` + Base58(`[0x02 | spend_pk_be[32] | view_pk[32]]`)).
+/// Public Audren v1 stealth address encoded as canonical BIP-350 Bech32m
+/// (`hrp = "aud"`, 65-byte payload `[0x01 | spend_pk_be[32] | view_pk[32]]`, `114` chars total).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudrenAddress {
     pub spend_pk: [u8; 32],
@@ -144,21 +264,81 @@ pub struct AudrenAddress {
 impl AudrenAddress {
     pub fn encode(&self) -> String {
         let mut raw = [0u8; 65];
-        raw[0] = ADDR_VERSION_V2;
+        raw[0] = ADDR_VERSION_V1;
         raw[1..33].copy_from_slice(&self.spend_pk);
         raw[33..65].copy_from_slice(&self.view_pk);
-        format!("{ADDR_PREFIX}{}", bs58::encode(raw).into_string())
+        let data5 = convert_bits(&raw, 8, 5, true).expect("65 B -> 104 5-bit groups");
+        let checksum = bech32m_create_checksum(ADDR_HRP, &data5);
+        let mut out = String::with_capacity(ADDR_HRP.len() + 1 + data5.len() + checksum.len());
+        out.push_str(ADDR_HRP);
+        out.push('1');
+        for &v in &data5 {
+            out.push(BECH32_CHARSET[v as usize] as char);
+        }
+        for &v in &checksum {
+            out.push(BECH32_CHARSET[v as usize] as char);
+        }
+        out
     }
 
     pub fn decode(s: &str) -> Result<Self, ClientError> {
-        let body = s
-            .strip_prefix(ADDR_PREFIX)
-            .ok_or(ClientError::InvalidEncoding("address must start with aud1"))?;
-        let raw = bs58::decode(body)
-            .into_vec()
-            .map_err(|_| ClientError::InvalidEncoding("invalid base58 in aud1 address"))?;
-        if raw.len() != 65 || raw[0] != ADDR_VERSION_V2 {
-            return Err(ClientError::InvalidEncoding("invalid aud1 address length or version"));
+        if s.is_empty() || s.len() > MAX_BECH32M_LEN {
+            return Err(ClientError::InvalidEncoding(
+                "invalid aud1 bech32m address length",
+            ));
+        }
+        let mut has_lower = false;
+        let mut has_upper = false;
+        for b in s.bytes() {
+            if !(33..=126).contains(&b) {
+                return Err(ClientError::InvalidEncoding(
+                    "invalid ASCII character in aud1 address",
+                ));
+            }
+            if b.is_ascii_lowercase() {
+                has_lower = true;
+            } else if b.is_ascii_uppercase() {
+                has_upper = true;
+            }
+        }
+        if has_lower && has_upper {
+            return Err(ClientError::InvalidEncoding(
+                "mixed case not allowed in bech32m address",
+            ));
+        }
+        let lower = s.to_ascii_lowercase();
+        let sep = lower
+            .rfind('1')
+            .ok_or(ClientError::InvalidEncoding("missing bech32m separator"))?;
+        if sep == 0 || lower.len() - sep - 1 < 6 {
+            return Err(ClientError::InvalidEncoding(
+                "malformed bech32m hrp or checksum",
+            ));
+        }
+        let hrp = &lower[..sep];
+        if hrp != ADDR_HRP {
+            return Err(ClientError::InvalidEncoding(
+                "address HRP must be \"aud\"",
+            ));
+        }
+        let data_part = &lower[sep + 1..];
+        let mut data_5bit = Vec::with_capacity(data_part.len());
+        for b in data_part.bytes() {
+            let v = bech32_char_value(b)
+                .ok_or(ClientError::InvalidEncoding("invalid bech32m character"))?;
+            data_5bit.push(v);
+        }
+        if !bech32m_verify_checksum(hrp, &data_5bit) {
+            return Err(ClientError::InvalidEncoding(
+                "invalid bech32m checksum in aud1 address",
+            ));
+        }
+        let payload_5bit = &data_5bit[..data_5bit.len() - 6];
+        let raw = convert_bits(payload_5bit, 5, 8, false)?;
+        if raw.len() != 65 || raw[0] != ADDR_VERSION_V1 {
+            return Err(ClientError::InvalidEncoding(
+                "invalid aud1 address payload length or version",
+            ));
         }
         let spend_pk: [u8; 32] = raw[1..33].try_into().unwrap();
         let view_pk: [u8; 32] = raw[33..65].try_into().unwrap();
@@ -175,7 +355,7 @@ impl AudrenAddress {
 
 /// Mode 2 read-only `FullViewingKey` (`spend_pk`, `nk`, `view_sk`, `view_pk`).
 ///
-/// Enables watch-only wallets, hardware-signer separation, relayer hot-worker fee verification,
+/// Enables watch-only wallets, offline balance tracking, relayer hot-worker fee verification,
 /// and compliance auditors to decrypt incoming notes AND compute exact spent nullifiers with
 /// zero spend capability (`spend_sk` is never exposed).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,7 +379,11 @@ impl FullViewingKey {
         Ok(derive_stealth_owner(self.spend_pk_fr()?, tweak))
     }
 
-    pub fn real_nullifier(&self, note_cm: Fr, global_leaf_index: u64) -> Result<[u8; 32], ClientError> {
+    pub fn real_nullifier(
+        &self,
+        note_cm: Fr,
+        global_leaf_index: u64,
+    ) -> Result<[u8; 32], ClientError> {
         let nf = compute_real_nullifier(self.nk_fr()?, note_cm, global_leaf_index);
         Ok(fr_to_be_bytes(&nf))
     }
@@ -235,13 +419,17 @@ impl SelectiveDisclosureProof {
     }
 }
 
-/// Decrypted note fields recovered from a `90 B` `MemoPage` entry and verified against `SubtreePage`.
+/// Decrypted note fields recovered from a versioned `106 B` `MemoPage` entry and verified
+/// against `SubtreePage`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecryptedMemo {
     pub tweak: Fr,
     pub blinding: Fr,
     pub amount: u64,
     pub mint: [u8; 32],
+    pub memo_version: u8,
+    pub memo_flags: u8,
+    pub payment_id: [u8; MEMO_PAYMENT_ID_LEN],
     pub is_dynamic: bool,
 }
 
@@ -252,137 +440,378 @@ fn sha256_labeled(label: &[u8], data: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-fn derive_memo_secrets(shared: &[u8; 32]) -> ([u8; 2], [u8; 32], [u8; 12], Fr, Fr, [u8; 56]) {
-    let vt_raw = sha256_labeled(b"audren/v2/vt", shared);
-    let view_tag = [vt_raw[0], vt_raw[1]];
-    let aead_key = sha256_labeled(b"audren/v2/aead_key", shared);
-    let nonce_raw = sha256_labeled(b"audren/v2/aead_nonce", shared);
+fn derive_view_tag(shared: &[u8; 32]) -> [u8; 2] {
+    let vt_raw = sha256_labeled(KDF_DOMAIN_VIEW_TAG, shared);
+    [vt_raw[0], vt_raw[1]]
+}
+
+fn derive_static_memo_secrets(shared: &[u8; 32]) -> ([u8; 2], [u8; 32], [u8; 12], Fr, Fr) {
+    let view_tag = derive_view_tag(shared);
+    let aead_key = sha256_labeled(KDF_DOMAIN_MEMO_KEY, shared);
+    let nonce_raw = sha256_labeled(KDF_DOMAIN_MEMO_NONCE, shared);
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_raw[0..12]);
 
-    let tw_raw = audren_core::mask_to_fr_be(sha256_labeled(b"audren/v2/tweak", shared));
-    let bl_raw = audren_core::mask_to_fr_be(sha256_labeled(b"audren/v2/blinding", shared));
+    let tw_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_TWEAK, shared));
+    let bl_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_BLIND, shared));
     let tweak = Fr::from_be_bytes_mod_order(&tw_raw);
     let blinding = Fr::from_be_bytes_mod_order(&bl_raw);
 
-    let m0 = sha256_labeled(b"audren/v2/dyn_mask0", shared);
-    let m1 = sha256_labeled(b"audren/v2/dyn_mask1", shared);
-    let mut dyn_mask = [0u8; 56];
-    dyn_mask[0..32].copy_from_slice(&m0);
-    dyn_mask[32..56].copy_from_slice(&m1[0..24]);
-
-    (view_tag, aead_key, nonce, tweak, blinding, dyn_mask)
+    (view_tag, aead_key, nonce, tweak, blinding)
 }
 
-/// Encrypt a compact `90 B` SoA note memo (`view_tag[2] || epk[32] || ct[56]`).
-/// Returns `(tweak, blinding, memo_90)` with zero wire overhead for `tweak`/`blinding`.
+fn derive_dynamic_memo_secrets(shared: &[u8; 32]) -> ([u8; 2], Fr, Fr, [u8; MEMO_CT_LEN]) {
+    let view_tag = derive_view_tag(shared);
+    let tw_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_DYN_TWEAK, shared));
+    let bl_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_DYN_BLIND, shared));
+    let dyn_tweak = Fr::from_be_bytes_mod_order(&tw_raw);
+    let dyn_blinding = Fr::from_be_bytes_mod_order(&bl_raw);
+
+    let mut dyn_mask = [0u8; MEMO_CT_LEN];
+    for block_idx in 0u8..3u8 {
+        let mut h = Sha256::new();
+        h.update(KDF_DOMAIN_DYN_MASK);
+        h.update(shared);
+        h.update([block_idx]);
+        let digest: [u8; 32] = h.finalize().into();
+        let start = (block_idx as usize) * 32;
+        let take = (MEMO_CT_LEN - start).min(32);
+        dyn_mask[start..start + take].copy_from_slice(&digest[..take]);
+    }
+
+    (view_tag, dyn_tweak, dyn_blinding, dyn_mask)
+}
+
+/// Encrypt a versioned `106 B` SoA note memo (`view_tag[2] || epk[32] || ct[72]`) with zero
+/// `payment_id` and `34 B` AEAD AAD (`view_tag || epk`).
+/// Returns `(tweak, blinding, memo_106)` or `Err` if `recipient_view_pk` is a low-order X25519 point.
 pub fn encrypt_note_memo(
     recipient_view_pk: &[u8; 32],
     eph_secret_32: [u8; 32],
     amount: u64,
     mint_32: &[u8; 32],
-) -> (Fr, Fr, [u8; MEMO_ENTRY_WIRE_LEN]) {
+) -> Result<(Fr, Fr, [u8; MEMO_ENTRY_WIRE_LEN]), ClientError> {
+    encrypt_note_memo_with_payment_id(
+        recipient_view_pk,
+        eph_secret_32,
+        amount,
+        mint_32,
+        [0u8; MEMO_PAYMENT_ID_LEN],
+    )
+}
+
+/// Encrypt a versioned `106 B` SoA note memo (`view_tag[2] || epk[32] || ct[72]`) with an explicit
+/// 14-byte `payment_id` and `34 B` AEAD AAD (`view_tag || epk`).
+/// Returns `(tweak, blinding, memo_106)` or `Err` if `recipient_view_pk` is a low-order X25519 point.
+pub fn encrypt_note_memo_with_payment_id(
+    recipient_view_pk: &[u8; 32],
+    eph_secret_32: [u8; 32],
+    amount: u64,
+    mint_32: &[u8; 32],
+    payment_id: [u8; MEMO_PAYMENT_ID_LEN],
+) -> Result<(Fr, Fr, [u8; MEMO_ENTRY_WIRE_LEN]), ClientError> {
     let eph_sec = X25519Sec::from(eph_secret_32);
     let eph_pub = X25519Pub::from(&eph_sec);
     let shared = eph_sec.diffie_hellman(&X25519Pub::from(*recipient_view_pk));
-    let (vt, key, nonce, tweak, blinding, _) = derive_memo_secrets(shared.as_bytes());
+    if !shared.was_contributory() {
+        return Err(ClientError::Crypto("low-order X25519 public key"));
+    }
+    let (vt, key, nonce, tweak, blinding) = derive_static_memo_secrets(shared.as_bytes());
 
-    let mut plain = [0u8; 40];
+    let mut plain = [0u8; MEMO_PLAINTEXT_LEN];
     plain[0..8].copy_from_slice(&amount.to_le_bytes());
     plain[8..40].copy_from_slice(mint_32);
+    plain[40] = MEMO_VERSION_V1;
+    plain[41] = 0; // memo_flags
+    plain[42..56].copy_from_slice(&payment_id);
+
+    let mut aad = [0u8; DYN_MEMO_HEAD_LEN];
+    aad[0..2].copy_from_slice(&vt);
+    aad[2..34].copy_from_slice(eph_pub.as_bytes());
 
     let cipher = ChaCha20Poly1305::new((&key).into());
     let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), plain.as_slice())
-        .expect("chacha20poly1305 encrypt");
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plain.as_slice(),
+                aad: aad.as_slice(),
+            },
+        )
+        .map_err(|_| ClientError::Crypto("chacha20poly1305 encrypt failed"))?;
     debug_assert_eq!(ct.len(), MEMO_CT_LEN);
 
     let mut out = [0u8; MEMO_ENTRY_WIRE_LEN];
-    out[0..2].copy_from_slice(&vt);
-    out[2..34].copy_from_slice(eph_pub.as_bytes());
-    out[34..90].copy_from_slice(&ct);
-    (tweak, blinding, out)
+    out[0..34].copy_from_slice(&aad);
+    out[34..MEMO_ENTRY_WIRE_LEN].copy_from_slice(&ct);
+    Ok((tweak, blinding, out))
 }
 
-/// Prepare XOR-masked `AUD2DYN2` dynamic memo inputs for `ExecViaEscrow` (`0` plaintext markers at rest).
+/// Prepare domain-separated XOR-masked `AUD1DYN1` (`72 B`) dynamic memo inputs for `ExecViaEscrow`
+/// (`0` plaintext markers at rest; uses `audren/v1/dyn_tweak`, `audren/v1/dyn_blind`, `audren/v1/dyn_mask`).
 pub fn prepare_dynamic_swap_memo(
     recipient_view_pk: &[u8; 32],
     eph_secret_32: [u8; 32],
-) -> (Fr, Fr, [u8; DYN_MEMO_HEAD_LEN], [u8; MEMO_CT_LEN]) {
+) -> Result<(Fr, Fr, [u8; DYN_MEMO_HEAD_LEN], [u8; MEMO_CT_LEN]), ClientError> {
     let eph_sec = X25519Sec::from(eph_secret_32);
     let eph_pub = X25519Pub::from(&eph_sec);
     let shared = eph_sec.diffie_hellman(&X25519Pub::from(*recipient_view_pk));
-    let (vt, _, _, tweak, blinding, dyn_mask) = derive_memo_secrets(shared.as_bytes());
+    if !shared.was_contributory() {
+        return Err(ClientError::Crypto("low-order X25519 public key"));
+    }
+    let (vt, dyn_tweak, dyn_blinding, dyn_mask) = derive_dynamic_memo_secrets(shared.as_bytes());
 
     let mut head = [0u8; DYN_MEMO_HEAD_LEN];
     head[0..2].copy_from_slice(&vt);
     head[2..34].copy_from_slice(eph_pub.as_bytes());
-    (tweak, blinding, head, dyn_mask)
+    Ok((dyn_tweak, dyn_blinding, head, dyn_mask))
 }
 
 /// Fast X25519 + 2-byte view-tag prefilter for SoA `MemoPage` scanning (`1/65,536` false positives).
+/// Rejects low-order Curve25519 ephemeral public keys (`!shared.was_contributory()`).
 pub fn check_memo_view_tag(fvk: &FullViewingKey, view_tag: [u8; 2], epk: &[u8; 32]) -> bool {
     let vsec = X25519Sec::from(fvk.view_sk);
     let shared = vsec.diffie_hellman(&X25519Pub::from(*epk));
-    let vt_raw = sha256_labeled(b"audren/v2/vt", shared.as_bytes());
-    vt_raw[0] == view_tag[0] && vt_raw[1] == view_tag[1]
+    if !shared.was_contributory() {
+        return false;
+    }
+    derive_view_tag(shared.as_bytes()) == view_tag
 }
 
-/// Decrypt or unmask a `90 B` `MemoPage` entry AND **mandatorily verify** that
+/// Decrypt or unmask a versioned `106 B` `MemoPage` entry AND **mandatorily verify** that
 /// `compute_note_commitment(stealth_owner, derive_asset_id(mint), amount, blinding) == onchain_cm_be`
 /// (from the local `SubtreePage` leaf) to block forged-memo balance poisoning.
+/// Rejects low-order Curve25519 points (`!shared.was_contributory()`), tampered AAD headers,
+/// unsupported memo versions, and non-zero dynamic swap padding bytes.
 pub fn try_decrypt_and_verify_memo_entry(
     fvk: &FullViewingKey,
     view_tag: [u8; 2],
     epk: &[u8; 32],
-    ct56: &[u8; MEMO_CT_LEN],
+    ct72: &[u8; MEMO_CT_LEN],
     onchain_cm_be: &[u8; 32],
 ) -> Option<DecryptedMemo> {
     let vsec = X25519Sec::from(fvk.view_sk);
     let shared = vsec.diffie_hellman(&X25519Pub::from(*epk));
-    let (exp_vt, key, nonce, tweak, blinding, dyn_mask) = derive_memo_secrets(shared.as_bytes());
+    if !shared.was_contributory() {
+        return None;
+    }
+    let (exp_vt, key, nonce, tweak, blinding) = derive_static_memo_secrets(shared.as_bytes());
     if exp_vt != view_tag {
         return None;
     }
 
+    let mut aad = [0u8; DYN_MEMO_HEAD_LEN];
+    aad[0..2].copy_from_slice(&view_tag);
+    aad[2..34].copy_from_slice(epk);
+
     let cipher = ChaCha20Poly1305::new((&key).into());
-    let candidate = if let Ok(plain) = cipher.decrypt(Nonce::from_slice(&nonce), ct56.as_slice()) {
-        if plain.len() != 40 {
+    let candidate = if let Ok(plain) = cipher.decrypt(
+        Nonce::from_slice(&nonce),
+        Payload {
+            msg: ct72.as_slice(),
+            aad: aad.as_slice(),
+        },
+    ) {
+        if plain.len() != MEMO_PLAINTEXT_LEN || plain[40] != MEMO_VERSION_V1 {
             return None;
         }
         let amount = u64::from_le_bytes(plain[0..8].try_into().unwrap());
         let mint: [u8; 32] = plain[8..40].try_into().unwrap();
+        let memo_version = plain[40];
+        let memo_flags = plain[41];
+        let payment_id: [u8; MEMO_PAYMENT_ID_LEN] = plain[42..56].try_into().unwrap();
         DecryptedMemo {
             tweak,
             blinding,
             amount,
             mint,
+            memo_version,
+            memo_flags,
+            payment_id,
             is_dynamic: false,
         }
     } else {
+        let (_, dyn_tweak, dyn_blinding, dyn_mask) =
+            derive_dynamic_memo_secrets(shared.as_bytes());
         let mut unmasked = [0u8; MEMO_CT_LEN];
         for i in 0..MEMO_CT_LEN {
-            unmasked[i] = ct56[i] ^ dyn_mask[i];
+            unmasked[i] = ct72[i] ^ dyn_mask[i];
         }
-        if unmasked[0..8] != DYN_MEMO_MAGIC {
+        if unmasked[0..8] != DYN_MEMO_MAGIC || unmasked[48..72] != [0u8; 24] {
             return None;
         }
         let amount = u64::from_le_bytes(unmasked[8..16].try_into().unwrap());
         let mint: [u8; 32] = unmasked[16..48].try_into().unwrap();
         DecryptedMemo {
-            tweak,
-            blinding,
+            tweak: dyn_tweak,
+            blinding: dyn_blinding,
             amount,
             mint,
+            memo_version: MEMO_VERSION_V1,
+            memo_flags: 0,
+            payment_id: [0u8; MEMO_PAYMENT_ID_LEN],
             is_dynamic: true,
         }
     };
 
     let stealth = fvk.stealth_owner(candidate.tweak).ok()?;
     let asset_id = derive_asset_id(&candidate.mint);
-    let expected_cm = compute_note_commitment(stealth, asset_id, candidate.amount, candidate.blinding);
+    let expected_cm =
+        compute_note_commitment(stealth, asset_id, candidate.amount, candidate.blinding);
     if fr_to_be_bytes(&expected_cm) != *onchain_cm_be {
         return None;
     }
     Some(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use audren_core::WSOL_MINT;
+
+    /// RFC 7748 Curve25519 low-order point of order 8.
+    const ORDER_8_POINT: [u8; 32] = [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ];
+
+    #[test]
+    fn bech32m_aud1_address_roundtrip_and_strict_validation() {
+        let keys = AudrenKeys::from_seed(&[0x11u8; 32]);
+        let addr = keys.address();
+        let encoded = addr.encode();
+        assert!(encoded.starts_with("aud1"));
+        assert_eq!(encoded.len(), 114, "aud1 + 104 data chars + 6 checksum chars");
+
+        // Lowercase and uppercase both decode identically
+        assert_eq!(AudrenAddress::decode(&encoded).unwrap(), addr);
+        assert_eq!(
+            AudrenAddress::decode(&encoded.to_ascii_uppercase()).unwrap(),
+            addr
+        );
+
+        // Single-character typo rejected
+        let mut typo = encoded.as_bytes().to_vec();
+        typo[10] = if typo[10] == b'q' { b'p' } else { b'q' };
+        assert!(AudrenAddress::decode(&String::from_utf8(typo).unwrap()).is_err());
+
+        // Mixed-case rejected
+        let mut mixed = encoded.clone();
+        let first = mixed.remove(0).to_ascii_uppercase();
+        mixed.insert(0, first);
+        assert!(AudrenAddress::decode(&mixed).is_err());
+
+        // Wrong HRP rejected
+        let mut raw = [0u8; 65];
+        raw[0] = ADDR_VERSION_V1;
+        raw[1..33].copy_from_slice(&addr.spend_pk);
+        raw[33..65].copy_from_slice(&addr.view_pk);
+        let data5 = convert_bits(&raw, 8, 5, true).unwrap();
+        let bad_hrp_ck = bech32m_create_checksum("sol", &data5);
+        let mut bad_hrp = String::from("sol1");
+        for &v in data5.iter().chain(bad_hrp_ck.iter()) {
+            bad_hrp.push(BECH32_CHARSET[v as usize] as char);
+        }
+        assert!(AudrenAddress::decode(&bad_hrp).is_err());
+
+        // Bad version byte (0x02) with valid Bech32m checksum rejected
+        raw[0] = 0x02;
+        let bad_ver5 = convert_bits(&raw, 8, 5, true).unwrap();
+        let bad_ver_ck = bech32m_create_checksum(ADDR_HRP, &bad_ver5);
+        let mut bad_ver = String::from("aud1");
+        for &v in bad_ver5.iter().chain(bad_ver_ck.iter()) {
+            bad_ver.push(BECH32_CHARSET[v as usize] as char);
+        }
+        assert!(AudrenAddress::decode(&bad_ver).is_err());
+
+        // Non-canonical spend_pk >= BN254_FR_MODULUS_BE with valid Bech32m checksum rejected
+        raw[0] = ADDR_VERSION_V1;
+        raw[1..33].copy_from_slice(&audren_core::BN254_FR_MODULUS_BE);
+        let bad_fr5 = convert_bits(&raw, 8, 5, true).unwrap();
+        let bad_fr_ck = bech32m_create_checksum(ADDR_HRP, &bad_fr5);
+        let mut bad_fr = String::from("aud1");
+        for &v in bad_fr5.iter().chain(bad_fr_ck.iter()) {
+            bad_fr.push(BECH32_CHARSET[v as usize] as char);
+        }
+        assert!(matches!(
+            AudrenAddress::decode(&bad_fr),
+            Err(ClientError::InvalidFieldElement)
+        ));
+    }
+
+    #[test]
+    fn x25519_low_order_points_and_aad_and_dyn_padding_rejected() {
+        let alice = AudrenKeys::from_seed(&[0x22u8; 32]);
+        let fvk = alice.full_viewing_key();
+        let zero_epk = [0u8; 32];
+
+        for bad_pk in [&zero_epk, &ORDER_8_POINT] {
+            assert!(encrypt_note_memo(bad_pk, [0x33u8; 32], 1_000, &WSOL_MINT).is_err());
+            assert!(prepare_dynamic_swap_memo(bad_pk, [0x33u8; 32]).is_err());
+            let forged_vt = derive_view_tag(&[0u8; 32]);
+            assert!(!check_memo_view_tag(&fvk, forged_vt, bad_pk));
+            assert!(try_decrypt_and_verify_memo_entry(
+                &fvk,
+                forged_vt,
+                bad_pk,
+                &[0u8; MEMO_CT_LEN],
+                &[0u8; 32],
+            )
+            .is_none());
+        }
+
+        // Static memo with payment_id round-trips and rejects tampered AAD
+        let pid = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+        let (tw, bl, memo106) =
+            encrypt_note_memo_with_payment_id(&alice.view_pk, [0x44u8; 32], 500_000, &WSOL_MINT, pid)
+                .unwrap();
+        let cm = compute_note_commitment(
+            derive_stealth_owner(alice.spend_pk, tw),
+            derive_asset_id(&WSOL_MINT),
+            500_000,
+            bl,
+        );
+        let cm_be = fr_to_be_bytes(&cm);
+        let vt = [memo106[0], memo106[1]];
+        let epk: [u8; 32] = memo106[2..34].try_into().unwrap();
+        let ct72: [u8; MEMO_CT_LEN] = memo106[34..106].try_into().unwrap();
+        let dec = try_decrypt_and_verify_memo_entry(&fvk, vt, &epk, &ct72, &cm_be).unwrap();
+        assert_eq!(dec.amount, 500_000);
+        assert_eq!(dec.mint, WSOL_MINT);
+        assert_eq!(dec.memo_version, MEMO_VERSION_V1);
+        assert_eq!(dec.memo_flags, 0);
+        assert_eq!(dec.payment_id, pid);
+        assert!(!dec.is_dynamic);
+
+        // Dynamic swap memo uses domain-separated tweak/blind and enforces zero 24 B tail
+        let (dtw, dbl, dhead, dmask) = prepare_dynamic_swap_memo(&alice.view_pk, [0x44u8; 32]).unwrap();
+        assert_ne!(dtw, tw, "dyn_tweak must be domain-separated from static tweak");
+        assert_ne!(dbl, bl, "dyn_blind must be domain-separated from static blinding");
+        let dcm = compute_note_commitment(
+            derive_stealth_owner(alice.spend_pk, dtw),
+            derive_asset_id(&WSOL_MINT),
+            999_999,
+            dbl,
+        );
+        let dcm_be = fr_to_be_bytes(&dcm);
+        let mut dplain = [0u8; MEMO_CT_LEN];
+        dplain[0..8].copy_from_slice(&DYN_MEMO_MAGIC);
+        dplain[8..16].copy_from_slice(&999_999u64.to_le_bytes());
+        dplain[16..48].copy_from_slice(&WSOL_MINT);
+        let mut dct = [0u8; MEMO_CT_LEN];
+        for i in 0..MEMO_CT_LEN {
+            dct[i] = dplain[i] ^ dmask[i];
+        }
+        let dvt = [dhead[0], dhead[1]];
+        let depk: [u8; 32] = dhead[2..34].try_into().unwrap();
+        let ddec = try_decrypt_and_verify_memo_entry(&fvk, dvt, &depk, &dct, &dcm_be).unwrap();
+        assert!(ddec.is_dynamic);
+        assert_eq!(ddec.amount, 999_999);
+
+        // Flip any of the 24 zero-padding tail bytes -> MUST reject!
+        let mut bad_dct = dct;
+        bad_dct[48] ^= 0x01;
+        assert!(try_decrypt_and_verify_memo_entry(&fvk, dvt, &depk, &bad_dct, &dcm_be).is_none());
+    }
 }

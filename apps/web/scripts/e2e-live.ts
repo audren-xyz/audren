@@ -5,7 +5,8 @@
  *   BASE_URL=https://audren.xyz pnpm --dir apps/web e2e:api
  */
 
-import { AUDREN_PROGRAM_ID, derivePoolPdaSync } from '../lib/audren-crypto'
+import { AUDREN_PROGRAM_ID, PROTOCOL_VERSION, derivePoolPdaSync, deriveVaultAuthPdaSync } from '../lib/audren-crypto'
+import { AUDREN } from '../lib/protocol'
 
 const BASE_URL = (process.env.BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
 
@@ -20,13 +21,28 @@ async function assertOkJson(path: string, init?: RequestInit): Promise<Record<st
 
 async function main() {
   const expectedPool0 = derivePoolPdaSync(0, AUDREN_PROGRAM_ID).address
+  const expectedVaultAuth = deriveVaultAuthPdaSync(0, AUDREN_PROGRAM_ID).address
+  if (expectedPool0 !== AUDREN.pool0Pda || expectedVaultAuth !== AUDREN.vaultAuthPda) {
+    throw new Error('AUDREN protocol register PDAs drifted from canonical v1 PDA derivation')
+  }
+  if ('solVaultPda' in AUDREN) {
+    throw new Error('AUDREN protocol register must not contain removed solVaultPda')
+  }
+
   const pool = await assertOkJson('/api/pool?cluster=devnet&poolId=0')
-  if (pool.programId !== AUDREN_PROGRAM_ID || pool.poolPda !== expectedPool0) {
+  if (
+    pool.programId !== AUDREN_PROGRAM_ID ||
+    pool.poolPda !== expectedPool0 ||
+    pool.vaultAuthPda !== expectedVaultAuth ||
+    'solVaultPda' in pool
+  ) {
     throw new Error(`Pool mismatch: ${JSON.stringify(pool)}`)
   }
   const devnetPool = await assertOkJson('/api/devnet/pool')
-  if (devnetPool.protocolVersion !== 2) {
-    throw new Error(`Expected protocolVersion=2, got ${String(devnetPool.protocolVersion)}`)
+  if (devnetPool.protocolVersion !== PROTOCOL_VERSION) {
+    throw new Error(
+      `Expected protocolVersion=${PROTOCOL_VERSION}, got ${String(devnetPool.protocolVersion)}`,
+    )
   }
   const bh = await assertOkJson('/api/rpc/blockhash?cluster=devnet')
   if (typeof bh.blockhash !== 'string' || bh.blockhash.length < 32) {
@@ -36,7 +52,11 @@ async function main() {
   if (!wasmRes.ok) {
     throw new Error(`Missing /wasm/audren_circuits.wasm: HTTP ${wasmRes.status}`)
   }
-  console.log(`Audren API smoke check PASSED against ${BASE_URL}`)
+  const workerRes = await fetch(`${BASE_URL}/wasm/prover-worker.js`, { method: 'HEAD' })
+  if (!workerRes.ok) {
+    throw new Error(`Missing /wasm/prover-worker.js: HTTP ${workerRes.status}`)
+  }
+  console.log(`Audren ${AUDREN.releaseTag} API smoke check PASSED against ${BASE_URL}`)
 }
 
 main().catch((err) => {

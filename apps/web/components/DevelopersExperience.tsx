@@ -39,7 +39,7 @@ const trading = deriveSubaccountKeys(seed32, 1);
 const fvk     = exportFullViewingKey(alice);
 const session = deriveDefiSessionKeypair(seed32, 0); // Ed25519 B_0 (public on external DeFi)
 
-// 2. Canonical PDAs (audren_v2_*)
+// 2. Canonical 12 PDAs (audren_*)
 const poolPda   = derivePoolPdaSync(0, AUDREN_PROGRAM_ID).address;
 const escrowPda = deriveEscrowPdaSync(0, 0, AUDREN_PROGRAM_ID).address;
 const unwrapPda = deriveUnwrapPdaSync(0, nf0Bytes, AUDREN_PROGRAM_ID).address;
@@ -72,7 +72,7 @@ let trading = AudrenKeys::from_seed_subaccount(&seed_32, 1);
 let fvk     = alice.full_viewing_key();
 let session = AudrenKeys::derive_defi_session_keypair(&seed_32, 0);
 
-// 2. Canonical PDAs (audren_v2_*)
+// 2. Canonical 12 PDAs (audren_*)
 let pid = Address::new_from_array(AUDREN_PROGRAM_ID);
 let (pool_pda, _)   = derive_pool_pda(&pid, 0);
 let (escrow_pda, _) = derive_escrow_pda(&pid, 0, 0);
@@ -98,14 +98,14 @@ let trading = try deriveSubaccountKeys(seed: seed32, accountIndex: 1)
 let fvk     = try exportFullViewingKey(seed: seed32)
 let session = try deriveDefiSessionKeypair(seed: seed32, sessionIndex: 0)
 
-// 2. Canonical PDAs (audren_v2_*)
+// 2. Canonical 12 PDAs (audren_*)
 let pid    = canonicalProgramId()
 let pool   = try derivePoolPda(programId: pid, poolId: 0)
 let escrow = try deriveEscrowPda(programId: pid, poolId: 0, shardId: 0)
 let unwrap = try deriveUnwrapPda(programId: pid, poolId: 0, nf0: nf0Data)
 
-// 3. Decrypt & verify 90 B note memo + Mode 1 SelectiveDisclosureProof + Groth16 proof
-let dec   = try decryptAndVerifyMemoEntry(fvk: fvk, memo90: memo90, onchainCommitment: leafCm)
+// 3. Decrypt & verify 106 B AEAD memo + Mode 1 SelectiveDisclosureProof + Groth16 proof
+let dec   = try decryptAndVerifyMemoEntry(fvk: fvk, memo106: memo106, onchainCommitment: leafCm)
 let valid = try verifySelectiveDisclosureProof(proof: receipt, onchainSubtreeLeaf: leafCm)
 let storeJson = try compactStoreNewJson(poolId: 0, birthdaySlot: 0)
 let proof = try proveJoinsplitWitnessBytes(witness4611: witnessData, seed32: rngSeed32)`,
@@ -121,14 +121,14 @@ val trading = deriveSubaccountKeys(seed32, 1u)
 val fvk     = exportFullViewingKey(seed32)
 val session = deriveDefiSessionKeypair(seed32, 0u)
 
-// 2. Canonical PDAs (audren_v2_*)
+// 2. Canonical 12 PDAs (audren_*)
 val pid    = canonicalProgramId()
 val pool   = derivePoolPda(pid, 0u)
 val escrow = deriveEscrowPda(pid, 0u, 0u)
 val unwrap = deriveUnwrapPda(pid, 0u, nf0Bytes)
 
-// 3. Decrypt & verify 90 B note memo + Mode 1 SelectiveDisclosureProof + Groth16 proof
-val dec       = decryptAndVerifyMemoEntry(fvk, memo90, leafCm)
+// 3. Decrypt & verify 106 B AEAD memo + Mode 1 SelectiveDisclosureProof + Groth16 proof
+val dec       = decryptAndVerifyMemoEntry(fvk, memo106, leafCm)
 val valid     = verifySelectiveDisclosureProof(receipt, leafCm)
 val storeJson = compactStoreNewJson(0u, 0uL)
 val proof     = proveJoinsplitWitnessBytes(witness4611, rngSeed32)`,
@@ -369,8 +369,9 @@ export function DevelopersExperience() {
               </div>
               <p>
                 Rust, TypeScript (+ WASM), Swift, and Kotlin share the exact same Circom BN254
-                Poseidon parameters, 17,861-R1CS Groth16 circuit, 90 B ChaCha20-Poly1305 memos, and{' '}
-                <code>audren_v2_*</code> PDAs, verified byte-for-byte in CI against{' '}
+                Poseidon parameters, 17,861-R1CS Groth16 circuit, versioned 72 B ChaCha20-Poly1305
+                AEAD memos (106 B SoA wire entries), BIP-350 Bech32m <code>aud1…</code> addresses,
+                and 12 canonical <code>audren_*</code> PDAs, verified byte-for-byte in CI against{' '}
                 <code>spec/test-vectors.json</code>.
               </p>
             </div>
@@ -409,7 +410,7 @@ export function DevelopersExperience() {
                   with the exact Rust-compiled <code>audren_circuits.wasm</code> Groth16 prover.
                 </p>
                 <ul className={styles.dashList}>
-                  <li><code>@audren/sdk</code>: pure-TS BN254 Poseidon, ChaCha20-Poly1305, 13 PDAs, <code>CompactWalletStore</code>, Transaction v1, IDLs &amp; <code>AudrenRelayClient</code></li>
+                  <li><code>@audren/sdk</code>: pure-TS BN254 Poseidon, ChaCha20-Poly1305 AEAD, BIP-350 Bech32m <code>aud1…</code>, 12 PDAs, <code>CompactWalletStore</code>, Transaction v1, IDLs &amp; <code>AudrenRelayClient</code></li>
                   <li><code>@audren/sdk/prover</code>: exact Rust <code>audren_circuits.wasm</code> (2.1 MB) proving byte-for-byte identical 192 B Groth16 proofs</li>
                   <li>Cross-SDK LiteSVM tests verify TS WASM proofs directly on sBPFv3 <code>audren.so</code></li>
                 </ul>
@@ -435,7 +436,7 @@ export function DevelopersExperience() {
                 </p>
                 <ul className={styles.dashList}>
                   <li>Native local BN254 Groth16 proving on Apple Silicon &amp; iPhone ARM64</li>
-                  <li>Keys, FVK, 13 PDAs, 90 B memo verification, Mode 1 receipts &amp; 9 ix builders</li>
+                  <li>Keys, FVK, 12 PDAs, 106 B AEAD memo verification, Mode 1 receipts &amp; 9 ix builders</li>
                   <li>One-command iOS <code>XCFramework</code> script (<code>scripts/build-mobile-sdks.sh ios</code>)</li>
                   <li>Verified in CI via <code>swift test</code> against <code>spec/test-vectors.json</code></li>
                 </ul>
@@ -542,8 +543,8 @@ export function DevelopersExperience() {
                   TypeScript, Swift, and Kotlin.
                 </p>
                 <ul className={styles.dashList}>
-                  <li><code>ExecViaEscrow</code> (Tag 7) supports any compatible PDA-signing Token A → Token B CPI with input or output relayer fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>) and hardened pre/post escrow checks.</li>
-                  <li>Self-paying <code>JoinSplit</code> (Tag 6) supports atomic <code>WITHDRAW_FLAG_UNWRAP_WSOL</code> to fund 0-SOL wallets or session keypairs, paired with zero-dust <code>DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code> sweeps.</li>
+                  <li><code>ExecViaEscrow</code> (Tag 6) supports any compatible PDA-signing SPL or Token-2022 Token A → Token B CPI with input or output relayer fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>) and hardened pre/post escrow checks.</li>
+                  <li>Self-paying <code>Transact</code> (Tag 5) supports atomic <code>WITHDRAW_FLAG_UNWRAP_WSOL</code> to fund 0-SOL wallets or session keypairs (plus up to 4 parallel 2 → 1 merges per Solana Transaction v1), paired with unified zero-dust <code>Deposit(DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code> sweeps.</li>
                   <li>All four example suites import the official SDKs directly with zero duplicated cryptography.</li>
                 </ul>
                 <div className={styles.cellFoot}>
@@ -592,7 +593,7 @@ export function DevelopersExperience() {
             <div>
               <h2>Inspect the on-chain specification.</h2>
               <p>
-                Exact fixed &lt;10 KiB account layouts, 17,861-R1CS BN254 Groth16 constraints, and
+                Exact fixed ≤10 KiB account layouts, 17,861-R1CS BN254 Groth16 constraints, and
                 measured sBPFv3 Compute Units.
               </p>
             </div>

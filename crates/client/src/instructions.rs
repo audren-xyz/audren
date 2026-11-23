@@ -1,16 +1,18 @@
-//! Builders for all 9 Audren instructions (`0x00..=0x08`) and exact `ctx_hash` transcripts.
+//! Builders for all 9 Audren v1 instructions (`0x00..=0x08`) and exact `ctx_hash` transcripts.
 
 use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use audren_circuits::poseidon::fr_to_be_bytes;
 use audren_core::{
     instruction::{
-        ASSET_MODE_SOL, ASSET_MODE_SPL, CTX_DOMAIN_EXEC_VIA_ESCROW, CTX_DOMAIN_JOINSPLIT,
-        CTX_DOMAIN_ROUTER_ACCOUNTS, DEPOSIT_FLAG_FEE_FROM_AMOUNT, EXEC_FLAG_FEE_ON_OUTPUT,
-        GROTH16_PROOF_LEN, OPEN_PAGE_KIND_MEMO, OPEN_PAGE_KIND_NULLIFIER, OPEN_PAGE_KIND_SUBROOT,
-        OPEN_PAGE_KIND_SUBTREE, TAG_DEPOSIT_SOL, TAG_DEPOSIT_SPL, TAG_EXEC_VIA_ESCROW,
-        TAG_INIT_LANE, TAG_INIT_POOL, TAG_JOINSPLIT, TAG_OPEN_PAGE, TAG_PUBLISH_CHECKPOINT,
-        TAG_SET_PAUSED, WITHDRAW_FLAG_UNWRAP_WSOL,
+        ASSET_MODE_PUBLIC, CTX_DOMAIN_EXEC_VIA_ESCROW, CTX_DOMAIN_ROUTER_ACCOUNTS,
+        CTX_DOMAIN_TRANSACT, DEPOSIT_FLAG_FEE_FROM_AMOUNT, DEPOSIT_FLAG_NATIVE_SOL,
+        EXEC_FLAG_FEE_ON_OUTPUT, GROTH16_PROOF_LEN, OPEN_PAGE_KIND_MEMO,
+        OPEN_PAGE_KIND_NULLIFIER, OPEN_PAGE_KIND_SUBROOT, OPEN_PAGE_KIND_SUBTREE, TAG_DEPOSIT,
+        TAG_EXEC_VIA_ESCROW, TAG_INIT_LANE, TAG_INIT_POOL, TAG_OPEN_PAGE, TAG_PUBLISH_CHECKPOINT,
+        TAG_SET_PAUSED, TAG_TRANSACT, TAG_UPDATE_POOL, UPDATE_POOL_ACCEPT_AUTHORITY,
+        UPDATE_POOL_PARAMS, UPDATE_POOL_PROPOSE_AUTHORITY, UPDATE_POOL_RENOUNCE_AUTHORITY,
+        WITHDRAW_FLAG_UNWRAP_WSOL,
     },
     layout::{
         DYN_MEMO_HEAD_LEN, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_NOTES_PER_PAGE, NF_PER_PAGE,
@@ -26,8 +28,7 @@ use crate::{
     pda::{
         derive_checkpoint_pda, derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda,
         derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda,
-        derive_sol_vault_pda, derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda,
-        derive_vault_auth_pda,
+        derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda,
     },
     router::prepare_escrow_accounts_for_audren,
 };
@@ -64,6 +65,22 @@ pub struct AudrenInstruction {
     pub data: Vec<u8>,
 }
 
+/// Governance actions accepted by `UpdatePool` (`TAG_UPDATE_POOL = 0x08`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdatePoolAction {
+    UpdateParams {
+        ckpt_interval: u64,
+        max_ckpt_age: u64,
+        note_rent_fee: u64,
+        nf_rent_fee: u64,
+    },
+    ProposeAuthority {
+        pending_authority: Address,
+    },
+    AcceptAuthority,
+    RenounceAuthority,
+}
+
 fn sys_id() -> Address {
     Address::new_from_array(SYSTEM_PROGRAM_ID)
 }
@@ -80,7 +97,10 @@ pub fn deterministic_note_rent_fee(
     sr_rent: u64,
     memo_rent: u64,
 ) -> u64 {
-    let live = sub_rent.div_ceil(256) + sr_rent.div_ceil(256 * 300) + memo_rent.div_ceil(112);
+    let live = sub_rent
+        .div_ceil(SUBTREE_LEAVES as u64)
+        .saturating_add(sr_rent.div_ceil((SUBTREE_LEAVES * SUBROOTS_PER_PAGE) as u64))
+        .saturating_add(memo_rent.div_ceil(MEMO_NOTES_PER_PAGE as u64));
     pool_note_rent_fee_cap.min(live)
 }
 
@@ -149,11 +169,12 @@ pub fn compute_page_rollovers(
     }
 }
 
-/// Exact `JoinSplit` `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
+/// Exact `Transact` (`0x05`) `ctx_hash` matching `program/src/lib.rs` bit-for-bit (with `vk_id` bound).
 #[allow(clippy::too_many_arguments)]
-pub fn compute_joinsplit_ctx_hash(
+pub fn compute_transact_ctx_hash(
     program_id: &Address,
     pool_id: u32,
+    vk_id: u8,
     out_lane_id: u8,
     output_mask: u8,
     asset_mode: u8,
@@ -166,17 +187,27 @@ pub fn compute_joinsplit_ctx_hash(
     memos_bytes: &[u8],
 ) -> Fr {
     let mut h = Sha256::new();
-    h.update(CTX_DOMAIN_JOINSPLIT);
+    h.update(CTX_DOMAIN_TRANSACT);
     h.update(program_id.as_ref());
     h.update(pool_id.to_le_bytes());
-    h.update([out_lane_id, output_mask, asset_mode, u8::from(unwrap_wsol)]);
+    h.update([
+        vk_id,
+        out_lane_id,
+        output_mask,
+        asset_mode,
+        u8::from(unwrap_wsol),
+    ]);
     if public_amount_out > 0 {
         h.update(recipient.expect("recipient required").as_ref());
     } else {
         h.update([0u8; 32]);
     }
     if relayer_fee_amount > 0 {
-        h.update(relayer_fee_recipient.expect("relayer_fee_recipient required").as_ref());
+        h.update(
+            relayer_fee_recipient
+                .expect("relayer_fee_recipient required")
+                .as_ref(),
+        );
     } else {
         h.update([0u8; 32]);
     }
@@ -200,20 +231,19 @@ pub fn compute_router_accounts_hash(router_accounts: &[AudrenAccountMeta]) -> [u
     h.finalize().into()
 }
 
-/// Exact `ExecViaEscrow` `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
+/// Exact `ExecViaEscrow` (`0x06`) `ctx_hash` matching `program/src/lib.rs` bit-for-bit (with `vk_id` bound).
 ///
-/// Applies Solana's transaction-wide writability promotion across `escrow_pda`, `sol_vault`,
+/// Applies Solana's transaction-wide writability promotion across `escrow_pda`,
 /// `relayer_fee_recipient`, and duplicate writable `router_accounts` before hashing
 /// `router_accounts` so on-chain `hash_router_accounts_arena` matches identically.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_exec_ctx_hash(
     program_id: &Address,
     pool_id: u32,
+    vk_id: u8,
     out_lane_id: u8,
     escrow_shard: u8,
     change_mask: u8,
-    in_kind: u8,
-    out_kind: u8,
     fee_on_output: bool,
     asset_in: &[u8; 32],
     amount_in: u64,
@@ -226,15 +256,12 @@ pub fn compute_exec_ctx_hash(
     out_stealth_owner: &[u8; 32],
     out_blinding: &[u8; 32],
     dyn_memo_head: &[u8; DYN_MEMO_HEAD_LEN],
-    dyn_mask_56: &[u8; MEMO_CT_LEN],
+    dyn_mask_72: &[u8; MEMO_CT_LEN],
     router_ix_data: &[u8],
     change_memos: &[u8],
 ) -> Fr {
     let (escrow_pda, _) = derive_escrow_pda(program_id, pool_id, escrow_shard);
-    let mut extra_writable = Vec::with_capacity(2);
-    if in_kind == 0 || out_kind == 0 {
-        extra_writable.push(derive_sol_vault_pda(program_id, pool_id).0);
-    }
+    let mut extra_writable = Vec::with_capacity(1);
     if relayer_fee_amount > 0 {
         if let Some(fee_r) = relayer_fee_recipient {
             extra_writable.push(*fee_r);
@@ -248,18 +275,21 @@ pub fn compute_exec_ctx_hash(
     h.update(program_id.as_ref());
     h.update(pool_id.to_le_bytes());
     h.update([
+        vk_id,
         out_lane_id,
         escrow_shard,
         change_mask,
-        in_kind,
-        out_kind,
         u8::from(fee_on_output),
     ]);
     h.update(asset_in);
     h.update(amount_in.to_le_bytes());
     h.update(relayer_fee_amount.to_le_bytes());
     if relayer_fee_amount > 0 {
-        h.update(relayer_fee_recipient.expect("relayer_fee_recipient required").as_ref());
+        h.update(
+            relayer_fee_recipient
+                .expect("relayer_fee_recipient required")
+                .as_ref(),
+        );
     } else {
         h.update([0u8; 32]);
     }
@@ -270,7 +300,7 @@ pub fn compute_exec_ctx_hash(
     h.update(out_stealth_owner);
     h.update(out_blinding);
     h.update(dyn_memo_head);
-    h.update(dyn_mask_56);
+    h.update(dyn_mask_72);
     h.update((router_ix_data.len() as u16).to_le_bytes());
     h.update(router_ix_data);
     h.update(change_memos);
@@ -279,7 +309,7 @@ pub fn compute_exec_ctx_hash(
 }
 
 // =============================================================================
-// 9 Canonical Audren Instruction Builders (0x00..=0x08)
+// 9 Canonical Audren v1 Instruction Builders (0x00..=0x08)
 // =============================================================================
 
 pub fn build_init_pool(
@@ -303,7 +333,6 @@ pub fn build_init_pool(
         accounts: vec![
             AudrenAccountMeta::writable(payer, true),
             AudrenAccountMeta::writable(derive_pool_pda(&program_id, pool_id).0, false),
-            AudrenAccountMeta::writable(derive_sol_vault_pda(&program_id, pool_id).0, false),
             AudrenAccountMeta::readonly(sys_id(), false),
         ],
         data,
@@ -326,11 +355,23 @@ pub fn build_init_lane(
             AudrenAccountMeta::writable(authority, true),
             AudrenAccountMeta::writable(derive_pool_pda(&program_id, pool_id).0, false),
             AudrenAccountMeta::writable(derive_lane_pda(&program_id, pool_id, lane_id).0, false),
-            AudrenAccountMeta::writable(derive_lane_rent_pda(&program_id, pool_id, lane_id).0, false),
-            AudrenAccountMeta::writable(derive_subtree_pda(&program_id, pool_id, lane_id, 0).0, false),
-            AudrenAccountMeta::writable(derive_subroot_pda(&program_id, pool_id, lane_id, 0).0, false),
+            AudrenAccountMeta::writable(
+                derive_lane_rent_pda(&program_id, pool_id, lane_id).0,
+                false,
+            ),
+            AudrenAccountMeta::writable(
+                derive_subtree_pda(&program_id, pool_id, lane_id, 0).0,
+                false,
+            ),
+            AudrenAccountMeta::writable(
+                derive_subroot_pda(&program_id, pool_id, lane_id, 0).0,
+                false,
+            ),
             AudrenAccountMeta::writable(derive_memo_pda(&program_id, pool_id, lane_id, 0).0, false),
-            AudrenAccountMeta::writable(derive_nf_page_pda(&program_id, pool_id, lane_id, 0).0, false),
+            AudrenAccountMeta::writable(
+                derive_nf_page_pda(&program_id, pool_id, lane_id, 0).0,
+                false,
+            ),
             AudrenAccountMeta::readonly(sys_id(), false),
         ],
         data,
@@ -364,7 +405,10 @@ pub fn build_open_page(
             AudrenAccountMeta::writable(payer, true),
             AudrenAccountMeta::readonly(derive_pool_pda(&program_id, pool_id).0, false),
             AudrenAccountMeta::readonly(derive_lane_pda(&program_id, pool_id, lane_id).0, false),
-            AudrenAccountMeta::writable(derive_lane_rent_pda(&program_id, pool_id, lane_id).0, false),
+            AudrenAccountMeta::writable(
+                derive_lane_rent_pda(&program_id, pool_id, lane_id).0,
+                false,
+            ),
             AudrenAccountMeta::writable(page_pda, false),
             AudrenAccountMeta::readonly(sys_id(), false),
         ],
@@ -372,86 +416,21 @@ pub fn build_open_page(
     }
 }
 
+/// Unified `Deposit` (`TAG_DEPOSIT = 0x03`, `185 B`, 13 fixed accounts + optional rollovers/hooks).
+///
+/// - When `native_sol == true`: sets `DEPOSIT_FLAG_NATIVE_SOL`; `mint` must be `WSOL_MINT`,
+///   `token_prog` must be `CLASSIC_TOKEN_PROGRAM_ID`, `source_account` must equal `depositor`,
+///   and `vault_ata` must be the canonical WSOL ATA owned by `vault_auth(pool_id)`.
+/// - When `native_sol == false`: transfers SPL / Token-2022 tokens from `source_account`
+///   (`depositor_ata`) into the canonical `vault_ata` owned by `vault_auth(pool_id)` (and
+///   `fee_from_amount` must be `false`).
 #[allow(clippy::too_many_arguments)]
-pub fn build_deposit_sol(
-    program_id: Address,
-    depositor: Address,
-    pool_id: u32,
-    lane_id: u8,
-    sub_page_seq: u64,
-    root_page_seq: u64,
-    memo_page_seq: u64,
-    next_sub_seq: Option<u64>,
-    next_memo_seq: Option<u64>,
-    fee_from_amount: bool,
-    amount: u64,
-    stealth_owner: Fr,
-    blinding: Fr,
-    memo_90: &[u8; MEMO_ENTRY_WIRE_LEN],
-) -> AudrenInstruction {
-    let flags = u8::from(next_sub_seq.is_some())
-        | (u8::from(next_memo_seq.is_some()) << 1)
-        | if fee_from_amount {
-            DEPOSIT_FLAG_FEE_FROM_AMOUNT
-        } else {
-            0
-        };
-    let mut data = Vec::with_capacity(169);
-    data.push(TAG_DEPOSIT_SOL);
-    data.extend_from_slice(&pool_id.to_le_bytes());
-    data.push(lane_id);
-    data.push(flags);
-    data.extend_from_slice(&amount.to_le_bytes());
-    data.extend_from_slice(&fr_to_be_bytes(&stealth_owner));
-    data.extend_from_slice(&fr_to_be_bytes(&blinding));
-    data.extend_from_slice(memo_90);
-
-    let mut accounts = vec![
-        AudrenAccountMeta::writable(depositor, true),
-        AudrenAccountMeta::readonly(derive_pool_pda(&program_id, pool_id).0, false),
-        AudrenAccountMeta::writable(derive_sol_vault_pda(&program_id, pool_id).0, false),
-        AudrenAccountMeta::writable(derive_lane_pda(&program_id, pool_id, lane_id).0, false),
-        AudrenAccountMeta::writable(derive_lane_rent_pda(&program_id, pool_id, lane_id).0, false),
-        AudrenAccountMeta::writable(
-            derive_subtree_pda(&program_id, pool_id, lane_id, sub_page_seq).0,
-            false,
-        ),
-        AudrenAccountMeta::writable(
-            derive_subroot_pda(&program_id, pool_id, lane_id, root_page_seq).0,
-            false,
-        ),
-        AudrenAccountMeta::writable(
-            derive_memo_pda(&program_id, pool_id, lane_id, memo_page_seq).0,
-            false,
-        ),
-        AudrenAccountMeta::readonly(sys_id(), false),
-    ];
-    if let Some(ns) = next_sub_seq {
-        accounts.push(AudrenAccountMeta::writable(
-            derive_subtree_pda(&program_id, pool_id, lane_id, ns).0,
-            false,
-        ));
-    }
-    if let Some(nm) = next_memo_seq {
-        accounts.push(AudrenAccountMeta::writable(
-            derive_memo_pda(&program_id, pool_id, lane_id, nm).0,
-            false,
-        ));
-    }
-    AudrenInstruction {
-        program_id: program_id.to_bytes(),
-        accounts,
-        data,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn build_deposit_spl(
+pub fn build_deposit(
     program_id: Address,
     depositor: Address,
     pool_id: u32,
     mint: Address,
-    depositor_ata: Address,
+    source_account: Address,
     vault_ata: Address,
     token_prog: Address,
     lane_id: u8,
@@ -460,33 +439,49 @@ pub fn build_deposit_spl(
     memo_page_seq: u64,
     next_sub_seq: Option<u64>,
     next_memo_seq: Option<u64>,
+    native_sol: bool,
+    fee_from_amount: bool,
     amount: u64,
     stealth_owner: Fr,
     blinding: Fr,
-    memo_90: &[u8; MEMO_ENTRY_WIRE_LEN],
+    memo_106: &[u8; MEMO_ENTRY_WIRE_LEN],
     transfer_hook_accounts: &[AudrenAccountMeta],
 ) -> AudrenInstruction {
-    let flags = u8::from(next_sub_seq.is_some()) | (u8::from(next_memo_seq.is_some()) << 1);
-    let mut data = Vec::with_capacity(169);
-    data.push(TAG_DEPOSIT_SPL);
+    let flags = u8::from(next_sub_seq.is_some())
+        | (u8::from(next_memo_seq.is_some()) << 1)
+        | if fee_from_amount {
+            DEPOSIT_FLAG_FEE_FROM_AMOUNT
+        } else {
+            0
+        }
+        | if native_sol {
+            DEPOSIT_FLAG_NATIVE_SOL
+        } else {
+            0
+        };
+    let mut data = Vec::with_capacity(185);
+    data.push(TAG_DEPOSIT);
     data.extend_from_slice(&pool_id.to_le_bytes());
     data.push(lane_id);
     data.push(flags);
     data.extend_from_slice(&amount.to_le_bytes());
     data.extend_from_slice(&fr_to_be_bytes(&stealth_owner));
     data.extend_from_slice(&fr_to_be_bytes(&blinding));
-    data.extend_from_slice(memo_90);
+    data.extend_from_slice(memo_106);
 
     let mut accounts = vec![
         AudrenAccountMeta::writable(depositor, true),
         AudrenAccountMeta::readonly(derive_pool_pda(&program_id, pool_id).0, false),
         AudrenAccountMeta::readonly(derive_vault_auth_pda(&program_id, pool_id).0, false),
         AudrenAccountMeta::readonly(mint, false),
-        AudrenAccountMeta::writable(depositor_ata, false),
+        AudrenAccountMeta::writable(source_account, source_account == depositor),
         AudrenAccountMeta::writable(vault_ata, false),
         AudrenAccountMeta::readonly(token_prog, false),
         AudrenAccountMeta::writable(derive_lane_pda(&program_id, pool_id, lane_id).0, false),
-        AudrenAccountMeta::writable(derive_lane_rent_pda(&program_id, pool_id, lane_id).0, false),
+        AudrenAccountMeta::writable(
+            derive_lane_rent_pda(&program_id, pool_id, lane_id).0,
+            false,
+        ),
         AudrenAccountMeta::writable(
             derive_subtree_pda(&program_id, pool_id, lane_id, sub_page_seq).0,
             false,
@@ -556,7 +551,7 @@ pub fn build_publish_checkpoint(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_joinsplit(
+pub fn build_transact(
     program_id: Address,
     payer: Address,
     pool_id: u32,
@@ -570,7 +565,7 @@ pub fn build_joinsplit(
     output_mask: u8,
     asset_mode: u8,
     unwrap_wsol: bool,
-    spl_withdraw_accs: Option<(Address, Address, Address)>, // (mint, vault_ata, token_prog)
+    public_withdraw_accs: Option<(Address, Address, Address)>, // (mint, vault_ata, token_prog)
     rollover: (Option<u64>, Option<u64>, Option<u64>),
     proof_192: &[u8; GROTH16_PROOF_LEN],
     nf0: &[u8; 32],
@@ -594,7 +589,7 @@ pub fn build_joinsplit(
             0
         };
     let mut data = Vec::with_capacity(378 + memos_bytes.len());
-    data.push(TAG_JOINSPLIT);
+    data.push(TAG_TRANSACT);
     data.extend_from_slice(&pool_id.to_le_bytes());
     data.push(vk_id);
     data.push(out_lane_id);
@@ -650,19 +645,9 @@ pub fn build_joinsplit(
         AudrenAccountMeta::readonly(sys_id(), false),
     ];
 
-    if asset_mode == ASSET_MODE_SOL {
-        accounts.push(AudrenAccountMeta::writable(
-            derive_sol_vault_pda(&program_id, pool_id).0,
-            false,
-        ));
-        accounts.push(AudrenAccountMeta::writable(recipient, false));
-        accounts.push(if relayer_fee_amount > 0 {
-            AudrenAccountMeta::writable(relayer_fee_recipient, false)
-        } else {
-            AudrenAccountMeta::readonly(relayer_fee_recipient, false)
-        });
-    } else if asset_mode == ASSET_MODE_SPL {
-        let (mint, vault_ata, token_prog) = spl_withdraw_accs.expect("SPL withdraw accs required");
+    if asset_mode == ASSET_MODE_PUBLIC {
+        let (mint, vault_ata, token_prog) =
+            public_withdraw_accs.expect("public withdraw accs required");
         accounts.push(AudrenAccountMeta::readonly(
             derive_vault_auth_pda(&program_id, pool_id).0,
             false,
@@ -725,11 +710,9 @@ pub fn build_exec_via_escrow(
     out_nf_seq: u64,
     escrow_shard: u8,
     change_mask: u8,
-    in_kind: u8,
-    out_kind: u8,
     fee_on_output: bool,
-    in_spl: Option<(Address, Address, Address, Address)>,
-    out_spl: Option<(Address, Address, Address, Address)>,
+    in_leg: (Address, Address, Address, Address), // (mint, vault_ata, escrow_ata, token_prog)
+    out_leg: (Address, Address, Address, Address), // (mint, vault_ata, escrow_ata, token_prog)
     relayer_fee_amount: u64,
     relayer_fee_recipient: Option<Address>,
     rollover: (Option<u64>, Option<u64>, Option<u64>),
@@ -744,7 +727,7 @@ pub fn build_exec_via_escrow(
     out_stealth_owner: &[u8; 32],
     out_blinding: &[u8; 32],
     dyn_memo_head: &[u8; DYN_MEMO_HEAD_LEN],
-    dyn_mask_56: &[u8; MEMO_CT_LEN],
+    dyn_mask_72: &[u8; MEMO_CT_LEN],
     router_prog: Address,
     router_ix_data: &[u8],
     router_accounts: Vec<AudrenAccountMeta>,
@@ -758,15 +741,13 @@ pub fn build_exec_via_escrow(
         } else {
             0
         };
-    let mut data = Vec::with_capacity(544 + router_ix_data.len() + change_memos.len());
+    let mut data = Vec::with_capacity(558 + router_ix_data.len() + change_memos.len());
     data.push(TAG_EXEC_VIA_ESCROW);
     data.extend_from_slice(&pool_id.to_le_bytes());
     data.push(vk_id);
     data.push(out_lane_id);
     data.push(escrow_shard);
     data.push(change_mask);
-    data.push(in_kind);
-    data.push(out_kind);
     data.push(flags);
     data.extend_from_slice(proof_192);
     data.extend_from_slice(nf0);
@@ -780,7 +761,7 @@ pub fn build_exec_via_escrow(
     data.extend_from_slice(out_stealth_owner);
     data.extend_from_slice(out_blinding);
     data.extend_from_slice(dyn_memo_head);
-    data.extend_from_slice(dyn_mask_56);
+    data.extend_from_slice(dyn_mask_72);
     data.extend_from_slice(&(router_ix_data.len() as u16).to_le_bytes());
     data.extend_from_slice(router_ix_data);
     data.extend_from_slice(change_memos);
@@ -792,6 +773,7 @@ pub fn build_exec_via_escrow(
     };
 
     let (escrow_pda, _) = derive_escrow_pda(&program_id, pool_id, escrow_shard);
+    let (vault_auth, _) = derive_vault_auth_pda(&program_id, pool_id);
     let mut accounts = vec![
         AudrenAccountMeta::writable(payer, true),
         AudrenAccountMeta::readonly(derive_pool_pda(&program_id, pool_id).0, false),
@@ -827,22 +809,12 @@ pub fn build_exec_via_escrow(
         AudrenAccountMeta::readonly(sys_id(), false),
     ];
 
-    if in_kind == 0 {
-        accounts.push(AudrenAccountMeta::writable(
-            derive_sol_vault_pda(&program_id, pool_id).0,
-            false,
-        ));
-    } else {
-        let (m_in, v_in, e_in, tp_in) = in_spl.expect("in_spl required");
-        accounts.push(AudrenAccountMeta::readonly(
-            derive_vault_auth_pda(&program_id, pool_id).0,
-            false,
-        ));
-        accounts.push(AudrenAccountMeta::readonly(m_in, false));
-        accounts.push(AudrenAccountMeta::writable(v_in, false));
-        accounts.push(AudrenAccountMeta::writable(e_in, false));
-        accounts.push(AudrenAccountMeta::readonly(tp_in, false));
-    }
+    let (m_in, v_in, e_in, tp_in) = in_leg;
+    accounts.push(AudrenAccountMeta::readonly(vault_auth, false));
+    accounts.push(AudrenAccountMeta::readonly(m_in, false));
+    accounts.push(AudrenAccountMeta::writable(v_in, false));
+    accounts.push(AudrenAccountMeta::writable(e_in, false));
+    accounts.push(AudrenAccountMeta::readonly(tp_in, false));
     if relayer_fee_amount > 0 && !fee_on_output {
         accounts.push(AudrenAccountMeta::writable(
             relayer_fee_recipient.expect("relayer_fee_recipient required"),
@@ -850,22 +822,12 @@ pub fn build_exec_via_escrow(
         ));
     }
 
-    if out_kind == 0 {
-        accounts.push(AudrenAccountMeta::writable(
-            derive_sol_vault_pda(&program_id, pool_id).0,
-            false,
-        ));
-    } else {
-        let (m_out, v_out, e_out, tp_out) = out_spl.expect("out_spl required");
-        accounts.push(AudrenAccountMeta::readonly(
-            derive_vault_auth_pda(&program_id, pool_id).0,
-            false,
-        ));
-        accounts.push(AudrenAccountMeta::readonly(m_out, false));
-        accounts.push(AudrenAccountMeta::writable(v_out, false));
-        accounts.push(AudrenAccountMeta::writable(e_out, false));
-        accounts.push(AudrenAccountMeta::readonly(tp_out, false));
-    }
+    let (m_out, v_out, e_out, tp_out) = out_leg;
+    accounts.push(AudrenAccountMeta::readonly(vault_auth, false));
+    accounts.push(AudrenAccountMeta::readonly(m_out, false));
+    accounts.push(AudrenAccountMeta::writable(v_out, false));
+    accounts.push(AudrenAccountMeta::writable(e_out, false));
+    accounts.push(AudrenAccountMeta::readonly(tp_out, false));
     if relayer_fee_amount > 0 && fee_on_output {
         accounts.push(AudrenAccountMeta::writable(
             relayer_fee_recipient.expect("relayer_fee_recipient required"),
@@ -927,6 +889,49 @@ pub fn build_set_paused(
     }
 }
 
+pub fn build_update_pool(
+    program_id: Address,
+    signer: Address,
+    pool_id: u32,
+    action: UpdatePoolAction,
+) -> AudrenInstruction {
+    let mut data = Vec::with_capacity(38);
+    data.push(TAG_UPDATE_POOL);
+    data.extend_from_slice(&pool_id.to_le_bytes());
+    match action {
+        UpdatePoolAction::UpdateParams {
+            ckpt_interval,
+            max_ckpt_age,
+            note_rent_fee,
+            nf_rent_fee,
+        } => {
+            data.push(UPDATE_POOL_PARAMS);
+            data.extend_from_slice(&ckpt_interval.to_le_bytes());
+            data.extend_from_slice(&max_ckpt_age.to_le_bytes());
+            data.extend_from_slice(&note_rent_fee.to_le_bytes());
+            data.extend_from_slice(&nf_rent_fee.to_le_bytes());
+        }
+        UpdatePoolAction::ProposeAuthority { pending_authority } => {
+            data.push(UPDATE_POOL_PROPOSE_AUTHORITY);
+            data.extend_from_slice(pending_authority.as_ref());
+        }
+        UpdatePoolAction::AcceptAuthority => {
+            data.push(UPDATE_POOL_ACCEPT_AUTHORITY);
+        }
+        UpdatePoolAction::RenounceAuthority => {
+            data.push(UPDATE_POOL_RENOUNCE_AUTHORITY);
+        }
+    }
+    AudrenInstruction {
+        program_id: program_id.to_bytes(),
+        accounts: vec![
+            AudrenAccountMeta::readonly(signer, true),
+            AudrenAccountMeta::writable(derive_pool_pda(&program_id, pool_id).0, false),
+        ],
+        data,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,7 +939,7 @@ mod tests {
     #[test]
     fn compute_page_rollovers_exact_boundaries() {
         assert_eq!(
-            compute_page_rollovers(109, 3, 0, 2),
+            compute_page_rollovers(93, 3, 0, 2),
             PageRolloverPlan {
                 out_sub_seq: 0,
                 out_root_seq: 0,
@@ -946,10 +951,10 @@ mod tests {
                 next_nf_seq: None,
             }
         );
-        assert_eq!(compute_page_rollovers(110, 3, 0, 2).next_memo_seq, Some(1));
-        assert_eq!(compute_page_rollovers(111, 2, 0, 1).next_memo_seq, Some(1));
-        assert_eq!(compute_page_rollovers(112, 3, 0, 2).out_memo_seq, 1);
-        assert_eq!(compute_page_rollovers(112, 3, 0, 2).next_memo_seq, None);
+        assert_eq!(compute_page_rollovers(94, 3, 0, 2).next_memo_seq, Some(1));
+        assert_eq!(compute_page_rollovers(95, 2, 0, 1).next_memo_seq, Some(1));
+        assert_eq!(compute_page_rollovers(96, 3, 0, 2).out_memo_seq, 1);
+        assert_eq!(compute_page_rollovers(96, 3, 0, 2).next_memo_seq, None);
 
         assert_eq!(compute_page_rollovers(254, 2, 0, 1).next_sub_seq, None);
         assert_eq!(compute_page_rollovers(254, 3, 0, 2).next_sub_seq, Some(1));

@@ -2,14 +2,16 @@
 //!
 //! Proves with ZERO mocks over real Solana Transaction v1 (`0x81`) that:
 //!   1. TypeScript `@audren/sdk` + `@audren/sdk/prover` WASM (`audren_circuits.wasm`) builds a
-//!      `DepositSol` instruction, ingests on-chain `SubtreePage`/`MemoPage` via TS
-//!      `CompactWalletStore`, proves a real BN254 Groth16 `JoinSplit` private transfer inside WASM,
-//!      and executes it on-chain against `target/deploy/audren.so`!
+//!      unified `Deposit(DEPOSIT_FLAG_NATIVE_SOL)` instruction, ingests on-chain `SubtreePage`/
+//!      `MemoPage` via TS `CompactWalletStore`, proves a real BN254 Groth16 `Transact` private
+//!      transfer inside WASM, and executes it on-chain against `target/deploy/audren.so`!
 //!   2. Rust UniFFI (`audren-ffi`, exact library powering Swift & Kotlin) ingests the resulting
-//!      on-chain pages produced by TypeScript, proves a Groth16 `JoinSplit` SOL withdrawal with
-//!      relayer fee via `prove_joinsplit_witness_bytes` + `build_joinsplit_ix`, and executes on-chain!
-//!   3. TypeScript `@audren/sdk/prover` WASM then spends Alice's change note in a public SOL
-//!      withdrawal with relayer fee, verifying full bidirectional cross-SDK interoperability!
+//!      on-chain pages produced by TypeScript, proves a Groth16 `Transact(WITHDRAW_FLAG_UNWRAP_WSOL)`
+//!      SOL withdrawal with relayer fee via `prove_joinsplit_witness_bytes` + `build_transact_ix`,
+//!      and executes on-chain!
+//!   3. TypeScript `@audren/sdk/prover` WASM then spends Alice's change note in a public
+//!      `Transact(WITHDRAW_FLAG_UNWRAP_WSOL)` withdrawal with relayer fee, verifying full
+//!      bidirectional cross-SDK interoperability!
 
 use agave_feature_set::FeatureSet;
 use ark_bn254::Fr;
@@ -22,13 +24,15 @@ use audren_circuits::{
 };
 use audren_client::{keys::AudrenKeys, store::CompactWalletStore};
 use audren_core::{
-    instruction::ASSET_MODE_SOL,
+    instruction::{ASSET_MODE_PUBLIC, VK_ID_DEFAULT},
     layout::{LaneTreeHeader, RootCheckpoint},
-    AUDREN_PROGRAM_ID, NATIVE_SOL_MINT,
+    ASSOCIATED_TOKEN_PROGRAM_ID, AUDREN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+    WSOL_MINT,
 };
 use audren_ffi::*;
 use litesvm::{types::TransactionResult, LiteSVM};
 use serde_json::{json, Value};
+use solana_account::Account;
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
@@ -167,8 +171,29 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         .with_blockhash_check(false);
     let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
     let program_id_str = canonical_program_id();
+    let spl_token_id = Address::new_from_array(CLASSIC_TOKEN_PROGRAM_ID);
+    let ata_prog_id = Address::new_from_array(ASSOCIATED_TOKEN_PROGRAM_ID);
+    let sys_prog_id = Address::new_from_array(SYSTEM_PROGRAM_ID);
+    let wsol_mint = Address::new_from_array(WSOL_MINT);
+
     svm.add_program_from_file(program_id, &so_path)
         .expect("load audren.so");
+
+    // Seed canonical Solana genesis WSOL Mint (82 B, decimals = 9, is_initialized = 1)
+    let mut wsol_data = vec![0u8; 82];
+    wsol_data[44] = 9;
+    wsol_data[45] = 1;
+    svm.set_account(
+        wsol_mint,
+        Account {
+            lamports: svm.minimum_balance_for_rent_exemption(82),
+            data: wsol_data,
+            owner: spl_token_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
 
     let authority = Keypair::new();
     let depositor = Keypair::new();
@@ -179,7 +204,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         svm.airdrop(&kp.pubkey(), 20_000_000_000).unwrap();
     }
 
-    // 1. InitPool + InitLane(0..4) using audren-ffi (exact Swift/Kotlin path)
+    // 1. InitPool + InitLane(0..4) + canonical WSOL vault ATA using audren-ffi (exact Swift/Kotlin path)
     let init_pool = ffi_ix_to_solana(
         build_init_pool_ix(
             program_id_str.clone(),
@@ -207,7 +232,31 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         send_v1(&mut svm, &authority, &[&authority], &[ix], 300_000).expect("init_lane");
     }
 
-    // 2. TypeScript @audren/sdk builds DepositSol (2.0 SOL to Alice on lane 0)
+    let vault_auth_str = derive_vault_auth_pda(program_id_str.clone(), 0).unwrap().address;
+    let vault_auth_addr: Address = vault_auth_str.parse().unwrap();
+    let vault_wsol_str = derive_ata(
+        vault_auth_str.clone(),
+        spl_token_id.to_string(),
+        wsol_mint.to_string(),
+    )
+    .unwrap();
+    let vault_wsol_addr: Address = vault_wsol_str.parse().unwrap();
+    let create_vault_wsol_ix = Instruction {
+        program_id: ata_prog_id,
+        accounts: vec![
+            AccountMeta::new(authority.pubkey(), true),
+            AccountMeta::new(vault_wsol_addr, false),
+            AccountMeta::new_readonly(vault_auth_addr, false),
+            AccountMeta::new_readonly(wsol_mint, false),
+            AccountMeta::new_readonly(sys_prog_id, false),
+            AccountMeta::new_readonly(spl_token_id, false),
+        ],
+        data: vec![1u8], // CreateIdempotent
+    };
+    send_v1(&mut svm, &authority, &[&authority], &[create_vault_wsol_ix], 200_000)
+        .expect("create canonical vault WSOL ATA");
+
+    // 2. TypeScript @audren/sdk builds unified Deposit(DEPOSIT_FLAG_NATIVE_SOL) (2.0 SOL to Alice on lane 0)
     let alice_seed = [0x11u8; 32];
     let bob_seed = [0x22u8; 32];
     let dep_res = run_ts_driver(&json!({
@@ -226,9 +275,9 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
     }));
     let dep_ix = json_ix_to_solana(&dep_res);
     let dep_meta = send_v1(&mut svm, &depositor, &[&depositor], &[dep_ix], 200_000)
-        .expect("TS DepositSol on-chain");
+        .expect("TS Deposit(NATIVE_SOL) on-chain");
     println!(
-        "[cross-sdk] TS DepositSol executed on-chain ({} CU)",
+        "[cross-sdk] TS Deposit(NATIVE_SOL) executed on-chain ({} CU)",
         dep_meta.compute_units_consumed
     );
 
@@ -246,7 +295,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
     );
     send_v1(&mut svm, &relayer, &[&relayer], &[ck1_ix], 150_000).expect("ckpt 1");
 
-    // 4. TypeScript @audren/sdk + @audren/sdk/prover WASM scans lane 0 and proves private transfer:
+    // 4. TypeScript @audren/sdk + @audren/sdk/prover WASM scans lane 0 and proves private Transact:
     //    Alice sends 1.2 SOL to Bob + 0.8 SOL change to Alice on lane 1!
     let sub0_addr: Address = derive_subtree_pda(program_id_str.clone(), 0, 0, 0)
         .unwrap()
@@ -265,7 +314,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         .unwrap();
 
     let ts_xfer = run_ts_driver(&json!({
-        "action": "joinsplit_transfer",
+        "action": "transact_transfer",
         "program_id": program_id_str,
         "payer": relayer.pubkey().to_string(),
         "pool_id": 0,
@@ -289,9 +338,9 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
     }));
     let xfer_ix = json_ix_to_solana(&ts_xfer);
     let xfer_meta = send_v1(&mut svm, &relayer, &[&relayer], &[xfer_ix], 350_000)
-        .expect("TS WASM JoinSplit private transfer on-chain");
+        .expect("TS WASM Transact private transfer on-chain");
     println!(
-        "[cross-sdk] TS WASM JoinSplit Private Transfer executed on-chain ({} CU)",
+        "[cross-sdk] TS WASM Transact Private Transfer executed on-chain ({} CU)",
         xfer_meta.compute_units_consumed
     );
 
@@ -310,7 +359,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
     send_v1(&mut svm, &relayer, &[&relayer], &[ck2_ix], 150_000).expect("ckpt 2");
 
     // 6. Rust UniFFI (Swift/Kotlin backend) ingests lane 1 pages created by TypeScript,
-    //    decrypts Bob's 1.2 SOL note, proves JoinSplit SOL withdrawal (1.15 SOL + 0.05 SOL relayer fee),
+    //    decrypts Bob's 1.2 SOL note, proves Transact WSOL unwrap withdrawal (1.15 SOL + 0.05 SOL relayer fee),
     //    and executes on-chain!
     let sub1_addr: Address = derive_subtree_pda(program_id_str.clone(), 0, 1, 0)
         .unwrap()
@@ -347,20 +396,21 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
 
     let ck2 = RootCheckpoint::decode(&ck2_raw).unwrap();
     let (super_root, path) = bob_store.build_witness_for_note(&bob_note, &ck2).unwrap();
-    let sol_asset_bytes = derive_asset_id_bytes(NATIVE_SOL_MINT.to_vec()).unwrap();
-    let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+    let wsol_asset_bytes = derive_asset_id_bytes(WSOL_MINT.to_vec()).unwrap();
+    let wsol_asset = derive_asset_id(&WSOL_MINT);
     let bob_fee = 50_000_000u64;
     let bob_out = bob_note.amount - bob_fee;
-    let ctx_bob_bytes = compute_joinsplit_ctx_hash_ffi(audren_ffi::FfiJoinSplitCtxHashParams {
+    let ctx_bob_bytes = compute_transact_ctx_hash_ffi(FfiTransactCtxHashParams {
         program_id: program_id_str.clone(),
         pool_id: 0,
+        vk_id: VK_ID_DEFAULT,
         out_lane_id: 2,
         output_mask: 0,
-        asset_mode: ASSET_MODE_SOL,
-        unwrap_wsol: false,
+        asset_mode: ASSET_MODE_PUBLIC,
+        unwrap_wsol: true,
         recipient: Some(recipient_bob.pubkey().to_string()),
         relayer_fee_recipient: Some(relayer.pubkey().to_string()),
-        public_asset_id: sol_asset_bytes,
+        public_asset_id: wsol_asset_bytes,
         public_amount_out: bob_out,
         relayer_fee_amount: bob_fee,
         memos_bytes: vec![],
@@ -370,8 +420,8 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
 
     let circuit = JoinSplit4AryCircuit::new_with_options(
         super_root,
-        sol_asset,
-        sol_asset,
+        wsol_asset,
+        wsol_asset,
         bob_out,
         bob_fee,
         ctx_bob,
@@ -380,7 +430,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
             JoinSplitInputWitness {
                 spend_sk: bob_keys.spend_sk,
                 tweak: bob_note.tweak_fr().unwrap(),
-                asset_id: sol_asset,
+                asset_id: wsol_asset,
                 amount: bob_note.amount,
                 blinding: bob_note.blinding_fr().unwrap(),
                 is_dummy: false,
@@ -389,7 +439,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
             JoinSplitInputWitness {
                 spend_sk: bob_keys.spend_sk,
                 tweak: Fr::from(0u64),
-                asset_id: sol_asset,
+                asset_id: wsol_asset,
                 amount: 0,
                 blinding: Fr::from(0x5555u64),
                 is_dummy: true,
@@ -397,32 +447,35 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
             },
         ],
         [
-            JoinSplitOutputWitness::dummy(sol_asset, Fr::from(1u64)),
-            JoinSplitOutputWitness::dummy(sol_asset, Fr::from(2u64)),
-            JoinSplitOutputWitness::dummy(sol_asset, Fr::from(3u64)),
+            JoinSplitOutputWitness::dummy(wsol_asset, Fr::from(1u64)),
+            JoinSplitOutputWitness::dummy(wsol_asset, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(wsol_asset, Fr::from(3u64)),
         ],
     );
     let witness_bytes = encode_joinsplit_witness_bytes(&circuit);
     let bob_proof = prove_joinsplit_witness_bytes(witness_bytes.to_vec(), vec![0x77u8; 32]).unwrap();
 
     let bob_wd_ix = ffi_ix_to_solana(
-        build_joinsplit_ix(audren_ffi::FfiJoinSplitParams {
+        build_transact_ix(FfiTransactParams {
             program_id: program_id_str.clone(),
             payer: relayer.pubkey().to_string(),
             pool_id: 0,
-            vk_id: 0,
+            vk_id: VK_ID_DEFAULT,
             ckpt_slot_idx: 2,
             out_lane_id: 2,
             out_sub_seq: 0,
             out_root_seq: 0,
             out_memo_seq: 0,
             out_nf_seq: 0,
+            next_sub_seq: None,
+            next_memo_seq: None,
+            next_nf_seq: None,
             output_mask: 0,
-            asset_mode: ASSET_MODE_SOL,
-            unwrap_wsol: false,
-            spl_mint: None,
-            spl_vault_ata: None,
-            spl_token_prog: None,
+            asset_mode: ASSET_MODE_PUBLIC,
+            unwrap_wsol: true,
+            public_mint: Some(wsol_mint.to_string()),
+            public_vault_ata: Some(vault_wsol_str),
+            public_token_prog: Some(spl_token_id.to_string()),
             proof_192: bob_proof.proof_192,
             nf0: bob_proof.nf0,
             nf1: bob_proof.nf1,
@@ -434,20 +487,21 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
             recipient: recipient_bob.pubkey().to_string(),
             relayer_fee_recipient: relayer.pubkey().to_string(),
             memos_bytes: vec![],
+            transfer_hook_accounts: vec![],
         })
         .unwrap(),
     );
     let bob_meta = send_v1(&mut svm, &relayer, &[&relayer], &[bob_wd_ix], 350_000)
-        .expect("FFI JoinSplit Withdraw SOL on-chain");
+        .expect("FFI Transact WSOL Unwrap Withdraw on-chain");
     assert_eq!(svm.get_balance(&recipient_bob.pubkey()).unwrap(), bob_out);
     println!(
-        "[cross-sdk] UniFFI (Swift/Kotlin) JoinSplit SOL Withdraw executed on-chain ({} CU)",
+        "[cross-sdk] UniFFI (Swift/Kotlin) Transact WSOL Unwrap executed on-chain ({} CU)",
         bob_meta.compute_units_consumed
     );
 
     // 7. TypeScript @audren/sdk/prover WASM spends Alice's 0.8 SOL change note from lane 1!
     let ts_wd = run_ts_driver(&json!({
-        "action": "joinsplit_withdraw_sol",
+        "action": "transact_withdraw_sol",
         "program_id": program_id_str,
         "payer": relayer.pubkey().to_string(),
         "pool_id": 0,
@@ -470,13 +524,13 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
     }));
     let alice_wd_ix = json_ix_to_solana(&ts_wd);
     let alice_meta = send_v1(&mut svm, &relayer, &[&relayer], &[alice_wd_ix], 350_000)
-        .expect("TS WASM JoinSplit Withdraw SOL on-chain");
+        .expect("TS WASM Transact WSOL Unwrap Withdraw on-chain");
     assert_eq!(
         svm.get_balance(&recipient_alice.pubkey()).unwrap(),
         775_000_000
     );
     println!(
-        "[cross-sdk] TS WASM JoinSplit SOL Withdraw executed on-chain ({} CU)",
+        "[cross-sdk] TS WASM Transact WSOL Unwrap executed on-chain ({} CU)",
         alice_meta.compute_units_consumed
     );
 

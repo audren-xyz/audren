@@ -2,12 +2,14 @@
 //! over any ordinary Solana account fetcher (LiteSVM or Solana RPC).
 //!
 //! Default `SyncPrivacyMode::Strict` eliminates RPC hit/spend-correlation leaks:
-//! - Fetches full `10,144 B` `MemoPage`s in uniform 100-account batches (zero `dataSlice`
+//! - Fetches full `10,240 B` `MemoPage`s in uniform 100-account batches (zero `dataSlice`
 //!   hit-correlated second round-trip).
 //! - Fetches newly synced `SubtreePage`s uniformly on incremental syncs (`<= 25` pages /
-//!   `<= 25` subtrees) and decoy-pads + shuffles hit-correlated historical sealed `SubtreePage`
-//!   fetches up to `min(16, total_sealed_subtrees)` on large catch-ups (`> 25` pages).
-//! - Streams all new `NullifierPage`s to `lane_hdr.nf_count` in Pass 2 with zero early-exit.
+//!   `<= 25` subtrees) and uses deterministic wallet-keyed decoy padding (`SHA256(view_sk ||
+//!   "audren/v1/decoy" || epoch_bucket)`) with fixed uniform batch count on large catch-ups
+//!   (`> 25` pages) so repeated syncs cannot be intersected and hit count is hidden.
+//! - Streams all new `NullifierPage`s to `lane_hdr.nf_count` in Pass 2 unconditionally
+//!   (even if Pass 1D hits a transient `SubtreePage` miss) with zero early-exit.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,7 +29,7 @@ use audren_core::{
     },
     NUM_LANES,
 };
-use rand::{rngs::OsRng, seq::SliceRandom, Rng};
+use sha2::{Digest, Sha256};
 use solana_address::Address;
 
 use crate::{
@@ -42,15 +44,17 @@ use crate::{
 
 /// Standard Solana `getMultipleAccounts` batch size.
 pub const RPC_BATCH_CHUNK: usize = 100;
-/// Maximum new `MemoPage`s fetched as an incremental sync (`<= ~250 KB`).
+/// Maximum new `MemoPage`s fetched as an incremental sync (`<= ~256 KB`).
 pub const INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD: u64 = 25;
 /// Maximum newly synced `SubtreePage`s fetched uniformly on incremental sync in `Strict` mode.
 pub const INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD: u64 = 25;
 /// Minimum sealed `SubtreePage` anonymity set size when decoy-padding in `Strict` mode.
 pub const STRICT_DECOY_SEALED_SUBTREE_TARGET: usize = 16;
+/// Domain tag for deterministic wallet-keyed decoy selection in `Strict` large catch-up.
+const DECOY_DOMAIN: &[u8] = b"audren/v1/decoy";
 /// Byte length of the `MemoPage` header prefix (`closed_slot` binary search).
 pub const MEMO_PAGE_HEADER_LEN: usize = 64;
-/// Byte length of the `MemoPage` SoA scan slice (`header + view_tags + ephemeral_pks = 3,872 B`).
+/// Byte length of the `MemoPage` SoA scan slice (`header + view_tags + ephemeral_pks = 3,328 B`).
 pub const MEMO_PAGE_SCAN_SLICE_LEN: usize = MM_OFF_CIPHERTEXTS;
 /// Byte length of the `NullifierPage` header prefix (`closed_slot` binary search).
 pub const NF_PAGE_HEADER_LEN: usize = 64;
@@ -58,18 +62,17 @@ pub const NF_PAGE_HEADER_LEN: usize = 64;
 /// RPC privacy mode for `CompactWalletStore` synchronization.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SyncPrivacyMode {
-    /// Default privacy-preserving sync: fetches full `10,144 B` `MemoPage`s in uniform batches,
+    /// Default privacy-preserving sync: fetches full `10,240 B` `MemoPage`s in uniform batches,
     /// fetches newly synced `SubtreePage`s uniformly on incremental syncs (`<= 25` pages / `<= 25`
-    /// subtrees), decoy-pads + shuffles hit-correlated historical sealed `SubtreePage` fetches up
-    /// to `min(16, total_sealed_subtrees)` on large catch-ups, and streams all new `NullifierPage`s
-    /// without early-exit.
+    /// subtrees), uses deterministic wallet-keyed decoy padding (`min(16, total_sealed_subtrees)`)
+    /// on large catch-ups, and runs Pass 2 unconditionally without early-exit.
     #[default]
     Strict,
     /// Opt-in bandwidth-saving mode for large historical catch-up (`> 25` `MemoPage`s) over a
-    /// self-hosted or trusted RPC: uses `3,872 B` `MemoPage` SoA `dataSlice` scanning followed by
+    /// self-hosted or trusted RPC: uses `3,328 B` `MemoPage` SoA `dataSlice` scanning followed by
     /// targeted full `MemoPage` re-fetches on view-tag hits (trading RPC hit-visibility for lower
     /// bandwidth). Small incremental syncs (`<= 25` `MemoPage`s) still fetch full `MemoPage`s
-    /// directly, and Pass 2 still streams all new `NullifierPage`s without early-exit.
+    /// directly, and Pass 2 still streams all new `NullifierPage`s unconditionally without early-exit.
     Fast,
 }
 
@@ -303,17 +306,18 @@ where
 /// - **Pass 1A:** Fast-sync finalized level-4 subroots via `SubtreeRootPage`.
 /// - **Pass 1B:** Optional `birthday_slot` binary search on `64 B` `MemoPage` headers.
 /// - **Pass 1C:** Fetch `MemoPage`s across all active lanes in uniform 100-account batches:
-///   - `Strict` (default): ALWAYS fetches full `10,144 B` `MemoPage`s in one pass (zero
+///   - `Strict` (default): ALWAYS fetches full `10,240 B` `MemoPage`s in one pass (zero
 ///     `dataSlice` hit-correlated re-fetches).
-///   - `Fast` (opt-in): fetches full `10,144 B` `MemoPage`s on small incremental syncs
-///     (`<= 25` pages), and uses `3,872 B` SoA `dataSlice` on large catch-ups (`> 25` pages)
+///   - `Fast` (opt-in): fetches full `10,240 B` `MemoPage`s on small incremental syncs
+///     (`<= 25` pages), and uses `3,328 B` SoA `dataSlice` on large catch-ups (`> 25` pages)
 ///     followed by Pass 1D full fetches on view-tag hits.
 /// - **Pass 1D:** Fetch required `SubtreePage`s in uniform shuffled batches:
 ///   - `Strict` incremental sync (`<= 25` MemoPages & `<= 25` newly synced SubtreePages): fetches
 ///     all `SubtreePage`s covering newly synced leaves uniformly without revealing hits.
-///   - `Strict` large catch-up (`> 25` MemoPages): pads any hit-correlated historical sealed
-///     `SubtreePage` fetch batch with uniform random decoy sealed `SubtreePage`s across active
-///     lanes up to `min(16, total_sealed_subtrees)` and shuffles the batch before fetching.
+///   - `Strict` large catch-up (`> 25` MemoPages): pads sealed `SubtreePage` fetch batches with
+///     deterministic wallet-keyed decoy sealed `SubtreePage`s across active lanes up to a fixed
+///     uniform batch size (`min(16, total_sealed_subtrees)`, even when 0 hits occur) and shuffles
+///     deterministically before fetching.
 /// - **Pass 2:** Unconditionally streams ALL new `NullifierPage`s across ALL active lanes up to
 ///   `lane_hdr.nf_count` in uniform 100-account batches with ZERO early-exit (even when 0 unspent
 ///   notes exist or after the last unspent note is marked spent), discarding all stranger prefixes.
@@ -730,25 +734,38 @@ where
         }
     }
 
-    // Decoy-pad hit-correlated historical sealed `SubtreePage` fetches in `Strict` mode
-    if privacy_mode == SyncPrivacyMode::Strict && has_hit_correlated_sealed_subtree {
-        let mut finalized_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
-        let mut total_sealed_subtrees = 0u64;
-        for lane_hdr in &lanes {
-            let fc = lane_hdr.next_leaf / sub_size;
-            finalized_by_lane.insert(lane_hdr.lane_id, fc);
-            total_sealed_subtrees = total_sealed_subtrees.saturating_add(fc);
-        }
+    // Deterministic wallet-keyed decoy padding for historical sealed `SubtreePage` fetches in
+    // `Strict` mode (`SHA256(view_sk || "audren/v1/decoy" || epoch_bucket || counter)`):
+    // - Always fetches a fixed uniform count independent of hit count (even 0 hits) during large
+    //   catch-up so RPC cannot tell whether a wallet had hits.
+    // - Deterministic per `(view_sk, epoch_bucket)` so repeated syncs / retries emit identical
+    //   decoy sets and cannot be intersected.
+    let mut finalized_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut total_sealed_subtrees = 0u64;
+    for lane_hdr in &lanes {
+        let fc = lane_hdr.next_leaf / sub_size;
+        finalized_by_lane.insert(lane_hdr.lane_id, fc);
+        total_sealed_subtrees = total_sealed_subtrees.saturating_add(fc);
+    }
+    let epoch_bucket: u64 = total_sealed_subtrees / 64;
 
-        let target_sealed =
-            total_sealed_subtrees.min(STRICT_DECOY_SEALED_SUBTREE_TARGET as u64) as usize;
+    let should_decoy_pad = privacy_mode == SyncPrivacyMode::Strict
+        && total_sealed_subtrees > 0
+        && (has_hit_correlated_sealed_subtree
+            || (!fetch_new_subtrees_uniformly && total_new_memo_pages > 0));
+    if should_decoy_pad {
         let mut current_sealed_count = needed_subtrees
             .keys()
             .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
             .count();
+        let buckets = current_sealed_count
+            .max(1)
+            .div_ceil(STRICT_DECOY_SEALED_SUBTREE_TARGET);
+        let target_sealed = (buckets * STRICT_DECOY_SEALED_SUBTREE_TARGET)
+            .min(total_sealed_subtrees as usize);
 
         if current_sealed_count < target_sealed {
-            if total_sealed_subtrees <= STRICT_DECOY_SEALED_SUBTREE_TARGET as u64 {
+            if total_sealed_subtrees <= target_sealed as u64 {
                 for lane_hdr in &lanes {
                     let fc = *finalized_by_lane.get(&lane_hdr.lane_id).unwrap_or(&0);
                     for s in 0..fc {
@@ -756,9 +773,17 @@ where
                     }
                 }
             } else {
-                let mut rng = OsRng;
+                let mut counter: u32 = 0;
                 while current_sealed_count < target_sealed {
-                    let mut g = rng.gen_range(0..total_sealed_subtrees);
+                    let mut h = Sha256::new();
+                    h.update(fvk.view_sk);
+                    h.update(DECOY_DOMAIN);
+                    h.update(epoch_bucket.to_le_bytes());
+                    h.update(counter.to_le_bytes());
+                    counter = counter.wrapping_add(1);
+                    let digest: [u8; 32] = h.finalize().into();
+                    let mut g =
+                        u64::from_le_bytes(digest[0..8].try_into().unwrap()) % total_sealed_subtrees;
                     for lane_hdr in &lanes {
                         let fc = *finalized_by_lane.get(&lane_hdr.lane_id).unwrap_or(&0);
                         if g < fc {
@@ -774,9 +799,19 @@ where
         }
     }
 
-    let mut sub_list: Vec<((u8, u64), Address)> = needed_subtrees.iter().map(|(&k, &v)| (k, v)).collect();
+    let mut sub_list: Vec<((u8, u64), Address)> =
+        needed_subtrees.iter().map(|(&k, &v)| (k, v)).collect();
     if sub_list.len() > 1 {
-        sub_list.shuffle(&mut OsRng);
+        sub_list.sort_by_cached_key(|(_, addr)| {
+            let mut h = Sha256::new();
+            h.update(fvk.view_sk);
+            h.update(DECOY_DOMAIN);
+            h.update(epoch_bucket.to_le_bytes());
+            h.update(b"order");
+            h.update(addr.as_ref());
+            let d: [u8; 32] = h.finalize().into();
+            d
+        });
     }
 
     let mut fetched_subtrees: BTreeMap<(u8, u64), Vec<[u8; 32]>> = BTreeMap::new();
@@ -855,11 +890,11 @@ where
                 ];
                 let epk = read_32(mraw, MM_OFF_EPHEMERAL_PKS + hit.slot * 32);
                 let ct_off = MM_OFF_CIPHERTEXTS + hit.slot * MEMO_CT_LEN;
-                let ct56: [u8; MEMO_CT_LEN] =
+                let ct72: [u8; MEMO_CT_LEN] =
                     mraw[ct_off..ct_off + MEMO_CT_LEN].try_into().unwrap();
                 let cm_be = leaves[sub_slot];
                 if let Some(dec) =
-                    try_decrypt_and_verify_memo_entry(fvk, vt, &epk, &ct56, &cm_be)
+                    try_decrypt_and_verify_memo_entry(fvk, vt, &epk, &ct72, &cm_be)
                 {
                     if store.record_verified_memo(fvk, lane_id, hit.leaf_idx, &dec, cm_be)? {
                         discovered_notes += 1;
@@ -913,149 +948,163 @@ where
     }
 
     // =========================================================================
-    // PASS 2: Stream ALL new `NullifierPage`s across ALL active lanes (ZERO early-exit!)
+    // PASS 2: Unconditionally stream ALL new `NullifierPage`s across ALL active
+    //         lanes (ZERO early-exit, ZERO Pass 1D -> Pass 2 miss oracle!).
+    //         If Pass 1D missed a `SubtreePage` / `MemoPage` (`!all_caught_up`),
+    //         we still issue every Pass 2 RPC identically and apply nullifiers to
+    //         known notes, while keeping `next_nf_index` pinned so the retried
+    //         note's nullifier is guaranteed to be checked on the next sync.
     // =========================================================================
     let all_caught_up = lanes
         .iter()
         .all(|h| store.lanes[h.lane_id as usize].next_memo_leaf >= h.next_leaf);
-    if all_caught_up {
-        // Optional birthday_slot binary search on `64 B` NullifierPage headers for fresh wallets
-        // (runs unconditionally regardless of owned-note balance so RPC cannot infer first receipt).
-        if birthday_slot > 0 {
-            struct NfBsState {
-                lane_id: u8,
-                nf_count: u64,
-                lo: u64,
-                hi: u64,
-            }
-            let mut nf_bs_states: Vec<NfBsState> = Vec::new();
-            for lane_hdr in &lanes {
-                let l = lane_hdr.lane_id as usize;
-                if lane_hdr.nf_count > 0 && store.lanes[l].next_nf_index == 0 {
-                    let target_nf_max = (lane_hdr.nf_count - 1) / nf_size;
-                    if target_nf_max > 2 {
-                        nf_bs_states.push(NfBsState {
-                            lane_id: lane_hdr.lane_id,
-                            nf_count: lane_hdr.nf_count,
-                            lo: 0,
-                            hi: target_nf_max + 1,
-                        });
-                    }
-                }
-            }
-            while nf_bs_states.iter().any(|s| s.lo < s.hi) {
-                let active_indices: Vec<usize> = nf_bs_states
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, s)| (s.lo < s.hi).then_some(idx))
-                    .collect();
-                let mids: Vec<u64> = active_indices
-                    .iter()
-                    .map(|&idx| (nf_bs_states[idx].lo + nf_bs_states[idx].hi) / 2)
-                    .collect();
-                let addrs: Vec<Address> = active_indices
-                    .iter()
-                    .zip(mids.iter())
-                    .map(|(&idx, &mid)| {
-                        derive_nf_page_pda(program_id, pool_id, nf_bs_states[idx].lane_id, mid).0
-                    })
-                    .collect();
-                let raws = fetch_batch(
-                    &addrs,
-                    Some(AccountDataSlice {
-                        offset: 0,
-                        length: NF_PAGE_HEADER_LEN,
-                    }),
-                );
-                for (i, &idx) in active_indices.iter().enumerate() {
-                    let mid = mids[i];
-                    let skip = raws
-                        .get(i)
-                        .and_then(|o| o.as_ref())
-                        .map(|nraw| {
-                            if nraw.len() >= NF_PAGE_HEADER_LEN && nraw[0..8] == NF_PAGE_MAGIC {
-                                let cnt = read_u16(nraw, NF_OFF_COUNT) as usize;
-                                let closed = read_u64(nraw, NF_OFF_CLOSED_SLOT);
-                                cnt == NF_PER_PAGE && closed > 0 && closed < birthday_slot
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false);
-                    if skip {
-                        nf_bs_states[idx].lo = mid + 1;
-                    } else {
-                        nf_bs_states[idx].hi = mid;
-                    }
-                }
-            }
-            for st in &nf_bs_states {
-                if st.lo > 0 {
-                    store.lanes[st.lane_id as usize].next_nf_index =
-                        (st.lo * nf_size).min(st.nf_count);
-                }
-            }
-        }
+    let saved_nf_indices: Vec<u64> = lanes
+        .iter()
+        .map(|h| store.lanes[h.lane_id as usize].next_nf_index)
+        .collect();
 
-        // Stream ALL new NullifierPages up to `lane_hdr.nf_count` in uniform 100-account batches.
-        // NEVER skip when 0 unspent notes exist, and NEVER break early when the last unspent note
-        // is marked spent — stranger prefixes are discarded immediately (zero RAM/JSON growth).
-        struct NfReq {
+    // Optional birthday_slot binary search on `64 B` NullifierPage headers for fresh wallets
+    // (runs unconditionally regardless of owned-note balance so RPC cannot infer first receipt).
+    if birthday_slot > 0 {
+        struct NfBsState {
             lane_id: u8,
-            page_seq: u64,
-            max_nf_index: u64,
-            addr: Address,
+            nf_count: u64,
+            lo: u64,
+            hi: u64,
         }
-        let mut nf_queue: Vec<NfReq> = Vec::new();
+        let mut nf_bs_states: Vec<NfBsState> = Vec::new();
         for lane_hdr in &lanes {
             let l = lane_hdr.lane_id as usize;
-            if lane_hdr.nf_count == 0 || store.lanes[l].next_nf_index >= lane_hdr.nf_count {
-                continue;
-            }
-            let start_nf = store.lanes[l].next_nf_index / nf_size;
-            let target_nf_max = (lane_hdr.nf_count - 1) / nf_size;
-            for n in start_nf..=target_nf_max {
-                nf_queue.push(NfReq {
-                    lane_id: lane_hdr.lane_id,
-                    page_seq: n,
-                    max_nf_index: lane_hdr.nf_count,
-                    addr: derive_nf_page_pda(program_id, pool_id, lane_hdr.lane_id, n).0,
-                });
+            if lane_hdr.nf_count > 0 && store.lanes[l].next_nf_index == 0 {
+                let target_nf_max = (lane_hdr.nf_count - 1) / nf_size;
+                if target_nf_max > 2 {
+                    nf_bs_states.push(NfBsState {
+                        lane_id: lane_hdr.lane_id,
+                        nf_count: lane_hdr.nf_count,
+                        lo: 0,
+                        hi: target_nf_max + 1,
+                    });
+                }
             }
         }
+        while nf_bs_states.iter().any(|s| s.lo < s.hi) {
+            let active_indices: Vec<usize> = nf_bs_states
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, s)| (s.lo < s.hi).then_some(idx))
+                .collect();
+            let mids: Vec<u64> = active_indices
+                .iter()
+                .map(|&idx| (nf_bs_states[idx].lo + nf_bs_states[idx].hi) / 2)
+                .collect();
+            let addrs: Vec<Address> = active_indices
+                .iter()
+                .zip(mids.iter())
+                .map(|(&idx, &mid)| {
+                    derive_nf_page_pda(program_id, pool_id, nf_bs_states[idx].lane_id, mid).0
+                })
+                .collect();
+            let raws = fetch_batch(
+                &addrs,
+                Some(AccountDataSlice {
+                    offset: 0,
+                    length: NF_PAGE_HEADER_LEN,
+                }),
+            );
+            for (i, &idx) in active_indices.iter().enumerate() {
+                let mid = mids[i];
+                let skip = raws
+                    .get(i)
+                    .and_then(|o| o.as_ref())
+                    .map(|nraw| {
+                        if nraw.len() >= NF_PAGE_HEADER_LEN && nraw[0..8] == NF_PAGE_MAGIC {
+                            let cnt = read_u16(nraw, NF_OFF_COUNT) as usize;
+                            let closed = read_u64(nraw, NF_OFF_CLOSED_SLOT);
+                            cnt == NF_PER_PAGE && closed > 0 && closed < birthday_slot
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if skip {
+                    nf_bs_states[idx].lo = mid + 1;
+                } else {
+                    nf_bs_states[idx].hi = mid;
+                }
+            }
+        }
+        for st in &nf_bs_states {
+            if st.lo > 0 {
+                store.lanes[st.lane_id as usize].next_nf_index =
+                    (st.lo * nf_size).min(st.nf_count);
+            }
+        }
+    }
 
-        let mut stopped_nf_lanes: BTreeSet<u8> = BTreeSet::new();
-        for chunk in nf_queue.chunks(RPC_BATCH_CHUNK) {
-            if chunk.iter().all(|item| stopped_nf_lanes.contains(&item.lane_id)) {
+    // Stream ALL new NullifierPages up to `lane_hdr.nf_count` in uniform 100-account batches.
+    // NEVER skip when 0 unspent notes exist or when Pass 1D had a transient miss, and NEVER break
+    // early when the last unspent note is marked spent — stranger prefixes are discarded immediately.
+    struct NfReq {
+        lane_id: u8,
+        page_seq: u64,
+        max_nf_index: u64,
+        addr: Address,
+    }
+    let mut nf_queue: Vec<NfReq> = Vec::new();
+    for lane_hdr in &lanes {
+        let l = lane_hdr.lane_id as usize;
+        if lane_hdr.nf_count == 0 || store.lanes[l].next_nf_index >= lane_hdr.nf_count {
+            continue;
+        }
+        let start_nf = store.lanes[l].next_nf_index / nf_size;
+        let target_nf_max = (lane_hdr.nf_count - 1) / nf_size;
+        for n in start_nf..=target_nf_max {
+            nf_queue.push(NfReq {
+                lane_id: lane_hdr.lane_id,
+                page_seq: n,
+                max_nf_index: lane_hdr.nf_count,
+                addr: derive_nf_page_pda(program_id, pool_id, lane_hdr.lane_id, n).0,
+            });
+        }
+    }
+
+    let mut stopped_nf_lanes: BTreeSet<u8> = BTreeSet::new();
+    for chunk in nf_queue.chunks(RPC_BATCH_CHUNK) {
+        if chunk.iter().all(|item| stopped_nf_lanes.contains(&item.lane_id)) {
+            continue;
+        }
+        let addrs: Vec<Address> = chunk.iter().map(|item| item.addr).collect();
+        let raws = fetch_batch(&addrs, None);
+        for (i, item) in chunk.iter().enumerate() {
+            if stopped_nf_lanes.contains(&item.lane_id) {
                 continue;
             }
-            let addrs: Vec<Address> = chunk.iter().map(|item| item.addr).collect();
-            let raws = fetch_batch(&addrs, None);
-            for (i, item) in chunk.iter().enumerate() {
-                if stopped_nf_lanes.contains(&item.lane_id) {
-                    continue;
-                }
-                let Some(nraw) = raws.get(i).and_then(|o| o.as_ref()) else {
-                    stopped_nf_lanes.insert(item.lane_id);
-                    continue;
-                };
-                if nraw.len() != NF_PAGE_LEN || nraw[0..8] != NF_PAGE_MAGIC {
-                    return Err(ClientError::InvalidEncoding("invalid NullifierPage"));
-                }
-                let hdr_count = read_u16(nraw, NF_OFF_COUNT) as usize;
-                let page_base = item.page_seq * nf_size;
-                let expected_cap =
-                    (item.max_nf_index.saturating_sub(page_base) as usize).min(NF_PER_PAGE);
-                store.ingest_nullifier_page(
-                    item.lane_id,
-                    item.page_seq,
-                    nraw,
-                    Some(item.max_nf_index),
-                )?;
-                if hdr_count < expected_cap {
-                    stopped_nf_lanes.insert(item.lane_id);
-                }
+            let Some(nraw) = raws.get(i).and_then(|o| o.as_ref()) else {
+                stopped_nf_lanes.insert(item.lane_id);
+                continue;
+            };
+            if nraw.len() != NF_PAGE_LEN || nraw[0..8] != NF_PAGE_MAGIC {
+                return Err(ClientError::InvalidEncoding("invalid NullifierPage"));
             }
+            let hdr_count = read_u16(nraw, NF_OFF_COUNT) as usize;
+            let page_base = item.page_seq * nf_size;
+            let expected_cap =
+                (item.max_nf_index.saturating_sub(page_base) as usize).min(NF_PER_PAGE);
+            store.ingest_nullifier_page(
+                item.lane_id,
+                item.page_seq,
+                nraw,
+                Some(item.max_nf_index),
+            )?;
+            if hdr_count < expected_cap {
+                stopped_nf_lanes.insert(item.lane_id);
+            }
+        }
+    }
+
+    if !all_caught_up {
+        for (i, lane_hdr) in lanes.iter().enumerate() {
+            store.lanes[lane_hdr.lane_id as usize].next_nf_index = saved_nf_indices[i];
         }
     }
 
@@ -1074,11 +1123,11 @@ mod tests {
     use audren_core::{
         layout::{
             LANE_MAGIC, LANE_STATE_LEN, LN_OFF_LANE_ID, LN_OFF_NEXT_LEAF, LN_OFF_NF_COUNT,
-            LN_OFF_VERSION, NF_OFF_PREFIXES, NF_PREFIX_LEN, PL_OFF_ACTIVE_LANES, PL_OFF_VERSION,
-            POOL_MAGIC, POOL_STATE_LEN, SB_OFF_LANE_ID, SB_OFF_PAGE_SEQ, SR_OFF_LANE_ID,
-            SR_OFF_ROOT_PAGE_SEQ,
+            LN_OFF_VERSION, MEMO_ENTRY_WIRE_LEN, NF_OFF_PREFIXES, NF_PREFIX_LEN,
+            PL_OFF_ACTIVE_LANES, PL_OFF_VERSION, POOL_MAGIC, POOL_STATE_LEN, SB_OFF_LANE_ID,
+            SB_OFF_PAGE_SEQ, SR_OFF_LANE_ID, SR_OFF_ROOT_PAGE_SEQ,
         },
-        AUDREN_PROGRAM_ID, NATIVE_SOL_MINT, PROTOCOL_VERSION,
+        AUDREN_PROGRAM_ID, PROTOCOL_VERSION, WSOL_MINT,
     };
 
     use crate::keys::{encrypt_note_memo, AudrenKeys};
@@ -1135,13 +1184,13 @@ mod tests {
         buf
     }
 
-    fn write_memo(buf: &mut [u8], slot: usize, memo_90: &[u8; 90]) {
+    fn write_memo(buf: &mut [u8], slot: usize, memo_106: &[u8; MEMO_ENTRY_WIRE_LEN]) {
         buf[MM_OFF_VIEW_TAGS + slot * 2..MM_OFF_VIEW_TAGS + (slot + 1) * 2]
-            .copy_from_slice(&memo_90[0..2]);
+            .copy_from_slice(&memo_106[0..2]);
         buf[MM_OFF_EPHEMERAL_PKS + slot * 32..MM_OFF_EPHEMERAL_PKS + (slot + 1) * 32]
-            .copy_from_slice(&memo_90[2..34]);
+            .copy_from_slice(&memo_106[2..34]);
         buf[MM_OFF_CIPHERTEXTS + slot * MEMO_CT_LEN..MM_OFF_CIPHERTEXTS + (slot + 1) * MEMO_CT_LEN]
-            .copy_from_slice(&memo_90[34..90]);
+            .copy_from_slice(&memo_106[34..MEMO_ENTRY_WIRE_LEN]);
     }
 
     fn make_nf_page(lane_id: u8, seq: u64, prefixes: &[[u8; NF_PREFIX_LEN]]) -> Vec<u8> {
@@ -1163,13 +1212,15 @@ mod tests {
         let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
         let alice = AudrenKeys::from_seed(&[0x7au8; 32]);
         let fvk = alice.full_viewing_key();
-        let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+        let sol_asset = derive_asset_id(&WSOL_MINT);
 
-        // Lane 2 has 520 leaves (2 sealed subtrees 0 & 1 + 8 frontier leaves in subtree 2).
-        // Alice owns 1 note at leaf 515 (SubtreePage 2, MemoPage 4), spent on Lane 0 alongside 40 strangers.
+        // Lane 2 has 520 leaves (2 sealed subtrees 0 & 1 + 8 frontier leaves in subtree 2;
+        // 6 MemoPages @ 96 notes/page).
+        // Alice owns 1 note at leaf 515 (SubtreePage 2, MemoPage 5), spent on Lane 0 alongside 40 strangers.
         let total_leaves = 520usize;
         let mut leaves = Vec::with_capacity(total_leaves);
-        let mut memos: Vec<Vec<u8>> = (0..5)
+        let memo_page_count = total_leaves.div_ceil(MEMO_NOTES_PER_PAGE);
+        let mut memos: Vec<Vec<u8>> = (0..memo_page_count)
             .map(|m| {
                 let cnt = MEMO_NOTES_PER_PAGE.min(total_leaves - m * MEMO_NOTES_PER_PAGE) as u16;
                 let closed = if cnt as usize == MEMO_NOTES_PER_PAGE {
@@ -1187,8 +1238,8 @@ mod tests {
 
         for i in 0..total_leaves {
             if i == 515 {
-                let (tw, bl, memo_90) =
-                    encrypt_note_memo(&alice.view_pk, [0x7bu8; 32], 4_200_000, &NATIVE_SOL_MINT);
+                let (tw, bl, memo_106) =
+                    encrypt_note_memo(&alice.view_pk, [0x7bu8; 32], 4_200_000, &WSOL_MINT).unwrap();
                 let cm = compute_note_commitment(
                     derive_stealth_owner(alice.spend_pk, tw),
                     sol_asset,
@@ -1196,7 +1247,7 @@ mod tests {
                     bl,
                 );
                 leaves.push(cm);
-                write_memo(&mut memos[i / MEMO_NOTES_PER_PAGE], i % MEMO_NOTES_PER_PAGE, &memo_90);
+                write_memo(&mut memos[i / MEMO_NOTES_PER_PAGE], i % MEMO_NOTES_PER_PAGE, &memo_106);
             } else {
                 leaves.push(Fr::from((i + 1) as u64));
             }
@@ -1307,10 +1358,10 @@ mod tests {
         let alice_fvk = alice.full_viewing_key();
         let bob = AudrenKeys::from_seed(&[0xb2u8; 32]);
         let bob_fvk = bob.full_viewing_key();
-        let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+        let sol_asset = derive_asset_id(&WSOL_MINT);
 
-        let (tw, bl, memo_90) =
-            encrypt_note_memo(&alice.view_pk, [0xa2u8; 32], 3_000_000, &NATIVE_SOL_MINT);
+        let (tw, bl, memo_106) =
+            encrypt_note_memo(&alice.view_pk, [0xa2u8; 32], 3_000_000, &WSOL_MINT).unwrap();
         let cm = compute_note_commitment(
             derive_stealth_owner(alice.spend_pk, tw),
             sol_asset,
@@ -1319,7 +1370,7 @@ mod tests {
         );
         let lane0_sub0 = make_subtree(0, 0, &[cm]);
         let mut lane0_memo0 = make_memo(1, 0);
-        write_memo(&mut lane0_memo0, 0, &memo_90);
+        write_memo(&mut lane0_memo0, 0, &memo_106);
 
         let alice_nf = alice_fvk.real_nullifier(cm, 0).unwrap();
         let alice_nf_prefix: [u8; NF_PREFIX_LEN] = alice_nf[0..NF_PREFIX_LEN].try_into().unwrap();
@@ -1448,14 +1499,16 @@ mod tests {
         let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
         let alice = AudrenKeys::from_seed(&[0xd1u8; 32]);
         let fvk = alice.full_viewing_key();
-        let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+        let bob = AudrenKeys::from_seed(&[0xd9u8; 32]);
+        let bob_fvk = bob.full_viewing_key();
+        let sol_asset = derive_asset_id(&WSOL_MINT);
 
         let dummy_leaves: Vec<Fr> = (0..SUBTREE_LEAVES).map(|i| Fr::from((i + 1) as u64)).collect();
         let dummy_subroot = compute_subtree_256_root(&dummy_leaves, SUBTREE_LEAVES);
         let dummy_frontier = &dummy_leaves[..4];
 
-        let (tw, bl, memo_90) =
-            encrypt_note_memo(&alice.view_pk, [0xd2u8; 32], 8_888_888, &NATIVE_SOL_MINT);
+        let (tw, bl, memo_106) =
+            encrypt_note_memo(&alice.view_pk, [0xd2u8; 32], 8_888_888, &WSOL_MINT).unwrap();
         let alice_cm = compute_note_commitment(
             derive_stealth_owner(alice.spend_pk, tw),
             sol_asset,
@@ -1463,7 +1516,7 @@ mod tests {
             bl,
         );
         // Alice's note is on Lane 2, leaf 300 -> sealed SubtreePage (lane=2, seq=1, slot=44),
-        // MemoPage (lane=2, seq=2, slot=76), spent on Lane 0 NullifierPage 0 (of 3 pages).
+        // MemoPage (lane=2, seq=3, slot=12 @ 96/page), spent on Lane 0 NullifierPage 0 (of 3 pages).
         let alice_leaf_idx = 300u64;
         let alice_sub_seq = 1u64;
         let alice_sub_slot = (alice_leaf_idx % SUBTREE_LEAVES as u64) as usize;
@@ -1475,7 +1528,7 @@ mod tests {
         let hit_subroot = compute_subtree_256_root(&hit_sub_leaves, SUBTREE_LEAVES);
         let hit_sub_raw = make_subtree(2, alice_sub_seq, &hit_sub_leaves);
         let mut hit_memo_raw = make_memo(MEMO_NOTES_PER_PAGE as u16, 0);
-        write_memo(&mut hit_memo_raw, alice_memo_slot, &memo_90);
+        write_memo(&mut hit_memo_raw, alice_memo_slot, &memo_106);
 
         let alice_nf = fvk
             .real_nullifier(alice_cm, (2u64 << 36) | alice_leaf_idx)
@@ -1600,9 +1653,9 @@ mod tests {
                 .collect()
         };
 
-        // 1. Small incremental fixture: 2 sealed subtrees/lane = 8 sealed subtrees, 20 MemoPages (<= 25)
+        // 1. Small incremental fixture: 2 sealed subtrees/lane = 8 sealed subtrees, 24 MemoPages (<= 25)
         let (acc_small, sealed_small, memos_small, nf_small, _, _, _) = build_fixture(2);
-        assert_eq!(memos_small.len(), 20);
+        assert_eq!(memos_small.len(), 24);
         let mut small_log = Vec::new();
         let mut small_store = CompactWalletStore::new(0, 0);
         let (_, _, d_small) = sync_compact_store_with_batch(
@@ -1632,7 +1685,7 @@ mod tests {
             .collect();
         assert_eq!(small_nf_fetched.len(), 3);
 
-        // Even Fast mode on <= 25 MemoPages fetches full MemoPages directly (zero 3,872 B dataSlice)!
+        // Even Fast mode on <= 25 MemoPages fetches full MemoPages directly (zero 3,328 B dataSlice)!
         let mut fast_small_log = Vec::new();
         let mut fast_small_store = CompactWalletStore::new(0, 0);
         sync_compact_store_with_batch(
@@ -1652,12 +1705,13 @@ mod tests {
             "fast mode must fetch full MemoPages directly on <= 25 pages"
         );
 
-        // 2. Large catch-up fixture: 5 sealed subtrees/lane = 20 sealed subtrees (> 16), 48 MemoPages (> 25)
+        // 2. Large catch-up fixture: 5 sealed subtrees/lane = 20 sealed subtrees (> 16), 56 MemoPages (> 25)
         let (acc_20, sealed_20, memos_20, nf_20, nf_total_20, hit_sub_20, hit_memo_20) = build_fixture(5);
         assert_eq!(sealed_20.len(), 20);
-        assert_eq!(memos_20.len(), 48);
+        assert_eq!(memos_20.len(), 56);
 
-        // 2A. Default Strict mode: ZERO dataSlice, ZERO MemoPage re-fetch, 16 decoy-padded sealed SubtreePages, full Pass 2!
+        // 2A. Default Strict mode: ZERO dataSlice, ZERO MemoPage re-fetch, 16 deterministic decoy-padded
+        //     sealed SubtreePages, full Pass 2!
         let mut strict20_log = Vec::new();
         let mut strict20_store = CompactWalletStore::new(0, 0);
         let (_, _, d20) = sync_compact_store_with_batch(
@@ -1677,11 +1731,12 @@ mod tests {
         for m in &memos_20 {
             assert_eq!(strict20_fetched.iter().filter(|&x| x == m).count(), 1, "each MemoPage fetched exactly once in full");
         }
-        let strict20_sealed: BTreeSet<Address> = strict20_fetched
+        let strict20_sealed_ordered: Vec<Address> = strict20_fetched
             .iter()
             .copied()
             .filter(|a| sealed_20.contains(a))
             .collect();
+        let strict20_sealed: BTreeSet<Address> = strict20_sealed_ordered.iter().copied().collect();
         assert!(strict20_sealed.contains(&hit_sub_20));
         assert_eq!(
             strict20_sealed.len(),
@@ -1695,10 +1750,116 @@ mod tests {
             .collect();
         assert_eq!(strict20_nf.len(), 3, "Pass 2 must fetch all 3 NullifierPages without early-exit");
 
-        // 2B. Smaller large catch-up: 3 sealed subtrees/lane = 12 (< 16), 28 MemoPages (> 25) -> pads to all 12!
+        // 2A-repeat: Repeated Strict sync for same wallet produces IDENTICAL decoy set & order (zero intersection leak),
+        //            and Bob (0 hits) ALSO fetches 16 sealed SubtreePages (fixed uniform batch size)!
+        let mut strict20_repeat_log = Vec::new();
+        let mut strict20_repeat_store = CompactWalletStore::new(0, 0);
+        sync_compact_store_with_batch(
+            &mut strict20_repeat_store,
+            &fvk,
+            |addrs, slice| slice_fetch(&acc_20, &mut strict20_repeat_log, addrs, slice),
+            &program_id,
+            SyncOptions::default(),
+        )
+        .unwrap();
+        let repeat_sealed_ordered: Vec<Address> = strict20_repeat_log
+            .iter()
+            .flat_map(|(a, _)| a.iter().copied())
+            .filter(|a| sealed_20.contains(a))
+            .collect();
+        assert_eq!(
+            strict20_sealed_ordered, repeat_sealed_ordered,
+            "deterministic wallet-keyed decoys must be identical across repeated syncs"
+        );
+
+        let mut bob20_log = Vec::new();
+        let mut bob20_store = CompactWalletStore::new(0, 0);
+        let (_, _, bob_d20) = sync_compact_store_with_batch(
+            &mut bob20_store,
+            &bob_fvk,
+            |addrs, slice| slice_fetch(&acc_20, &mut bob20_log, addrs, slice),
+            &program_id,
+            SyncOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(bob_d20, 0);
+        let bob20_sealed: BTreeSet<Address> = bob20_log
+            .iter()
+            .flat_map(|(a, _)| a.iter().copied())
+            .filter(|a| sealed_20.contains(a))
+            .collect();
+        assert_eq!(
+            bob20_sealed.len(),
+            16,
+            "zero-hit wallet in strict large catch-up must still fetch 16 sealed SubtreePages"
+        );
+
+        // 2A-miss: Transient Pass 1D SubtreePage miss on hit MUST STILL run Pass 2 unconditionally
+        //          (zero Pass 1D -> Pass 2 oracle!), cap next_memo_leaf, and recover on retry!
+        let mut miss_log = Vec::new();
+        let mut miss_store = CompactWalletStore::new(0, 0);
+        let (_, _, d_miss) = sync_compact_store_with_batch(
+            &mut miss_store,
+            &fvk,
+            |addrs, slice| {
+                miss_log.push((addrs.to_vec(), slice));
+                addrs
+                    .iter()
+                    .map(|a| {
+                        if *a == hit_sub_20 {
+                            return None;
+                        }
+                        let full = acc_20.get(a)?;
+                        match slice {
+                            Some(s) => {
+                                let end = s.offset.saturating_add(s.length).min(full.len());
+                                Some(full[s.offset..end].to_vec())
+                            }
+                            None => Some(full.clone()),
+                        }
+                    })
+                    .collect()
+            },
+            &program_id,
+            SyncOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(d_miss, 0, "missed SubtreePage cannot verify hit note yet");
+        assert_eq!(
+            miss_store.lanes[2].next_memo_leaf, alice_leaf_idx,
+            "next_memo_leaf must be capped at the missed hit leaf"
+        );
+        let miss_nf: BTreeSet<Address> = miss_log
+            .iter()
+            .flat_map(|(a, _)| a.iter().copied())
+            .filter(|a| nf_20.contains(a))
+            .collect();
+        assert_eq!(
+            miss_nf.len(),
+            3,
+            "Pass 2 MUST run unconditionally and fetch all 3 NullifierPages even when Pass 1D misses a hit SubtreePage"
+        );
+        // Retry once RPC returns hit_sub_20 -> discovers note AND marks it spent!
+        let mut retry_log = Vec::new();
+        let (_, _, d_retry) = sync_compact_store_with_batch(
+            &mut miss_store,
+            &fvk,
+            |addrs, slice| slice_fetch(&acc_20, &mut retry_log, addrs, slice),
+            &program_id,
+            SyncOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(d_retry, 1, "retry must recover missed hit note");
+        assert!(
+            miss_store.notes[0].spent,
+            "retry Pass 2 must mark recovered note spent"
+        );
+        assert_eq!(miss_store.lanes[0].next_nf_index, nf_total_20);
+
+        // 2B. Smaller large catch-up: 3 sealed subtrees/lane = 12 (< 16), 36 MemoPages (> 25) -> pads to all 12!
         let (acc_12, sealed_12, memos_12, _, _, _, _) = build_fixture(3);
         assert_eq!(sealed_12.len(), 12);
-        assert_eq!(memos_12.len(), 28);
+        assert_eq!(memos_12.len(), 36);
         let mut strict12_log = Vec::new();
         let mut strict12_store = CompactWalletStore::new(0, 0);
         let (_, _, d12) = sync_compact_store_with_batch(
@@ -1717,7 +1878,7 @@ mod tests {
             .collect();
         assert_eq!(strict12_sealed.len(), 12, "when < 16 sealed subtrees exist, strict mode must pad to all 12");
 
-        // 2C. Explicit Fast mode on > 25 MemoPages: uses dataSlice(0, 3872), full re-fetch only on hit,
+        // 2C. Explicit Fast mode on > 25 MemoPages: uses dataSlice(0, 3328), full re-fetch only on hit,
         //     skips decoy SubtreePages, and STILL runs full Pass 2 without early-exit!
         let mut fast20_log = Vec::new();
         let mut fast20_store = CompactWalletStore::new(0, 0);
@@ -1740,7 +1901,7 @@ mod tests {
             .filter(|(_, s)| *s == Some(AccountDataSlice { offset: 0, length: MEMO_PAGE_SCAN_SLICE_LEN }))
             .flat_map(|(a, _)| a.iter().copied())
             .collect();
-        assert_eq!(fast_sliced_memos.len(), 48, "fast mode > 25 pages must scan all 48 MemoPages via dataSlice(0, 3872)");
+        assert_eq!(fast_sliced_memos.len(), 56, "fast mode > 25 pages must scan all 56 MemoPages via dataSlice(0, 3328)");
 
         let fast_full_memos: Vec<Address> = fast20_log
             .iter()

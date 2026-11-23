@@ -2,7 +2,7 @@
  * Zero-indexer `CompactWalletStore` & 4-ary Depth-20 Merkle witness builder matching
  * `crates/audren-circuits/src/merkle.rs` and `crates/client/src/store.rs` bit-for-bit.
  *
- * Discards every sealed `SubtreePage` (`8,256 B`), `MemoPage` (`10,144 B`), and stranger
+ * Discards every sealed `SubtreePage` (`8,256 B`), `MemoPage` (`10,240 B`), and stranger
  * `NullifierPage` prefix immediately after scanning, persisting only frozen 12-sibling
  * intra-subtree paths (`384 B` per owned note), `32 B` finalized level-4 subroots (`1.28 MB`
  * at 10M pool notes), unsealed frontier tail leaves, and at most one just-sealed page per lane
@@ -12,6 +12,7 @@
 import {
   LANE_DEPTH_4ARY,
   MEMO_NOTES_PER_PAGE,
+  MEMO_PAYMENT_ID_LEN,
   NF_PER_PAGE,
   NF_PREFIX_LEN,
   NUM_LANES,
@@ -264,6 +265,7 @@ export interface OwnedNote {
   stealthOwner: Uint8Array;
   commitment: Uint8Array;
   nullifier: Uint8Array;
+  paymentId: Uint8Array;
   isDynamic: boolean;
   spent: boolean;
   frozenIntraSiblings: Uint8Array[][] | null; // [4][3] 32-byte BE
@@ -376,6 +378,10 @@ export class CompactWalletStore {
       stealthOwner: frToBeBytes(stealth),
       commitment: new Uint8Array(cmBe),
       nullifier: nf,
+      paymentId:
+        decrypted.paymentId.byteLength === MEMO_PAYMENT_ID_LEN
+          ? new Uint8Array(decrypted.paymentId)
+          : new Uint8Array(MEMO_PAYMENT_ID_LEN),
       isDynamic: decrypted.isDynamic,
       spent: false,
       frozenIntraSiblings: null,
@@ -790,6 +796,7 @@ export class CompactWalletStore {
         stealthOwner: bytesToHex(n.stealthOwner),
         commitment: bytesToHex(n.commitment),
         nullifier: bytesToHex(n.nullifier),
+        paymentId: bytesToHex(n.paymentId),
         isDynamic: n.isDynamic,
         spent: n.spent,
         frozenIntraSiblings: n.frozenIntraSiblings
@@ -825,6 +832,7 @@ export class CompactWalletStore {
         stealthOwner: string;
         commitment: string;
         nullifier: string;
+        paymentId?: string;
         isDynamic: boolean;
         spent: boolean;
         frozenIntraSiblings: string[][] | null;
@@ -857,6 +865,10 @@ export class CompactWalletStore {
       stealthOwner: hexToBytes(n.stealthOwner),
       commitment: hexToBytes(n.commitment),
       nullifier: hexToBytes(n.nullifier),
+      paymentId:
+        typeof n.paymentId === 'string' && n.paymentId.length === MEMO_PAYMENT_ID_LEN * 2
+          ? hexToBytes(n.paymentId)
+          : new Uint8Array(MEMO_PAYMENT_ID_LEN),
       isDynamic: n.isDynamic,
       spent: n.spent,
       frozenIntraSiblings: n.frozenIntraSiblings

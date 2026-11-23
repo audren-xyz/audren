@@ -1,4 +1,4 @@
-//! Fixed-size, zero-copy account layouts for Audren (all `< 10,240 B` CPI allocation cap,
+//! Fixed-size, zero-copy account layouts for Audren (all `<= 10,240 B` CPI allocation cap,
 //! zero `realloc`, SIMD-0460 compliant).
 
 use crate::{Bytes32, LANE_DEPTH_4ARY, NUM_LANES, ZERO_HASHES_4ARY};
@@ -12,26 +12,29 @@ pub const SUBTREE_LEAVES: usize = 256;
 /// 300 finalized 256-leaf subtree roots per `SubtreeRootPage`.
 pub const SUBROOTS_PER_PAGE: usize = 300;
 
-/// 112 compact `90 B` SoA note memos per `MemoPage` (`64 + 112 * 90 = 10,144 B < 10,240 B`).
-pub const MEMO_NOTES_PER_PAGE: usize = 112;
-pub const MEMO_CT_LEN: usize = 56;
-pub const MEMO_ENTRY_WIRE_LEN: usize = 2 + 32 + MEMO_CT_LEN; // 90 B
+/// 96 versioned `106 B` SoA note memos per `MemoPage` (`64 + 96 * 106 = 10,240 B == MAX_CPI_ACCOUNT_ALLOC`).
+pub const MEMO_NOTES_PER_PAGE: usize = 96;
+pub const MEMO_PLAINTEXT_LEN: usize = 56;
+pub const MEMO_VERSION_V1: u8 = 1;
+pub const MEMO_PAYMENT_ID_LEN: usize = 14;
+pub const MEMO_CT_LEN: usize = 72; // 56 B plaintext + 16 B Poly1305 tag
+pub const MEMO_ENTRY_WIRE_LEN: usize = 2 + 32 + MEMO_CT_LEN; // 106 B
 pub const DYN_MEMO_HEAD_LEN: usize = 2 + 32; // 34 B
 
 /// 600 x 16-byte (128-bit) nullifier prefixes per `NullifierPage` (`64 + 600 * 16 = 9,664 B`).
 pub const NF_PREFIX_LEN: usize = 16;
 pub const NF_PER_PAGE: usize = 600;
 
-/// 8-byte ASCII account magic headers.
-pub const POOL_MAGIC: [u8; 8] = *b"AUD2PL02";
-pub const LANE_RENT_MAGIC: [u8; 8] = *b"AUD2RV01";
-pub const LANE_MAGIC: [u8; 8] = *b"AUD2LN01";
-pub const SUBTREE_MAGIC: [u8; 8] = *b"AUD2SB01";
-pub const SUBROOT_MAGIC: [u8; 8] = *b"AUD2SR01";
-pub const MEMO_MAGIC: [u8; 8] = *b"AUD2MM03";
-pub const NF_PAGE_MAGIC: [u8; 8] = *b"AUD2NF01";
-pub const CKPT_MAGIC: [u8; 8] = *b"AUD2CK01";
-pub const DYN_MEMO_MAGIC: [u8; 8] = *b"AUD2DYN2";
+/// 8-byte ASCII account magic headers (`AUD1*`).
+pub const POOL_MAGIC: [u8; 8] = *b"AUD1PL01";
+pub const LANE_RENT_MAGIC: [u8; 8] = *b"AUD1RV01";
+pub const LANE_MAGIC: [u8; 8] = *b"AUD1LN01";
+pub const SUBTREE_MAGIC: [u8; 8] = *b"AUD1SB01";
+pub const SUBROOT_MAGIC: [u8; 8] = *b"AUD1SR01";
+pub const MEMO_MAGIC: [u8; 8] = *b"AUD1MM01";
+pub const NF_PAGE_MAGIC: [u8; 8] = *b"AUD1NF01";
+pub const CKPT_MAGIC: [u8; 8] = *b"AUD1CK01";
+pub const DYN_MEMO_MAGIC: [u8; 8] = *b"AUD1DYN1";
 
 /// Fixed account byte lengths (all `<= 10,240 B`, zero `realloc`).
 pub const POOL_STATE_LEN: usize = 128;
@@ -39,7 +42,7 @@ pub const SENTINEL_LEN: usize = 16;
 pub const LANE_STATE_LEN: usize = 64 + 32 + (LANE_DEPTH_4ARY * 3 * 32); // 1,824 B
 pub const SUBTREE_PAGE_LEN: usize = 64 + (SUBTREE_LEAVES * 32); // 8,256 B
 pub const SUBROOT_PAGE_LEN: usize = 64 + (SUBROOTS_PER_PAGE * 32); // 9,664 B
-pub const MEMO_PAGE_LEN: usize = 64 + (MEMO_NOTES_PER_PAGE * MEMO_ENTRY_WIRE_LEN); // 10,144 B
+pub const MEMO_PAGE_LEN: usize = 64 + (MEMO_NOTES_PER_PAGE * MEMO_ENTRY_WIRE_LEN); // 10,240 B
 pub const NF_PAGE_LEN: usize = 64 + (NF_PER_PAGE * NF_PREFIX_LEN); // 9,664 B
 pub const CKPT_LEN: usize = 64 + (NUM_LANES * 32) + (NUM_LANES * 8); // 704 B
 
@@ -47,7 +50,7 @@ const _: () = assert!(POOL_STATE_LEN == 128);
 const _: () = assert!(LANE_STATE_LEN == 1_824);
 const _: () = assert!(SUBTREE_PAGE_LEN == 8_256 && SUBTREE_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
 const _: () = assert!(SUBROOT_PAGE_LEN == 9_664 && SUBROOT_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
-const _: () = assert!(MEMO_PAGE_LEN == 10_144 && MEMO_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
+const _: () = assert!(MEMO_PAGE_LEN == 10_240 && MEMO_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
 const _: () = assert!(NF_PAGE_LEN == 9_664 && NF_PAGE_LEN <= MAX_CPI_ACCOUNT_ALLOC);
 const _: () = assert!(CKPT_LEN == 704);
 
@@ -61,12 +64,10 @@ pub const PL_OFF_POOL_ID: usize = 12; // 4 (u32)
 pub const PL_OFF_CKPT_INTERVAL: usize = 16; // 8 (u64)
 pub const PL_OFF_MAX_CKPT_AGE: usize = 24; // 8 (u64)
 pub const PL_OFF_AUTHORITY: usize = 32; // 32
-pub const PL_OFF_SOL_VAULT_BUMP: usize = 64; // 1
-pub const PL_OFF_VAULT_AUTH_BUMP: usize = 65; // 1
-pub const PL_OFF_MODE: usize = 66; // 1 (PoolMode)
+pub const PL_OFF_VAULT_AUTH_BUMP: usize = 64; // 1 (65..72 reserved [0; 7])
 pub const PL_OFF_NOTE_RENT_FEE: usize = 72; // 8 (u64)
 pub const PL_OFF_NF_RENT_FEE: usize = 80; // 8 (u64)
-pub const PL_OFF_AUDITOR_PK: usize = 88; // 32 (reserved for opt-in InstitutionalAudited)
+pub const PL_OFF_PENDING_AUTHORITY: usize = 88; // 32 (120..128 reserved [0; 8])
 
 // --- LaneRentVault sentinel offsets (16 B) ---
 pub const SN_OFF_MAGIC: usize = 0; // 8
@@ -104,18 +105,22 @@ pub const SR_OFF_POOL_ID: usize = 12; // 4 (u32)
 pub const SR_OFF_ROOT_PAGE_SEQ: usize = 16; // 8 (u64)
 pub const SR_OFF_ROOTS: usize = 64; // 300 * 32 = 9,600 B
 
-// --- MemoPage offsets (10,144 B; Structure-of-Arrays) ---
+// --- MemoPage offsets (10,240 B; Structure-of-Arrays) ---
 pub const MM_OFF_MAGIC: usize = 0; // 8
 pub const MM_OFF_LANE_ID: usize = 8; // 1
 pub const MM_OFF_BUMP: usize = 9; // 1
-pub const MM_OFF_COUNT: usize = 10; // 2 (u16: 0..=112)
+pub const MM_OFF_COUNT: usize = 10; // 2 (u16: 0..=96)
 pub const MM_OFF_POOL_ID: usize = 12; // 4 (u32)
 pub const MM_OFF_PAGE_SEQ: usize = 16; // 8 (u64)
 pub const MM_OFF_CREATED_SLOT: usize = 24; // 8 (u64)
 pub const MM_OFF_CLOSED_SLOT: usize = 32; // 8 (u64)
-pub const MM_OFF_VIEW_TAGS: usize = 64; // 112 * 2 = 224 B
-pub const MM_OFF_EPHEMERAL_PKS: usize = 64 + MEMO_NOTES_PER_PAGE * 2; // 288; 112 * 32 = 3,584 B
-pub const MM_OFF_CIPHERTEXTS: usize = MM_OFF_EPHEMERAL_PKS + MEMO_NOTES_PER_PAGE * 32; // 3,872; 112 * 56 = 6,272 B
+pub const MM_OFF_VIEW_TAGS: usize = 64; // 96 * 2 = 192 B (64..256)
+pub const MM_OFF_EPHEMERAL_PKS: usize = 64 + MEMO_NOTES_PER_PAGE * 2; // 256; 96 * 32 = 3,072 B (256..3,328)
+pub const MM_OFF_CIPHERTEXTS: usize = MM_OFF_EPHEMERAL_PKS + MEMO_NOTES_PER_PAGE * 32; // 3,328; 96 * 72 = 6,912 B (3,328..10,240)
+
+const _: () = assert!(MM_OFF_EPHEMERAL_PKS == 256);
+const _: () = assert!(MM_OFF_CIPHERTEXTS == 3_328);
+const _: () = assert!(MM_OFF_CIPHERTEXTS + MEMO_NOTES_PER_PAGE * MEMO_CT_LEN == MEMO_PAGE_LEN);
 
 // --- NullifierPage offsets (9,664 B) ---
 pub const NF_OFF_MAGIC: usize = 0; // 8
@@ -183,12 +188,10 @@ pub struct PoolState {
     pub ckpt_interval: u64,
     pub max_ckpt_age: u64,
     pub authority: Bytes32,
-    pub sol_vault_bump: u8,
     pub vault_auth_bump: u8,
-    pub mode: u8,
     pub note_rent_fee: u64,
     pub nf_rent_fee: u64,
-    pub auditor_pk: Bytes32,
+    pub pending_authority: Bytes32,
 }
 
 impl PoolState {
@@ -205,12 +208,10 @@ impl PoolState {
             ckpt_interval: read_u64(data, PL_OFF_CKPT_INTERVAL),
             max_ckpt_age: read_u64(data, PL_OFF_MAX_CKPT_AGE),
             authority: read_32(data, PL_OFF_AUTHORITY),
-            sol_vault_bump: data[PL_OFF_SOL_VAULT_BUMP],
             vault_auth_bump: data[PL_OFF_VAULT_AUTH_BUMP],
-            mode: data[PL_OFF_MODE],
             note_rent_fee: read_u64(data, PL_OFF_NOTE_RENT_FEE),
             nf_rent_fee: read_u64(data, PL_OFF_NF_RENT_FEE),
-            auditor_pk: read_32(data, PL_OFF_AUDITOR_PK),
+            pending_authority: read_32(data, PL_OFF_PENDING_AUTHORITY),
         })
     }
 }
@@ -295,8 +296,10 @@ mod tests {
     #[test]
     fn layout_invariants_hold() {
         assert_eq!(MM_OFF_VIEW_TAGS, 64);
-        assert_eq!(MM_OFF_EPHEMERAL_PKS, 288);
-        assert_eq!(MM_OFF_CIPHERTEXTS, 3_872);
+        assert_eq!(MM_OFF_EPHEMERAL_PKS, 256);
+        assert_eq!(MM_OFF_CIPHERTEXTS, 3_328);
+        assert_eq!(MEMO_PAGE_LEN, 10_240);
+        assert_eq!(MEMO_PAGE_LEN, MAX_CPI_ACCOUNT_ALLOC);
         assert_eq!(MM_OFF_CIPHERTEXTS + MEMO_NOTES_PER_PAGE * MEMO_CT_LEN, MEMO_PAGE_LEN);
         assert_eq!(CK_OFF_LANE_COUNTS + NUM_LANES * 8, CKPT_LEN);
         assert!(is_canonical_fr(&[0u8; 32]));

@@ -18,15 +18,15 @@ use solana_address::Address;
 
 use crate::ClientError;
 
-/// Canonical `asset_id` for Native SOL (`None`) or any SPL / Token-2022 mint (`Some(&mint)`).
+/// Canonical `asset_id` for SOL/WSOL (`None`) or any SPL / Token-2022 mint (`Some(&mint)`).
 pub fn asset_id_for_mint(mint: Option<&Address>) -> Fr {
     match mint {
-        None => derive_asset_id(&audren_core::NATIVE_SOL_MINT),
+        None => derive_asset_id(&audren_core::WSOL_MINT),
         Some(m) => derive_asset_id(&m.to_bytes()),
     }
 }
 
-/// Canonical 32-byte BE `asset_id` for Native SOL (`None`) or any SPL / Token-2022 mint (`Some(&mint)`).
+/// Canonical 32-byte BE `asset_id` for SOL/WSOL (`None`) or any SPL / Token-2022 mint (`Some(&mint)`).
 pub fn asset_id_bytes_for_mint(mint: Option<&Address>) -> [u8; 32] {
     fr_to_be_bytes(&asset_id_for_mint(mint))
 }

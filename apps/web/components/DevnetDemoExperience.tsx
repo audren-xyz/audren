@@ -24,20 +24,26 @@ import { SiteFooter } from '@/components/SiteFooter'
 import { LiveWalletVault } from '@/components/LiveWalletVault'
 import {
   ASSET_MODE_PRIVATE,
-  NATIVE_SOL_MINT_BYTES,
+  AUDREN_PROGRAM_ID,
   NUM_LANES,
+  SUBTREE_LEAVES,
+  VK_ID_DEFAULT,
+  WSOL_MINT,
   ZERO_HASHES_4ARY,
-  buildJoinsplitInstruction,
+  base58Decode,
+  buildTransactInstruction,
   buildWitnessFromFrozenSubsiblings,
   bytes32ToFrMasked,
-  computeJoinsplitCtxHash,
   computeMerkleRoot4Ary,
   computeNoteCommitment,
   computePageRollovers,
   computeSubtree256Root,
+  computeTransactCtxHash,
+  decodeSubtreePage,
   deriveAssetId,
   deriveKeysFromSeed,
   deriveStealthOwner,
+  deriveSubtreePdaSync,
   encryptNoteMemo,
   exportFullViewingKey,
   extractIntraSubtreeSiblings,
@@ -49,7 +55,7 @@ import {
   reconstructWitness,
   toBase64,
   toHex,
-  tryDecryptAndVerifyMemo90,
+  tryDecryptAndVerifyMemo,
   verifySelectiveDisclosureProof,
   type AccountBatchFetcher,
   type AudrenKeys,
@@ -59,6 +65,7 @@ import {
 import {
   dummyInputWitness,
   proveJoinsplitInBrowser,
+  warmBrowserWasmProver,
 } from '@/lib/audren-prover'
 import { AUDREN, shortHash, solscanAddress, solscanTx } from '@/lib/protocol'
 
@@ -89,7 +96,7 @@ interface SandboxNote {
   stealthOwner: bigint
   assetId: bigint
   commitment: bigint
-  memo90: Uint8Array
+  memo: Uint8Array
   path: MerklePath4Ary | null
   superRoot: bigint | null
   devnetSig?: string
@@ -106,7 +113,7 @@ interface SandboxProofArtifact {
   ctxHashHex: string
   recipientAmountLamports: bigint
   changeAmountLamports: bigint
-  joinSplitDevnetSig?: string
+  transactDevnetSig?: string
   wireBytes?: number
 }
 
@@ -115,6 +122,8 @@ const PRESET_AMOUNTS = [
   { label: '0.002 SOL', lamports: 2_000_000n },
   { label: '0.005 SOL', lamports: 5_000_000n },
 ] as const
+
+const WSOL_MINT_BYTES = base58Decode(WSOL_MINT)
 
 function randomFr(): bigint {
   return bytes32ToFrMasked(crypto.getRandomValues(new Uint8Array(32)))
@@ -152,6 +161,8 @@ export function DevnetDemoExperience() {
   const [proofArtifact, setProofArtifact] = useState<SandboxProofArtifact | null>(null)
   const [receiptTampered, setReceiptTampered] = useState(false)
   const [receiptValid, setReceiptValid] = useState<boolean | null>(null)
+  const [receiptSourceNote, setReceiptSourceNote] = useState<string | null>(null)
+  const [verifyingReceipt, setVerifyingReceipt] = useState(false)
   const [proving, setProving] = useState(false)
   const [fundingDevnet, setFundingDevnet] = useState(false)
   const [publishingCkpt, setPublishingCkpt] = useState(false)
@@ -167,6 +178,7 @@ export function DevnetDemoExperience() {
     setSandboxNote(null)
     setProofArtifact(null)
     setReceiptValid(null)
+    setReceiptSourceNote(null)
     setReceiptTampered(false)
     setErrorMsg(null)
   }, [])
@@ -199,6 +211,7 @@ export function DevnetDemoExperience() {
 
   useEffect(() => {
     if (mode !== 'sandbox') return
+    void warmBrowserWasmProver().catch(() => {})
     fetch('/api/devnet/pool')
       .then((r) => (r.ok ? r.json() : null))
       .then((d: DevnetPoolSnapshot | null) => {
@@ -240,15 +253,16 @@ export function DevnetDemoExperience() {
     setErrorMsg(null)
     setProofArtifact(null)
     setReceiptValid(null)
+    setReceiptSourceNote(null)
     setReceiptTampered(false)
 
     try {
-      const mintBytes = NATIVE_SOL_MINT_BYTES
+      const mintBytes = WSOL_MINT_BYTES
       const assetId = deriveAssetId(mintBytes)
       const fvk = exportFullViewingKey(keys)
 
       if (!broadcastDevnet) {
-        const { tweak, blinding, memo90 } = encryptNoteMemo(
+        const { tweak, blinding, memo } = encryptNoteMemo(
           keys.viewPk,
           crypto.getRandomValues(new Uint8Array(32)),
           selectedAmount,
@@ -256,7 +270,7 @@ export function DevnetDemoExperience() {
         )
         const stealthOwner = deriveStealthOwner(keys.spendPk, tweak)
         const commitment = computeNoteCommitment(stealthOwner, assetId, selectedAmount, blinding)
-        const dec = tryDecryptAndVerifyMemo90(fvk, memo90, frToBeBytes(commitment))
+        const dec = tryDecryptAndVerifyMemo(fvk, memo, frToBeBytes(commitment))
         if (!dec || dec.amount !== selectedAmount) {
           throw new Error('Local X25519 ChaCha20-Poly1305 memo verification failed')
         }
@@ -296,14 +310,14 @@ export function DevnetDemoExperience() {
           stealthOwner,
           assetId,
           commitment,
-          memo90,
+          memo,
           path,
           superRoot,
         })
         return
       }
 
-      // Live Devnet DepositSol via faucet -> decrypt real on-chain memo -> sync real Devnet Merkle witness
+      // Live Devnet unified Deposit via faucet, then decrypt real on-chain memo & sync Merkle witness
       setFundingDevnet(true)
       const res = await fetch('/api/devnet/deposit', {
         method: 'POST',
@@ -320,20 +334,20 @@ export function DevnetDemoExperience() {
         leafIndex?: string
         amountLamports?: string
         commitmentHex?: string
-        memo90B64?: string
+        memoB64?: string
         checkpointSignature?: string | null
         checkpointSlotIndex?: number | null
         error?: string
       }
-      if (!res.ok || !j.signature || !j.memo90B64 || !j.commitmentHex) {
+      if (!res.ok || !j.signature || !j.memoB64 || !j.commitmentHex) {
         throw new Error(j.error ?? `Devnet deposit HTTP ${res.status}`)
       }
 
-      const memo90 = fromBase64(j.memo90B64)
+      const memo = fromBase64(j.memoB64)
       const cmBytes = fromHex(j.commitmentHex)
-      const dec = tryDecryptAndVerifyMemo90(fvk, memo90, cmBytes)
+      const dec = tryDecryptAndVerifyMemo(fvk, memo, cmBytes)
       if (!dec) {
-        throw new Error('Failed to decrypt & verify live Devnet memo90 against on-chain commitment')
+        throw new Error('Failed to decrypt & verify live Devnet 106 B memo against on-chain commitment')
       }
       const tweak = dec.tweak
       const blinding = dec.blinding
@@ -350,7 +364,7 @@ export function DevnetDemoExperience() {
         stealthOwner,
         assetId,
         commitment,
-        memo90,
+        memo,
         path: null,
         superRoot: null,
         devnetSig: j.signature,
@@ -373,7 +387,6 @@ export function DevnetDemoExperience() {
       const res = await fetch('/api/devnet/checkpoint', { method: 'POST' })
       const j = (await res.json()) as { signature?: string; error?: string }
       if (!res.ok && !j.signature) {
-        // Checkpoint might already have rolled forward; still try re-syncing witness
         const retry = await syncLiveDevnetWitness(sandboxNote)
         if (!retry.awaitingCheckpoint) {
           setSandboxNote(retry)
@@ -393,7 +406,7 @@ export function DevnetDemoExperience() {
     }
   }
 
-  const handleRunBrowserWasmProof = async (broadcastLiveJoinSplit: boolean) => {
+  const handleRunBrowserWasmProof = async (broadcastLiveTransact: boolean) => {
     if (!keys || !sandboxNote || !sandboxNote.path || sandboxNote.superRoot === null) return
     setProving(true)
     setErrorMsg(null)
@@ -410,7 +423,7 @@ export function DevnetDemoExperience() {
       let rollover: { nextSubSeq?: bigint | null; nextMemoSeq?: bigint | null; nextNfSeq?: bigint | null } | undefined
       let relayerPayer = devnetRelayerAddress
 
-      if (broadcastLiveJoinSplit) {
+      if (broadcastLiveTransact) {
         const pool = (await fetch('/api/devnet/pool').then((r) => r.json())) as DevnetPoolSnapshot
         if (!pool.initialized || !pool.relayerAddress) {
           throw new Error('Devnet sandbox relayer is unavailable on this Worker')
@@ -439,7 +452,7 @@ export function DevnetDemoExperience() {
         }
       }
 
-      const mintBytes = NATIVE_SOL_MINT_BYTES
+      const mintBytes = WSOL_MINT_BYTES
       const m0 = encryptNoteMemo(recKeys.viewPk, crypto.getRandomValues(new Uint8Array(32)), sendAmt, mintBytes)
       const recOwner = deriveStealthOwner(recKeys.spendPk, m0.tweak)
       const m1 = encryptNoteMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)), changeAmt, mintBytes)
@@ -449,14 +462,15 @@ export function DevnetDemoExperience() {
       const dummyOwner = deriveStealthOwner(dummyKeys.spendPk, m2.tweak)
 
       const memosConcat = new Uint8Array(
-        m0.memo90.byteLength + m1.memo90.byteLength + m2.memo90.byteLength,
+        m0.memo.byteLength + m1.memo.byteLength + m2.memo.byteLength,
       )
-      memosConcat.set(m0.memo90, 0)
-      memosConcat.set(m1.memo90, m0.memo90.byteLength)
-      memosConcat.set(m2.memo90, m0.memo90.byteLength + m1.memo90.byteLength)
+      memosConcat.set(m0.memo, 0)
+      memosConcat.set(m1.memo, m0.memo.byteLength)
+      memosConcat.set(m2.memo, m0.memo.byteLength + m1.memo.byteLength)
 
-      const ctxHash = computeJoinsplitCtxHash({
+      const ctxHash = computeTransactCtxHash({
         poolId: 0,
+        vkId: VK_ID_DEFAULT,
         outLaneId,
         outputMask: 0b111,
         assetMode: ASSET_MODE_PRIVATE,
@@ -511,14 +525,15 @@ export function DevnetDemoExperience() {
         ],
       })
 
-      let joinSplitDevnetSig: string | undefined
+      let transactDevnetSig: string | undefined
       let wireBytes: number | undefined
-      if (broadcastLiveJoinSplit) {
+      if (broadcastLiveTransact) {
         if (!relayerPayer || sandboxNote.ckptSlotIdx === undefined) {
           throw new Error('Live Devnet checkpoint or relayer address is missing')
         }
-        const ix = buildJoinsplitInstruction({
+        const ix = buildTransactInstruction({
           poolId: 0,
+          vkId: VK_ID_DEFAULT,
           outLaneId,
           ckptSlotIdx: sandboxNote.ckptSlotIdx,
           outSubSeq,
@@ -558,7 +573,7 @@ export function DevnetDemoExperience() {
         if (!subRes.ok || !subJson.signature) {
           throw new Error(subJson.error ?? `Devnet relay submit HTTP ${subRes.status}`)
         }
-        joinSplitDevnetSig = subJson.signature
+        transactDevnetSig = subJson.signature
         wireBytes = subJson.wireBytes
       }
 
@@ -572,7 +587,7 @@ export function DevnetDemoExperience() {
         ctxHashHex: toHex(frToBeBytes(ctxHash)),
         recipientAmountLamports: sendAmt,
         changeAmountLamports: changeAmt,
-        joinSplitDevnetSig,
+        transactDevnetSig,
         wireBytes,
       })
     } catch (err) {
@@ -582,20 +597,52 @@ export function DevnetDemoExperience() {
     }
   }
 
-  const handleCheckSelectiveDisclosure = (tamper: boolean) => {
+  const handleCheckSelectiveDisclosure = async (tamper: boolean) => {
     if (!sandboxNote) return
     setReceiptTampered(tamper)
-    const sdp: SelectiveDisclosureProof = {
-      poolId: 0,
-      laneId: sandboxNote.laneId,
-      leafIndex: sandboxNote.leafIndex,
-      stealthOwner: frToBeBytes(sandboxNote.stealthOwner),
-      mint: NATIVE_SOL_MINT_BYTES,
-      amount: tamper ? sandboxNote.amountLamports + 1n : sandboxNote.amountLamports,
-      blinding: frToBeBytes(sandboxNote.blinding),
-      commitment: frToBeBytes(sandboxNote.commitment),
+    setVerifyingReceipt(true)
+    setReceiptValid(null)
+    setReceiptSourceNote(null)
+    try {
+      const sdp: SelectiveDisclosureProof = {
+        poolId: 0,
+        laneId: sandboxNote.laneId,
+        leafIndex: sandboxNote.leafIndex,
+        stealthOwner: frToBeBytes(sandboxNote.stealthOwner),
+        mint: WSOL_MINT_BYTES,
+        amount: tamper ? sandboxNote.amountLamports + 1n : sandboxNote.amountLamports,
+        blinding: frToBeBytes(sandboxNote.blinding),
+        commitment: frToBeBytes(sandboxNote.commitment),
+      }
+      if (sandboxNote.isLiveDevnet) {
+        const subSeq = sandboxNote.leafIndex / BigInt(SUBTREE_LEAVES)
+        const offset = Number(sandboxNote.leafIndex % BigInt(SUBTREE_LEAVES))
+        const pda = deriveSubtreePdaSync(0, sandboxNote.laneId, subSeq, AUDREN_PROGRAM_ID).address
+        const [raw] = await createDevnetBatchFetcher()([pda])
+        if (!raw) {
+          setReceiptValid(false)
+          setReceiptSourceNote(`SubtreePage ${shortHash(pda, 6, 4)} not found on Devnet`)
+          return
+        }
+        const page = decodeSubtreePage(raw)
+        const leaf = page.leaves[offset]
+        if (!leaf) {
+          setReceiptValid(false)
+          setReceiptSourceNote('Leaf index out of range on Devnet SubtreePage')
+          return
+        }
+        setReceiptValid(verifySelectiveDisclosureProof(sdp, leaf))
+        setReceiptSourceNote(`Verified against live Devnet SubtreePage ${shortHash(pda, 6, 4)}`)
+      } else {
+        setReceiptValid(verifySelectiveDisclosureProof(sdp, frToBeBytes(sandboxNote.commitment)))
+        setReceiptSourceNote('Verified against local offline SubtreePage leaf')
+      }
+    } catch (err) {
+      setReceiptValid(false)
+      setReceiptSourceNote(err instanceof Error ? err.message : String(err))
+    } finally {
+      setVerifyingReceipt(false)
     }
-    setReceiptValid(verifySelectiveDisclosureProof(sdp, frToBeBytes(sandboxNote.commitment)))
   }
 
   return (
@@ -618,8 +665,9 @@ export function DevnetDemoExperience() {
           <h1>Audren Wallet &amp; Sandbox</h1>
           <p>
             Connect a Solana wallet on Devnet or Mainnet, or run the zero-wallet Sandbox right in your
-            browser to encrypt a 90-byte SoA note, generate a real 192-byte BN254 Groth16 proof in WASM,
-            broadcast live on Devnet, and verify a Mode 1 selective disclosure receipt.
+            browser to encrypt a versioned 72-byte SoA note (106 B wire entry), generate a real 192-byte
+            BN254 Groth16 proof in a dedicated Web Worker, broadcast live on Devnet, and verify a Mode 1
+            selective disclosure receipt.
           </p>
 
           <div className="lv-cluster-switch" role="tablist" aria-label="App mode" style={{ marginTop: '1.25rem' }}>
@@ -651,7 +699,7 @@ export function DevnetDemoExperience() {
             <div className="lv-topbar">
               <div className="lv-wallet-bar">
                 <span className="lv-wallet-pill mono">
-                  <Lock size={12} /> Client-side · <code>/wasm/audren_circuits.wasm</code>
+                  <Lock size={12} /> Web Worker · <code>/wasm/audren_circuits.wasm</code>
                 </span>
                 <span className="lv-wallet-pill mono">
                   17,861 R1CS · 2^15 FFT · No indexer
@@ -690,7 +738,7 @@ export function DevnetDemoExperience() {
                 {keys && (
                   <div className="lv-simple-body">
                     <div className="lv-addr-row">
-                      <span className="mono">aud1… address</span>
+                      <span className="mono">aud1… Bech32m address</span>
                       <code className="mono">{shortHash(keys.address, 14, 10)}</code>
                       <button
                         type="button"
@@ -717,7 +765,7 @@ export function DevnetDemoExperience() {
                       <div className="lv-balance-row">
                         <div>
                           <span className="lv-row-title">View public key (X25519)</span>
-                          <span className="mono">90 B SoA ChaCha20-Poly1305 ECDH</span>
+                          <span className="mono">72 B versioned AEAD memo · 106 B SoA entry</span>
                         </div>
                         <span className="mono">{shortHash(toHex(keys.viewPk), 10, 8)}</span>
                       </div>
@@ -733,8 +781,8 @@ export function DevnetDemoExperience() {
                         </div>
                         {strangerView ? (
                           <p className="mono">
-                            View tag: 0x{toHex(sandboxNote.memo90.subarray(0, 2))} · Memo (90 B):{' '}
-                            {shortHash(toHex(sandboxNote.memo90), 18, 12)} · Commitment:{' '}
+                            View tag: 0x{toHex(sandboxNote.memo.subarray(0, 2))} · Memo (106 B):{' '}
+                            {shortHash(toHex(sandboxNote.memo), 18, 12)} · Commitment:{' '}
                             {shortHash(toHex(frToBeBytes(sandboxNote.commitment)), 12, 8)}
                           </p>
                         ) : (
@@ -761,7 +809,7 @@ export function DevnetDemoExperience() {
                                 rel="noreferrer"
                                 className="lv-ledger-ext mono"
                               >
-                                Devnet DepositSol {shortHash(sandboxNote.devnetSig, 8, 6)} <ArrowUpRight size={12} />
+                                Devnet Deposit {shortHash(sandboxNote.devnetSig, 8, 6)} <ArrowUpRight size={12} />
                               </a>
                             )}
                             {sandboxNote.checkpointSig && (
@@ -815,7 +863,7 @@ export function DevnetDemoExperience() {
                           onClick={() => handleShieldSandboxNote(true)}
                         >
                           {fundingDevnet ? <Loader2 size={15} className="spin" /> : <ArrowUpRight size={15} />}
-                          Broadcast live Devnet DepositSol
+                          Broadcast live Devnet Deposit
                         </button>
                       )}
                     </div>
@@ -840,7 +888,7 @@ export function DevnetDemoExperience() {
                   )}
 
                   <div className="lv-field-block">
-                    <span className="lv-label">Step 3 · Prove 192 B BN254 Groth16 in browser WASM</span>
+                    <span className="lv-label">Step 3 · Prove 192 B BN254 Groth16 in Web Worker</span>
                     <div className="lv-unlock-actions">
                       <button
                         type="button"
@@ -850,8 +898,8 @@ export function DevnetDemoExperience() {
                       >
                         {proving ? <Loader2 size={15} className="spin" /> : <Cpu size={15} />}
                         {proving
-                          ? 'Proving 17,861 R1CS in WASM…'
-                          : 'Prove 192 B Groth16 JoinSplit locally'}
+                          ? 'Proving 17,861 R1CS in Web Worker…'
+                          : 'Prove 192 B Groth16 Transact locally'}
                       </button>
                       {sandboxNote?.isLiveDevnet && !sandboxNote.awaitingCheckpoint && devnetRelayerAvailable && (
                         <button
@@ -861,7 +909,7 @@ export function DevnetDemoExperience() {
                           onClick={() => handleRunBrowserWasmProof(true)}
                         >
                           {proving ? <Loader2 size={15} className="spin" /> : <ArrowUpRight size={15} />}
-                          Prove &amp; broadcast live Devnet JoinSplit
+                          Prove &amp; broadcast live Devnet Transact
                         </button>
                       )}
                     </div>
@@ -870,21 +918,21 @@ export function DevnetDemoExperience() {
                       <div className="lv-audit-card" style={{ marginTop: '0.85rem' }}>
                         <div className="lv-audit-head">
                           <h4>
-                            {proofArtifact.joinSplitDevnetSig
-                              ? 'Live Devnet JoinSplit (Tag 6) verified on-chain'
-                              : '192-byte BN254 Groth16 proof generated locally'}
+                            {proofArtifact.transactDevnetSig
+                              ? 'Live Devnet Transact (Tag 5) verified on-chain'
+                              : '192-byte BN254 Groth16 proof generated in Web Worker'}
                           </h4>
                           <span className="sb-confirmed-pill mono">{proofArtifact.elapsedMs} ms</span>
                         </div>
-                        {proofArtifact.joinSplitDevnetSig && (
+                        {proofArtifact.transactDevnetSig && (
                           <p style={{ marginBottom: '0.6rem' }}>
                             <a
-                              href={solscanTx(proofArtifact.joinSplitDevnetSig, 'devnet')}
+                              href={solscanTx(proofArtifact.transactDevnetSig, 'devnet')}
                               target="_blank"
                               rel="noreferrer"
                               className="lv-ledger-ext mono"
                             >
-                              Solscan Devnet JoinSplit {shortHash(proofArtifact.joinSplitDevnetSig, 10, 8)}
+                              Solscan Devnet Transact {shortHash(proofArtifact.transactDevnetSig, 10, 8)}
                               {proofArtifact.wireBytes ? ` (${proofArtifact.wireBytes} B Tx v1)` : ''}{' '}
                               <ArrowUpRight size={12} />
                             </a>
@@ -918,7 +966,7 @@ export function DevnetDemoExperience() {
                           <div className="lv-balance-row">
                             <div>
                               <span className="lv-row-title">Bound Fiat-Shamir ctx_hash</span>
-                              <span className="mono">SHA-256 masked to 253-bit Fr</span>
+                              <span className="mono">SHA-256 masked to 253-bit Fr (binds vk_id=0)</span>
                             </div>
                             <code className="mono">{shortHash(proofArtifact.ctxHashHex, 10, 8)}</code>
                           </div>
@@ -933,16 +981,17 @@ export function DevnetDemoExperience() {
                       <button
                         type="button"
                         className="lv-mini-btn"
-                        disabled={!sandboxNote}
-                        onClick={() => handleCheckSelectiveDisclosure(false)}
+                        disabled={!sandboxNote || verifyingReceipt}
+                        onClick={() => void handleCheckSelectiveDisclosure(false)}
                       >
-                        <ShieldCheck size={13} /> Verify genuine note receipt
+                        {verifyingReceipt ? <Loader2 size={13} className="spin" /> : <ShieldCheck size={13} />}
+                        Verify genuine note receipt
                       </button>
                       <button
                         type="button"
                         className="lv-mini-btn"
-                        disabled={!sandboxNote}
-                        onClick={() => handleCheckSelectiveDisclosure(true)}
+                        disabled={!sandboxNote || verifyingReceipt}
+                        onClick={() => void handleCheckSelectiveDisclosure(true)}
                       >
                         <ShieldAlert size={13} /> Tamper amount (+1 lamport)
                       </button>
@@ -953,10 +1002,10 @@ export function DevnetDemoExperience() {
                         style={{ marginTop: '0.6rem' }}
                       >
                         {receiptValid
-                          ? 'Valid · Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, amount, blinding) matches on-chain leaf'
+                          ? `Valid · Poseidon5 commitment matches leaf (${receiptSourceNote ?? 'verified'})`
                           : receiptTampered
-                            ? 'Rejected · 1-lamport tamper broke the Poseidon commitment binding immediately'
-                            : 'Invalid'}
+                            ? `Rejected · 1-lamport tamper broke Poseidon commitment binding (${receiptSourceNote ?? 'mismatch'})`
+                            : `Invalid · ${receiptSourceNote ?? 'Commitment mismatch'}`}
                       </div>
                     )}
                   </div>

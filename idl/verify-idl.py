@@ -32,7 +32,7 @@ spec.loader.exec_module(gen)
 
 CANONICAL_PROGRAM_ID = "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3"
 CANONICAL_PROGRAM_DATA = "Gj4hW4KuMTNR9YTPmixRPsNcMNwRvYTXdksxLgoGRiVM"
-CANONICAL_POOL0_PDA = "8CN7uxRdQGjuAaZQVVcHRZbptSzvgfUv7tg8EarLHztF"
+CANONICAL_POOL0_PDA = "5Bvt5f5QMfsVb9TyX8bzkRMvAX6JSWwRtnymGveF9U3G"
 CANONICAL_IDL_PDA = "5QoLwK1C3NpUXjsHEV14RsQE65MaaiT9WxGvoTyxBPsn"
 CANONICAL_SECURITY_PDA = "GU7K3e7p8zUHoKQuQ1fidi9atxQc3UN1e3Q1Xomzs2Lj"
 CANONICAL_OTTER_VERIFY_PDA = "FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt"
@@ -141,12 +141,12 @@ def main() -> None:
         )
         assert acc["size"] == expected_sizes[name]
 
-    # 5. Verify all 13 PDA constant seeds match crates/audren-core/src/lib.rs
+    # 5. Verify all 12 PDA constant seeds match crates/audren-core/src/lib.rs
     pda_names = {p["name"] for p in prog["pdas"]}
     pda_prefixes = {p["seeds"][0]["value"]["data"] for p in prog["pdas"]}
     core_seeds = set(core["seeds"].values())
     assert pda_prefixes == core_seeds, f"PDA seeds mismatch: {pda_prefixes ^ core_seeds}"
-    assert len(pda_prefixes) == 13, f"Expected 13 PDA seeds, found {len(pda_prefixes)}"
+    assert len(pda_prefixes) == 12, f"Expected 12 PDA seeds, found {len(pda_prefixes)}"
 
     # 6. Verify instruction pdaValueNode links reference valid PDAs and have no duplicate Explorer rows
     seen_acc_to_pda: dict[str, str] = {}
@@ -319,13 +319,15 @@ def main() -> None:
         assert f"export const {dom_name} = {dom_val}n;" in sdk_consts, (
             f"SDK constants.ts {dom_name} drifted from crates/audren-core ({dom_val}n)"
         )
-    for ctx_name, ctx_val in re.findall(r'pub const ((?:ASSET_ID|CTX)_DOMAIN[A-Z0-9_]*):\s*&\[u8\]\s*=\s*b"([^"]+)";', core_ix_src):
+    for ctx_name, ctx_val in re.findall(
+        r'pub const ((?:ASSET_ID|CTX|KDF)_DOMAIN[A-Z0-9_]*):\s*&\[u8\]\s*=\s*b"([^"]+)";', core_ix_src
+    ):
         assert f"export const {ctx_name} = '{ctx_val}';" in sdk_consts, (
             f"SDK constants.ts {ctx_name} drifted from crates/audren-core ('{ctx_val}')"
         )
 
     def eval_int_expr(expr: str) -> int:
-        expr = expr.strip().replace("_", "")
+        expr = expr.split("//", 1)[0].strip().replace("_", "")
         if "<<" in expr:
             lhs, rhs = expr.split("<<", 1)
             return int(lhs.strip(), 0) << int(rhs.strip(), 0)
@@ -342,15 +344,35 @@ def main() -> None:
         return eval_int_expr(m.group(1))
 
     for sym in (
+        "PROTOCOL_VERSION",
         "DEPOSIT_FLAG_FEE_FROM_AMOUNT",
+        "DEPOSIT_FLAG_NATIVE_SOL",
+        "ASSET_MODE_PRIVATE",
+        "ASSET_MODE_PUBLIC",
         "WITHDRAW_FLAG_UNWRAP_WSOL",
         "EXEC_FLAG_FEE_ON_OUTPUT",
+        "UPDATE_POOL_PARAMS",
+        "UPDATE_POOL_PROPOSE_AUTHORITY",
+        "UPDATE_POOL_ACCEPT_AUTHORITY",
+        "UPDATE_POOL_RENOUNCE_AUTHORITY",
         "GROTH16_PROOF_LEN",
+        "MEMO_NOTES_PER_PAGE",
+        "MEMO_PLAINTEXT_LEN",
+        "MEMO_VERSION_V1",
+        "MEMO_PAYMENT_ID_LEN",
         "MEMO_CT_LEN",
+        "PL_OFF_VAULT_AUTH_BUMP",
+        "PL_OFF_PENDING_AUTHORITY",
     ):
         rv = parse_const_val(core_ix_src, sym, "rust")
         sv = parse_const_val(sdk_consts, sym, "ts")
         assert rv == sv, f"Wire constant {sym} drifted: rust={rv}, sdk={sv}"
+    assert core["lengths"]["MEMO_PAGE_LEN"] == 10_240, (
+        f"Expected MEMO_PAGE_LEN == 10240, got {core['lengths']['MEMO_PAGE_LEN']}"
+    )
+    assert parse_const_val(sdk_consts, "MEMO_ENTRY_WIRE_LEN", "ts") == 106, (
+        "SDK constants.ts MEMO_ENTRY_WIRE_LEN drifted from 106"
+    )
 
     relay_audren = (ROOT / "apps" / "relay" / "src" / "solana" / "audren.ts").read_text()
     assert "@audren/sdk" in relay_audren, "apps/relay/src/solana/audren.ts must import canonical helpers from @audren/sdk"
@@ -535,8 +557,8 @@ def main() -> None:
     vectors_path = ROOT / "spec" / "test-vectors.json"
     assert vectors_path.is_file(), "Missing canonical cross-language test vectors at spec/test-vectors.json"
     vectors = json.loads(vectors_path.read_text(encoding="utf-8"))
-    assert vectors["protocol_version"] == 2, (
-        f"spec/test-vectors.json protocol_version {vectors['protocol_version']} != 2"
+    assert vectors["protocol_version"] == 1, (
+        f"spec/test-vectors.json protocol_version {vectors['protocol_version']} != 1"
     )
     assert vectors["program_id"] == CANONICAL_PROGRAM_ID, "spec/test-vectors.json program_id mismatch"
     assert len(vectors["groth16"]["proof_192_hex"]) == 384, "spec/test-vectors.json groth16.proof_192_hex must be 192 bytes"

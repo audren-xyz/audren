@@ -34,7 +34,7 @@ export default function HowItWorksPage() {
             <div className={styles.heroMetaCell}>
               <span className={styles.heroMetaLabel}>Receiving address</span>
               <span className={styles.heroMetaValue}>
-                1 reusable <code>aud1…</code> → 1-time stealth owners
+                BIP-350 Bech32m <code>aud1…</code> → 1-time stealth owners
               </span>
             </div>
             <div className={styles.heroMetaCell}>

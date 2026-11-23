@@ -5,24 +5,25 @@ import {
   CLASSIC_TOKEN_PROGRAM_ID,
   MEMO_NOTES_PER_PAGE,
   MEMO_PAGE_LEN,
-  NATIVE_SOL_MINT_BYTES,
   NUM_ESCROW_SHARDS,
   OPEN_PAGE_KIND_MEMO,
   OPEN_PAGE_KIND_NULLIFIER,
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
+  PROTOCOL_VERSION,
   SUBROOTS_PER_PAGE,
   SUBROOT_PAGE_LEN,
   SUBTREE_LEAVES,
   SUBTREE_PAGE_LEN,
   TAG_EXEC_VIA_ESCROW,
-  TAG_JOINSPLIT,
+  TAG_TRANSACT,
   TOKEN_2022_PROGRAM_ID,
   WSOL_MINT,
   audrenInstructionToSolana,
   base58Decode,
   base58Encode,
-  buildDepositSolInstruction,
+  buildCreateAtaIdempotentInstruction,
+  buildDepositInstruction,
   buildOpenPageInstruction,
   buildPublishCheckpointInstruction,
   compileV1Message,
@@ -40,7 +41,6 @@ import {
   deriveMemoPdaSync,
   deriveNfPagePdaSync,
   derivePoolPdaSync,
-  deriveSolVaultPdaSync,
   deriveStealthOwner,
   deriveSubrootPdaSync,
   deriveSubtreePdaSync,
@@ -139,13 +139,13 @@ interface JupiterTokenV2 {
 interface InitializedPoolSnapshot {
   initialized: true
   cluster: Cluster
-  protocolVersion: 2
+  protocolVersion: number
   programId: string
   poolId: number
   poolPda: string
-  solVaultPda: string
   vaultAuthPda: string
-  solVaultLamports: number
+  wsolVaultAta: string
+  wsolVaultLamports: string
   paused: boolean
   activeLanes: number
   ckptInterval: string
@@ -178,13 +178,13 @@ interface InitializedPoolSnapshot {
 interface UninitializedPoolSnapshot {
   initialized: false
   cluster: Cluster
-  protocolVersion: 2
+  protocolVersion: number
   programId: string
   poolId: number
   poolPda: string
-  solVaultPda: string
   vaultAuthPda: string
-  solVaultLamports: number
+  wsolVaultAta: string
+  wsolVaultLamports: string
 }
 
 function jsonResponse(body: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
@@ -305,31 +305,46 @@ async function sendAndConfirmV1(
   return { signature: txSig, slot, wireBytes: wire.byteLength }
 }
 
+function readSplTokenAmount(b64: string | undefined): bigint {
+  if (!b64) return 0n
+  const bytes = fromBase64(b64)
+  if (bytes.byteLength < 72) return 0n
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(64, true)
+}
+
 async function fetchPoolSnapshot(
   env: Env,
   cluster: Cluster,
   poolId: number,
 ): Promise<InitializedPoolSnapshot | UninitializedPoolSnapshot> {
   const poolPda = derivePoolPdaSync(poolId, AUDREN_PROGRAM_ID).address
-  const solVaultPda = deriveSolVaultPdaSync(poolId, AUDREN_PROGRAM_ID).address
   const vaultAuthPda = deriveVaultAuthPdaSync(poolId, AUDREN_PROGRAM_ID).address
+  const wsolVaultAta = deriveAssociatedTokenAddressSync(
+    vaultAuthPda,
+    WSOL_MINT,
+    CLASSIC_TOKEN_PROGRAM_ID,
+  ).address
 
   const head = await solanaRpc<{
     value: Array<{ data: [string, string]; lamports: number } | null>
-  }>(env, cluster, 'getMultipleAccounts', [[poolPda, solVaultPda], { encoding: 'base64', commitment: 'confirmed' }])
+  }>(env, cluster, 'getMultipleAccounts', [
+    [poolPda, wsolVaultAta],
+    { encoding: 'base64', commitment: 'confirmed' },
+  ])
 
+  const wsolVaultLamports = readSplTokenAmount(head.value[1]?.data?.[0]).toString()
   const poolAcc = head.value[0]
   if (!poolAcc?.data?.[0]) {
     return {
       initialized: false,
       cluster,
-      protocolVersion: 2,
+      protocolVersion: PROTOCOL_VERSION,
       programId: AUDREN_PROGRAM_ID,
       poolId,
       poolPda,
-      solVaultPda,
       vaultAuthPda,
-      solVaultLamports: head.value[1]?.lamports ?? 0,
+      wsolVaultAta,
+      wsolVaultLamports,
     }
   }
 
@@ -455,13 +470,13 @@ async function fetchPoolSnapshot(
   return {
     initialized: true,
     cluster,
-    protocolVersion: 2,
+    protocolVersion: PROTOCOL_VERSION,
     programId: AUDREN_PROGRAM_ID,
     poolId,
     poolPda,
-    solVaultPda,
     vaultAuthPda,
-    solVaultLamports: head.value[1]?.lamports ?? 0,
+    wsolVaultAta,
+    wsolVaultLamports,
     paused: pool.paused,
     activeLanes: pool.activeLanes,
     ckptInterval: pool.ckptInterval.toString(),
@@ -940,13 +955,21 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
   const rootPageSeq = subPageSeq / BigInt(SUBROOTS_PER_PAGE)
   const memoPageSeq = nextLeaf / BigInt(MEMO_NOTES_PER_PAGE)
 
-  const reqPages = [
+  const vaultAuth = deriveVaultAuthPdaSync(poolId, AUDREN_PROGRAM_ID).address
+  const wsolVaultAta = deriveAssociatedTokenAddressSync(
+    vaultAuth,
+    WSOL_MINT,
+    CLASSIC_TOKEN_PROGRAM_ID,
+  ).address
+
+  const reqAccounts = [
     deriveSubtreePdaSync(poolId, laneId, subPageSeq, AUDREN_PROGRAM_ID).address,
     deriveSubrootPdaSync(poolId, laneId, rootPageSeq, AUDREN_PROGRAM_ID).address,
     deriveMemoPdaSync(poolId, laneId, memoPageSeq, AUDREN_PROGRAM_ID).address,
+    wsolVaultAta,
   ]
   const pageCheck = await solanaRpc<{ value: Array<unknown | null> }>(env, 'devnet', 'getMultipleAccounts', [
-    reqPages,
+    reqAccounts,
     { encoding: 'base64', commitment: 'confirmed' },
   ])
 
@@ -990,9 +1013,22 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
       ),
     )
   }
+  if (!pageCheck.value[3]) {
+    ixs.push(
+      toV1Ix(
+        buildCreateAtaIdempotentInstruction({
+          payer: demo.pubkeyStr,
+          ata: wsolVaultAta,
+          owner: vaultAuth,
+          mint: WSOL_MINT,
+          tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+        }),
+      ),
+    )
+  }
 
-  const mintBytes = NATIVE_SOL_MINT_BYTES
-  const { tweak, blinding, memo90 } = encryptNoteMemo(
+  const mintBytes = base58Decode(WSOL_MINT)
+  const { tweak, blinding, memo } = encryptNoteMemo(
     parsedAddr.viewPk,
     crypto.getRandomValues(new Uint8Array(32)),
     amount,
@@ -1005,29 +1041,35 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
 
   ixs.push(
     toV1Ix(
-      buildDepositSolInstruction({
+      buildDepositInstruction({
         poolId,
         laneId,
         subPageSeq,
         rootPageSeq,
         memoPageSeq,
         depositor: demo.pubkeyStr,
+        nativeSol: true,
         amount,
         stealthOwner,
         blinding,
-        memo90,
+        memo,
       }),
     ),
   )
 
   const tx = await sendAndConfirmV1(env, 'devnet', demo, ixs, 250_000)
 
-  // Best-effort RootCheckpoint publish after DepositSol settles (never fails the deposit on CheckpointTooSoon)
+  // Best-effort RootCheckpoint publish after Deposit settles (never fails the deposit on CheckpointTooSoon)
   let checkpointSignature: string | null = null
   let checkpointSlotIndex: number | null = null
   try {
-    const curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'confirmed' }])
+    let curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
     const ckptInterval = BigInt(snap.ckptInterval) > 0n ? BigInt(snap.ckptInterval) : 1n
+    if (ckptInterval <= 16n && BigInt(curSlot) % ckptInterval >= ckptInterval - 3n) {
+      const waitSlots = Number(ckptInterval - (BigInt(curSlot) % ckptInterval))
+      await new Promise((r) => setTimeout(r, waitSlots * 420 + 150))
+      curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
+    }
     const slotIdx = Number((BigInt(curSlot) / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
     const ckIx = toV1Ix(
       buildPublishCheckpointInstruction({
@@ -1051,7 +1093,7 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
     leafIndex: nextLeaf.toString(),
     amountLamports: amount.toString(),
     commitmentHex: toHex(frToBeBytes(commitment)),
-    memo90B64: toBase64(memo90),
+    memoB64: toBase64(memo),
     checkpointSignature,
     checkpointSlotIndex,
     ...tx,
@@ -1068,8 +1110,13 @@ async function handleDevnetCheckpoint(request: Request, env: Env): Promise<Respo
   if (!snap.initialized) {
     return jsonResponse({ error: 'Devnet Pool #0 is not initialized yet' }, 503)
   }
-  const curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'confirmed' }])
+  let curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
   const ckptInterval = BigInt(snap.ckptInterval) > 0n ? BigInt(snap.ckptInterval) : 1n
+  if (ckptInterval <= 16n && BigInt(curSlot) % ckptInterval >= ckptInterval - 3n) {
+    const waitSlots = Number(ckptInterval - (BigInt(curSlot) % ckptInterval))
+    await new Promise((r) => setTimeout(r, waitSlots * 420 + 150))
+    curSlot = await solanaRpc<number>(env, 'devnet', 'getSlot', [{ commitment: 'processed' }])
+  }
   const slotIdx = Number((BigInt(curSlot) / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
   const ckIx = toV1Ix(
     buildPublishCheckpointInstruction({
@@ -1121,12 +1168,15 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
     return jsonResponse({ error: 'instructionDataB64 must be valid base64' }, 400)
   }
   const tag = ixData[0]
-  if (tag !== TAG_JOINSPLIT && tag !== TAG_EXEC_VIA_ESCROW) {
-    return jsonResponse({ error: 'Only Audren JoinSplit (Tag 6) and ExecViaEscrow (Tag 7) may be relayed' }, 400)
+  if (tag !== TAG_TRANSACT && tag !== TAG_EXEC_VIA_ESCROW) {
+    return jsonResponse({ error: 'Only Audren Transact (Tag 5) and ExecViaEscrow (Tag 6) may be relayed' }, 400)
   }
-  const minDataLen = tag === TAG_JOINSPLIT ? 378 : 544
+  const minDataLen = tag === TAG_TRANSACT ? 378 : 558
   if (ixData.byteLength < minDataLen) {
     return jsonResponse({ error: `Instruction data too short (${ixData.byteLength} < ${minDataLen})` }, 400)
+  }
+  if (ixData[5] !== 0) {
+    return jsonResponse({ error: `Unsupported vk_id (${ixData[5]}); only vk_id=0 is permitted` }, 400)
   }
 
   const payerAcc = body.accounts[0]
@@ -1164,15 +1214,15 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
 
   // Ensure primary and atomic rollover output/nullifier pages exist on Devnet Pool #0 outLaneId
   const preIxs: V1Instruction[] = []
-  if (tag === TAG_JOINSPLIT || tag === TAG_EXEC_VIA_ESCROW) {
+  if (tag === TAG_TRANSACT || tag === TAG_EXEC_VIA_ESCROW) {
     const outLaneId = ixData[6]!
-    const maskByte = tag === TAG_JOINSPLIT ? ixData[7]! : ixData[8]!
+    const maskByte = tag === TAG_TRANSACT ? ixData[7]! : ixData[8]!
     const maskPopcount =
       ((maskByte & 1) !== 0 ? 1 : 0) +
       ((maskByte & 2) !== 0 ? 1 : 0) +
       ((maskByte & 4) !== 0 ? 1 : 0)
-    const outputCount = tag === TAG_JOINSPLIT ? maskPopcount : 1 + maskPopcount
-    const nf1Off = tag === TAG_JOINSPLIT ? 234 : 236
+    const outputCount = tag === TAG_TRANSACT ? maskPopcount : 1 + maskPopcount
+    const nf1Off = 234
     let hasNf1 = false
     for (let i = 0; i < 32; i++) {
       if (ixData[nf1Off + i] !== 0) {

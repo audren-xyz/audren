@@ -1,12 +1,12 @@
-//! Audren Mobile & Native FFI Facade (UniFFI -> Swift for iOS/macOS & Kotlin for Android/JVM).
+//! Audren v1 Mobile & Native FFI Facade (UniFFI -> Swift for iOS/macOS & Kotlin for Android/JVM).
 //!
-//! Exposes all Audren building blocks backed directly by `audren-core`, `audren-circuits`,
+//! Exposes all Audren v1 building blocks backed directly by `audren-core`, `audren-circuits`,
 //! and `audren-client` with zero duplicated cryptography and zero transcript drift:
-//! 1. Keys, `aud1...` stealth addresses, Mode 2 `FullViewingKey` (`spend_pk, nk, view_sk, view_pk`),
+//! 1. Keys, BIP-350 Bech32m `aud1...` stealth addresses, Mode 2 `FullViewingKey`,
 //!    and deterministic `DefiSessionKeypair`
-//! 2. Canonical PDAs (`audren_v2_*`) and zero-copy account decoders
-//! 3. Zero-indexer `CompactWalletStore` & authenticated `90 B` memo encryption/decryption
-//! 4. Local BN254 Groth16 proving (`17,861` R1CS) and 9-instruction wire builders
+//! 2. Canonical 12 `audren_*` PDAs, ATA derivation, and zero-copy account decoders
+//! 3. Zero-indexer `CompactWalletStore` & versioned `106 B` AEAD memo encryption/decryption
+//! 4. Local BN254 Groth16 proving (`17,861` R1CS) and all 9 v1 instruction builders (`0x00..=0x08`)
 //! 5. Mode 1 `SelectiveDisclosureProof` verification (1 Poseidon check, zero keys revealed)
 //! 6. Relayer & Jupiter CPI exclusion constants
 
@@ -18,13 +18,14 @@ use audren_circuits::{
 };
 use audren_client::{
     instructions::{
-        build_deposit_sol, build_deposit_spl, build_exec_via_escrow, build_init_lane,
-        build_init_pool, build_joinsplit, build_open_page, build_publish_checkpoint,
-        build_set_paused, compute_exec_ctx_hash, compute_joinsplit_ctx_hash,
-        deterministic_note_rent_fee, AudrenAccountMeta, AudrenInstruction,
+        build_deposit, build_exec_via_escrow, build_init_lane, build_init_pool, build_open_page,
+        build_publish_checkpoint, build_set_paused, build_transact, build_update_pool,
+        compute_exec_ctx_hash, compute_page_rollovers, compute_transact_ctx_hash,
+        deterministic_note_rent_fee, AudrenAccountMeta, AudrenInstruction, UpdatePoolAction,
     },
     keys::{
-        encrypt_note_memo as rust_encrypt_memo,
+        check_memo_view_tag as rust_check_view_tag,
+        encrypt_note_memo_with_payment_id as rust_encrypt_memo_with_pid,
         prepare_dynamic_swap_memo as rust_prepare_dyn_memo,
         try_decrypt_and_verify_memo_entry as rust_decrypt_memo, AudrenAddress, AudrenKeys,
         FullViewingKey, SelectiveDisclosureProof,
@@ -35,11 +36,8 @@ use audren_client::{
         derive_lane_rent_pda as rust_derive_lane_rent_pda,
         derive_memo_pda as rust_derive_memo_pda, derive_nf_page_pda as rust_derive_nf_page_pda,
         derive_nullifier_pda as rust_derive_nullifier_pda,
-        derive_pool_pda as rust_derive_pool_pda,
-        derive_sol_vault_pda as rust_derive_sol_vault_pda,
-        derive_subroot_pda as rust_derive_subroot_pda,
-        derive_subtree_pda as rust_derive_subtree_pda,
-        derive_unwrap_pda as rust_derive_unwrap_pda,
+        derive_pool_pda as rust_derive_pool_pda, derive_subroot_pda as rust_derive_subroot_pda,
+        derive_subtree_pda as rust_derive_subtree_pda, derive_unwrap_pda as rust_derive_unwrap_pda,
         derive_vault_auth_pda as rust_derive_vault_auth_pda,
     },
     prover::AudrenProver,
@@ -48,7 +46,10 @@ use audren_client::{
     store::CompactWalletStore,
     ClientError,
 };
-use audren_core::{AUDREN_PROGRAM_ID, PROTOCOL_VERSION};
+use audren_core::{
+    layout::{DYN_MEMO_HEAD_LEN, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_PAYMENT_ID_LEN},
+    AUDREN_PROGRAM_ID, PROTOCOL_VERSION,
+};
 use solana_address::Address;
 
 uniffi::setup_scaffolding!();
@@ -143,11 +144,10 @@ pub struct FfiPoolState {
     pub ckpt_interval: u64,
     pub max_ckpt_age: u64,
     pub authority_b58: String,
-    pub sol_vault_bump: u8,
     pub vault_auth_bump: u8,
-    pub mode: u8,
     pub note_rent_fee: u64,
     pub nf_rent_fee: u64,
+    pub pending_authority_b58: String,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -176,12 +176,24 @@ pub struct FfiRootCheckpoint {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
+pub struct FfiPageRolloverPlan {
+    pub out_sub_seq: u64,
+    pub out_root_seq: u64,
+    pub out_memo_seq: u64,
+    pub nf_page_seq: u64,
+    pub next_sub_seq: Option<u64>,
+    pub next_root_seq: Option<u64>,
+    pub next_memo_seq: Option<u64>,
+    pub next_nf_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct FfiEncryptedMemo {
     pub tweak: Vec<u8>,
     pub blinding: Vec<u8>,
     pub stealth_owner: Vec<u8>,
     pub commitment: Vec<u8>,
-    pub memo_90: Vec<u8>,
+    pub memo_106: Vec<u8>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -189,7 +201,7 @@ pub struct FfiDynamicMemoPrep {
     pub tweak: Vec<u8>,
     pub blinding: Vec<u8>,
     pub dyn_head_34: Vec<u8>,
-    pub dyn_mask_56: Vec<u8>,
+    pub dyn_mask_72: Vec<u8>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -198,6 +210,9 @@ pub struct FfiDecryptedMemo {
     pub blinding: Vec<u8>,
     pub amount: u64,
     pub mint: Vec<u8>,
+    pub memo_version: u8,
+    pub memo_flags: u8,
+    pub payment_id: Vec<u8>,
     pub is_dynamic: bool,
 }
 
@@ -236,6 +251,21 @@ pub struct FfiGroth16ProofBundle {
     pub cm1: Vec<u8>,
     pub cm2: Vec<u8>,
     pub public_input_hash: Vec<u8>,
+}
+
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum FfiUpdatePoolAction {
+    UpdateParams {
+        ckpt_interval: u64,
+        max_ckpt_age: u64,
+        note_rent_fee: u64,
+        nf_rent_fee: u64,
+    },
+    ProposeAuthority {
+        pending_authority: String,
+    },
+    AcceptAuthority,
+    RenounceAuthority,
 }
 
 fn from_audren_ix(ix: AudrenInstruction) -> FfiInstruction {
@@ -277,6 +307,15 @@ fn keys_to_ffi(k: &AudrenKeys) -> FfiAudrenKeys {
         view_pk: k.view_pk.to_vec(),
         address: k.address().encode(),
     }
+}
+
+fn fvk_from_ffi(fvk: &FfiFullViewingKey) -> Result<FullViewingKey, AudrenFfiError> {
+    Ok(FullViewingKey {
+        spend_pk: to_arr::<32>(&fvk.spend_pk, "fvk.spend_pk")?,
+        nk: to_arr::<32>(&fvk.nk, "fvk.nk")?,
+        view_sk: to_arr::<32>(&fvk.view_sk, "fvk.view_sk")?,
+        view_pk: to_arr::<32>(&fvk.view_pk, "fvk.view_pk")?,
+    })
 }
 
 #[uniffi::export]
@@ -361,16 +400,10 @@ pub fn derive_asset_id_bytes(mint_bytes: Vec<u8>) -> Result<Vec<u8>, AudrenFfiEr
 #[uniffi::export]
 pub fn derive_pool_pda(program_id: String, pool_id: u32) -> Result<FfiPdaResult, AudrenFfiError> {
     let (a, b) = rust_derive_pool_pda(&parse_addr(&program_id, "program_id")?, pool_id);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
-}
-
-#[uniffi::export]
-pub fn derive_sol_vault_pda(
-    program_id: String,
-    pool_id: u32,
-) -> Result<FfiPdaResult, AudrenFfiError> {
-    let (a, b) = rust_derive_sol_vault_pda(&parse_addr(&program_id, "program_id")?, pool_id);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -379,7 +412,10 @@ pub fn derive_vault_auth_pda(
     pool_id: u32,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
     let (a, b) = rust_derive_vault_auth_pda(&parse_addr(&program_id, "program_id")?, pool_id);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -389,7 +425,10 @@ pub fn derive_lane_pda(
     lane_id: u8,
 ) -> Result<FfiPdaResult, AudrenFfiError> {
     let (a, b) = rust_derive_lane_pda(&parse_addr(&program_id, "program_id")?, pool_id, lane_id);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -400,7 +439,10 @@ pub fn derive_lane_rent_pda(
 ) -> Result<FfiPdaResult, AudrenFfiError> {
     let (a, b) =
         rust_derive_lane_rent_pda(&parse_addr(&program_id, "program_id")?, pool_id, lane_id);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -416,7 +458,10 @@ pub fn derive_subtree_pda(
         lane_id,
         page_seq,
     );
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -432,7 +477,10 @@ pub fn derive_subroot_pda(
         lane_id,
         root_page_seq,
     );
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -448,7 +496,10 @@ pub fn derive_memo_pda(
         lane_id,
         page_seq,
     );
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -464,7 +515,10 @@ pub fn derive_nf_page_pda(
         lane_id,
         page_seq,
     );
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -475,7 +529,10 @@ pub fn derive_checkpoint_pda(
 ) -> Result<FfiPdaResult, AudrenFfiError> {
     let (a, b) =
         rust_derive_checkpoint_pda(&parse_addr(&program_id, "program_id")?, pool_id, slot_idx);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -486,7 +543,10 @@ pub fn derive_nullifier_pda(
 ) -> Result<FfiPdaResult, AudrenFfiError> {
     let nf = to_arr::<32>(&nullifier, "nullifier")?;
     let (a, b) = rust_derive_nullifier_pda(&parse_addr(&program_id, "program_id")?, pool_id, &nf);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -497,7 +557,10 @@ pub fn derive_escrow_pda(
 ) -> Result<FfiPdaResult, AudrenFfiError> {
     let (a, b) =
         rust_derive_escrow_pda(&parse_addr(&program_id, "program_id")?, pool_id, shard_id);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -508,7 +571,10 @@ pub fn derive_unwrap_pda(
 ) -> Result<FfiPdaResult, AudrenFfiError> {
     let n = to_arr::<32>(&nf0, "nf0")?;
     let (a, b) = rust_derive_unwrap_pda(&parse_addr(&program_id, "program_id")?, pool_id, &n);
-    Ok(FfiPdaResult { address: a.to_string(), bump: b })
+    Ok(FfiPdaResult {
+        address: a.to_string(),
+        bump: b,
+    })
 }
 
 #[uniffi::export]
@@ -537,11 +603,10 @@ pub fn decode_pool_state_account(data: Vec<u8>) -> Result<FfiPoolState, AudrenFf
         ckpt_interval: p.ckpt_interval,
         max_ckpt_age: p.max_ckpt_age,
         authority_b58: Address::new_from_array(p.authority).to_string(),
-        sol_vault_bump: p.sol_vault_bump,
         vault_auth_bump: p.vault_auth_bump,
-        mode: p.mode,
         note_rent_fee: p.note_rent_fee,
         nf_rent_fee: p.nf_rent_fee,
+        pending_authority_b58: Address::new_from_array(p.pending_authority).to_string(),
     })
 }
 
@@ -583,13 +648,18 @@ pub fn encrypt_note_memo(
     eph_secret: Vec<u8>,
     amount: u64,
     mint: Vec<u8>,
+    payment_id: Option<Vec<u8>>,
 ) -> Result<FfiEncryptedMemo, AudrenFfiError> {
     let spk_b = to_arr::<32>(&recipient_spend_pk, "recipient_spend_pk")?;
     let spk = fr_from_be_bytes_strict(&spk_b).ok_or(ClientError::InvalidFieldElement)?;
     let vpk = to_arr::<32>(&recipient_view_pk, "recipient_view_pk")?;
     let eph = to_arr::<32>(&eph_secret, "eph_secret")?;
     let m = to_arr::<32>(&mint, "mint")?;
-    let (tw, bl, memo) = rust_encrypt_memo(&vpk, eph, amount, &m);
+    let pid = match payment_id {
+        Some(b) => to_arr::<MEMO_PAYMENT_ID_LEN>(&b, "payment_id")?,
+        None => [0u8; MEMO_PAYMENT_ID_LEN],
+    };
+    let (tw, bl, memo) = rust_encrypt_memo_with_pid(&vpk, eph, amount, &m, pid)?;
     let stealth = derive_stealth_owner(spk, tw);
     let cm = compute_note_commitment(stealth, derive_asset_id(&m), amount, bl);
     Ok(FfiEncryptedMemo {
@@ -597,7 +667,7 @@ pub fn encrypt_note_memo(
         blinding: fr_to_be_bytes(&bl).to_vec(),
         stealth_owner: fr_to_be_bytes(&stealth).to_vec(),
         commitment: fr_to_be_bytes(&cm).to_vec(),
-        memo_90: memo.to_vec(),
+        memo_106: memo.to_vec(),
     })
 }
 
@@ -608,37 +678,47 @@ pub fn prepare_dynamic_swap_memo(
 ) -> Result<FfiDynamicMemoPrep, AudrenFfiError> {
     let vpk = to_arr::<32>(&recipient_view_pk, "recipient_view_pk")?;
     let eph = to_arr::<32>(&eph_secret, "eph_secret")?;
-    let (tw, bl, head, mask) = rust_prepare_dyn_memo(&vpk, eph);
+    let (tw, bl, head, mask) = rust_prepare_dyn_memo(&vpk, eph)?;
     Ok(FfiDynamicMemoPrep {
         tweak: fr_to_be_bytes(&tw).to_vec(),
         blinding: fr_to_be_bytes(&bl).to_vec(),
         dyn_head_34: head.to_vec(),
-        dyn_mask_56: mask.to_vec(),
+        dyn_mask_72: mask.to_vec(),
     })
+}
+
+#[uniffi::export]
+pub fn check_memo_view_tag(
+    fvk: FfiFullViewingKey,
+    view_tag: Vec<u8>,
+    epk: Vec<u8>,
+) -> Result<bool, AudrenFfiError> {
+    let f = fvk_from_ffi(&fvk)?;
+    let vt = to_arr::<2>(&view_tag, "view_tag")?;
+    let e = to_arr::<32>(&epk, "epk")?;
+    Ok(rust_check_view_tag(&f, vt, &e))
 }
 
 #[uniffi::export]
 pub fn decrypt_and_verify_memo_entry(
     fvk: FfiFullViewingKey,
-    memo_90: Vec<u8>,
+    memo_106: Vec<u8>,
     onchain_commitment: Vec<u8>,
 ) -> Result<Option<FfiDecryptedMemo>, AudrenFfiError> {
-    let m = to_arr::<90>(&memo_90, "memo_90")?;
+    let m = to_arr::<MEMO_ENTRY_WIRE_LEN>(&memo_106, "memo_106")?;
     let cm = to_arr::<32>(&onchain_commitment, "onchain_commitment")?;
-    let f = FullViewingKey {
-        spend_pk: to_arr::<32>(&fvk.spend_pk, "fvk.spend_pk")?,
-        nk: to_arr::<32>(&fvk.nk, "fvk.nk")?,
-        view_sk: to_arr::<32>(&fvk.view_sk, "fvk.view_sk")?,
-        view_pk: to_arr::<32>(&fvk.view_pk, "fvk.view_pk")?,
-    };
+    let f = fvk_from_ffi(&fvk)?;
     let vt = [m[0], m[1]];
     let epk: [u8; 32] = m[2..34].try_into().unwrap();
-    let ct: [u8; 56] = m[34..90].try_into().unwrap();
+    let ct: [u8; MEMO_CT_LEN] = m[34..MEMO_ENTRY_WIRE_LEN].try_into().unwrap();
     Ok(rust_decrypt_memo(&f, vt, &epk, &ct, &cm).map(|d| FfiDecryptedMemo {
         tweak: fr_to_be_bytes(&d.tweak).to_vec(),
         blinding: fr_to_be_bytes(&d.blinding).to_vec(),
         amount: d.amount,
         mint: d.mint.to_vec(),
+        memo_version: d.memo_version,
+        memo_flags: d.memo_flags,
+        payment_id: d.payment_id.to_vec(),
         is_dynamic: d.is_dynamic,
     }))
 }
@@ -692,9 +772,10 @@ pub fn prove_joinsplit_witness_bytes(
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiJoinSplitCtxHashParams {
+pub struct FfiTransactCtxHashParams {
     pub program_id: String,
     pub pool_id: u32,
+    pub vk_id: u8,
     pub out_lane_id: u8,
     pub output_mask: u8,
     pub asset_mode: u8,
@@ -708,8 +789,8 @@ pub struct FfiJoinSplitCtxHashParams {
 }
 
 #[uniffi::export]
-pub fn compute_joinsplit_ctx_hash_ffi(
-    params: FfiJoinSplitCtxHashParams,
+pub fn compute_transact_ctx_hash_ffi(
+    params: FfiTransactCtxHashParams,
 ) -> Result<Vec<u8>, AudrenFfiError> {
     let pid = parse_addr(&params.program_id, "program_id")?;
     let recip = params
@@ -723,9 +804,10 @@ pub fn compute_joinsplit_ctx_hash_ffi(
         .map(|s| parse_addr(s, "relayer_fee_recipient"))
         .transpose()?;
     let paid = to_arr::<32>(&params.public_asset_id, "public_asset_id")?;
-    let h = compute_joinsplit_ctx_hash(
+    let h = compute_transact_ctx_hash(
         &pid,
         params.pool_id,
+        params.vk_id,
         params.out_lane_id,
         params.output_mask,
         params.asset_mode,
@@ -744,11 +826,10 @@ pub fn compute_joinsplit_ctx_hash_ffi(
 pub struct FfiExecCtxHashParams {
     pub program_id: String,
     pub pool_id: u32,
+    pub vk_id: u8,
     pub out_lane_id: u8,
     pub escrow_shard: u8,
     pub change_mask: u8,
-    pub in_kind: u8,
-    pub out_kind: u8,
     pub fee_on_output: bool,
     pub asset_in: Vec<u8>,
     pub amount_in: u64,
@@ -761,7 +842,7 @@ pub struct FfiExecCtxHashParams {
     pub out_stealth_owner: Vec<u8>,
     pub out_blinding: Vec<u8>,
     pub dyn_memo_head: Vec<u8>,
-    pub dyn_mask_56: Vec<u8>,
+    pub dyn_mask_72: Vec<u8>,
     pub router_ix_data: Vec<u8>,
     pub change_memos: Vec<u8>,
 }
@@ -781,11 +862,10 @@ pub fn compute_exec_ctx_hash_ffi(
     let h = compute_exec_ctx_hash(
         &pid,
         params.pool_id,
+        params.vk_id,
         params.out_lane_id,
         params.escrow_shard,
         params.change_mask,
-        params.in_kind,
-        params.out_kind,
         params.fee_on_output,
         &to_arr::<32>(&params.asset_in, "asset_in")?,
         params.amount_in,
@@ -797,8 +877,8 @@ pub fn compute_exec_ctx_hash_ffi(
         &raccs,
         &to_arr::<32>(&params.out_stealth_owner, "out_stealth_owner")?,
         &to_arr::<32>(&params.out_blinding, "out_blinding")?,
-        &to_arr::<34>(&params.dyn_memo_head, "dyn_memo_head")?,
-        &to_arr::<56>(&params.dyn_mask_56, "dyn_mask_56")?,
+        &to_arr::<DYN_MEMO_HEAD_LEN>(&params.dyn_memo_head, "dyn_memo_head")?,
+        &to_arr::<MEMO_CT_LEN>(&params.dyn_mask_72, "dyn_mask_72")?,
         &params.router_ix_data,
         &params.change_memos,
     );
@@ -813,6 +893,31 @@ pub fn deterministic_note_rent_fee_ffi(
     memo_rent: u64,
 ) -> u64 {
     deterministic_note_rent_fee(pool_note_rent_fee_cap, sub_rent, sr_rent, memo_rent)
+}
+
+#[uniffi::export]
+pub fn compute_page_rollovers_ffi(
+    leaf_count: u64,
+    output_count: u32,
+    nf_count: u64,
+    spent_nullifiers: u32,
+) -> FfiPageRolloverPlan {
+    let p = compute_page_rollovers(
+        leaf_count,
+        output_count as usize,
+        nf_count,
+        spent_nullifiers as usize,
+    );
+    FfiPageRolloverPlan {
+        out_sub_seq: p.out_sub_seq,
+        out_root_seq: p.out_root_seq,
+        out_memo_seq: p.out_memo_seq,
+        nf_page_seq: p.nf_page_seq,
+        next_sub_seq: p.next_sub_seq,
+        next_root_seq: p.next_root_seq,
+        next_memo_seq: p.next_memo_seq,
+        next_nf_seq: p.next_nf_seq,
+    }
 }
 
 #[uniffi::export]
@@ -871,88 +976,53 @@ pub fn build_open_page_ix(
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiDepositSolParams {
-    pub program_id: String,
-    pub depositor: String,
-    pub pool_id: u32,
-    pub lane_id: u8,
-    pub sub_page_seq: u64,
-    pub root_page_seq: u64,
-    pub memo_page_seq: u64,
-    pub fee_from_amount: bool,
-    pub amount: u64,
-    pub stealth_owner: Vec<u8>,
-    pub blinding: Vec<u8>,
-    pub memo_90: Vec<u8>,
-}
-
-#[uniffi::export]
-pub fn build_deposit_sol_ix(params: FfiDepositSolParams) -> Result<FfiInstruction, AudrenFfiError> {
-    let st = fr_from_be_bytes_strict(&to_arr::<32>(&params.stealth_owner, "stealth_owner")?)
-        .ok_or(ClientError::InvalidFieldElement)?;
-    let bl = fr_from_be_bytes_strict(&to_arr::<32>(&params.blinding, "blinding")?)
-        .ok_or(ClientError::InvalidFieldElement)?;
-    let m = to_arr::<90>(&params.memo_90, "memo_90")?;
-    Ok(from_audren_ix(build_deposit_sol(
-        parse_addr(&params.program_id, "program_id")?,
-        parse_addr(&params.depositor, "depositor")?,
-        params.pool_id,
-        params.lane_id,
-        params.sub_page_seq,
-        params.root_page_seq,
-        params.memo_page_seq,
-        None,
-        None,
-        params.fee_from_amount,
-        params.amount,
-        st,
-        bl,
-        &m,
-    )))
-}
-
-#[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiDepositSplParams {
+pub struct FfiDepositParams {
     pub program_id: String,
     pub depositor: String,
     pub pool_id: u32,
     pub mint: String,
-    pub depositor_ata: String,
+    pub source_account: String,
     pub vault_ata: String,
     pub token_prog: String,
     pub lane_id: u8,
     pub sub_page_seq: u64,
     pub root_page_seq: u64,
     pub memo_page_seq: u64,
+    pub next_sub_seq: Option<u64>,
+    pub next_memo_seq: Option<u64>,
+    pub native_sol: bool,
+    pub fee_from_amount: bool,
     pub amount: u64,
     pub stealth_owner: Vec<u8>,
     pub blinding: Vec<u8>,
-    pub memo_90: Vec<u8>,
+    pub memo_106: Vec<u8>,
     pub transfer_hook_accounts: Vec<FfiAccountMeta>,
 }
 
 #[uniffi::export]
-pub fn build_deposit_spl_ix(params: FfiDepositSplParams) -> Result<FfiInstruction, AudrenFfiError> {
+pub fn build_deposit_ix(params: FfiDepositParams) -> Result<FfiInstruction, AudrenFfiError> {
     let st = fr_from_be_bytes_strict(&to_arr::<32>(&params.stealth_owner, "stealth_owner")?)
         .ok_or(ClientError::InvalidFieldElement)?;
     let bl = fr_from_be_bytes_strict(&to_arr::<32>(&params.blinding, "blinding")?)
         .ok_or(ClientError::InvalidFieldElement)?;
-    let m = to_arr::<90>(&params.memo_90, "memo_90")?;
+    let m = to_arr::<MEMO_ENTRY_WIRE_LEN>(&params.memo_106, "memo_106")?;
     let hooks = to_audren_metas(&params.transfer_hook_accounts)?;
-    Ok(from_audren_ix(build_deposit_spl(
+    Ok(from_audren_ix(build_deposit(
         parse_addr(&params.program_id, "program_id")?,
         parse_addr(&params.depositor, "depositor")?,
         params.pool_id,
         parse_addr(&params.mint, "mint")?,
-        parse_addr(&params.depositor_ata, "depositor_ata")?,
+        parse_addr(&params.source_account, "source_account")?,
         parse_addr(&params.vault_ata, "vault_ata")?,
         parse_addr(&params.token_prog, "token_prog")?,
         params.lane_id,
         params.sub_page_seq,
         params.root_page_seq,
         params.memo_page_seq,
-        None,
-        None,
+        params.next_sub_seq,
+        params.next_memo_seq,
+        params.native_sol,
+        params.fee_from_amount,
         params.amount,
         st,
         bl,
@@ -979,7 +1049,7 @@ pub fn build_publish_checkpoint_ix(
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiJoinSplitParams {
+pub struct FfiTransactParams {
     pub program_id: String,
     pub payer: String,
     pub pool_id: u32,
@@ -990,12 +1060,15 @@ pub struct FfiJoinSplitParams {
     pub out_root_seq: u64,
     pub out_memo_seq: u64,
     pub out_nf_seq: u64,
+    pub next_sub_seq: Option<u64>,
+    pub next_memo_seq: Option<u64>,
+    pub next_nf_seq: Option<u64>,
     pub output_mask: u8,
     pub asset_mode: u8,
     pub unwrap_wsol: bool,
-    pub spl_mint: Option<String>,
-    pub spl_vault_ata: Option<String>,
-    pub spl_token_prog: Option<String>,
+    pub public_mint: Option<String>,
+    pub public_vault_ata: Option<String>,
+    pub public_token_prog: Option<String>,
     pub proof_192: Vec<u8>,
     pub nf0: Vec<u8>,
     pub nf1: Vec<u8>,
@@ -1007,24 +1080,30 @@ pub struct FfiJoinSplitParams {
     pub recipient: String,
     pub relayer_fee_recipient: String,
     pub memos_bytes: Vec<u8>,
+    pub transfer_hook_accounts: Vec<FfiAccountMeta>,
 }
 
 #[uniffi::export]
-pub fn build_joinsplit_ix(params: FfiJoinSplitParams) -> Result<FfiInstruction, AudrenFfiError> {
-    let spl = match (params.spl_mint, params.spl_vault_ata, params.spl_token_prog) {
+pub fn build_transact_ix(params: FfiTransactParams) -> Result<FfiInstruction, AudrenFfiError> {
+    let pub_accs = match (
+        params.public_mint,
+        params.public_vault_ata,
+        params.public_token_prog,
+    ) {
         (Some(m), Some(v), Some(t)) => Some((
-            parse_addr(&m, "spl_mint")?,
-            parse_addr(&v, "spl_vault_ata")?,
-            parse_addr(&t, "spl_token_prog")?,
+            parse_addr(&m, "public_mint")?,
+            parse_addr(&v, "public_vault_ata")?,
+            parse_addr(&t, "public_token_prog")?,
         )),
         (None, None, None) => None,
         _ => {
             return Err(AudrenFfiError::InvalidInput {
-                reason: "spl_mint, spl_vault_ata, and spl_token_prog must either all be Some or all be None".to_string(),
+                reason: "public_mint, public_vault_ata, and public_token_prog must either all be Some or all be None".to_string(),
             });
         }
     };
-    Ok(from_audren_ix(build_joinsplit(
+    let hooks = to_audren_metas(&params.transfer_hook_accounts)?;
+    Ok(from_audren_ix(build_transact(
         parse_addr(&params.program_id, "program_id")?,
         parse_addr(&params.payer, "payer")?,
         params.pool_id,
@@ -1038,8 +1117,8 @@ pub fn build_joinsplit_ix(params: FfiJoinSplitParams) -> Result<FfiInstruction, 
         params.output_mask,
         params.asset_mode,
         params.unwrap_wsol,
-        spl,
-        (None, None, None),
+        pub_accs,
+        (params.next_sub_seq, params.next_memo_seq, params.next_nf_seq),
         &to_arr::<192>(&params.proof_192, "proof_192")?,
         &to_arr::<32>(&params.nf0, "nf0")?,
         &to_arr::<32>(&params.nf1, "nf1")?,
@@ -1051,7 +1130,7 @@ pub fn build_joinsplit_ix(params: FfiJoinSplitParams) -> Result<FfiInstruction, 
         parse_addr(&params.recipient, "recipient")?,
         parse_addr(&params.relayer_fee_recipient, "relayer_fee_recipient")?,
         &params.memos_bytes,
-        &[],
+        &hooks,
     )))
 }
 
@@ -1067,13 +1146,14 @@ pub struct FfiExecViaEscrowParams {
     pub out_root_seq: u64,
     pub out_memo_seq: u64,
     pub out_nf_seq: u64,
+    pub next_sub_seq: Option<u64>,
+    pub next_memo_seq: Option<u64>,
+    pub next_nf_seq: Option<u64>,
     pub escrow_shard: u8,
     pub change_mask: u8,
-    pub in_kind: u8,
-    pub out_kind: u8,
     pub fee_on_output: bool,
-    pub in_spl: Option<Vec<String>>,
-    pub out_spl: Option<Vec<String>>,
+    pub in_leg: Vec<String>,
+    pub out_leg: Vec<String>,
     pub relayer_fee_amount: u64,
     pub relayer_fee_recipient: Option<String>,
     pub proof_192: Vec<u8>,
@@ -1087,7 +1167,7 @@ pub struct FfiExecViaEscrowParams {
     pub out_stealth_owner: Vec<u8>,
     pub out_blinding: Vec<u8>,
     pub dyn_memo_head: Vec<u8>,
-    pub dyn_mask_56: Vec<u8>,
+    pub dyn_mask_72: Vec<u8>,
     pub router_prog: String,
     pub router_ix_data: Vec<u8>,
     pub router_accounts: Vec<FfiAccountMeta>,
@@ -1098,20 +1178,20 @@ pub struct FfiExecViaEscrowParams {
 pub fn build_exec_via_escrow_ix(
     params: FfiExecViaEscrowParams,
 ) -> Result<FfiInstruction, AudrenFfiError> {
-    let parse_leg = |v: Option<Vec<String>>, label: &str| -> Result<Option<(Address, Address, Address, Address)>, AudrenFfiError> {
-        match v {
-            None => Ok(None),
-            Some(a) if a.len() == 4 => Ok(Some((
+    let parse_leg =
+        |a: Vec<String>, label: &str| -> Result<(Address, Address, Address, Address), AudrenFfiError> {
+            if a.len() != 4 {
+                return Err(AudrenFfiError::InvalidInput {
+                    reason: format!("{label} must have 4 pubkeys (mint, vault_ata, escrow_ata, token_prog)"),
+                });
+            }
+            Ok((
                 parse_addr(&a[0], label)?,
                 parse_addr(&a[1], label)?,
                 parse_addr(&a[2], label)?,
                 parse_addr(&a[3], label)?,
-            ))),
-            Some(_) => Err(AudrenFfiError::InvalidInput {
-                reason: format!("{label} must have 4 pubkeys"),
-            }),
-        }
-    };
+            ))
+        };
     let fee_r = params
         .relayer_fee_recipient
         .as_deref()
@@ -1130,14 +1210,12 @@ pub fn build_exec_via_escrow_ix(
         params.out_nf_seq,
         params.escrow_shard,
         params.change_mask,
-        params.in_kind,
-        params.out_kind,
         params.fee_on_output,
-        parse_leg(params.in_spl, "in_spl")?,
-        parse_leg(params.out_spl, "out_spl")?,
+        parse_leg(params.in_leg, "in_leg")?,
+        parse_leg(params.out_leg, "out_leg")?,
         params.relayer_fee_amount,
         fee_r,
-        (None, None, None),
+        (params.next_sub_seq, params.next_memo_seq, params.next_nf_seq),
         &to_arr::<192>(&params.proof_192, "proof_192")?,
         &to_arr::<32>(&params.nf0, "nf0")?,
         &to_arr::<32>(&params.nf1, "nf1")?,
@@ -1148,8 +1226,8 @@ pub fn build_exec_via_escrow_ix(
         params.min_amount_out,
         &to_arr::<32>(&params.out_stealth_owner, "out_stealth_owner")?,
         &to_arr::<32>(&params.out_blinding, "out_blinding")?,
-        &to_arr::<34>(&params.dyn_memo_head, "dyn_memo_head")?,
-        &to_arr::<56>(&params.dyn_mask_56, "dyn_mask_56")?,
+        &to_arr::<DYN_MEMO_HEAD_LEN>(&params.dyn_memo_head, "dyn_memo_head")?,
+        &to_arr::<MEMO_CT_LEN>(&params.dyn_mask_72, "dyn_mask_72")?,
         parse_addr(&params.router_prog, "router_prog")?,
         &params.router_ix_data,
         to_audren_metas(&params.router_accounts)?,
@@ -1169,5 +1247,40 @@ pub fn build_set_paused_ix(
         parse_addr(&authority, "authority")?,
         pool_id,
         paused,
+    )))
+}
+
+#[uniffi::export]
+pub fn build_update_pool_ix(
+    program_id: String,
+    signer: String,
+    pool_id: u32,
+    action: FfiUpdatePoolAction,
+) -> Result<FfiInstruction, AudrenFfiError> {
+    let rust_action = match action {
+        FfiUpdatePoolAction::UpdateParams {
+            ckpt_interval,
+            max_ckpt_age,
+            note_rent_fee,
+            nf_rent_fee,
+        } => UpdatePoolAction::UpdateParams {
+            ckpt_interval,
+            max_ckpt_age,
+            note_rent_fee,
+            nf_rent_fee,
+        },
+        FfiUpdatePoolAction::ProposeAuthority { pending_authority } => {
+            UpdatePoolAction::ProposeAuthority {
+                pending_authority: parse_addr(&pending_authority, "pending_authority")?,
+            }
+        }
+        FfiUpdatePoolAction::AcceptAuthority => UpdatePoolAction::AcceptAuthority,
+        FfiUpdatePoolAction::RenounceAuthority => UpdatePoolAction::RenounceAuthority,
+    };
+    Ok(from_audren_ix(build_update_pool(
+        parse_addr(&program_id, "program_id")?,
+        parse_addr(&signer, "signer")?,
+        pool_id,
+        rust_action,
     )))
 }

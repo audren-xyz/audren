@@ -87,7 +87,7 @@ export function computeSwapFeePlan(params: {
   feeAccount: string | null
   feeAccountExists: boolean
   hasUnsafeSelfPayExt?: boolean
-  /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers, padded swap). */
+  /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers, padded spend). */
   omitNf1?: boolean
   /** Shielded output note count (change + dynamic output). Defaults to `2`. */
   outputCount?: number
@@ -103,11 +103,11 @@ export function computeSwapFeePlan(params: {
     feeAccount,
     feeAccountExists,
     hasUnsafeSelfPayExt = false,
-    omitNf1,
+    omitNf1 = false,
     outputCount,
   } = params
 
-  const hasCustomShape = omitNf1 !== undefined || outputCount !== undefined
+  const hasCustomShape = omitNf1 || outputCount !== undefined
   const baseSwapLamports = hasCustomShape
     ? BigInt(omitNf1 ? 1 : 2) *
         (rentSchedule.nullifierRentLamports + rentSchedule.nfPageRentPerNfLamports) +
@@ -262,21 +262,22 @@ export function computeSwapFeePlan(params: {
 }
 
 /**
- * Compute an exact native protocol fee quote (`GET /v1/fee-quote`) for:
+ * Compute an exact protocol fee quote (`GET /v1/fee-quote`) for:
  *   - `transfer` (`ASSET_MODE_PRIVATE`): flat per-mint shielded `cm2` fee independent of `amount`
- *   - `withdraw` (Native SOL, atomic `unwrap_wsol`, or SPL/Token-2022)
- *   - `exec_escrow` (any DEX swap, Kamino supply, yield vault, LST mint, RWA vault, etc.)
+ *   - `withdraw` (`ASSET_MODE_PUBLIC`: atomic `unwrap_wsol` or SPL/Token-2022)
+ *   - `exec_escrow` (SPL/Token-2022 DEX swap, Kamino supply, yield vault, LST mint, RWA vault, etc.)
  *
- * Uses live on-chain rent from RPC + live token prices; falls back to `sponsored` cleanly
- * when an action is too small to self-pay without exceeding `maxSelfPayBps` or when a mint
- * has no live USD price.
+ * Defaults `omitNf1 = false` (2 nullifiers) across ALL ops so 1-nullifier spends are never encouraged
+ * by default. Uses live on-chain rent from RPC + live token prices; falls back to `sponsored` cleanly
+ * when an action is too small to self-pay without exceeding `maxSelfPayBps` or when a mint has no live USD price.
  */
 export function computeNativeFeeQuote(params: {
   cluster: Cluster
   op: 'transfer' | 'withdraw' | 'exec_escrow'
   cfg: RelayPolicyConfig
   rentSchedule: LiveRentSchedule
-  isNativeSolFee: boolean
+  /** True strictly for `op === 'withdraw'` with `WITHDRAW_FLAG_UNWRAP_WSOL` (pays SOL lamports to relayerPubkey). */
+  unwrapWsol?: boolean
   feeSide?: 'in' | 'out' | 'shielded_cm2'
   feeMint: string
   feeTokenProgram: string | null
@@ -284,13 +285,16 @@ export function computeNativeFeeQuote(params: {
   /** Used for `withdraw` / `exec_escrow` self-pay sizing; optional and ignored for `transfer`. */
   amount?: bigint
   outputCount?: number
-  /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers) on `transfer`, `true` (1 nullifier) otherwise. */
+  /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers) across ALL ops. */
   omitNf1?: boolean
   missingAtaCount?: number
   hasUnsafeSelfPayExt?: boolean
+  relayerPubkey?: string | null
   feeRecipient: string | null
   feeShieldedAddress?: string | null
   feeRecipientExists: boolean
+  shardId?: number
+  escrowPda?: string
   solPriceUsd: number | null
   feeTokenPriceUsd: number | null
 }): NativeFeeQuote {
@@ -299,22 +303,26 @@ export function computeNativeFeeQuote(params: {
     op,
     cfg,
     rentSchedule,
-    isNativeSolFee,
+    unwrapWsol = false,
     feeSide = op === 'transfer' ? 'shielded_cm2' : 'in',
     feeMint,
     feeTokenProgram,
     feeDecimals,
     outputCount = op === 'transfer' ? 3 : op === 'exec_escrow' ? 2 : 0,
-    omitNf1 = op !== 'transfer',
+    omitNf1 = false,
     missingAtaCount = 0,
     hasUnsafeSelfPayExt = false,
+    relayerPubkey = null,
     feeRecipient,
     feeShieldedAddress = null,
     feeRecipientExists,
+    shardId,
+    escrowPda,
     solPriceUsd,
     feeTokenPriceUsd,
   } = params
 
+  const isDirectLamportPayout = op === 'withdraw' && unwrapWsol
   const nullifierCount = omitNf1 ? 1n : 2n
   const clampedOutputs = BigInt(Math.max(0, Math.min(3, Math.trunc(outputCount))))
   const nullifierRent =
@@ -329,6 +337,12 @@ export function computeNativeFeeQuote(params: {
   const costUsd = (lamports: bigint) =>
     solPriceUsd && solPriceUsd > 0 ? (Number(lamports) / 1e9) * solPriceUsd : null
 
+  const metaFields = {
+    ...(relayerPubkey !== null ? { relayerPubkey } : {}),
+    ...(shardId !== undefined ? { shardId } : {}),
+    ...(escrowPda !== undefined ? { escrowPda } : {}),
+  }
+
   // Private transfers quote a strictly flat per-mint shielded cm2 fee; plaintext `amount` is never required or consulted.
   if (op === 'transfer') {
     if (!feeShieldedAddress || hasUnsafeSelfPayExt) {
@@ -339,7 +353,7 @@ export function computeNativeFeeQuote(params: {
         billingMode: 'sponsored',
         feeSide: 'shielded_cm2',
         feeMint,
-        feeTokenProgram: isNativeSolFee ? null : feeTokenProgram,
+        feeTokenProgram,
         feeRecipient: null,
         feeShieldedAddress,
         feeRecipientExists: false,
@@ -348,6 +362,7 @@ export function computeNativeFeeQuote(params: {
         feeBps: 0,
         flatFee: true,
         nullifierCount: Number(nullifierCount),
+        ...metaFields,
         estimatedRelayCostLamports: txBaseLamports.toString(),
         estimatedRelayCostUsd: costUsd(txBaseLamports),
         reason: hasUnsafeSelfPayExt
@@ -357,30 +372,6 @@ export function computeNativeFeeQuote(params: {
     }
 
     const flatLamports = BigInt(Math.ceil(Number(txBaseLamports) * marginMult))
-
-    if (isNativeSolFee) {
-      return {
-        ok: true,
-        cluster,
-        op,
-        billingMode: 'self_paying',
-        feeSide: 'shielded_cm2',
-        feeMint,
-        feeTokenProgram: null,
-        feeRecipient: null,
-        feeShieldedAddress,
-        feeRecipientExists: true,
-        needsFeeAtaSetup: false,
-        relayerFee: flatLamports.toString(),
-        feeBps: 0,
-        flatFee: true,
-        nullifierCount: Number(nullifierCount),
-        estimatedRelayCostLamports: txBaseLamports.toString(),
-        estimatedRelayCostUsd: costUsd(txBaseLamports),
-        reason:
-          'Flat shielded cm2 SOL relay fee covering exact nullifier & page rent + gas (verified via read-only relayer FVK; transfer amount not required).',
-      }
-    }
 
     let flatTokenUnits: bigint | null = null
     if (feeMint === WSOL_MINT_STR) {
@@ -410,10 +401,13 @@ export function computeNativeFeeQuote(params: {
         feeBps: 0,
         flatFee: true,
         nullifierCount: Number(nullifierCount),
+        ...metaFields,
         estimatedRelayCostLamports: txBaseLamports.toString(),
         estimatedRelayCostUsd: costUsd(txBaseLamports),
         reason:
-          'Flat shielded cm2 SPL relay fee covering exact nullifier & page rent + gas (verified via read-only relayer FVK; transfer amount not required).',
+          feeMint === WSOL_MINT_STR
+            ? 'Flat shielded cm2 WSOL relay fee covering exact nullifier & page rent + gas (verified via read-only relayer FVK; transfer amount not required).'
+            : 'Flat shielded cm2 SPL/Token-2022 relay fee covering exact nullifier & page rent + gas (verified via read-only relayer FVK; transfer amount not required).',
       }
     }
 
@@ -433,6 +427,7 @@ export function computeNativeFeeQuote(params: {
       feeBps: 0,
       flatFee: true,
       nullifierCount: Number(nullifierCount),
+      ...metaFields,
       estimatedRelayCostLamports: txBaseLamports.toString(),
       estimatedRelayCostUsd: costUsd(txBaseLamports),
       reason: 'Unpriced token transfer sponsored under relay rate limits.',
@@ -449,7 +444,7 @@ export function computeNativeFeeQuote(params: {
       billingMode: 'sponsored',
       feeSide,
       feeMint,
-      feeTokenProgram,
+      feeTokenProgram: isDirectLamportPayout ? null : feeTokenProgram,
       feeRecipient: hasUnsafeSelfPayExt ? feeRecipient : null,
       feeShieldedAddress,
       feeRecipientExists: hasUnsafeSelfPayExt ? feeRecipientExists : false,
@@ -458,6 +453,7 @@ export function computeNativeFeeQuote(params: {
       feeBps: 0,
       flatFee: false,
       nullifierCount: Number(nullifierCount),
+      ...metaFields,
       estimatedRelayCostLamports: txBaseLamports.toString(),
       estimatedRelayCostUsd: costUsd(txBaseLamports),
       reason: hasUnsafeSelfPayExt
@@ -466,8 +462,8 @@ export function computeNativeFeeQuote(params: {
     }
   }
 
-  // Native SOL fee (Native SOL Withdraw, atomic `unwrap_wsol`, or SOL ExecViaEscrow)
-  if (isNativeSolFee) {
+  // Atomic WSOL unwrap Withdraw (`WITHDRAW_FLAG_UNWRAP_WSOL`): relayer fee paid directly in SOL lamports to `relayerPubkey`
+  if (isDirectLamportPayout) {
     const neededLamports = BigInt(Math.ceil(Number(txBaseLamports) * marginMult))
     const pctFee = (amount * BigInt(cfg.baseSwapFeeBps)) / 10_000n
     const candidateFee = neededLamports > pctFee ? neededLamports : pctFee
@@ -489,10 +485,11 @@ export function computeNativeFeeQuote(params: {
         feeBps: Math.max(1, effBps),
         flatFee: false,
         nullifierCount: Number(nullifierCount),
+        ...metaFields,
         estimatedRelayCostLamports: txBaseLamports.toString(),
         estimatedRelayCostUsd: costUsd(txBaseLamports),
         reason:
-          'Self-paying Native SOL relay fee covers nullifier rent & gas — zero SOL needed in caller wallet.',
+          'Self-paying atomic WSOL-unwrap relay fee covers nullifier rent & gas — zero SOL needed in caller wallet.',
       }
     }
     return {
@@ -511,6 +508,7 @@ export function computeNativeFeeQuote(params: {
       feeBps: 0,
       flatFee: false,
       nullifierCount: Number(nullifierCount),
+      ...metaFields,
       estimatedRelayCostLamports: txBaseLamports.toString(),
       estimatedRelayCostUsd: costUsd(txBaseLamports),
       reason: 'Small action sponsored under relay rate limits.',
@@ -552,6 +550,7 @@ export function computeNativeFeeQuote(params: {
         feeBps: Math.max(1, effBps),
         flatFee: false,
         nullifierCount: Number(nullifierCount),
+        ...metaFields,
         estimatedRelayCostLamports: effectiveLamports.toString(),
         estimatedRelayCostUsd: costUsd(effectiveLamports),
         reason: feeRecipientExists
@@ -577,6 +576,7 @@ export function computeNativeFeeQuote(params: {
     feeBps: 0,
     flatFee: false,
     nullifierCount: Number(nullifierCount),
+    ...metaFields,
     estimatedRelayCostLamports: txBaseLamports.toString(),
     estimatedRelayCostUsd: costUsd(txBaseLamports),
     reason: 'Small or unpriced token action sponsored under relay rate limits.',

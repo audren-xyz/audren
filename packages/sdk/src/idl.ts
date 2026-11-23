@@ -9,7 +9,7 @@ export const AUDREN_CODAMA_IDL = {
     "kind": "programNode",
     "name": "audren",
     "publicKey": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
-    "version": "1.1.1",
+    "version": "1.2.0",
     "origin": "shank",
     "docs": [
       "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16, 4-ary Depth-20 MASP) and Protocol-Agnostic DeFi Execution Program on Solana."
@@ -38,7 +38,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2PL02"
+                "data": "AUD1PL01"
               }
             }
           }
@@ -129,25 +129,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "solVaultBump",
-              "type": {
-                "kind": "numberTypeNode",
-                "format": "u8",
-                "endian": "le"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
               "name": "vaultAuthBump",
-              "type": {
-                "kind": "numberTypeNode",
-                "format": "u8",
-                "endian": "le"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "mode",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u8",
@@ -159,7 +141,7 @@ export const AUDREN_CODAMA_IDL = {
               "name": "reserved1",
               "type": {
                 "kind": "fixedSizeTypeNode",
-                "size": 5,
+                "size": 7,
                 "type": {
                   "kind": "bytesTypeNode"
                 }
@@ -185,13 +167,9 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "auditorPk",
+              "name": "pendingAuthority",
               "type": {
-                "kind": "fixedSizeTypeNode",
-                "size": 32,
-                "type": {
-                  "kind": "bytesTypeNode"
-                }
+                "kind": "publicKeyTypeNode"
               }
             },
             {
@@ -231,7 +209,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2RV01"
+                "data": "AUD1RV01"
               }
             }
           }
@@ -314,7 +292,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2LN01"
+                "data": "AUD1LN01"
               }
             }
           }
@@ -443,7 +421,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "accountNode",
         "name": "subtreePage",
         "docs": [
-          "Append-only 256-leaf note commitment page (8,256 B < 10 KiB)."
+          "Append-only 256-leaf note commitment page (8,256 B <= 10 KiB)."
         ],
         "size": 8256,
         "discriminators": [
@@ -462,7 +440,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2SB01"
+                "data": "AUD1SB01"
               }
             }
           }
@@ -562,7 +540,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "accountNode",
         "name": "subtreeRootPage",
         "docs": [
-          "Append-only 300 finalized 256-leaf subtree roots page (9,664 B < 10 KiB)."
+          "Append-only 300 finalized 256-leaf subtree roots page (9,664 B <= 10 KiB)."
         ],
         "size": 9664,
         "discriminators": [
@@ -581,7 +559,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2SR01"
+                "data": "AUD1SR01"
               }
             }
           }
@@ -681,9 +659,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "accountNode",
         "name": "memoPage",
         "docs": [
-          "Compact Structure-of-Arrays 112 x 90 B note memo page (10,144 B < 10 KiB)."
+          "Versioned Structure-of-Arrays 96 x 106 B note memo page (10,240 B == 10 KiB CPI cap)."
         ],
-        "size": 10144,
+        "size": 10240,
         "discriminators": [
           {
             "kind": "constantDiscriminatorNode",
@@ -700,7 +678,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2MM03"
+                "data": "AUD1MM01"
               }
             }
           }
@@ -807,7 +785,7 @@ export const AUDREN_CODAMA_IDL = {
                 },
                 "count": {
                   "kind": "fixedCountNode",
-                  "value": 112
+                  "value": 96
                 }
               }
             },
@@ -825,7 +803,7 @@ export const AUDREN_CODAMA_IDL = {
                 },
                 "count": {
                   "kind": "fixedCountNode",
-                  "value": 112
+                  "value": 96
                 }
               }
             },
@@ -836,14 +814,14 @@ export const AUDREN_CODAMA_IDL = {
                 "kind": "arrayTypeNode",
                 "item": {
                   "kind": "fixedSizeTypeNode",
-                  "size": 56,
+                  "size": 72,
                   "type": {
                     "kind": "bytesTypeNode"
                   }
                 },
                 "count": {
                   "kind": "fixedCountNode",
-                  "value": 112
+                  "value": 96
                 }
               }
             }
@@ -854,7 +832,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "accountNode",
         "name": "nullifierPage",
         "docs": [
-          "Append-only 600 x 16 B nullifier prefix page for zero-leakage wallet sync (9,664 B < 10 KiB)."
+          "Append-only 600 x 16 B nullifier prefix page for zero-leakage wallet sync (9,664 B <= 10 KiB)."
         ],
         "size": 9664,
         "discriminators": [
@@ -873,7 +851,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2NF01"
+                "data": "AUD1NF01"
               }
             }
           }
@@ -1010,7 +988,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD2CK01"
+                "data": "AUD1CK01"
               }
             }
           }
@@ -1137,7 +1115,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "initPool",
         "docs": [
-          "Initialize PoolState (active_lanes = 0) and prefund unified sol_vault PDA."
+          "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0)."
         ],
         "discriminators": [
           {
@@ -1165,7 +1143,7 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Pool authority and rent payer."
+              "Initial pool authority and rent payer."
             ]
           },
           {
@@ -1176,16 +1154,6 @@ export const AUDREN_CODAMA_IDL = {
             "isOptional": false,
             "docs": [
               "PoolState PDA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "solVault",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Unified Native SOL custody vault PDA."
             ]
           },
           {
@@ -1556,9 +1524,9 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "instructionNode",
-        "name": "depositSol",
+        "name": "deposit",
         "docs": [
-          "Deposit Native SOL into unified sol_vault (supports zero-dust DEPOSIT_FLAG_FEE_FROM_AMOUNT)."
+          "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA."
         ],
         "discriminators": [
           {
@@ -1586,7 +1554,7 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Native SOL depositor signer."
+              "Depositor signer."
             ]
           },
           {
@@ -1601,12 +1569,52 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionAccountNode",
-            "name": "solVault",
+            "name": "vaultAuthority",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Unified vault_auth PDA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "mint",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "WSOL, Classic SPL, or Token-2022 Mint."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "sourceAccount",
             "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Unified sol_vault PDA."
+              "Depositor signer pubkey (when DEPOSIT_FLAG_NATIVE_SOL) or depositor token account."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "vaultAta",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Canonical vault_auth Associated Token Account for mint."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "tokenProgram",
+            "isWritable": false,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "Classic SPL Token or Token-2022 program."
             ]
           },
           {
@@ -1732,7 +1740,7 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "bit0=nextSub, bit1=nextMemo, bit2=DEPOSIT_FLAG_FEE_FROM_AMOUNT."
+              "bit0=nextSub, bit1=nextMemo, bit2=DEPOSIT_FLAG_FEE_FROM_AMOUNT, bit3=DEPOSIT_FLAG_NATIVE_SOL."
             ]
           },
           {
@@ -1768,275 +1776,10 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "memo90",
+            "name": "memo106",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 90,
-              "type": {
-                "kind": "bytesTypeNode"
-              }
-            }
-          }
-        ]
-      },
-      {
-        "kind": "instructionNode",
-        "name": "depositSpl",
-        "docs": [
-          "Deposit Classic SPL or Token-2022 (net TransferFee + active TransferHook) into unified vault_auth ATA."
-        ],
-        "discriminators": [
-          {
-            "kind": "constantDiscriminatorNode",
-            "offset": 0,
-            "constant": {
-              "kind": "constantValueNode",
-              "type": {
-                "kind": "numberTypeNode",
-                "format": "u8",
-                "endian": "le"
-              },
-              "value": {
-                "kind": "numberValueNode",
-                "number": 4
-              }
-            }
-          }
-        ],
-        "accounts": [
-          {
-            "kind": "instructionAccountNode",
-            "name": "depositor",
-            "isWritable": true,
-            "isSigner": true,
-            "isOptional": false,
-            "docs": [
-              "Token depositor signer."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "poolState",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "PoolState PDA (read-only)."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "vaultAuthority",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Unified vault_auth PDA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "mint",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "SPL or Token-2022 Mint."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "depositorAta",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Depositor source token account."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "vaultAta",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Pool vault_auth token account."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "tokenProgram",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Classic SPL Token or Token-2022 program."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "laneState",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Target active LaneTreeState PDA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "laneRentVault",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Per-lane LaneRentVault PDA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "subtreePage",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Active SubtreePage PDA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "subrootPage",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Active SubtreeRootPage PDA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "memoPage",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "Active MemoPage PDA."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "systemProgram",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "System Program."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "nextSubtreePage",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": true,
-            "docs": [
-              "Optional rollover SubtreePage."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "nextMemoPage",
-            "isWritable": true,
-            "isSigner": false,
-            "isOptional": true,
-            "docs": [
-              "Optional rollover MemoPage."
-            ]
-          }
-        ],
-        "arguments": [
-          {
-            "kind": "instructionArgumentNode",
-            "name": "tag",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u8",
-              "endian": "le"
-            },
-            "defaultValue": {
-              "kind": "numberValueNode",
-              "number": 4
-            },
-            "defaultValueStrategy": "omitted"
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "poolId",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u32",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "laneId",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u8",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "flags",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u8",
-              "endian": "le"
-            },
-            "docs": [
-              "bit0=nextSub, bit1=nextMemo."
-            ]
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "amount",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u64",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "stealthOwner",
-            "type": {
-              "kind": "fixedSizeTypeNode",
-              "size": 32,
-              "type": {
-                "kind": "bytesTypeNode"
-              }
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "blinding",
-            "type": {
-              "kind": "fixedSizeTypeNode",
-              "size": 32,
-              "type": {
-                "kind": "bytesTypeNode"
-              }
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "memo90",
-            "type": {
-              "kind": "fixedSizeTypeNode",
-              "size": 90,
+              "size": 106,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -2063,7 +1806,7 @@ export const AUDREN_CODAMA_IDL = {
               },
               "value": {
                 "kind": "numberValueNode",
-                "number": 5
+                "number": 4
               }
             }
           }
@@ -2121,7 +1864,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             "defaultValue": {
               "kind": "numberValueNode",
-              "number": 5
+              "number": 4
             },
             "defaultValueStrategy": "omitted"
           },
@@ -2138,9 +1881,9 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "instructionNode",
-        "name": "joinSplit",
+        "name": "transact",
         "docs": [
-          "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw (incl. atomic WSOL unwrap & pause-exempt full exit)."
+          "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit)."
         ],
         "discriminators": [
           {
@@ -2155,7 +1898,7 @@ export const AUDREN_CODAMA_IDL = {
               },
               "value": {
                 "kind": "numberValueNode",
-                "number": 6
+                "number": 5
               }
             }
           }
@@ -2293,7 +2036,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             "defaultValue": {
               "kind": "numberValueNode",
-              "number": 6
+              "number": 5
             },
             "defaultValueStrategy": "omitted"
           },
@@ -2342,7 +2085,7 @@ export const AUDREN_CODAMA_IDL = {
               "endian": "le"
             },
             "docs": [
-              "0=Private, 1=NativeSOL, 2=SPL/T22."
+              "0=Private, 1=Public (canonical SPL/Token-2022/WSOL vault ATA)."
             ]
           },
           {
@@ -2454,7 +2197,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "execViaEscrow",
         "docs": [
-          "Atomic multi-asset DeFi CPI behind WatchedEscrowBuf firewall with optional EXEC_FLAG_FEE_ON_OUTPUT and XOR-masked dynamic output memo."
+          "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, and XOR-masked 72 B dynamic output memo."
         ],
         "discriminators": [
           {
@@ -2469,7 +2212,7 @@ export const AUDREN_CODAMA_IDL = {
               },
               "value": {
                 "kind": "numberValueNode",
-                "number": 7
+                "number": 6
               }
             }
           }
@@ -2627,7 +2370,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             "defaultValue": {
               "kind": "numberValueNode",
-              "number": 7
+              "number": 6
             },
             "defaultValueStrategy": "omitted"
           },
@@ -2675,30 +2418,6 @@ export const AUDREN_CODAMA_IDL = {
               "format": "u8",
               "endian": "le"
             }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "inKind",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u8",
-              "endian": "le"
-            },
-            "docs": [
-              "0=SOL, 1=SPL/T22."
-            ]
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "outKind",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u8",
-              "endian": "le"
-            },
-            "docs": [
-              "0=SOL, 1=SPL/T22."
-            ]
           },
           {
             "kind": "instructionArgumentNode",
@@ -2840,10 +2559,10 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "dynMask56",
+            "name": "dynMask72",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 56,
+              "size": 72,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -2877,7 +2596,7 @@ export const AUDREN_CODAMA_IDL = {
               },
               "value": {
                 "kind": "numberValueNode",
-                "number": 8
+                "number": 7
               }
             }
           }
@@ -2891,6 +2610,87 @@ export const AUDREN_CODAMA_IDL = {
             "isOptional": false,
             "docs": [
               "Pool authority signer."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "poolState",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "PoolState PDA."
+            ]
+          }
+        ],
+        "arguments": [
+          {
+            "kind": "instructionArgumentNode",
+            "name": "tag",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "defaultValue": {
+              "kind": "numberValueNode",
+              "number": 7
+            },
+            "defaultValueStrategy": "omitted"
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "poolId",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u32",
+              "endian": "le"
+            }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "paused",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "instructionNode",
+        "name": "updatePool",
+        "docs": [
+          "Update pool governance parameters or execute two-step authority transfer / renounce (renounce requires !paused)."
+        ],
+        "discriminators": [
+          {
+            "kind": "constantDiscriminatorNode",
+            "offset": 0,
+            "constant": {
+              "kind": "constantValueNode",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u8",
+                "endian": "le"
+              },
+              "value": {
+                "kind": "numberValueNode",
+                "number": 8
+              }
+            }
+          }
+        ],
+        "accounts": [
+          {
+            "kind": "instructionAccountNode",
+            "name": "signer",
+            "isWritable": false,
+            "isSigner": true,
+            "isOptional": false,
+            "docs": [
+              "Pool authority (or pending_authority for AcceptAuthority)."
             ]
           },
           {
@@ -2930,43 +2730,30 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "paused",
+            "name": "action",
             "type": {
               "kind": "numberTypeNode",
               "format": "u8",
               "endian": "le"
-            }
+            },
+            "docs": [
+              "0=UpdateParams, 1=ProposeAuthority, 2=AcceptAuthority, 3=RenounceAuthority."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "payload",
+            "type": {
+              "kind": "bytesTypeNode"
+            },
+            "docs": [
+              "UpdateParams: ckpt_interval(8)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."
+            ]
           }
         ]
       }
     ],
-    "definedTypes": [
-      {
-        "kind": "definedTypeNode",
-        "name": "poolMode",
-        "docs": [
-          "Pool governance / verifying-key policy."
-        ],
-        "type": {
-          "kind": "enumTypeNode",
-          "size": {
-            "kind": "numberTypeNode",
-            "format": "u8",
-            "endian": "le"
-          },
-          "variants": [
-            {
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "permissionless"
-            },
-            {
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "institutionalAudited"
-            }
-          ]
-        }
-      }
-    ],
+    "definedTypes": [],
     "pdas": [
       {
         "kind": "pdaNode",
@@ -2979,7 +2766,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 14,
+              "size": 11,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -2987,40 +2774,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_pool"
-            }
-          },
-          {
-            "kind": "variablePdaSeedNode",
-            "name": "poolId",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u32",
-              "endian": "le"
-            }
-          }
-        ]
-      },
-      {
-        "kind": "pdaNode",
-        "name": "solVault",
-        "docs": [
-          "Unified System-owned Native SOL custody vault PDA."
-        ],
-        "seeds": [
-          {
-            "kind": "constantPdaSeedNode",
-            "type": {
-              "kind": "fixedSizeTypeNode",
-              "size": 13,
-              "type": {
-                "kind": "bytesTypeNode"
-              }
-            },
-            "value": {
-              "kind": "bytesValueNode",
-              "encoding": "utf8",
-              "data": "audren_v2_sol"
+              "data": "audren_pool"
             }
           },
           {
@@ -3038,14 +2792,14 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "pdaNode",
         "name": "vaultAuthority",
         "docs": [
-          "Unified SPL / Token-2022 custody vault ATA owner PDA."
+          "Unified WSOL / Classic SPL / Token-2022 custody vault ATA owner PDA."
         ],
         "seeds": [
           {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 15,
+              "size": 17,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3053,7 +2807,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_vault"
+              "data": "audren_vault_auth"
             }
           },
           {
@@ -3078,7 +2832,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 14,
+              "size": 11,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3086,7 +2840,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_lane"
+              "data": "audren_lane"
             }
           },
           {
@@ -3120,7 +2874,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 15,
+              "size": 16,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3128,7 +2882,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_lrent"
+              "data": "audren_lane_rent"
             }
           },
           {
@@ -3162,7 +2916,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 13,
+              "size": 14,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3170,7 +2924,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_sub"
+              "data": "audren_subtree"
             }
           },
           {
@@ -3213,7 +2967,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 15,
+              "size": 14,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3221,7 +2975,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_sroot"
+              "data": "audren_subroot"
             }
           },
           {
@@ -3257,14 +3011,14 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "pdaNode",
         "name": "memoPage",
         "docs": [
-          "112 x 90 B compact SoA encrypted note memos PDA (10,144 B)."
+          "96 x 106 B versioned SoA encrypted note memos PDA (10,240 B)."
         ],
         "seeds": [
           {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 14,
+              "size": 11,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3272,7 +3026,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_memo"
+              "data": "audren_memo"
             }
           },
           {
@@ -3315,7 +3069,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 16,
+              "size": 14,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3323,7 +3077,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_nfpage"
+              "data": "audren_nf_page"
             }
           },
           {
@@ -3366,7 +3120,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 14,
+              "size": 11,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3374,7 +3128,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_ckpt"
+              "data": "audren_ckpt"
             }
           },
           {
@@ -3408,7 +3162,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 14,
+              "size": 9,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3416,7 +3170,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_null"
+              "data": "audren_nf"
             }
           },
           {
@@ -3452,7 +3206,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 16,
+              "size": 13,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3460,7 +3214,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_escrow"
+              "data": "audren_escrow"
             }
           },
           {
@@ -3494,7 +3248,7 @@ export const AUDREN_CODAMA_IDL = {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 16,
+              "size": 13,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3502,7 +3256,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_v2_unwrap"
+              "data": "audren_unwrap"
             }
           },
           {
@@ -3632,9 +3386,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "invalidVkId",
         "code": 6011,
-        "message": "Verifying key identifier is unsupported for this PoolMode.",
+        "message": "Verifying key identifier is unsupported.",
         "docs": [
-          "Verifying key identifier is unsupported for this PoolMode."
+          "Verifying key identifier is unsupported."
         ]
       },
       {
@@ -3695,9 +3449,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "memoPageFull",
         "code": 6018,
-        "message": "Active MemoPage has reached 112 note entries.",
+        "message": "Active MemoPage has reached 96 note entries.",
         "docs": [
-          "Active MemoPage has reached 112 note entries."
+          "Active MemoPage has reached 96 note entries."
         ]
       },
       {
@@ -3713,9 +3467,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "invalidTokenAccount",
         "code": 6020,
-        "message": "Invalid SPL / Token-2022 mint, custody ATA, delegate, close_authority, or TLV extension.",
+        "message": "Invalid SPL / Token-2022 mint, canonical custody/escrow ATA, delegate, close_authority, or TLV extension.",
         "docs": [
-          "Invalid SPL / Token-2022 mint, custody ATA, delegate, close_authority, or TLV extension."
+          "Invalid SPL / Token-2022 mint, canonical custody/escrow ATA, delegate, close_authority, or TLV extension."
         ]
       },
       {
@@ -3731,9 +3485,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "escrowNotDrained",
         "code": 6022,
-        "message": "External DeFi CPI left unspent input tokens or SOL dust in escrow.",
+        "message": "External DeFi CPI left unspent input tokens in escrow.",
         "docs": [
-          "External DeFi CPI left unspent input tokens or SOL dust in escrow."
+          "External DeFi CPI left unspent input tokens in escrow."
         ]
       },
       {
@@ -3785,18 +3539,18 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "unauthorized",
         "code": 6028,
-        "message": "Required authority signer is missing or mismatched.",
+        "message": "Required authority signer is missing, renounced, or mismatched.",
         "docs": [
-          "Required authority signer is missing or mismatched."
+          "Required authority signer is missing, renounced, or mismatched."
         ]
       },
       {
         "kind": "errorNode",
         "name": "pageSeqOutOfRange",
         "code": 6029,
-        "message": "OpenPage sequence exceeds cur_seq + 2 lookahead bound.",
+        "message": "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage).",
         "docs": [
-          "OpenPage sequence exceeds cur_seq + 2 lookahead bound."
+          "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage)."
         ]
       },
       {
@@ -3835,7 +3589,7 @@ export const AUDREN_ANCHOR_IDL = {
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "1.1.1",
+    "version": "1.2.0",
     "spec": "0.1.0",
     "description": "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
@@ -3844,7 +3598,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "init_pool",
       "docs": [
-        "Initialize PoolState (active_lanes = 0) and prefund unified sol_vault PDA."
+        "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0)."
       ],
       "discriminator": [
         0
@@ -3857,11 +3611,6 @@ export const AUDREN_ANCHOR_IDL = {
         },
         {
           "name": "pool_state",
-          "writable": true,
-          "signer": false
-        },
-        {
-          "name": "sol_vault",
           "writable": true,
           "signer": false
         },
@@ -4020,125 +3769,12 @@ export const AUDREN_ANCHOR_IDL = {
       ]
     },
     {
-      "name": "deposit_sol",
+      "name": "deposit",
       "docs": [
-        "Deposit Native SOL into unified sol_vault (supports zero-dust DEPOSIT_FLAG_FEE_FROM_AMOUNT)."
+        "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA."
       ],
       "discriminator": [
         3
-      ],
-      "accounts": [
-        {
-          "name": "depositor",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "pool_state",
-          "writable": false,
-          "signer": false
-        },
-        {
-          "name": "sol_vault",
-          "writable": true,
-          "signer": false
-        },
-        {
-          "name": "lane_state",
-          "writable": true,
-          "signer": false
-        },
-        {
-          "name": "lane_rent_vault",
-          "writable": true,
-          "signer": false
-        },
-        {
-          "name": "subtree_page",
-          "writable": true,
-          "signer": false
-        },
-        {
-          "name": "subroot_page",
-          "writable": true,
-          "signer": false
-        },
-        {
-          "name": "memo_page",
-          "writable": true,
-          "signer": false
-        },
-        {
-          "name": "system_program",
-          "writable": false,
-          "signer": false
-        },
-        {
-          "name": "next_subtree_page",
-          "writable": true,
-          "signer": false,
-          "optional": true
-        },
-        {
-          "name": "next_memo_page",
-          "writable": true,
-          "signer": false,
-          "optional": true
-        }
-      ],
-      "args": [
-        {
-          "name": "pool_id",
-          "type": "u32"
-        },
-        {
-          "name": "lane_id",
-          "type": "u8"
-        },
-        {
-          "name": "flags",
-          "type": "u8"
-        },
-        {
-          "name": "amount",
-          "type": "u64"
-        },
-        {
-          "name": "stealth_owner",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          }
-        },
-        {
-          "name": "blinding",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          }
-        },
-        {
-          "name": "memo90",
-          "type": {
-            "array": [
-              "u8",
-              90
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "deposit_spl",
-      "docs": [
-        "Deposit Classic SPL or Token-2022 (net TransferFee + active TransferHook) into unified vault_auth ATA."
-      ],
-      "discriminator": [
-        4
       ],
       "accounts": [
         {
@@ -4162,7 +3798,7 @@ export const AUDREN_ANCHOR_IDL = {
           "signer": false
         },
         {
-          "name": "depositor_ata",
+          "name": "source_account",
           "writable": true,
           "signer": false
         },
@@ -4255,11 +3891,11 @@ export const AUDREN_ANCHOR_IDL = {
           }
         },
         {
-          "name": "memo90",
+          "name": "memo106",
           "type": {
             "array": [
               "u8",
-              90
+              106
             ]
           }
         }
@@ -4271,7 +3907,7 @@ export const AUDREN_ANCHOR_IDL = {
         "Permissionless, pause-exempt global super_root checkpoint publisher over active_lanes read-only lanes."
       ],
       "discriminator": [
-        5
+        4
       ],
       "accounts": [
         {
@@ -4303,12 +3939,12 @@ export const AUDREN_ANCHOR_IDL = {
       ]
     },
     {
-      "name": "join_split",
+      "name": "transact",
       "docs": [
-        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw (incl. atomic WSOL unwrap & pause-exempt full exit)."
+        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit)."
       ],
       "discriminator": [
-        6
+        5
       ],
       "accounts": [
         {
@@ -4468,10 +4104,10 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "exec_via_escrow",
       "docs": [
-        "Atomic multi-asset DeFi CPI behind WatchedEscrowBuf firewall with optional EXEC_FLAG_FEE_ON_OUTPUT and XOR-masked dynamic output memo."
+        "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, and XOR-masked 72 B dynamic output memo."
       ],
       "discriminator": [
-        7
+        6
       ],
       "accounts": [
         {
@@ -4564,14 +4200,6 @@ export const AUDREN_ANCHOR_IDL = {
         },
         {
           "name": "change_mask",
-          "type": "u8"
-        },
-        {
-          "name": "in_kind",
-          "type": "u8"
-        },
-        {
-          "name": "out_kind",
           "type": "u8"
         },
         {
@@ -4672,11 +4300,11 @@ export const AUDREN_ANCHOR_IDL = {
           }
         },
         {
-          "name": "dyn_mask56",
+          "name": "dyn_mask72",
           "type": {
             "array": [
               "u8",
-              56
+              72
             ]
           }
         },
@@ -4692,7 +4320,7 @@ export const AUDREN_ANCHOR_IDL = {
         "Authority-only emergency pause toggle (full withdrawals, PublishCheckpoint, and OpenPage remain permanently open)."
       ],
       "discriminator": [
-        8
+        7
       ],
       "accounts": [
         {
@@ -4716,6 +4344,41 @@ export const AUDREN_ANCHOR_IDL = {
           "type": "u8"
         }
       ]
+    },
+    {
+      "name": "update_pool",
+      "docs": [
+        "Update pool governance parameters or execute two-step authority transfer / renounce (renounce requires !paused)."
+      ],
+      "discriminator": [
+        8
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "writable": false,
+          "signer": true
+        },
+        {
+          "name": "pool_state",
+          "writable": true,
+          "signer": false
+        }
+      ],
+      "args": [
+        {
+          "name": "pool_id",
+          "type": "u32"
+        },
+        {
+          "name": "action",
+          "type": "u8"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        }
+      ]
     }
   ],
   "accounts": [
@@ -4725,11 +4388,11 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         80,
         76,
         48,
-        50
+        49
       ]
     },
     {
@@ -4738,7 +4401,7 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         82,
         86,
         48,
@@ -4751,7 +4414,7 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         76,
         78,
         48,
@@ -4764,7 +4427,7 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         83,
         66,
         48,
@@ -4777,7 +4440,7 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         83,
         82,
         48,
@@ -4790,11 +4453,11 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         77,
         77,
         48,
-        51
+        49
       ]
     },
     {
@@ -4803,7 +4466,7 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         78,
         70,
         48,
@@ -4816,7 +4479,7 @@ export const AUDREN_ANCHOR_IDL = {
         65,
         85,
         68,
-        50,
+        49,
         67,
         75,
         48,
@@ -4825,23 +4488,6 @@ export const AUDREN_ANCHOR_IDL = {
     }
   ],
   "types": [
-    {
-      "name": "PoolMode",
-      "docs": [
-        "Pool governance / verifying-key policy."
-      ],
-      "type": {
-        "kind": "enum",
-        "variants": [
-          {
-            "name": "Permissionless"
-          },
-          {
-            "name": "InstitutionalAudited"
-          }
-        ]
-      }
-    },
     {
       "name": "PoolState",
       "docs": [
@@ -4892,15 +4538,7 @@ export const AUDREN_ANCHOR_IDL = {
             "type": "pubkey"
           },
           {
-            "name": "sol_vault_bump",
-            "type": "u8"
-          },
-          {
             "name": "vault_auth_bump",
-            "type": "u8"
-          },
-          {
-            "name": "mode",
             "type": "u8"
           },
           {
@@ -4908,7 +4546,7 @@ export const AUDREN_ANCHOR_IDL = {
             "type": {
               "array": [
                 "u8",
-                5
+                7
               ]
             }
           },
@@ -4921,13 +4559,8 @@ export const AUDREN_ANCHOR_IDL = {
             "type": "u64"
           },
           {
-            "name": "auditor_pk",
-            "type": {
-              "array": [
-                "u8",
-                32
-              ]
-            }
+            "name": "pending_authority",
+            "type": "pubkey"
           },
           {
             "name": "reserved2",
@@ -5065,7 +4698,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "SubtreePage",
       "docs": [
-        "Append-only 256-leaf note commitment page (8,256 B < 10 KiB)."
+        "Append-only 256-leaf note commitment page (8,256 B <= 10 KiB)."
       ],
       "type": {
         "kind": "struct",
@@ -5128,7 +4761,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "SubtreeRootPage",
       "docs": [
-        "Append-only 300 finalized 256-leaf subtree roots page (9,664 B < 10 KiB)."
+        "Append-only 300 finalized 256-leaf subtree roots page (9,664 B <= 10 KiB)."
       ],
       "type": {
         "kind": "struct",
@@ -5191,7 +4824,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "MemoPage",
       "docs": [
-        "Compact Structure-of-Arrays 112 x 90 B note memo page (10,144 B < 10 KiB)."
+        "Versioned Structure-of-Arrays 96 x 106 B note memo page (10,240 B == 10 KiB CPI cap)."
       ],
       "type": {
         "kind": "struct",
@@ -5252,7 +4885,7 @@ export const AUDREN_ANCHOR_IDL = {
                     2
                   ]
                 },
-                112
+                96
               ]
             }
           },
@@ -5266,7 +4899,7 @@ export const AUDREN_ANCHOR_IDL = {
                     32
                   ]
                 },
-                112
+                96
               ]
             }
           },
@@ -5277,10 +4910,10 @@ export const AUDREN_ANCHOR_IDL = {
                 {
                   "array": [
                     "u8",
-                    56
+                    72
                   ]
                 },
-                112
+                96
               ]
             }
           }
@@ -5290,7 +4923,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "NullifierPage",
       "docs": [
-        "Append-only 600 x 16 B nullifier prefix page for zero-leakage wallet sync (9,664 B < 10 KiB)."
+        "Append-only 600 x 16 B nullifier prefix page for zero-leakage wallet sync (9,664 B <= 10 KiB)."
       ],
       "type": {
         "kind": "struct",
@@ -5494,7 +5127,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6011,
       "name": "InvalidVkId",
-      "msg": "Verifying key identifier is unsupported for this PoolMode."
+      "msg": "Verifying key identifier is unsupported."
     },
     {
       "code": 6012,
@@ -5529,7 +5162,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6018,
       "name": "MemoPageFull",
-      "msg": "Active MemoPage has reached 112 note entries."
+      "msg": "Active MemoPage has reached 96 note entries."
     },
     {
       "code": 6019,
@@ -5539,7 +5172,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6020,
       "name": "InvalidTokenAccount",
-      "msg": "Invalid SPL / Token-2022 mint, custody ATA, delegate, close_authority, or TLV extension."
+      "msg": "Invalid SPL / Token-2022 mint, canonical custody/escrow ATA, delegate, close_authority, or TLV extension."
     },
     {
       "code": 6021,
@@ -5549,7 +5182,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6022,
       "name": "EscrowNotDrained",
-      "msg": "External DeFi CPI left unspent input tokens or SOL dust in escrow."
+      "msg": "External DeFi CPI left unspent input tokens in escrow."
     },
     {
       "code": 6023,
@@ -5579,12 +5212,12 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6028,
       "name": "Unauthorized",
-      "msg": "Required authority signer is missing or mismatched."
+      "msg": "Required authority signer is missing, renounced, or mismatched."
     },
     {
       "code": 6029,
       "name": "PageSeqOutOfRange",
-      "msg": "OpenPage sequence exceeds cur_seq + 2 lookahead bound."
+      "msg": "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage)."
     },
     {
       "code": 6030,

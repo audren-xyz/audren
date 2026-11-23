@@ -1,4 +1,4 @@
-//! Canonical Cross-Language Conformance Vector Suite for Audren (`spec/test-vectors.json`).
+//! Canonical Cross-Language Conformance Vector Suite for Audren v1 (`spec/test-vectors.json`).
 //!
 //! Verified byte-for-byte on every CI run by:
 //! - Rust (`audren-client`)
@@ -27,28 +27,29 @@ use audren_client::{
         poseidon::{fr_to_be_bytes, poseidon2, poseidon4, poseidon5},
     },
     audren_core::{
-        instruction::{ASSET_MODE_PRIVATE, ASSET_MODE_SPL, VK_ID_DEFAULT},
+        instruction::{ASSET_MODE_PRIVATE, ASSET_MODE_PUBLIC, VK_ID_DEFAULT},
         layout::{
             PoolState, CK_OFF_BUMP, CK_OFF_EPOCH_ID, CK_OFF_LANE_COUNTS, CK_OFF_LANE_ROOTS,
             CK_OFF_MAGIC, CK_OFF_POOL_ID, CK_OFF_PUBLISHED_SLOT, CK_OFF_SLOT_IDX,
-            CK_OFF_SUPER_ROOT, CK_OFF_VERSION, CKPT_LEN, CKPT_MAGIC, PL_OFF_ACTIVE_LANES,
-            PL_OFF_AUTHORITY, PL_OFF_BUMP, PL_OFF_CKPT_INTERVAL, PL_OFF_MAGIC,
-            PL_OFF_MAX_CKPT_AGE, PL_OFF_MODE, PL_OFF_NF_RENT_FEE, PL_OFF_NOTE_RENT_FEE,
-            PL_OFF_PAUSED, PL_OFF_POOL_ID, PL_OFF_SOL_VAULT_BUMP, PL_OFF_VAULT_AUTH_BUMP,
+            CK_OFF_SUPER_ROOT, CK_OFF_VERSION, CKPT_LEN, CKPT_MAGIC, DYN_MEMO_HEAD_LEN,
+            DYN_MEMO_MAGIC, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_VERSION_V1,
+            PL_OFF_ACTIVE_LANES, PL_OFF_AUTHORITY, PL_OFF_BUMP, PL_OFF_CKPT_INTERVAL,
+            PL_OFF_MAGIC, PL_OFF_MAX_CKPT_AGE, PL_OFF_NF_RENT_FEE, PL_OFF_NOTE_RENT_FEE,
+            PL_OFF_PAUSED, PL_OFF_PENDING_AUTHORITY, PL_OFF_POOL_ID, PL_OFF_VAULT_AUTH_BUMP,
             PL_OFF_VERSION, POOL_MAGIC, POOL_STATE_LEN,
         },
-        PoolMode, AUDREN_PROGRAM_ID, NATIVE_SOL_MINT, NUM_LANES, PROTOCOL_VERSION, WSOL_MINT,
+        AUDREN_PROGRAM_ID, NUM_LANES, PROTOCOL_VERSION, WSOL_MINT,
     },
-    instructions::{compute_exec_ctx_hash, compute_joinsplit_ctx_hash, AudrenAccountMeta},
+    instructions::{compute_exec_ctx_hash, compute_transact_ctx_hash, AudrenAccountMeta},
     keys::{
-        encrypt_note_memo, prepare_dynamic_swap_memo, try_decrypt_and_verify_memo_entry,
-        AudrenAddress, AudrenKeys, SelectiveDisclosureProof,
+        check_memo_view_tag, encrypt_note_memo, encrypt_note_memo_with_payment_id,
+        prepare_dynamic_swap_memo, try_decrypt_and_verify_memo_entry, AudrenAddress, AudrenKeys,
+        SelectiveDisclosureProof,
     },
     pda::{
         derive_checkpoint_pda, derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda,
         derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda,
-        derive_sol_vault_pda, derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda,
-        derive_vault_auth_pda,
+        derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda,
     },
     prover::AudrenProver,
 };
@@ -58,6 +59,12 @@ use solana_address::Address;
 fn to_hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+/// RFC 7748 Curve25519 low-order point of order 8.
+const ORDER_8_EPK: [u8; 32] = [
+    0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
+    0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
+];
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 struct KeyVector {
@@ -92,7 +99,6 @@ struct PdaVectors {
     shard_id: u8,
     nullifier_hex: String,
     pool: PdaEntry,
-    sol_vault: PdaEntry,
     vault_auth: PdaEntry,
     lane: PdaEntry,
     lane_rent: PdaEntry,
@@ -118,7 +124,6 @@ struct PoseidonVectors {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 struct AssetIdVectors {
-    native_sol_asset_id_hex: String,
     wsol_asset_id_hex: String,
     usdc_mint_b58: String,
     usdc_asset_id_hex: String,
@@ -129,19 +134,33 @@ struct MemoVector {
     eph_secret_hex: String,
     amount: u64,
     mint_hex: String,
+    payment_id_hex: String,
     tweak_hex: String,
     blinding_hex: String,
     stealth_owner_hex: String,
     commitment_hex: String,
-    memo_90_hex: String,
+    memo_106_hex: String,
+    dyn_eph_secret_hex: String,
+    dyn_tweak_hex: String,
+    dyn_blinding_hex: String,
     dyn_head_34_hex: String,
-    dyn_mask_56_hex: String,
+    dyn_mask_72_hex: String,
+    dyn_amount: u64,
+    dyn_mint_hex: String,
+    dyn_commitment_hex: String,
+    dyn_stamped_memo_106_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+struct LowOrderX25519Vectors {
+    all_zero_epk_hex: String,
+    order_8_epk_hex: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 struct CtxHashVectors {
-    joinsplit_private_ctx_hash_hex: String,
-    joinsplit_wsol_unwrap_ctx_hash_hex: String,
+    transact_private_ctx_hash_hex: String,
+    transact_wsol_unwrap_ctx_hash_hex: String,
     exec_fee_on_output_ctx_hash_hex: String,
 }
 
@@ -149,6 +168,8 @@ struct CtxHashVectors {
 struct Groth16Vector {
     vk_id: u8,
     super_root_hex: String,
+    out0_stealth_owner_hex: String,
+    out1_stealth_owner_hex: String,
     nf0_hex: String,
     nf1_hex: String,
     cm0_hex: String,
@@ -168,6 +189,7 @@ struct PoolStateVector {
     note_rent_fee: u64,
     nf_rent_fee: u64,
     paused: bool,
+    pending_authority_b58: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -183,6 +205,7 @@ struct ConformanceVectors {
     asset_ids: AssetIdVectors,
     pdas: PdaVectors,
     memo: MemoVector,
+    low_order_x25519: LowOrderX25519Vectors,
     selective_disclosure: SelectiveDisclosureProof,
     ctx_hashes: CtxHashVectors,
     groth16: Groth16Vector,
@@ -210,8 +233,14 @@ fn build_canonical_vectors() -> ConformanceVectors {
     let alice_sub1 = AudrenKeys::from_seed_subaccount(&alice_seed, 1);
     let bob = AudrenKeys::from_seed(&bob_seed);
 
-    let decoded_addr = AudrenAddress::decode(&alice.address().encode()).unwrap();
+    let alice_addr_str = alice.address().encode();
+    assert_eq!(alice_addr_str.len(), 114, "BIP-350 Bech32m aud1 address must be 114 chars");
+    let decoded_addr = AudrenAddress::decode(&alice_addr_str).unwrap();
     assert_eq!(decoded_addr, alice.address());
+    assert_eq!(
+        AudrenAddress::decode(&alice_addr_str.to_ascii_uppercase()).unwrap(),
+        alice.address()
+    );
 
     let sess0 = AudrenKeys::derive_defi_session_keypair(&alice_seed, 0);
     let sess3 = AudrenKeys::derive_defi_session_keypair(&alice_seed, 3);
@@ -221,27 +250,71 @@ fn build_canonical_vectors() -> ConformanceVectors {
         .unwrap();
     let usdc_mint = usdc_addr.to_bytes();
 
-    let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
     let wsol_asset = derive_asset_id(&WSOL_MINT);
     let usdc_asset = derive_asset_id(&usdc_mint);
 
-    // Memo & note commitment
+    // Versioned 106 B static memo (72 B AEAD ciphertext + 34 B header AAD + 14 B payment_id)
     let eph_secret = [0x33u8; 32];
     let amount = 1_500_000u64;
-    let (tw, bl, memo_90) = encrypt_note_memo(&alice.view_pk, eph_secret, amount, &NATIVE_SOL_MINT);
+    let payment_id: [u8; 14] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+    let (tw, bl, memo_106) =
+        encrypt_note_memo_with_payment_id(&alice.view_pk, eph_secret, amount, &WSOL_MINT, payment_id)
+            .expect("valid view_pk");
     let stealth = derive_stealth_owner(alice.spend_pk, tw);
-    let cm = compute_note_commitment(stealth, sol_asset, amount, bl);
+    let cm = compute_note_commitment(stealth, wsol_asset, amount, bl);
     let cm_be = fr_to_be_bytes(&cm);
     let fvk = alice.full_viewing_key();
-    let vt = [memo_90[0], memo_90[1]];
-    let epk: [u8; 32] = memo_90[2..34].try_into().unwrap();
-    let ct: [u8; 56] = memo_90[34..90].try_into().unwrap();
+    let vt = [memo_106[0], memo_106[1]];
+    let epk: [u8; 32] = memo_106[2..34].try_into().unwrap();
+    let ct: [u8; MEMO_CT_LEN] = memo_106[34..MEMO_ENTRY_WIRE_LEN].try_into().unwrap();
     let dec = try_decrypt_and_verify_memo_entry(&fvk, vt, &epk, &ct, &cm_be)
         .expect("FVK memo decrypt + commitment verify");
     assert_eq!(dec.amount, amount);
-    assert_eq!(dec.mint, NATIVE_SOL_MINT);
+    assert_eq!(dec.mint, WSOL_MINT);
+    assert_eq!(dec.memo_version, MEMO_VERSION_V1);
+    assert_eq!(dec.memo_flags, 0);
+    assert_eq!(dec.payment_id, payment_id);
+    assert!(!dec.is_dynamic);
 
-    let (_, _, dyn_head, dyn_mask) = prepare_dynamic_swap_memo(&bob.view_pk, [0x44u8; 32]);
+    // Tampering with AAD view_tag or epk MUST fail decryption
+    let bad_vt = [vt[0] ^ 0x01, vt[1]];
+    assert!(try_decrypt_and_verify_memo_entry(&fvk, bad_vt, &epk, &ct, &cm_be).is_none());
+
+    // Low-order X25519 points MUST be rejected everywhere
+    let zero_epk = [0u8; 32];
+    for low_epk in [&zero_epk, &ORDER_8_EPK] {
+        assert!(encrypt_note_memo(low_epk, eph_secret, amount, &WSOL_MINT).is_err());
+        assert!(prepare_dynamic_swap_memo(low_epk, eph_secret).is_err());
+        assert!(!check_memo_view_tag(&fvk, [0, 0], low_epk));
+        assert!(try_decrypt_and_verify_memo_entry(&fvk, [0, 0], low_epk, &ct, &cm_be).is_none());
+    }
+
+    // Domain-separated 72 B dynamic swap memo (`AUD1DYN1 || actual_out || mint || [0; 24]`)
+    let dyn_eph_secret = [0x44u8; 32];
+    let dyn_amount = 425_000_000u64;
+    let (dyn_tw, dyn_bl, dyn_head, dyn_mask) =
+        prepare_dynamic_swap_memo(&bob.view_pk, dyn_eph_secret).expect("valid bob view_pk");
+    let dyn_stealth = derive_stealth_owner(bob.spend_pk, dyn_tw);
+    let dyn_cm = compute_note_commitment(dyn_stealth, wsol_asset, dyn_amount, dyn_bl);
+    let dyn_cm_be = fr_to_be_bytes(&dyn_cm);
+    let mut dyn_plain = [0u8; MEMO_CT_LEN];
+    dyn_plain[0..8].copy_from_slice(&DYN_MEMO_MAGIC);
+    dyn_plain[8..16].copy_from_slice(&dyn_amount.to_le_bytes());
+    dyn_plain[16..48].copy_from_slice(&WSOL_MINT);
+    let mut dyn_stamped = [0u8; MEMO_ENTRY_WIRE_LEN];
+    dyn_stamped[0..DYN_MEMO_HEAD_LEN].copy_from_slice(&dyn_head);
+    for i in 0..MEMO_CT_LEN {
+        dyn_stamped[DYN_MEMO_HEAD_LEN + i] = dyn_plain[i] ^ dyn_mask[i];
+    }
+    let bob_fvk = bob.full_viewing_key();
+    let dvt = [dyn_stamped[0], dyn_stamped[1]];
+    let depk: [u8; 32] = dyn_stamped[2..34].try_into().unwrap();
+    let dct: [u8; MEMO_CT_LEN] = dyn_stamped[34..MEMO_ENTRY_WIRE_LEN].try_into().unwrap();
+    let ddec = try_decrypt_and_verify_memo_entry(&bob_fvk, dvt, &depk, &dct, &dyn_cm_be)
+        .expect("Bob FVK dynamic swap memo decrypt + commitment verify");
+    assert!(ddec.is_dynamic);
+    assert_eq!(ddec.amount, dyn_amount);
+    assert_eq!(ddec.mint, WSOL_MINT);
 
     // Selective disclosure proof
     let sd = SelectiveDisclosureProof {
@@ -249,14 +322,14 @@ fn build_canonical_vectors() -> ConformanceVectors {
         lane_id: 2,
         leaf_index: 5,
         stealth_owner: fr_to_be_bytes(&stealth),
-        mint: NATIVE_SOL_MINT,
+        mint: WSOL_MINT,
         amount,
         blinding: fr_to_be_bytes(&bl),
         commitment: cm_be,
     };
     assert!(sd.verify_against_leaf(&cm_be));
 
-    // PDAs
+    // All 12 canonical v1 PDAs
     let nf_sample = fr_to_be_bytes(&compute_real_nullifier(alice.nk, cm, (2u64 << 36) | 5));
     let mk_pda = |(a, b): (Address, u8)| PdaEntry {
         address: a.to_string(),
@@ -270,7 +343,6 @@ fn build_canonical_vectors() -> ConformanceVectors {
         shard_id: 5,
         nullifier_hex: to_hex(&nf_sample),
         pool: mk_pda(derive_pool_pda(&program_id, 0)),
-        sol_vault: mk_pda(derive_sol_vault_pda(&program_id, 0)),
         vault_auth: mk_pda(derive_vault_auth_pda(&program_id, 0)),
         lane: mk_pda(derive_lane_pda(&program_id, 0, 2)),
         lane_rent: mk_pda(derive_lane_rent_pda(&program_id, 0, 2)),
@@ -284,12 +356,13 @@ fn build_canonical_vectors() -> ConformanceVectors {
         unwrap: mk_pda(derive_unwrap_pda(&program_id, 0, &nf_sample)),
     };
 
-    // Context hashes
+    // Context hashes (with vk_id = 0 bound)
     let recip = Address::new_from_array(sess0.pubkey);
     let relayer = Address::new_from_array(sess3.pubkey);
-    let ctx_priv = compute_joinsplit_ctx_hash(
+    let ctx_priv = compute_transact_ctx_hash(
         &program_id,
         0,
+        VK_ID_DEFAULT,
         2,
         0b111,
         ASSET_MODE_PRIVATE,
@@ -299,14 +372,15 @@ fn build_canonical_vectors() -> ConformanceVectors {
         &[0u8; 32],
         0,
         0,
-        &memo_90,
+        &memo_106,
     );
-    let ctx_wsol = compute_joinsplit_ctx_hash(
+    let ctx_wsol = compute_transact_ctx_hash(
         &program_id,
         0,
+        VK_ID_DEFAULT,
         2,
         0b000,
-        ASSET_MODE_SPL,
+        ASSET_MODE_PUBLIC,
         true,
         Some(&recip),
         Some(&relayer),
@@ -323,17 +397,16 @@ fn build_canonical_vectors() -> ConformanceVectors {
     let ctx_exec = compute_exec_ctx_hash(
         &program_id,
         0,
+        VK_ID_DEFAULT,
         1,
         3,
         0b01,
-        1,
-        0,
         true,
         &fr_to_be_bytes(&usdc_asset),
         50_000_000,
         2_000_000,
         Some(&relayer),
-        &fr_to_be_bytes(&sol_asset),
+        &fr_to_be_bytes(&wsol_asset),
         400_000_000,
         &router_prog,
         &router_accs,
@@ -342,7 +415,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
         &dyn_head,
         &dyn_mask,
         &[1, 2, 3, 4],
-        &memo_90,
+        &memo_106,
     );
 
     // Deterministic tree + Groth16 proof vector
@@ -360,10 +433,13 @@ fn build_canonical_vectors() -> ConformanceVectors {
     let path5 = build_historical_witness_4ary(2, 5, &lane_roots, 6, &[], &leaves, Some(&leaves));
     assert_eq!(path5.compute_root(cm), super_root);
 
+    let out0_stealth = derive_stealth_owner(bob.spend_pk, Fr::from(0x101u64));
+    let out1_stealth = derive_stealth_owner(alice.spend_pk, Fr::from(0x102u64));
+
     let prover = AudrenProver::from_canonical_pk();
     let circuit = JoinSplit4AryCircuit::new_with_options(
         super_root,
-        sol_asset,
+        wsol_asset,
         Fr::from(0u64),
         0,
         0,
@@ -373,7 +449,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
             JoinSplitInputWitness {
                 spend_sk: alice.spend_sk,
                 tweak: tw,
-                asset_id: sol_asset,
+                asset_id: wsol_asset,
                 amount,
                 blinding: bl,
                 is_dummy: false,
@@ -382,7 +458,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
             JoinSplitInputWitness {
                 spend_sk: alice.spend_sk,
                 tweak: Fr::from(0u64),
-                asset_id: sol_asset,
+                asset_id: wsol_asset,
                 amount: 0,
                 blinding: Fr::from(0x5555u64),
                 is_dummy: true,
@@ -391,25 +467,24 @@ fn build_canonical_vectors() -> ConformanceVectors {
         ],
         [
             JoinSplitOutputWitness {
-                stealth_owner: derive_stealth_owner(bob.spend_pk, Fr::from(0x101u64)),
-                asset_id: sol_asset,
+                stealth_owner: out0_stealth,
+                asset_id: wsol_asset,
                 amount: 1_000_000,
                 blinding: Fr::from(0x201u64),
             },
             JoinSplitOutputWitness {
-                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(0x102u64)),
-                asset_id: sol_asset,
+                stealth_owner: out1_stealth,
+                asset_id: wsol_asset,
                 amount: 500_000,
                 blinding: Fr::from(0x202u64),
             },
-            JoinSplitOutputWitness::dummy(sol_asset, Fr::from(0x203u64)),
+            JoinSplitOutputWitness::dummy(wsol_asset, Fr::from(0x203u64)),
         ],
     );
     let bundle = prover.prove_with_seed(circuit, [0x99u8; 32]);
 
-    // Synthetic PoolState & RootCheckpoint raw bytes
+    // Synthetic v1 PoolState (128 B) & RootCheckpoint (704 B) raw bytes
     let (_, pool_bump) = derive_pool_pda(&program_id, 0);
-    let (_, sv_bump) = derive_sol_vault_pda(&program_id, 0);
     let (_, va_bump) = derive_vault_auth_pda(&program_id, 0);
     let mut pool_raw = [0u8; POOL_STATE_LEN];
     pool_raw[PL_OFF_MAGIC..PL_OFF_MAGIC + 8].copy_from_slice(&POOL_MAGIC);
@@ -422,15 +497,16 @@ fn build_canonical_vectors() -> ConformanceVectors {
     pool_raw[PL_OFF_MAX_CKPT_AGE..PL_OFF_MAX_CKPT_AGE + 8]
         .copy_from_slice(&1_536u64.to_le_bytes());
     pool_raw[PL_OFF_AUTHORITY..PL_OFF_AUTHORITY + 32].copy_from_slice(&sess0.pubkey);
-    pool_raw[PL_OFF_SOL_VAULT_BUMP] = sv_bump;
     pool_raw[PL_OFF_VAULT_AUTH_BUMP] = va_bump;
-    pool_raw[PL_OFF_MODE] = PoolMode::Permissionless as u8;
     pool_raw[PL_OFF_NOTE_RENT_FEE..PL_OFF_NOTE_RENT_FEE + 8]
         .copy_from_slice(&1_500_000u64.to_le_bytes());
     pool_raw[PL_OFF_NF_RENT_FEE..PL_OFF_NF_RENT_FEE + 8]
         .copy_from_slice(&500_000u64.to_le_bytes());
+    pool_raw[PL_OFF_PENDING_AUTHORITY..PL_OFF_PENDING_AUTHORITY + 32]
+        .copy_from_slice(&sess3.pubkey);
     let decoded_pool = PoolState::decode(&pool_raw).unwrap();
     assert_eq!(decoded_pool.active_lanes, 4);
+    assert_eq!(decoded_pool.pending_authority, sess3.pubkey);
 
     let (_, ck_bump) = derive_checkpoint_pda(&program_id, 0, 13);
     let mut ck_raw = [0u8; CKPT_LEN];
@@ -476,7 +552,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
             poseidon5_note_hex: to_hex(&fr_to_be_bytes(&poseidon5(
                 Fr::from(3u64),
                 stealth,
-                sol_asset,
+                wsol_asset,
                 Fr::from(amount),
                 bl,
             ))),
@@ -485,7 +561,6 @@ fn build_canonical_vectors() -> ConformanceVectors {
             zero_hash_level20_hex: to_hex(&fr_to_be_bytes(&zeros[20])),
         },
         asset_ids: AssetIdVectors {
-            native_sol_asset_id_hex: to_hex(&fr_to_be_bytes(&sol_asset)),
             wsol_asset_id_hex: to_hex(&fr_to_be_bytes(&wsol_asset)),
             usdc_mint_b58: usdc_addr.to_string(),
             usdc_asset_id_hex: to_hex(&fr_to_be_bytes(&usdc_asset)),
@@ -494,24 +569,38 @@ fn build_canonical_vectors() -> ConformanceVectors {
         memo: MemoVector {
             eph_secret_hex: to_hex(&eph_secret),
             amount,
-            mint_hex: to_hex(&NATIVE_SOL_MINT),
+            mint_hex: to_hex(&WSOL_MINT),
+            payment_id_hex: to_hex(&payment_id),
             tweak_hex: to_hex(&fr_to_be_bytes(&tw)),
             blinding_hex: to_hex(&fr_to_be_bytes(&bl)),
             stealth_owner_hex: to_hex(&fr_to_be_bytes(&stealth)),
             commitment_hex: to_hex(&cm_be),
-            memo_90_hex: to_hex(&memo_90),
+            memo_106_hex: to_hex(&memo_106),
+            dyn_eph_secret_hex: to_hex(&dyn_eph_secret),
+            dyn_tweak_hex: to_hex(&fr_to_be_bytes(&dyn_tw)),
+            dyn_blinding_hex: to_hex(&fr_to_be_bytes(&dyn_bl)),
             dyn_head_34_hex: to_hex(&dyn_head),
-            dyn_mask_56_hex: to_hex(&dyn_mask),
+            dyn_mask_72_hex: to_hex(&dyn_mask),
+            dyn_amount,
+            dyn_mint_hex: to_hex(&WSOL_MINT),
+            dyn_commitment_hex: to_hex(&dyn_cm_be),
+            dyn_stamped_memo_106_hex: to_hex(&dyn_stamped),
+        },
+        low_order_x25519: LowOrderX25519Vectors {
+            all_zero_epk_hex: to_hex(&zero_epk),
+            order_8_epk_hex: to_hex(&ORDER_8_EPK),
         },
         selective_disclosure: sd,
         ctx_hashes: CtxHashVectors {
-            joinsplit_private_ctx_hash_hex: to_hex(&fr_to_be_bytes(&ctx_priv)),
-            joinsplit_wsol_unwrap_ctx_hash_hex: to_hex(&fr_to_be_bytes(&ctx_wsol)),
+            transact_private_ctx_hash_hex: to_hex(&fr_to_be_bytes(&ctx_priv)),
+            transact_wsol_unwrap_ctx_hash_hex: to_hex(&fr_to_be_bytes(&ctx_wsol)),
             exec_fee_on_output_ctx_hash_hex: to_hex(&fr_to_be_bytes(&ctx_exec)),
         },
         groth16: Groth16Vector {
             vk_id: VK_ID_DEFAULT,
             super_root_hex: to_hex(&fr_to_be_bytes(&super_root)),
+            out0_stealth_owner_hex: to_hex(&fr_to_be_bytes(&out0_stealth)),
+            out1_stealth_owner_hex: to_hex(&fr_to_be_bytes(&out1_stealth)),
             nf0_hex: to_hex(&bundle.nf0),
             nf1_hex: to_hex(&bundle.nf1),
             cm0_hex: to_hex(&bundle.cm0),
@@ -529,6 +618,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
             note_rent_fee: 1_500_000,
             nf_rent_fee: 500_000,
             paused: false,
+            pending_authority_b58: Address::new_from_array(sess3.pubkey).to_string(),
         },
         checkpoint_raw_hex: to_hex(&ck_raw),
     }

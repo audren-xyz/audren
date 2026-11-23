@@ -86,7 +86,7 @@ export function PrivacyExperience() {
               </text>
               <circle cx="31" cy="129.5" r="2" fill="#9bc0a8" />
               <text x="41" y="133" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                BN254 Groth16 WASM proving
+                BN254 Groth16 Worker proving
               </text>
               <circle cx="31" cy="150.5" r="2" fill="#9bc0a8" />
               <text x="41" y="154" fill="#e6efe4" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
@@ -114,7 +114,7 @@ export function PrivacyExperience() {
               </text>
               <circle cx="345" cy="129.5" r="2" fill="#696b61" />
               <text x="355" y="133" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                Hosted relay anti-abuse guard hashes
+                Ephemeral daily salted rate limits
               </text>
               <circle cx="345" cy="150.5" r="2" fill="#696b61" />
               <text x="355" y="154" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
@@ -134,7 +134,7 @@ export function PrivacyExperience() {
               </text>
               <circle cx="659" cy="87.5" r="2" fill="#6e4928" />
               <text x="669" y="91" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
-                JoinSplit: hidden mint, amt &amp; key
+                Transact: hidden mint, amt &amp; key
               </text>
               <circle cx="659" cy="108.5" r="2" fill="#6e4928" />
               <text x="669" y="112" fill="#4f5148" fontSize="11.5" fontWeight="400" fontFamily="var(--font-sans), sans-serif">
@@ -163,7 +163,7 @@ export function PrivacyExperience() {
                 <span className={styles.cellIndex}>Local custody</span>
                 <h3>Local keys &amp; exports</h3>
                 <ul className={styles.dashList}>
-                  <li>The wallet derives keys, decrypts notes, creates spending proofs, and checks receipt openings locally in your browser.</li>
+                  <li>The wallet derives keys, decrypts notes, generates Groth16 proofs in a dedicated Web Worker, and checks receipt openings locally in your browser.</li>
                   <li>Spending and viewing keys are not included in ordinary RPC or relay requests.</li>
                   <li>Exporting a backup, single-note receipt, or viewing key deliberately shares the information inside that export; any recipient can retain or redistribute it.</li>
                   <li>The site loads zero advertising or third-party analytics scripts.</li>
@@ -192,7 +192,7 @@ export function PrivacyExperience() {
                 <ul className={styles.dashList}>
                   <li>Anyone can run a compatible relayer, or submit directly with your own fee payer. Neither choice provides network anonymity by itself.</li>
                   <li>The website proxies RPC, token metadata, and Direct Self-Pay routing through its Cloudflare Worker; wallet-mode relay calls go to your selected relay.</li>
-                  <li>The hosted relay stores IP-derived anti-abuse identifiers (salted with the public relay key; hashing is not anonymization), timestamps, sponsorship figures, and temporary associations with in-flight nullifiers.</li>
+                  <li>The hosted relay rate-limits submissions using IP hashes derived with an ephemeral daily rotating secret salt that is never stored alongside spent nullifiers (rate-limit hashing is not network anonymization; timestamps and sponsorship figures are still observed during processing).</li>
                   <li>Expired guard records are pruned on cleanup, not guaranteed immediate deletion across every infrastructure log.</li>
                 </ul>
               </article>

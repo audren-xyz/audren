@@ -21,7 +21,7 @@ export interface Env {
    * Optional read-only relayer `FullViewingKey` JSON
    * (`{ spendPkHex, nkHex, viewSkHex, viewPkHex }` or `{ spendPk, nk, viewSk, viewPk }`)
    * with ZERO spend authority on the hot Worker, enabling Mode 1 shielded `cm2` fee verification
-   * on private `JoinSplit` transfers (`ASSET_MODE_PRIVATE`).
+   * on private `Transact` transfers (`ASSET_MODE_PRIVATE`).
    */
   MAINNET_RELAYER_FVK_JSON?: string
   DEVNET_RELAYER_FVK_JSON?: string
@@ -66,7 +66,7 @@ export interface Env {
 export interface RelayPolicyConfig {
   defaultAggregator: AggregatorId
   enabledAggregators: Set<AggregatorId>
-  /** Strictly allowlisted zero-signer crank programs permitted in `preInstructions` before Tag 7. */
+  /** Strictly allowlisted zero-signer crank programs permitted in `preInstructions` before Tag 6. */
   allowedPreIxPrograms: Set<string>
   baseSwapFeeBps: number
   maxSelfPayBps: number
@@ -88,7 +88,7 @@ const VALID_AGGREGATORS: readonly AggregatorId[] = ['jupiter', 'bedrock', 'dflow
 
 /**
  * Default zero-signer DeFi refresh/oracle crank programs permitted in `preInstructions`
- * immediately before Audren Tag 7 (`ExecViaEscrow`):
+ * immediately before Audren Tag 6 (`ExecViaEscrow`):
  *   - Kamino Lending (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`)
  *   - Kamino Vaults (`kvauTFR8qm1dhniz6pYuBZkuene3Hfrs1VQhVRgCNrr`)
  *   - Pyth Solana Receiver (`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`)

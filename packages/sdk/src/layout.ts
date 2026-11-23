@@ -53,17 +53,15 @@ import {
   NF_PREFIX_LEN,
   NUM_LANES,
   PL_OFF_ACTIVE_LANES,
-  PL_OFF_AUDITOR_PK,
   PL_OFF_AUTHORITY,
   PL_OFF_BUMP,
   PL_OFF_CKPT_INTERVAL,
   PL_OFF_MAX_CKPT_AGE,
-  PL_OFF_MODE,
   PL_OFF_NF_RENT_FEE,
   PL_OFF_NOTE_RENT_FEE,
   PL_OFF_PAUSED,
+  PL_OFF_PENDING_AUTHORITY,
   PL_OFF_POOL_ID,
-  PL_OFF_SOL_VAULT_BUMP,
   PL_OFF_VAULT_AUTH_BUMP,
   PL_OFF_VERSION,
   POOL_MAGIC,
@@ -104,12 +102,10 @@ export interface DecodedPoolState {
   maxCkptAge: bigint;
   authority: string;
   authorityBytes: Uint8Array;
-  solVaultBump: number;
   vaultAuthBump: number;
-  mode: number;
   noteRentFee: bigint;
   nfRentFee: bigint;
-  auditorPk: Uint8Array;
+  pendingAuthority: Uint8Array;
 }
 
 export interface DecodedLaneHeader {
@@ -223,12 +219,10 @@ export function decodePoolState(data: Uint8Array): DecodedPoolState {
     maxCkptAge: dv.getBigUint64(PL_OFF_MAX_CKPT_AGE, true),
     authority: base58Encode(authorityBytes),
     authorityBytes,
-    solVaultBump: data[PL_OFF_SOL_VAULT_BUMP]!,
     vaultAuthBump: data[PL_OFF_VAULT_AUTH_BUMP]!,
-    mode: data[PL_OFF_MODE]!,
     noteRentFee: dv.getBigUint64(PL_OFF_NOTE_RENT_FEE, true),
     nfRentFee: dv.getBigUint64(PL_OFF_NF_RENT_FEE, true),
-    auditorPk: data.slice(PL_OFF_AUDITOR_PK, PL_OFF_AUDITOR_PK + 32),
+    pendingAuthority: data.slice(PL_OFF_PENDING_AUTHORITY, PL_OFF_PENDING_AUTHORITY + 32),
   };
 }
 

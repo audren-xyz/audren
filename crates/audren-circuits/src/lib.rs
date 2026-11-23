@@ -414,7 +414,7 @@ mod tests {
         let sk = Fr::from(0xDEAD_BEEF_1234u64);
         let pk = derive_spend_pk(sk);
         let asset_usdc = derive_asset_id(&[0x11; 32]);
-        let asset_sol = derive_asset_id(&audren_core::NATIVE_SOL_MINT);
+        let asset_sol = derive_asset_id(&audren_core::WSOL_MINT);
 
         // Build 300 leaves in lane 3 and verify historical truncation at N_E = 100
         let mut leaves = Vec::with_capacity(300);

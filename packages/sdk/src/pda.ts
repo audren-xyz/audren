@@ -1,7 +1,7 @@
 /**
- * Solana Base58 codec, `aud1...` stealth address codec (version `0x02`, 65 bytes),
- * and canonical Audren PDA derivations (`audren_v2_*`) matching `crates/client/src/pda.rs`
- * byte-for-byte.
+ * Solana Base58 codec, BIP-350 Bech32m `aud1...` stealth address codec (HRP `"aud"`,
+ * version `0x01`, 65-byte payload, 114 chars), and canonical 12 Audren v1 PDA derivations
+ * (`audren_*`) matching `crates/client/src/pda.rs` byte-for-byte.
  */
 
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -20,7 +20,6 @@ import {
   NUM_ESCROW_SHARDS,
   NUM_LANES,
   POOL_SEED,
-  SOL_VAULT_SEED,
   SUBROOT_SEED,
   SUBTREE_SEED,
   UNWRAP_SEED,
@@ -34,9 +33,19 @@ for (let i = 0; i < BASE58_ALPHABET.length; i++) {
   BASE58_MAP[BASE58_ALPHABET.charCodeAt(i)] = i;
 }
 
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const BECH32_CHARSET_MAP = new Int8Array(128).fill(-1);
+for (let i = 0; i < BECH32_CHARSET.length; i++) {
+  BECH32_CHARSET_MAP[BECH32_CHARSET.charCodeAt(i)] = i;
+}
+const BECH32M_CONST = 0x2bc830a3;
+const BECH32_GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3] as const;
+const BECH32_MAX_LEN = 128;
+const AUDREN_ADDR_HRP = 'aud';
+const ADDR_VERSION_V1 = 0x01;
+
 const utf8Encoder = new TextEncoder();
 const PDA_MARKER = utf8Encoder.encode('ProgramDerivedAddress');
-const ADDR_VERSION_V2 = 0x02;
 
 const ED25519_P = (1n << 255n) - 19n;
 const ED25519_D = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
@@ -117,6 +126,81 @@ export function toPubkeyBytes(pubkey: string | Uint8Array): Uint8Array {
   return bytes;
 }
 
+// =============================================================================
+// Canonical BIP-350 Bech32m Codec (`hrp = "aud"`, up to 128 chars)
+// =============================================================================
+
+function bech32Polymod(values: readonly number[]): number {
+  let chk = 1;
+  for (let i = 0; i < values.length; i++) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ values[i]!;
+    for (let b = 0; b < 5; b++) {
+      if ((top >>> b) & 1) chk ^= BECH32_GEN[b]!;
+    }
+  }
+  return chk >>> 0;
+}
+
+function bech32HrpExpand(hrp: string): number[] {
+  const ret: number[] = [];
+  for (let i = 0; i < hrp.length; i++) {
+    ret.push(hrp.charCodeAt(i) >>> 5);
+  }
+  ret.push(0);
+  for (let i = 0; i < hrp.length; i++) {
+    ret.push(hrp.charCodeAt(i) & 31);
+  }
+  return ret;
+}
+
+function bech32mCreateChecksum(hrp: string, data5: readonly number[]): number[] {
+  const values = [...bech32HrpExpand(hrp), ...data5, 0, 0, 0, 0, 0, 0];
+  const pmod = (bech32Polymod(values) ^ BECH32M_CONST) >>> 0;
+  const out: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    out.push((pmod >>> (5 * (5 - i))) & 31);
+  }
+  return out;
+}
+
+function convertBits(
+  data: readonly number[] | Uint8Array,
+  fromBits: number,
+  toBits: number,
+  pad: boolean,
+): number[] {
+  let acc = 0;
+  let bits = 0;
+  const out: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  const maxAcc = (1 << (fromBits + toBits - 1)) - 1;
+  for (let i = 0; i < data.length; i++) {
+    const value = data[i]!;
+    if (value < 0 || value >>> fromBits !== 0) {
+      throw new Error(`Invalid Bech32m bit group value: ${value}`);
+    }
+    acc = ((acc << fromBits) | value) & maxAcc;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      out.push((acc >>> bits) & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0) {
+      out.push((acc << (toBits - bits)) & maxv);
+    }
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv) !== 0) {
+    throw new Error('Invalid Bech32m padding bits');
+  }
+  return out;
+}
+
+/**
+ * Encode `(spendPk[32], viewPk[32])` into a canonical BIP-350 Bech32m `aud1...` stealth address
+ * (`hrp = "aud"`, payload `0x01 || spend_pk[32] || view_pk[32]`, 114 lowercase characters).
+ */
 export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): string {
   if (spendPk.byteLength !== 32 || viewPk.byteLength !== 32) {
     throw new RangeError('spendPk and viewPk must each be 32 bytes');
@@ -125,32 +209,74 @@ export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): st
     throw new Error('spendPk must be a canonical BN254 Fr scalar (< r)');
   }
   const raw = new Uint8Array(65);
-  raw[0] = ADDR_VERSION_V2;
+  raw[0] = ADDR_VERSION_V1;
   raw.set(spendPk, 1);
   raw.set(viewPk, 33);
-  return `aud1${base58Encode(raw)}`;
+  const data5 = convertBits(raw, 8, 5, true);
+  const checksum = bech32mCreateChecksum(AUDREN_ADDR_HRP, data5);
+  let out = `${AUDREN_ADDR_HRP}1`;
+  for (const v of data5) out += BECH32_CHARSET[v]!;
+  for (const v of checksum) out += BECH32_CHARSET[v]!;
+  return out;
 }
 
-export const encodeAudrenAddress = formatAudrenAddress;
-
+/**
+ * Strictly decode and validate a BIP-350 Bech32m `aud1...` stealth address.
+ * Rejects mixed case, wrong HRP, invalid Bech32m checksum, non-zero pad bits,
+ * wrong payload length, wrong version byte (`!== 0x01`), and non-canonical `spendPk >= r`.
+ */
 export function parseAudrenAddress(encoded: string): ParsedAudrenAddress {
   const trimmed = encoded.trim();
-  if (!trimmed.startsWith('aud1')) {
-    throw new Error('Audren stealth address must start with aud1');
+  if (trimmed.length < 8 || trimmed.length > BECH32_MAX_LEN) {
+    throw new Error(`Invalid Audren Bech32m address length (${trimmed.length})`);
   }
-  const raw = base58Decode(trimmed.slice(4));
-  if (raw.byteLength !== 65 || raw[0] !== ADDR_VERSION_V2) {
-    throw new Error(`Invalid Audren address length or version (got ${raw.byteLength} bytes, v=${raw[0]})`);
+  let hasLower = false;
+  let hasUpper = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const code = trimmed.charCodeAt(i);
+    if (code < 33 || code > 126) {
+      throw new Error(`Invalid character in Audren Bech32m address at index ${i}`);
+    }
+    if (code >= 97 && code <= 122) hasLower = true;
+    if (code >= 65 && code <= 90) hasUpper = true;
+  }
+  if (hasLower && hasUpper) {
+    throw new Error('Mixed case is forbidden in Bech32m Audren address');
+  }
+  const lower = trimmed.toLowerCase();
+  const sep = lower.lastIndexOf('1');
+  if (sep < 1 || sep + 7 > lower.length) {
+    throw new Error('Invalid Bech32m separator position in Audren address');
+  }
+  const hrp = lower.slice(0, sep);
+  if (hrp !== AUDREN_ADDR_HRP) {
+    throw new Error(`Invalid Audren address HRP: expected "${AUDREN_ADDR_HRP}", got "${hrp}"`);
+  }
+  const dataPart = lower.slice(sep + 1);
+  const dataValues: number[] = [];
+  for (let i = 0; i < dataPart.length; i++) {
+    const code = dataPart.charCodeAt(i);
+    const val = code < 128 ? BECH32_CHARSET_MAP[code]! : -1;
+    if (val < 0) {
+      throw new Error(`Invalid Bech32m character '${dataPart[i]}' in Audren address`);
+    }
+    dataValues.push(val);
+  }
+  if (bech32Polymod([...bech32HrpExpand(hrp), ...dataValues]) !== BECH32M_CONST) {
+    throw new Error('Invalid Bech32m checksum in Audren address');
+  }
+  const payload5 = dataValues.slice(0, dataValues.length - 6);
+  const raw = new Uint8Array(convertBits(payload5, 5, 8, false));
+  if (raw.byteLength !== 65 || raw[0] !== ADDR_VERSION_V1) {
+    throw new Error(`Invalid Audren address payload length or version (len=${raw.byteLength}, v=${raw[0]})`);
   }
   const spendPk = raw.slice(1, 33);
   const viewPk = raw.slice(33, 65);
   if (!isCanonicalFr(spendPk)) {
     throw new Error('Audren address spendPk is not a canonical BN254 Fr scalar');
   }
-  return { encoded: `aud1${base58Encode(raw)}`, spendPk, viewPk };
+  return { encoded: lower, spendPk, viewPk };
 }
-
-export const decodeAudrenAddress = parseAudrenAddress;
 
 function modP(n: bigint): bigint {
   const r = n % ED25519_P;
@@ -270,20 +396,6 @@ export async function derivePoolPda(
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): Promise<DerivedPda> {
   return derivePoolPdaSync(poolId, programId);
-}
-
-export function deriveSolVaultPdaSync(
-  poolId = 0,
-  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): DerivedPda {
-  return findProgramAddressSync([utf8Encoder.encode(SOL_VAULT_SEED), u32le(poolId)], programId);
-}
-
-export async function deriveSolVaultPda(
-  poolId = 0,
-  programId: string | Uint8Array = AUDREN_PROGRAM_ID,
-): Promise<DerivedPda> {
-  return deriveSolVaultPdaSync(poolId, programId);
 }
 
 export function deriveVaultAuthPdaSync(

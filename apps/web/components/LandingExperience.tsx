@@ -35,10 +35,10 @@ const POOL_CASES: readonly PoolCase[] = [
   {
     id: 'pay',
     tab: 'Pay someone',
-    stageMeta: 'Global MASP · JoinSplit (Tag 6)',
+    stageMeta: 'Global MASP · Transact (Tag 5)',
     title: 'Pay privately with existing tokens.',
     detail:
-      'Pay any reusable aud1… address with SOL, Classic SPL, or Token-2022 inside a single global Multi-Asset Shielded Pool (4-ary Depth-20 Merkle tree, 1.099T note capacity). A 192-byte Groth16 proof conceals the spent notes across the entire pool history and creates fresh one-time stealth outputs with hidden asset and amount. Timing and external information can still create links.',
+      'Pay any reusable Bech32m aud1… address with SOL, Classic SPL, or Token-2022 inside a single global Multi-Asset Shielded Pool (4-ary Depth-20 Merkle tree, 1.099T note capacity). A 192-byte Groth16 proof conceals the spent notes across the entire pool history and creates fresh one-time stealth outputs with hidden asset and amount. Timing and external information can still create links.',
     steps: [
       {
         phase: 'Input',
@@ -57,7 +57,7 @@ const POOL_CASES: readonly PoolCase[] = [
       },
     ],
     resultText:
-      'Private JoinSplit settles in ~130k CU with hidden inputs, stealth recipient, hidden asset, and hidden amount.',
+      'Private Transact settles in ~130k CU with hidden inputs, stealth recipient, hidden asset, and hidden amount.',
     hiddenLabel: 'Spent notes across global pool, recipient, token, and amount',
     publicLabel: 'Checkpoint root, lane append slot, timing, and fee payer',
     txHref: solscanTx(AUDREN.mainnet.transferTx),
@@ -67,10 +67,10 @@ const POOL_CASES: readonly PoolCase[] = [
   {
     id: 'swap',
     tab: 'Shielded DeFi',
-    stageMeta: 'Isolated escrow CPI · ExecViaEscrow (Tag 7)',
+    stageMeta: 'Isolated escrow CPI · ExecViaEscrow (Tag 6)',
     title: 'Swap, lend, stake, or deploy in DeFi and return to the pool.',
     detail:
-      'ExecViaEscrow turns any Token A → Token B Solana program call into a single shielded Transaction v1: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA mint or redeem. Native relayer fees settle from input or output tokens (EXEC_FLAG_FEE_ON_OUTPUT); external DeFi amounts, mints, and output record remain public.',
+      'ExecViaEscrow turns any SPL or Token-2022 Token A → Token B Solana program call into a single shielded Transaction v1: DEX swaps (Jupiter, Titan, DFlow, Raydium, Orca) alongside lending supply (kTokens), yield vaults, liquid staking (JitoSOL, INF), perp LP (JLP), and RWA mint or redeem. Native relayer fees settle from input or output tokens (EXEC_FLAG_FEE_ON_OUTPUT); external DeFi amounts, mints, and output record remain public.',
     steps: [
       {
         phase: 'Escrow out',
@@ -99,10 +99,10 @@ const POOL_CASES: readonly PoolCase[] = [
   {
     id: 'withdraw',
     tab: 'Pay or fund wallet',
-    stageMeta: 'Self-paying exit · JoinSplit with atomic WSOL unwrap (Tag 6)',
+    stageMeta: 'Self-paying exit · Transact with atomic WSOL unwrap (Tag 5)',
     title: 'Pay any address, or fund a fresh session wallet with zero SOL.',
     detail:
-      'Exit SOL or SPL tokens from the global pool to any wallet, exchange, or deterministic Private DeFi Session keypair (B₀, B₁…) for stateful borrow or perp protocols. Pay the relayer directly from the withdrawn note, optionally unwrap WSOL atomically to Native SOL in the same instruction (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune on full exit), and later sweep remaining gas back with zero-dust DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT). Positions opened by session wallets remain public on Solana.',
+      'Exit SOL or SPL tokens from the global pool to any wallet, exchange, or deterministic Private DeFi Session keypair (B₀, B₁…) for stateful borrow or perp protocols. Pay the relayer directly from the withdrawn note, unwrap WSOL atomically to Native SOL in the same instruction (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune on full exit), and later sweep remaining gas back with zero-dust Deposit (DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT). Positions opened by session wallets remain public on Solana.',
     steps: [
       {
         phase: 'Pool spend',
@@ -437,7 +437,7 @@ export function LandingExperience() {
             <div className={styles.sectionIntro}>
               <h2>One escrow primitive for open Solana DeFi.</h2>
               <p>
-                <code>ExecViaEscrow</code> (Tag 7) executes any stateless{' '}
+                <code>ExecViaEscrow</code> (Tag 6) executes any stateless SPL or Token-2022{' '}
                 <code>Token A → Token B</code> Solana CPI through 16 sharded escrow PDAs and
                 reshields the exact net vault delta on-chain (~158k CU, leaving &gt;1.2M CU for
                 DeFi). Stateful protocols work cleanly through self-funded ephemeral session
@@ -455,19 +455,19 @@ export function LandingExperience() {
                   <code>EXEC_FLAG_FEE_ON_OUTPUT</code>).
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 7 · SOL or SPL → Any SPL → Shielded note
+                  Tag 6 · WSOL or SPL → Any SPL → Shielded note
                 </span>
               </article>
 
               <article className={styles.defiCell}>
                 <h3>Lending supply</h3>
                 <p>
-                  Supply USDC or SOL into Solana lending reserves (such as Kamino Lend) and reshield
-                  the minted interest-bearing receipt token (<code>kUSDC</code>, <code>kSOL</code>)
-                  directly into the unified global pool.
+                  Supply USDC or WSOL into Solana lending reserves (such as Kamino Lend) and
+                  reshield the minted interest-bearing receipt token (<code>kUSDC</code>,{' '}
+                  <code>kSOL</code>) directly into the unified global pool.
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 7 · USDC → Reserve deposit → kUSDC note
+                  Tag 6 · USDC → Reserve deposit → kUSDC note
                 </span>
               </article>
 
@@ -479,19 +479,19 @@ export function LandingExperience() {
                   note.
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 7 · Asset → Vault deposit → Share token note
+                  Tag 6 · Asset → Vault deposit → Share token note
                 </span>
               </article>
 
               <article className={styles.defiCell}>
                 <h3>Liquid staking tokens</h3>
                 <p>
-                  Convert shielded SOL or WSOL into yield-bearing liquid staking tokens (
-                  <code>JitoSOL</code>, <code>mSOL</code>, Sanctum <code>INF</code>) and hold or
-                  unwind them back inside the unified pool.
+                  Convert shielded SOL (stored as canonical WSOL) into yield-bearing liquid staking
+                  tokens (<code>JitoSOL</code>, <code>mSOL</code>, Sanctum <code>INF</code>) and
+                  hold or unwind them back inside the unified pool.
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 7 · SOL or WSOL → Stake pool CPI → LST note
+                  Tag 6 · WSOL → Stake pool CPI → LST note
                 </span>
               </article>
 
@@ -503,7 +503,7 @@ export function LandingExperience() {
                   standard SPL or Token-2022 receipt token.
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 7 · USDC → Mint or redeem → JLP or RWA note
+                  Tag 6 · USDC → Mint or redeem → JLP or RWA note
                 </span>
               </article>
 
@@ -511,13 +511,13 @@ export function LandingExperience() {
                 <h3>Borrowing and perps via session wallets</h3>
                 <p>
                   Fund deterministic session wallets (<code>B₀, B₁…</code>) from zero prior SOL via
-                  self-paying <code>JoinSplit(WITHDRAW_FLAG_UNWRAP_WSOL)</code>, trade or borrow on
+                  self-paying <code>Transact(WITHDRAW_FLAG_UNWRAP_WSOL)</code>, trade or borrow on
                   stateful protocols, then sweep every remaining lamport back with zero-dust{' '}
-                  <code>DepositSol(DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code>. Positions opened by{' '}
+                  <code>Deposit(DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code>. Positions opened by{' '}
                   <code>Bᵢ</code> remain public on Solana.
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 6 + Tag 3 · Unwrap exit → Session Bᵢ → 0-dust sweep
+                  Tag 5 + Tag 3 · Unwrap exit → Session Bᵢ → 0-dust sweep
                 </span>
               </article>
             </div>
@@ -622,10 +622,11 @@ export function LandingExperience() {
             <div className={styles.sectionIntro}>
               <h2>Public vault balances on Solana, with spending keys on your device.</h2>
               <p>
-                Anyone can inspect the pooled SOL and token accounts on Solscan. Public assets offer
-                useful transparency, though they do not independently reveal or verify all private
-                liabilities. The program checks spending proofs, range proofs, and value
-                conservation; its implementation still needs independent review.
+                Anyone can inspect the unified WSOL and SPL token accounts held by the pool vault
+                authority on Solscan. Public assets offer useful transparency, though they do not
+                independently reveal or verify all private liabilities. The program checks spending
+                proofs, range proofs, and value conservation; its implementation still needs
+                independent review.
               </p>
             </div>
 
@@ -634,8 +635,8 @@ export function LandingExperience() {
                 <h3>On your device</h3>
                 <p>
                   Syncs state through ordinary Solana RPC (2-pass CompactWalletStore) and generates
-                  192-byte BN254 Groth16 proofs locally from one 3.93 MB proving key. Spending keys
-                  never leave your device.
+                  192-byte BN254 Groth16 proofs locally in a dedicated Web Worker from one 3.93 MB
+                  proving key. Spending keys never leave your device.
                 </p>
                 <span className={styles.deviceMeta}>Local key custody · CompactWalletStore</span>
               </article>
@@ -654,15 +655,15 @@ export function LandingExperience() {
                   <li>Nullifier PDAs reject repeated spends across all 16 append lanes</li>
                 </ul>
                 <div className={styles.vaultLinks}>
-                  <a href={solscanAddress(AUDREN.solVaultPda)} target="_blank" rel="noreferrer">
-                    Inspect SOL vault <ArrowUpRight size={13} />
-                  </a>
                   <a
                     href={`${solscanAddress(AUDREN.vaultAuthPda)}#portfolio`}
                     target="_blank"
                     rel="noreferrer"
                   >
-                    Inspect SPL vault <ArrowUpRight size={13} />
+                    Inspect Vault Authority · WSOL &amp; Token Custody <ArrowUpRight size={13} />
+                  </a>
+                  <a href={solscanAddress(AUDREN.pool0Pda)} target="_blank" rel="noreferrer">
+                    Inspect Pool #0 state <ArrowUpRight size={13} />
                   </a>
                 </div>
               </article>

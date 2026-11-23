@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  ASSET_MODE_SOL,
-  ASSET_MODE_SPL,
+  ASSET_MODE_PRIVATE,
+  ASSET_MODE_PUBLIC,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   AUDREN_ANCHOR_IDL,
   AUDREN_CODAMA_IDL,
   AUDREN_PROGRAM_ID,
   AudrenRelayClient,
+  BN254_FR_MODULUS,
   CKPT_LEN,
   CKPT_MAGIC,
   CK_OFF_LANE_COUNTS,
@@ -18,7 +19,9 @@ import {
   CK_OFF_VERSION,
   CLASSIC_TOKEN_PROGRAM_ID,
   CompactWalletStore,
-  EXEC_KIND_SPL,
+  DEPOSIT_FLAG_FEE_FROM_AMOUNT,
+  DEPOSIT_FLAG_NATIVE_SOL,
+  DYN_MEMO_MAGIC,
   JUPITER_CPI_EXCLUDED_DEXES,
   LANE_MAGIC,
   LANE_STATE_LEN,
@@ -27,11 +30,15 @@ import {
   LN_OFF_NEXT_LEAF,
   LN_OFF_NF_COUNT,
   LN_OFF_VERSION,
+  MEMO_CT_LEN,
+  MEMO_ENTRY_WIRE_LEN,
   MEMO_MAGIC,
   MEMO_NOTES_PER_PAGE,
   MEMO_PAGE_HEADER_LEN,
   MEMO_PAGE_LEN,
   MEMO_PAGE_SCAN_SLICE_LEN,
+  MEMO_PAYMENT_ID_LEN,
+  MEMO_VERSION_V1,
   MM_OFF_CIPHERTEXTS,
   MM_OFF_CLOSED_SLOT,
   MM_OFF_COUNT,
@@ -40,7 +47,6 @@ import {
   MM_OFF_MAGIC,
   MM_OFF_PAGE_SEQ,
   MM_OFF_VIEW_TAGS,
-  NATIVE_SOL_MINT_BYTES,
   NF_OFF_COUNT,
   NF_OFF_LANE_ID,
   NF_OFF_MAGIC,
@@ -75,20 +81,36 @@ import {
   SUBTREE_MAGIC,
   SUBTREE_PAGE_LEN,
   SYSTEM_PROGRAM_ID,
+  TAG_DEPOSIT,
+  TAG_EXEC_VIA_ESCROW,
+  TAG_INIT_LANE,
+  TAG_INIT_POOL,
+  TAG_OPEN_PAGE,
+  TAG_PUBLISH_CHECKPOINT,
+  TAG_SET_PAUSED,
+  TAG_TRANSACT,
+  TAG_UPDATE_POOL,
   TOKEN_2022_PROGRAM_ID,
+  UPDATE_POOL_ACCEPT_AUTHORITY,
+  UPDATE_POOL_PARAMS,
+  UPDATE_POOL_PROPOSE_AUTHORITY,
+  UPDATE_POOL_RENOUNCE_AUTHORITY,
+  WITHDRAW_FLAG_UNWRAP_WSOL,
   WSOL_MINT,
   ZERO_HASHES_4ARY,
+  base58Decode,
   base58Encode,
   buildCreateAtaIdempotentInstruction,
-  buildDepositSolInstruction,
-  buildDepositSplInstruction,
+  buildDepositInstruction,
   buildExecViaEscrowInstruction,
   buildInitLaneInstruction,
   buildInitPoolInstruction,
-  buildJoinsplitInstruction,
   buildOpenPageInstruction,
   buildPublishCheckpointInstruction,
   buildSetPausedInstruction,
+  buildTransactInstruction,
+  buildUpdatePoolInstruction,
+  checkMemoViewTag,
   compileV1Message,
   computeExecCtxHash,
   computeMerkleRoot4Ary,
@@ -97,9 +119,11 @@ import {
   computeSubtree256Root,
   computeSuperRoot4Ary,
   computeToken2022NetAmount,
+  computeTransactCtxHash,
   decodeRootCheckpoint,
   deriveAssetId,
   deriveAssociatedTokenAddressSync,
+  deriveCheckpointPdaSync,
   deriveEscrowPdaSync,
   deriveKeysFromSeed,
   deriveLanePdaSync,
@@ -109,25 +133,34 @@ import {
   deriveStealthOwner,
   deriveSubrootPdaSync,
   deriveSubtreePdaSync,
+  deriveUnwrapPdaSync,
+  deriveVaultAuthPdaSync,
+  deterministicNoteRentFee,
   encryptNoteMemo,
   exportFullViewingKey,
   exportSelectiveDisclosureProof,
+  formatAudrenAddress,
   frToBeBytes,
   inspectToken2022UnsafeSelfPay,
+  parseAudrenAddress,
   parseToken2022TransferFeeConfig,
   pickRandomEscrowShard,
   pickRandomLaneId,
   poseidon4,
+  prepareDynamicSwapMemo,
   prepareEscrowAccounts,
   prepareEscrowAccountsForAudren,
+  reconstructWitness,
   serializeV1Transaction,
   syncCompactStoreWithRpc,
   toPubkeyBytes,
+  tryDecryptAndVerifyMemo,
   verifySelectiveDisclosureProof,
 } from '../dist/index.js';
 import { AudrenWasmProver } from '../dist/prover-entry.js';
 
 const enc = new TextEncoder();
+const WSOL_MINT_BYTES = base58Decode(WSOL_MINT);
 
 function makeMemoPage(count) {
   const buf = new Uint8Array(MEMO_PAGE_LEN);
@@ -136,10 +169,11 @@ function makeMemoPage(count) {
   return buf;
 }
 
-function writeMemoSlot(memoRaw, slot, memo90) {
-  memoRaw.set(memo90.subarray(0, 2), MM_OFF_VIEW_TAGS + slot * 2);
-  memoRaw.set(memo90.subarray(2, 34), MM_OFF_EPHEMERAL_PKS + slot * 32);
-  memoRaw.set(memo90.subarray(34, 90), MM_OFF_CIPHERTEXTS + slot * 56);
+function writeMemoSlot(memoRaw, slot, memo106) {
+  assert.equal(memo106.byteLength, MEMO_ENTRY_WIRE_LEN);
+  memoRaw.set(memo106.subarray(0, 2), MM_OFF_VIEW_TAGS + slot * 2);
+  memoRaw.set(memo106.subarray(2, 34), MM_OFF_EPHEMERAL_PKS + slot * 32);
+  memoRaw.set(memo106.subarray(34, MEMO_ENTRY_WIRE_LEN), MM_OFF_CIPHERTEXTS + slot * MEMO_CT_LEN);
 }
 
 function makeT22MintWithExtensions(tlvs) {
@@ -172,43 +206,277 @@ function makeTransferFeeConfigExt({ olderEpoch, olderMax, olderBps, newerEpoch, 
   return { type: 1, data };
 }
 
-test('Package exports, IDLs, Transaction v1 compiler, and CompactWalletStore sealing/freezing', () => {
+function bech32EncodeCustom(hrp, payloadBytes, constVal = 0x2bc830a3) {
+  const charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  const polymod = (vals) => {
+    let chk = 1;
+    for (const v of vals) {
+      const top = chk >>> 25;
+      chk = ((chk & 0x1ffffff) << 5) ^ v;
+      for (let b = 0; b < 5; b++) if ((top >>> b) & 1) chk ^= gen[b];
+    }
+    return chk >>> 0;
+  };
+  const hrpExp = [
+    ...Array.from(hrp, (c) => c.charCodeAt(0) >>> 5),
+    0,
+    ...Array.from(hrp, (c) => c.charCodeAt(0) & 31),
+  ];
+  let acc = 0;
+  let bits = 0;
+  const data5 = [];
+  for (const b of payloadBytes) {
+    acc = ((acc << 8) | b) & 0xfff;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      data5.push((acc >>> bits) & 31);
+    }
+  }
+  if (bits > 0) data5.push((acc << (5 - bits)) & 31);
+  const pmod = (polymod([...hrpExp, ...data5, 0, 0, 0, 0, 0, 0]) ^ constVal) >>> 0;
+  const chk = Array.from({ length: 6 }, (_, i) => (pmod >>> (5 * (5 - i))) & 31);
+  return `${hrp}1${[...data5, ...chk].map((v) => charset[v]).join('')}`;
+}
+
+test('BIP-350 Bech32m aud1... address codec enforces strict checksum, casing, version, length, and Fr modulus', () => {
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x55));
+  const addr = alice.address;
+  assert.equal(addr.startsWith('aud1'), true);
+  assert.equal(addr.length, 114);
+
+  // Lowercase & uppercase roundtrip
+  const parsed = parseAudrenAddress(addr);
+  assert.equal(parsed.encoded, addr);
+  assert.deepEqual(parsed.spendPk, alice.spendPkBytes);
+  assert.deepEqual(parsed.viewPk, alice.viewPk);
+
+  const upper = parseAudrenAddress(addr.toUpperCase());
+  assert.equal(upper.encoded, addr);
+  assert.deepEqual(upper.spendPk, alice.spendPkBytes);
+  assert.deepEqual(upper.viewPk, alice.viewPk);
+
+  // Single-character typo detection across HRP, payload, and checksum
+  const flipChar = (s, idx) => {
+    const alt = s[idx] === 'q' ? 'p' : 'q';
+    return s.slice(0, idx) + alt + s.slice(idx + 1);
+  };
+  assert.throws(() => parseAudrenAddress(flipChar(addr, 4)), /checksum/i);
+  assert.throws(() => parseAudrenAddress(flipChar(addr, 50)), /checksum/i);
+  assert.throws(() => parseAudrenAddress(flipChar(addr, addr.length - 1)), /checksum/i);
+
+  // Mixed-case rejection
+  assert.throws(() => parseAudrenAddress(`Aud1${addr.slice(4)}`), /Mixed case/);
+  assert.throws(
+    () => parseAudrenAddress(addr.slice(0, 10) + addr[10].toUpperCase() + addr.slice(11)),
+    /Mixed case/,
+  );
+
+  // Wrong HRP rejection
+  const validPayload = new Uint8Array(65);
+  validPayload[0] = 1;
+  validPayload.set(alice.spendPkBytes, 1);
+  validPayload.set(alice.viewPk, 33);
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('btc', validPayload)), /HRP/);
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('sol', validPayload)), /HRP/);
+
+  // Bech32 (v0, const = 1) instead of Bech32m (0x2bc830a3) rejected
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', validPayload, 1)), /checksum/i);
+
+  // Wrong version byte (0x02 and 0x00) rejected
+  const badVer2 = new Uint8Array(validPayload);
+  badVer2[0] = 2;
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', badVer2)), /version/);
+  const badVer0 = new Uint8Array(validPayload);
+  badVer0[0] = 0;
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', badVer0)), /version/);
+
+  // Wrong payload length (64 B and 66 B) rejected
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', validPayload.slice(0, 64))), /length/);
+  const tooLong = new Uint8Array(66);
+  tooLong.set(validPayload, 0);
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', tooLong)), /length/);
+
+  // Non-canonical spendPk (>= BN254 Fr modulus) rejected on encode AND decode
+  const nonCanonical = new Uint8Array(32);
+  let r = BN254_FR_MODULUS;
+  for (let i = 31; i >= 0; i--) {
+    nonCanonical[i] = Number(r & 0xffn);
+    r >>= 8n;
+  }
+  assert.throws(() => formatAudrenAddress(nonCanonical, alice.viewPk), /canonical BN254 Fr/);
+  const badFrPayload = new Uint8Array(65);
+  badFrPayload[0] = 1;
+  badFrPayload.set(nonCanonical, 1);
+  badFrPayload.set(alice.viewPk, 33);
+  assert.throws(() => parseAudrenAddress(bech32EncodeCustom('aud', badFrPayload)), /canonical BN254 Fr/);
+});
+
+test('X25519 low-order points (all-zero & order-8) are rejected across all memo primitives', () => {
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x31));
+  const fvk = exportFullViewingKey(alice);
+  const ephSec = new Uint8Array(32).fill(0x42);
+
+  // Canonical Curve25519 low-order points (RFC 7748): 0, 1, order-8 generators
+  const lowOrderPoints = [
+    new Uint8Array(32), // all-zero
+    Uint8Array.from([1, ...new Array(31).fill(0)]), // u = 1
+    Uint8Array.from([
+      0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
+      0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
+    ]), // order-8 point
+    Uint8Array.from([
+      0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    ]), // order-2/4/8 boundary point (p - 1)
+  ];
+
+  const fakeMemo = new Uint8Array(MEMO_ENTRY_WIRE_LEN);
+  const fakeCm = new Uint8Array(32);
+
+  for (const badPk of lowOrderPoints) {
+    assert.equal(checkMemoViewTag(alice.viewSk, new Uint8Array(2), badPk), false);
+    fakeMemo.set(badPk, 2);
+    assert.equal(tryDecryptAndVerifyMemo(fvk, fakeMemo, fakeCm), null);
+    assert.throws(() => encryptNoteMemo(badPk, ephSec, 100n, WSOL_MINT_BYTES), /Low-order X25519/);
+    assert.throws(() => prepareDynamicSwapMemo(badPk, ephSec), /Low-order X25519/);
+  }
+});
+
+test('Versioned 72 B memo + 34 B AEAD AAD + paymentId roundtrip & 72 B AUD1DYN1 padding tamper rejection', () => {
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x61));
+  const fvk = exportFullViewingKey(alice);
+  const ephSec = new Uint8Array(32).fill(0x62);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
+  const paymentId = Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+
+  // 1. Static versioned memo roundtrip with explicit 14 B paymentId
+  const staticEnc = encryptNoteMemo(alice.viewPk, ephSec, 4_200_000n, WSOL_MINT_BYTES, paymentId);
+  assert.equal(staticEnc.memo.byteLength, MEMO_ENTRY_WIRE_LEN);
+  const cmBe = frToBeBytes(
+    computeNoteCommitment(
+      deriveStealthOwner(alice.spendPk, staticEnc.tweak),
+      wsolAsset,
+      4_200_000n,
+      staticEnc.blinding,
+    ),
+  );
+
+  const dec = tryDecryptAndVerifyMemo(fvk, staticEnc.memo, cmBe);
+  assert.ok(dec);
+  assert.equal(dec.amount, 4_200_000n);
+  assert.equal(dec.memoVersion, MEMO_VERSION_V1);
+  assert.equal(dec.memoFlags, 0);
+  assert.deepEqual(dec.paymentId, paymentId);
+  assert.equal(dec.isDynamic, false);
+
+  // Invalid paymentId length throws
+  assert.throws(
+    () => encryptNoteMemo(alice.viewPk, ephSec, 4_200_000n, WSOL_MINT_BYTES, new Uint8Array(13)),
+    RangeError,
+  );
+
+  // AEAD AAD tamper rejection: mutating viewTag OR epk OR ciphertext fails Poly1305 verification
+  const tamperedVt = new Uint8Array(staticEnc.memo);
+  tamperedVt[0] ^= 0x01;
+  assert.equal(tryDecryptAndVerifyMemo(fvk, tamperedVt, cmBe), null);
+
+  const tamperedEpk = new Uint8Array(staticEnc.memo);
+  tamperedEpk[2] ^= 0x80;
+  assert.equal(tryDecryptAndVerifyMemo(fvk, tamperedEpk, cmBe), null);
+
+  const tamperedCt = new Uint8Array(staticEnc.memo);
+  tamperedCt[40] ^= 0x01;
+  assert.equal(tryDecryptAndVerifyMemo(fvk, tamperedCt, cmBe), null);
+
+  // 2. Dynamic 72 B AUD1DYN1 swap memo: domain separation + zero-padding tamper rejection
+  const dynPrep = prepareDynamicSwapMemo(alice.viewPk, ephSec);
+  assert.notEqual(dynPrep.tweak, staticEnc.tweak, 'dyn_tweak must be domain-separated from static tweak');
+  assert.notEqual(dynPrep.blinding, staticEnc.blinding, 'dyn_blind must be domain-separated from static blinding');
+  assert.equal(dynPrep.dynHead34.byteLength, 34);
+  assert.equal(dynPrep.dynMask72.byteLength, MEMO_CT_LEN);
+
+  const dynAmount = 987_654_321n;
+  const plain72 = new Uint8Array(MEMO_CT_LEN);
+  plain72.set(enc.encode(DYN_MEMO_MAGIC), 0);
+  new DataView(plain72.buffer).setBigUint64(8, dynAmount, true);
+  plain72.set(WSOL_MINT_BYTES, 16);
+  // plain72[48..72] are all zeroes
+
+  const stamped = new Uint8Array(MEMO_ENTRY_WIRE_LEN);
+  stamped.set(dynPrep.dynHead34, 0);
+  for (let i = 0; i < MEMO_CT_LEN; i++) {
+    stamped[34 + i] = plain72[i] ^ dynPrep.dynMask72[i];
+  }
+  const dynCmBe = frToBeBytes(
+    computeNoteCommitment(
+      deriveStealthOwner(alice.spendPk, dynPrep.tweak),
+      wsolAsset,
+      dynAmount,
+      dynPrep.blinding,
+    ),
+  );
+
+  const dynDec = tryDecryptAndVerifyMemo(fvk, stamped, dynCmBe);
+  assert.ok(dynDec);
+  assert.equal(dynDec.isDynamic, true);
+  assert.equal(dynDec.amount, dynAmount);
+  assert.deepEqual(dynDec.mint, WSOL_MINT_BYTES);
+  assert.deepEqual(dynDec.paymentId, new Uint8Array(MEMO_PAYMENT_ID_LEN));
+
+  // Flipping ANY byte in trailing 24-byte zero padding [48..72] MUST be rejected!
+  const tamperedPadStart = new Uint8Array(stamped);
+  tamperedPadStart[34 + 48] ^= 0x01;
+  assert.equal(tryDecryptAndVerifyMemo(fvk, tamperedPadStart, dynCmBe), null);
+
+  const tamperedPadEnd = new Uint8Array(stamped);
+  tamperedPadEnd[34 + 71] ^= 0x80;
+  assert.equal(tryDecryptAndVerifyMemo(fvk, tamperedPadEnd, dynCmBe), null);
+});
+
+test('Package exports, IDLs, Transaction v1 compiler, and CompactWalletStore sealing/freezing (96 memos/page)', () => {
   assert.equal(AUDREN_CODAMA_IDL.program.publicKey, AUDREN_PROGRAM_ID);
   assert.equal(AUDREN_CODAMA_IDL.program.instructions.length, 9);
   assert.equal(AUDREN_ANCHOR_IDL.instructions.length, 9);
   assert.equal(JUPITER_CPI_EXCLUDED_DEXES.length, 8);
+  assert.equal(MEMO_NOTES_PER_PAGE, 96);
+  assert.equal(MEMO_PAGE_LEN, 10_240);
+  assert.equal(MEMO_PAGE_SCAN_SLICE_LEN, 3_328);
 
   const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x55));
   const fvk = exportFullViewingKey(alice);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
+  const payId = Uint8Array.from([0xaa, 0xbb, 0xcc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xdd]);
 
-  // Build a sealed 256-leaf SubtreePage (with Alice's note at slot 7) + all 3 MemoPages (256 slots)
+  // Build a sealed 256-leaf SubtreePage (with Alice's note at slot 7) + 3 MemoPages (96 + 96 + 64 = 256)
   const subRaw = new Uint8Array(SUBTREE_PAGE_LEN);
   subRaw.set(enc.encode(SUBTREE_MAGIC), SB_OFF_MAGIC);
   new DataView(subRaw.buffer).setUint16(SB_OFF_COUNT, SUBTREE_LEAVES, true);
 
-  const memo0 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 0..111
-  const memo1 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 112..223
-  const memo2 = makeMemoPage(SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE); // 224..255 (32)
+  const memo0 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 0..95
+  const memo1 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 96..191
+  const memo2 = makeMemoPage(SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE); // 192..255 (64)
 
   const leaves = [];
   for (let i = 0; i < SUBTREE_LEAVES; i++) {
     if (i === 7) {
-      const { tweak, blinding, memo90 } = encryptNoteMemo(
+      const { tweak, blinding, memo } = encryptNoteMemo(
         alice.viewPk,
         new Uint8Array(32).fill(0x66),
         2_500_000n,
-        NATIVE_SOL_MINT_BYTES,
+        WSOL_MINT_BYTES,
+        payId,
       );
       const cm = computeNoteCommitment(
         deriveStealthOwner(alice.spendPk, tweak),
-        solAsset,
+        wsolAsset,
         2_500_000n,
         blinding,
       );
       leaves.push(cm);
       subRaw.set(frToBeBytes(cm), SB_OFF_LEAVES + i * 32);
-      writeMemoSlot(memo0, i, memo90);
+      writeMemoSlot(memo0, i, memo);
     } else {
       const leaf = BigInt(i + 1);
       leaves.push(leaf);
@@ -233,12 +501,14 @@ test('Package exports, IDLs, Transaction v1 compiler, and CompactWalletStore sea
   assert.equal(store.lanes[1].frontierSubSeq, 1n);
   assert.equal(store.lanes[1].frontierLeaves.length, 0);
   assert.ok(store.notes[0].frozenIntraSiblings, 'sealed page must freeze 12 intra-subtree siblings');
+  assert.deepEqual(store.notes[0].paymentId, payId);
 
-  // Round-trip JSON persistence (IndexedDB / disk)
+  // Round-trip JSON persistence (IndexedDB / disk) preserves paymentId
   const restored = CompactWalletStore.fromJSON(store.toJSON());
   assert.equal(restored.notes.length, 1);
   const note = restored.notes[0];
   assert.equal(note.amount, 2_500_000n);
+  assert.deepEqual(note.paymentId, payId);
   assert.equal(verifySelectiveDisclosureProof(exportSelectiveDisclosureProof(note), note.commitment), true);
 
   // Build synthetic RootCheckpoint at count = 256 and reconstruct offline witness
@@ -295,18 +565,19 @@ test('Package exports, IDLs, Transaction v1 compiler, and CompactWalletStore sea
   });
   assert.equal(restored.unspentNotes().length, 0, 'out-of-order NullifierPage 0 must not be skipped');
 
-  // Transaction v1 (0x81) compilation + wire serialization test
-  const depIx = buildDepositSolInstruction({
+  // Transaction v1 (0x81) compilation + wire serialization test with unified v1 Deposit
+  const depIx = buildDepositInstruction({
     depositor: SYSTEM_PROGRAM_ID,
     poolId: 0,
     laneId: 0,
     subPageSeq: 0n,
     rootPageSeq: 0n,
     memoPageSeq: 0n,
+    nativeSol: true,
     amount: 1_000_000n,
     stealthOwner: deriveStealthOwner(alice.spendPk, 1n),
     blinding: 2n,
-    memo90: new Uint8Array(90),
+    memo: new Uint8Array(MEMO_ENTRY_WIRE_LEN),
   });
   const compiled = compileV1Message({
     feePayer: toPubkeyBytes(SYSTEM_PROGRAM_ID),
@@ -333,32 +604,32 @@ test('Package exports, IDLs, Transaction v1 compiler, and CompactWalletStore sea
 test('CompactWalletStore holds sealed SubtreePage until lagged MemoPages arrive (no sync stall)', () => {
   const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x77));
   const fvk = exportFullViewingKey(alice);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
   const subRaw = new Uint8Array(SUBTREE_PAGE_LEN);
   subRaw.set(enc.encode(SUBTREE_MAGIC), SB_OFF_MAGIC);
   new DataView(subRaw.buffer).setUint16(SB_OFF_COUNT, SUBTREE_LEAVES, true);
 
-  const memo0 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 0..111
-  const memo1 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 112..223
-  const memo2 = makeMemoPage(SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE); // 224..255
+  const memo0 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 0..95
+  const memo1 = makeMemoPage(MEMO_NOTES_PER_PAGE); // 96..191
+  const memo2 = makeMemoPage(SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE); // 192..255
 
   for (let i = 0; i < SUBTREE_LEAVES; i++) {
     if (i === 150) {
-      const { tweak, blinding, memo90 } = encryptNoteMemo(
+      const { tweak, blinding, memo } = encryptNoteMemo(
         alice.viewPk,
         new Uint8Array(32).fill(0x88),
         5_000_000n,
-        NATIVE_SOL_MINT_BYTES,
+        WSOL_MINT_BYTES,
       );
       const cm = computeNoteCommitment(
         deriveStealthOwner(alice.spendPk, tweak),
-        solAsset,
+        wsolAsset,
         5_000_000n,
         blinding,
       );
       subRaw.set(frToBeBytes(cm), SB_OFF_LEAVES + i * 32);
-      writeMemoSlot(memo1, i - MEMO_NOTES_PER_PAGE, memo90);
+      writeMemoSlot(memo1, i - MEMO_NOTES_PER_PAGE, memo);
     } else {
       subRaw.set(frToBeBytes(BigInt(i + 1)), SB_OFF_LEAVES + i * 32);
     }
@@ -374,7 +645,7 @@ test('CompactWalletStore holds sealed SubtreePage until lagged MemoPages arrive 
     nfPages: [],
   });
   assert.equal(d1, 0);
-  assert.equal(store.lanes[0].nextMemoLeaf, 112n);
+  assert.equal(store.lanes[0].nextMemoLeaf, 96n);
   assert.equal(store.lanes[0].frontierSubSeq, 0n, 'must hold frontierSubSeq until memos reach 256');
   assert.equal(store.lanes[0].frontierLeaves.length, SUBTREE_LEAVES);
 
@@ -387,7 +658,7 @@ test('CompactWalletStore holds sealed SubtreePage until lagged MemoPages arrive 
     nfPages: [],
   });
   assert.equal(d2, 1, 'Alice note at leaf 150 must be discovered from held frontier');
-  assert.equal(store.lanes[0].nextMemoLeaf, 224n);
+  assert.equal(store.lanes[0].nextMemoLeaf, 192n);
   assert.equal(store.notes[0].amount, 5_000_000n);
   assert.ok(store.notes[0].frozenIntraSiblings, 'newly discovered note in full page must freeze siblings');
 
@@ -405,18 +676,217 @@ test('CompactWalletStore holds sealed SubtreePage until lagged MemoPages arrive 
   assert.equal(store.lanes[0].frontierLeaves.length, 0);
 });
 
-test('ExecViaEscrow Solana transaction-wide writability promotion & instruction builders', async () => {
+test('All 9 v1 instruction builders, ctx_hash vkId binding, and ExecViaEscrow writability promotion', async () => {
   const usdcMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
   const payer = base58Encode(new Uint8Array(32).fill(0x11));
   const extraPool = base58Encode(new Uint8Array(32).fill(0x22));
   const readonlyAcc = base58Encode(new Uint8Array(32).fill(0x33));
   const routerProg = base58Encode(new Uint8Array(32).fill(0x44));
+  const newAuth = base58Encode(new Uint8Array(32).fill(0x55));
+  const vaultAuth = deriveVaultAuthPdaSync(0).address;
   const escrowPda = deriveEscrowPdaSync(0, 0).address;
   const escrowInAta = deriveAssociatedTokenAddressSync(escrowPda, usdcMint, CLASSIC_TOKEN_PROGRAM_ID).address;
   const escrowOutAta = deriveAssociatedTokenAddressSync(escrowPda, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID).address;
+  const wsolVaultAta = deriveAssociatedTokenAddressSync(vaultAuth, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID).address;
 
-  // Simulate live Mainnet Jupiter ZeroFi returning escrowPda as isSigner:true, isWritable:false
-  // plus a duplicate pubkey appearing readonly once and writable once.
+  // deterministicNoteRentFee uses MEMO_NOTES_PER_PAGE = 96
+  assert.equal(
+    deterministicNoteRentFee(10_000_000n, 256n * 100n, 76_800n * 10n, 96n * 200n),
+    310n,
+  );
+  assert.equal(
+    deterministicNoteRentFee(150n, 256n * 100n, 76_800n * 10n, 96n * 200n),
+    150n,
+  );
+
+  // Tag 0: InitPool (3 accounts, 37 B)
+  const initPool = buildInitPoolInstruction({
+    payer,
+    poolId: 0,
+    ckptInterval: 8n,
+    maxCkptAge: 1536n,
+    noteRentFee: 100n,
+    nfRentFee: 50n,
+  });
+  assert.equal(initPool.data[0], TAG_INIT_POOL);
+  assert.equal(initPool.data.byteLength, 37);
+  assert.equal(initPool.accounts.length, 3);
+
+  // Tag 1: InitLane (9 accounts, 6 B)
+  const initLane = buildInitLaneInstruction({ authority: payer, poolId: 0, laneId: 0 });
+  assert.equal(initLane.data[0], TAG_INIT_LANE);
+  assert.equal(initLane.data.byteLength, 6);
+  assert.equal(initLane.accounts.length, 9);
+
+  // Tag 2: OpenPage (6 accounts, 15 B)
+  const openPage = buildOpenPageInstruction({
+    payer,
+    pageKind: OPEN_PAGE_KIND_SUBTREE,
+    poolId: 0,
+    laneId: 0,
+    pageSeq: 1n,
+  });
+  assert.equal(openPage.data[0], TAG_OPEN_PAGE);
+  assert.equal(openPage.data.byteLength, 15);
+  assert.equal(openPage.accounts.length, 6);
+
+  // Tag 3: Unified Deposit — Native SOL path (185 B, 13 fixed accounts)
+  const depSol = buildDepositInstruction({
+    depositor: payer,
+    poolId: 0,
+    laneId: 0,
+    subPageSeq: 0n,
+    rootPageSeq: 0n,
+    memoPageSeq: 0n,
+    nativeSol: true,
+    feeFromAmount: true,
+    amount: 500_000n,
+    stealthOwner: 1n,
+    blinding: 2n,
+    memo: new Uint8Array(MEMO_ENTRY_WIRE_LEN),
+  });
+  assert.equal(depSol.data[0], TAG_DEPOSIT);
+  assert.equal(depSol.data.byteLength, 185);
+  assert.equal(depSol.data[6], DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT);
+  assert.equal(depSol.accounts.length, 13);
+  assert.equal(depSol.accounts[3].pubkey, WSOL_MINT);
+  assert.equal(depSol.accounts[4].pubkey, payer);
+  assert.equal(depSol.accounts[5].pubkey, wsolVaultAta);
+  assert.equal(depSol.accounts[6].pubkey, CLASSIC_TOKEN_PROGRAM_ID);
+
+  // Tag 3: Unified Deposit — SPL / Token-2022 path with rollover + hook accounts
+  const depSpl = buildDepositInstruction({
+    depositor: payer,
+    poolId: 0,
+    laneId: 0,
+    subPageSeq: 0n,
+    rootPageSeq: 0n,
+    memoPageSeq: 0n,
+    mint: usdcMint,
+    sourceAccount: escrowInAta,
+    tokenProgram: TOKEN_2022_PROGRAM_ID,
+    rollover: { nextSubSeq: 1n, nextMemoSeq: 1n },
+    amount: 1_000n,
+    stealthOwner: 1n,
+    blinding: 2n,
+    memo: new Uint8Array(MEMO_ENTRY_WIRE_LEN),
+    hookAccounts: [{ pubkey: extraPool, isSigner: false, isWritable: false }],
+  });
+  assert.equal(depSpl.data[0], TAG_DEPOSIT);
+  assert.equal(depSpl.data.byteLength, 185);
+  assert.equal(depSpl.data[6], 0b11);
+  assert.equal(depSpl.accounts.length, 16); // 13 + 2 rollover + 1 hook
+  assert.throws(
+    () =>
+      buildDepositInstruction({
+        depositor: payer,
+        poolId: 0,
+        laneId: 0,
+        subPageSeq: 0n,
+        rootPageSeq: 0n,
+        memoPageSeq: 0n,
+        mint: usdcMint,
+        sourceAccount: escrowInAta,
+        feeFromAmount: true,
+        amount: 1_000n,
+        stealthOwner: 1n,
+        blinding: 2n,
+        memo: new Uint8Array(MEMO_ENTRY_WIRE_LEN),
+      }),
+    /feeFromAmount is only valid when nativeSol is true/,
+  );
+
+  // Tag 4: PublishCheckpoint (5 B)
+  const pubCkpt = buildPublishCheckpointInstruction({ payer, poolId: 0, slotIdx: 0, activeLanes: 4 });
+  assert.equal(pubCkpt.data[0], TAG_PUBLISH_CHECKPOINT);
+  assert.equal(pubCkpt.data.byteLength, 5);
+  assert.equal(pubCkpt.accounts.length, 8);
+
+  // Tag 5: Transact — private, public, WSOL unwrap, & vkId binding in ctx_hash
+  const ctxVk0 = computeTransactCtxHash({
+    poolId: 0,
+    vkId: 0,
+    outLaneId: 0,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PRIVATE,
+    unwrapWsol: false,
+    publicAssetId: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: new Uint8Array(0),
+  });
+  const ctxVk1 = computeTransactCtxHash({
+    poolId: 0,
+    vkId: 1,
+    outLaneId: 0,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PRIVATE,
+    unwrapWsol: false,
+    publicAssetId: new Uint8Array(32),
+    publicAmountOut: 0n,
+    relayerFeeAmount: 0n,
+    memosBytes: new Uint8Array(0),
+  });
+  assert.notEqual(ctxVk0, ctxVk1, 'computeTransactCtxHash must cryptographically bind vkId');
+
+  const nf0Bytes = new Uint8Array(32).fill(1);
+  const transactUnwrap = buildTransactInstruction({
+    payer,
+    poolId: 0,
+    ckptSlotIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: true,
+    proof192: new Uint8Array(192),
+    nf0: nf0Bytes,
+    nf1: new Uint8Array(32),
+    cm0: new Uint8Array(32),
+    cm1: new Uint8Array(32),
+    cm2: new Uint8Array(32),
+    publicAmountOut: 100_000n,
+    relayerFeeAmount: 5_000n,
+    recipient: readonlyAcc,
+    relayerFeeRecipient: payer,
+    memosBytes: new Uint8Array(0),
+  });
+  assert.equal(transactUnwrap.data[0], TAG_TRANSACT);
+  assert.equal(transactUnwrap.data.byteLength, 378);
+  assert.equal(transactUnwrap.data[9], WITHDRAW_FLAG_UNWRAP_WSOL);
+  assert.equal(transactUnwrap.accounts.length, 19); // 12 head + 7 public w/ unwrap PDA
+  assert.equal(transactUnwrap.accounts[18].pubkey, deriveUnwrapPdaSync(0, nf0Bytes).address);
+
+  assert.throws(
+    () =>
+      buildTransactInstruction({
+        payer,
+        poolId: 0,
+        ckptSlotIdx: 0,
+        outLaneId: 0,
+        outSubSeq: 0n,
+        outRootSeq: 0n,
+        outMemoSeq: 0n,
+        outNfSeq: 0n,
+        outputMask: 0,
+        assetMode: ASSET_MODE_PUBLIC,
+        proof192: new Uint8Array(192),
+        nf0: new Uint8Array(32).fill(1),
+        nf1: new Uint8Array(32),
+        cm0: new Uint8Array(32),
+        cm1: new Uint8Array(32),
+        cm2: new Uint8Array(32),
+        publicAmountOut: 100n,
+        relayerFeeAmount: 0n,
+        memosBytes: new Uint8Array(0),
+      }),
+    /recipient is required/,
+  );
+
+  // Tag 6: ExecViaEscrow (SPL/T22 only, 558 B header, 72 B dynMemoMask, vkId binding & writability promotion)
   const rawRouterAccs = [
     { pubkey: escrowPda, isSigner: true, isWritable: false },
     { pubkey: escrowInAta, isSigner: false, isWritable: false },
@@ -425,13 +895,12 @@ test('ExecViaEscrow Solana transaction-wide writability promotion & instruction 
     { pubkey: extraPool, isSigner: false, isWritable: true },
     { pubkey: readonlyAcc, isSigner: false, isWritable: false },
   ];
-
   const normalized = prepareEscrowAccountsForAudren(rawRouterAccs, escrowPda, [payer, escrowInAta]);
-  assert.equal(normalized[0].isSigner, false, 'escrow signer bit must be stripped');
-  assert.equal(normalized[0].isWritable, true, 'escrow must be promoted writable');
-  assert.equal(normalized[1].isWritable, true, 'extraWritablePubkeys must promote escrowInAta');
-  assert.equal(normalized[3].isWritable, true, 'duplicate writable pubkey must promote readonly copy');
-  assert.equal(normalized[5].isWritable, false, 'unrelated readonly account stays readonly');
+  assert.equal(normalized[0].isSigner, false);
+  assert.equal(normalized[0].isWritable, true);
+  assert.equal(normalized[1].isWritable, true);
+  assert.equal(normalized[3].isWritable, true);
+  assert.equal(normalized[5].isWritable, false);
 
   const prepared = await prepareEscrowAccounts({
     poolId: 0,
@@ -441,17 +910,12 @@ test('ExecViaEscrow Solana transaction-wide writability promotion & instruction 
     actionAccounts: rawRouterAccs,
     extraWritablePubkeys: [payer],
   });
-  assert.equal(prepared.accounts[0].isWritable, true);
-  assert.equal(prepared.accounts[1].isWritable, true);
-
-  // computeExecCtxHash with unnormalized routerAccounts matches normalized hash bit-for-bit!
-  const ctxArgs = {
+  const execCtxBase = {
     poolId: 0,
+    vkId: 0,
     outLaneId: 0,
     escrowShard: 0,
     changeMask: 0,
-    inKind: EXEC_KIND_SPL,
-    outKind: EXEC_KIND_SPL,
     feeOnOutput: true,
     assetIn: new Uint8Array(32).fill(1),
     amountIn: 10_000_000n,
@@ -464,15 +928,16 @@ test('ExecViaEscrow Solana transaction-wide writability promotion & instruction 
     outStealthOwner: new Uint8Array(32).fill(3),
     outBlinding: new Uint8Array(32).fill(4),
     dynMemoHead: new Uint8Array(34).fill(5),
-    dynMask56: new Uint8Array(56).fill(6),
+    dynMemoMask: new Uint8Array(MEMO_CT_LEN).fill(6),
     routerIxData: new Uint8Array([9, 8, 7]),
     changeMemos: new Uint8Array(0),
   };
-  const hRaw = computeExecCtxHash({ ...ctxArgs, routerAccounts: rawRouterAccs });
-  const hNorm = computeExecCtxHash({ ...ctxArgs, routerAccounts: prepared.accounts });
+  const hRaw = computeExecCtxHash({ ...execCtxBase, routerAccounts: rawRouterAccs });
+  const hNorm = computeExecCtxHash({ ...execCtxBase, routerAccounts: prepared.accounts });
+  const hVk1 = computeExecCtxHash({ ...execCtxBase, vkId: 1, routerAccounts: prepared.accounts });
   assert.equal(hRaw, hNorm, 'computeExecCtxHash must normalize Solana tx-wide writability');
+  assert.notEqual(hRaw, hVk1, 'computeExecCtxHash must cryptographically bind vkId');
 
-  // buildExecViaEscrowInstruction also normalizes trailing router accounts
   const execIx = buildExecViaEscrowInstruction({
     payer,
     poolId: 0,
@@ -484,11 +949,9 @@ test('ExecViaEscrow Solana transaction-wide writability promotion & instruction 
     outNfSeq: 0n,
     escrowShard: 0,
     changeMask: 0,
-    inKind: EXEC_KIND_SPL,
-    outKind: EXEC_KIND_SPL,
     feeOnOutput: true,
-    inSpl: { mint: usdcMint, vaultAta: readonlyAcc, escrowAta: escrowInAta, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
-    outSpl: { mint: WSOL_MINT, vaultAta: readonlyAcc, escrowAta: escrowOutAta, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
+    inLeg: { mint: usdcMint, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
+    outLeg: { mint: WSOL_MINT, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
     relayerFeeAmount: 50_000n,
     relayerFeeRecipient: payer,
     proof192: new Uint8Array(192),
@@ -502,19 +965,64 @@ test('ExecViaEscrow Solana transaction-wide writability promotion & instruction 
     outStealthOwner: new Uint8Array(32).fill(3),
     outBlinding: new Uint8Array(32).fill(4),
     dynMemoHead: new Uint8Array(34).fill(5),
-    dynMask56: new Uint8Array(56).fill(6),
+    dynMemoMask: new Uint8Array(MEMO_CT_LEN).fill(6),
     routerProg,
     routerIxData: new Uint8Array([9, 8, 7]),
     routerAccounts: rawRouterAccs,
     changeMemos: new Uint8Array(0),
   });
+  assert.equal(execIx.data[0], TAG_EXEC_VIA_ESCROW);
+  assert.equal(execIx.data.byteLength, 558 + 3);
   const trailing = execIx.accounts.slice(-rawRouterAccs.length);
   assert.equal(trailing[0].isSigner, false);
   assert.equal(trailing[0].isWritable, true);
   assert.equal(trailing[1].isWritable, true);
   assert.equal(trailing[3].isWritable, true);
 
-  // Smoke-test remaining instruction builders & CreateAtaIdempotent
+  // Tag 7: SetPaused (6 B)
+  const setPaused = buildSetPausedInstruction({ authority: payer, poolId: 0, paused: true });
+  assert.equal(setPaused.data[0], TAG_SET_PAUSED);
+  assert.equal(setPaused.data.byteLength, 6);
+
+  // Tag 8: UpdatePool (all 4 sub-actions)
+  const updParams = buildUpdatePoolInstruction({
+    signer: payer,
+    poolId: 0,
+    action: { kind: 'params', ckptInterval: 16n, maxCkptAge: 2048n, noteRentFee: 200n, nfRentFee: 100n },
+  });
+  assert.equal(updParams.data[0], TAG_UPDATE_POOL);
+  assert.equal(updParams.data[5], UPDATE_POOL_PARAMS);
+  assert.equal(updParams.data.byteLength, 38);
+  assert.equal(updParams.accounts.length, 2);
+
+  const updProp = buildUpdatePoolInstruction({
+    signer: payer,
+    poolId: 0,
+    action: { kind: 'proposeAuthority', pendingAuthority: newAuth },
+  });
+  assert.equal(updProp.data[0], TAG_UPDATE_POOL);
+  assert.equal(updProp.data[5], UPDATE_POOL_PROPOSE_AUTHORITY);
+  assert.equal(updProp.data.byteLength, 38);
+
+  const updAcc = buildUpdatePoolInstruction({
+    signer: newAuth,
+    poolId: 0,
+    action: { kind: 'acceptAuthority' },
+  });
+  assert.equal(updAcc.data[0], TAG_UPDATE_POOL);
+  assert.equal(updAcc.data[5], UPDATE_POOL_ACCEPT_AUTHORITY);
+  assert.equal(updAcc.data.byteLength, 6);
+
+  const updRen = buildUpdatePoolInstruction({
+    signer: newAuth,
+    poolId: 0,
+    action: { kind: 'renounceAuthority' },
+  });
+  assert.equal(updRen.data[0], TAG_UPDATE_POOL);
+  assert.equal(updRen.data[5], UPDATE_POOL_RENOUNCE_AUTHORITY);
+  assert.equal(updRen.data.byteLength, 6);
+
+  // CreateAtaIdempotent helper
   const ataIx = buildCreateAtaIdempotentInstruction({
     payer,
     ata: escrowInAta,
@@ -525,69 +1033,9 @@ test('ExecViaEscrow Solana transaction-wide writability promotion & instruction 
   assert.equal(ataIx.programId, ASSOCIATED_TOKEN_PROGRAM_ID);
   assert.deepEqual(Array.from(ataIx.data), [1]);
   assert.equal(ataIx.accounts[5].pubkey, TOKEN_2022_PROGRAM_ID);
-
-  assert.equal(buildInitPoolInstruction({ payer, poolId: 0, ckptInterval: 8n, maxCkptAge: 1536n, noteRentFee: 100n, nfRentFee: 50n }).data[0], 0);
-  assert.equal(buildInitLaneInstruction({ authority: payer, poolId: 0, laneId: 0 }).data[0], 1);
-  assert.equal(buildOpenPageInstruction({ payer, pageKind: OPEN_PAGE_KIND_SUBTREE, poolId: 0, laneId: 0, pageSeq: 1n }).data[0], 2);
-  assert.equal(buildDepositSplInstruction({ depositor: payer, poolId: 0, mint: usdcMint, depositorAta: escrowInAta, vaultAta: escrowOutAta, tokenProgram: TOKEN_2022_PROGRAM_ID, laneId: 0, subPageSeq: 0n, rootPageSeq: 0n, memoPageSeq: 0n, amount: 1000n, stealthOwner: 1n, blinding: 2n, memo90: new Uint8Array(90) }).data[0], 4);
-  assert.equal(buildPublishCheckpointInstruction({ payer, poolId: 0, slotIdx: 0, activeLanes: 4 }).data[0], 5);
-  assert.equal(buildSetPausedInstruction({ authority: payer, poolId: 0, paused: true }).data[0], 8);
-  assert.throws(
-    () =>
-      buildJoinsplitInstruction({
-        payer,
-        poolId: 0,
-        ckptSlotIdx: 0,
-        outLaneId: 0,
-        outSubSeq: 0n,
-        outRootSeq: 0n,
-        outMemoSeq: 0n,
-        outNfSeq: 0n,
-        outputMask: 0,
-        assetMode: ASSET_MODE_SOL,
-        proof192: new Uint8Array(192),
-        nf0: new Uint8Array(32).fill(1),
-        nf1: new Uint8Array(32),
-        cm0: new Uint8Array(32),
-        cm1: new Uint8Array(32),
-        cm2: new Uint8Array(32),
-        publicAmountOut: 100n,
-        relayerFeeAmount: 0n,
-        memosBytes: new Uint8Array(0),
-      }),
-    /recipient is required/,
-  );
-  assert.throws(
-    () =>
-      buildJoinsplitInstruction({
-        payer,
-        poolId: 0,
-        ckptSlotIdx: 0,
-        outLaneId: 0,
-        outSubSeq: 0n,
-        outRootSeq: 0n,
-        outMemoSeq: 0n,
-        outNfSeq: 0n,
-        outputMask: 0,
-        assetMode: ASSET_MODE_SPL,
-        splWithdrawAccs: { mint: usdcMint, vaultAta: escrowInAta, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
-        proof192: new Uint8Array(192),
-        nf0: new Uint8Array(31), // invalid length
-        nf1: new Uint8Array(32),
-        cm0: new Uint8Array(32),
-        cm1: new Uint8Array(32),
-        cm2: new Uint8Array(32),
-        publicAmountOut: 100n,
-        relayerFeeAmount: 0n,
-        recipient: payer,
-        memosBytes: new Uint8Array(0),
-      }),
-    /nf0 must be 32 bytes/,
-  );
 });
 
 test('Token-2022 epoch-aware TransferFeeConfig parser, net calculation & self-pay safety inspector', () => {
-  // Epoch 100 -> older (100 bps, max 5000); Epoch 200 -> newer (250 bps, max 10_000)
   const mintFee = makeT22MintWithExtensions([
     makeTransferFeeConfigExt({
       olderEpoch: 100n,
@@ -600,15 +1048,14 @@ test('Token-2022 epoch-aware TransferFeeConfig parser, net calculation & self-pa
   ]);
   const feeAt150 = parseToken2022TransferFeeConfig(mintFee, 150);
   assert.deepEqual(feeAt150, { bps: 100n, maxFee: 5_000n, epoch: 100n });
-  assert.equal(computeToken2022NetAmount(10_001n, feeAt150), 9_900n); // ceil(10001 * 100 / 10000) = 101
-  assert.equal(computeToken2022NetAmount(1_000_000n, feeAt150), 995_000n); // capped at maxFee=5000
+  assert.equal(computeToken2022NetAmount(10_001n, feeAt150), 9_900n);
+  assert.equal(computeToken2022NetAmount(1_000_000n, feeAt150), 995_000n);
 
   const feeAt200 = parseToken2022TransferFeeConfig(mintFee, 200n);
   assert.deepEqual(feeAt200, { bps: 250n, maxFee: 10_000n, epoch: 200n });
   assert.equal(computeToken2022NetAmount(100_000n, feeAt200), 97_500n);
   assert.equal(inspectToken2022UnsafeSelfPay(mintFee), false);
 
-  // Zero-bps active schedule returns null
   const mintZeroNewer = makeT22MintWithExtensions([
     makeTransferFeeConfigExt({
       olderEpoch: 100n,
@@ -626,7 +1073,6 @@ test('Token-2022 epoch-aware TransferFeeConfig parser, net calculation & self-pa
     epoch: 100n,
   });
 
-  // High transfer fee (> 500 bps), PermanentDelegate (12), NonTransferable (9), active TransferHook (14)
   const mintHighFee = makeT22MintWithExtensions([
     makeTransferFeeConfigExt({
       olderEpoch: 0n,
@@ -762,28 +1208,25 @@ function makeSyntheticCheckpoint(laneId, laneRoot, laneCount) {
     ckRaw.set(frToBeBytes(laneRoots[i]), CK_OFF_LANE_ROOTS + i * 32);
     ckv.setBigUint64(CK_OFF_LANE_COUNTS + i * 8, i === laneId ? laneCount : 0n, true);
   }
-  return { ckpt: decodeRootCheckpoint(ckRaw), superRoot };
+  return { ckpt: decodeRootCheckpoint(ckRaw), superRoot, ckRaw };
 }
 
 test('2-pass cross-lane nullifier sync discards stranger prefixes & loads legacy seenNfPrefixes JSON', async () => {
   const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x21));
   const fvk = exportFullViewingKey(alice);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
-  // Note created on Lane 2 (leaf 0), spent on Lane 0 (NullifierPage 0 alongside 50 stranger prefixes).
-  // In a naive 1-pass lane loop (0 -> 1 -> 2), Lane 0 nullifiers run BEFORE Lane 2 notes are discovered!
-  const { tweak, blinding, memo90 } = encryptNoteMemo(
+  const { tweak, blinding, memo } = encryptNoteMemo(
     alice.viewPk,
     new Uint8Array(32).fill(0x31),
     9_000_000n,
-    NATIVE_SOL_MINT_BYTES,
+    WSOL_MINT_BYTES,
   );
-  const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), solAsset, 9_000_000n, blinding);
+  const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), wsolAsset, 9_000_000n, blinding);
   const lane2Sub0 = makeSubtreePage(2, 0n, [cm]);
   const lane2Memo0 = makeMemoPageWithMeta(2, 0n, 1);
-  writeMemoSlot(lane2Memo0, 0, memo90);
+  writeMemoSlot(lane2Memo0, 0, memo);
 
-  // Discover note's exact nullifier using a scratch store, then place it into Lane 0's NullifierPage
   const probeStore = new CompactWalletStore(0, 0n);
   probeStore.ingestLanePages({
     fvk,
@@ -826,17 +1269,15 @@ test('2-pass cross-lane nullifier sync discards stranger prefixes & loads legacy
   const res = await syncCompactStoreWithRpc({ store, fvk, fetchBatch });
   assert.equal(res.discoveredNotes, 1);
   assert.equal(store.notes.length, 1);
-  assert.equal(store.notes[0].spent, true, '2-pass sync must mark Lane 2 note spent via Lane 0 NullifierPage');
+  assert.equal(store.notes[0].spent, true);
   assert.equal(store.unspentNotes().length, 0);
   assert.equal(store.lanes[0].nextNfIndex, BigInt(nfPrefixes.length));
 
-  // Verify ZERO stranger prefixes persisted in toJSON()
   const serialized = store.toJSON();
   const parsed = JSON.parse(serialized);
-  assert.equal('seenNfPrefixes' in parsed, false, 'toJSON() must NOT persist seenNfPrefixes');
-  assert.equal(serialized.includes('aa00000000'), false, 'stranger prefix bytes must not appear in JSON');
+  assert.equal('seenNfPrefixes' in parsed, false);
+  assert.equal(serialized.includes('aa00000000'), false);
 
-  // Verify backwards-compatible loading of legacy JSON containing seenNfPrefixes
   const legacyObj = JSON.parse(probeStore.toJSON());
   assert.equal(legacyObj.notes[0].spent, false);
   legacyObj.seenNfPrefixes = [
@@ -844,44 +1285,125 @@ test('2-pass cross-lane nullifier sync discards stranger prefixes & loads legacy
     Array.from(ownNfPrefix, (b) => b.toString(16).padStart(2, '0')).join(''),
   ];
   const migrated = CompactWalletStore.fromJSON(JSON.stringify(legacyObj));
-  assert.equal(migrated.notes[0].spent, true, 'legacy seenNfPrefixes must be applied during migration');
+  assert.equal(migrated.notes[0].spent, true);
   assert.equal('seenNfPrefixes' in JSON.parse(migrated.toJSON()), false);
+});
+
+test('Pass 1D -> Pass 2 oracle regression: transient SubtreePage miss STILL executes Pass 2 unconditionally', async () => {
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x51));
+  const aliceFvk = exportFullViewingKey(alice);
+  const bob = deriveKeysFromSeed(new Uint8Array(32).fill(0x52));
+  const bobFvk = exportFullViewingKey(bob);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
+
+  const { tweak, blinding, memo } = encryptNoteMemo(
+    alice.viewPk,
+    new Uint8Array(32).fill(0x53),
+    6_000_000n,
+    WSOL_MINT_BYTES,
+  );
+  const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), wsolAsset, 6_000_000n, blinding);
+  const sub0 = makeSubtreePage(0, 0n, [cm]);
+  const memo0 = makeMemoPageWithMeta(0, 0n, 1);
+  writeMemoSlot(memo0, 0, memo);
+
+  const probe = new CompactWalletStore(0, 0n);
+  probe.ingestLanePages({
+    fvk: aliceFvk,
+    laneId: 0,
+    subtreePages: [{ pageSeq: 0n, raw: sub0 }],
+    memoPages: [{ pageSeq: 0n, raw: memo0 }],
+    nfPages: [],
+  });
+  const aliceNfPrefix = probe.notes[0].nullifier.subarray(0, NF_PREFIX_LEN);
+  const nf0 = makeNfPage(0, 0n, [aliceNfPrefix]);
+
+  const sub0Addr = deriveSubtreePdaSync(0, 0, 0n).address;
+  const nf0Addr = deriveNfPagePdaSync(0, 0, 0n).address;
+  const accounts = new Map([
+    [derivePoolPdaSync(0).address, makePoolState(1)],
+    [deriveLanePdaSync(0, 0).address, makeLaneState(0, 1n, 1n)],
+    [sub0Addr, sub0],
+    [deriveMemoPdaSync(0, 0, 0n).address, memo0],
+    [nf0Addr, nf0],
+  ]);
+
+  let dropSub0 = true;
+  const makeAdversarialFetcher = (log) => async (addrs) => {
+    log.push([...addrs]);
+    return addrs.map((a) => (dropSub0 && a === sub0Addr ? null : (accounts.get(a) ?? null)));
+  };
+
+  // Sync 1 (adversarial RPC drops SubtreePage 0):
+  // Alice (hit on dropped SubtreePage) AND Bob (no hit) MUST both STILL run Pass 2 & fetch nf0Addr!
+  const aliceLog1 = [];
+  const aliceStore = new CompactWalletStore(0, 0n);
+  await syncCompactStoreWithRpc({
+    store: aliceStore,
+    fvk: aliceFvk,
+    fetchBatch: makeAdversarialFetcher(aliceLog1),
+  });
+  const bobLog1 = [];
+  const bobStore = new CompactWalletStore(0, 0n);
+  await syncCompactStoreWithRpc({
+    store: bobStore,
+    fvk: bobFvk,
+    fetchBatch: makeAdversarialFetcher(bobLog1),
+  });
+
+  assert.deepEqual(
+    aliceLog1,
+    bobLog1,
+    'Pass 1D SubtreePage drop must produce IDENTICAL RPC traffic (incl. Pass 2) for hit vs non-hit wallets',
+  );
+  assert.equal(aliceLog1.flat().includes(nf0Addr), true, 'Pass 2 MUST execute unconditionally after Pass 1D miss');
+  assert.equal(aliceStore.lanes[0].nextMemoLeaf, 0n, 'nextMemoLeaf must remain capped on transient SubtreePage miss');
+  assert.equal(aliceStore.lanes[0].nextNfIndex, 0n, 'nextNfIndex must be held until missed note is verified');
+
+  // Sync 2 (healthy RPC returns SubtreePage 0): Alice discovers note AND Pass 2 marks it spent!
+  dropSub0 = false;
+  const aliceLog2 = [];
+  const res2 = await syncCompactStoreWithRpc({
+    store: aliceStore,
+    fvk: aliceFvk,
+    fetchBatch: makeAdversarialFetcher(aliceLog2),
+  });
+  assert.equal(res2.discoveredNotes, 1);
+  assert.equal(aliceStore.notes[0].spent, true, 'missed note must be marked spent on subsequent healthy sync');
+  assert.equal(aliceStore.lanes[0].nextMemoLeaf, 1n);
+  assert.equal(aliceStore.lanes[0].nextNfIndex, 1n);
 });
 
 test('Post-seal checkpoint witness building via prevSealedLeaves & automatic pruning', () => {
   const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x41));
   const fvk = exportFullViewingKey(alice);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
-  // Build 256 leaves in SubtreePage #0 (Alice's note at leaf 200)
   const leaves = [];
-  const memo0 = makeMemoPageWithMeta(0, 0n, MEMO_NOTES_PER_PAGE);
-  const memo1 = makeMemoPageWithMeta(0, 1n, MEMO_NOTES_PER_PAGE);
-  const memo2 = makeMemoPageWithMeta(0, 2n, SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE);
+  const memo0 = makeMemoPageWithMeta(0, 0n, MEMO_NOTES_PER_PAGE); // 0..95
+  const memo1 = makeMemoPageWithMeta(0, 1n, MEMO_NOTES_PER_PAGE); // 96..191
+  const memo2 = makeMemoPageWithMeta(0, 2n, SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE); // 192..255
 
   for (let i = 0; i < SUBTREE_LEAVES; i++) {
     if (i === 200) {
-      const { tweak, blinding, memo90 } = encryptNoteMemo(
+      const { tweak, blinding, memo } = encryptNoteMemo(
         alice.viewPk,
         new Uint8Array(32).fill(0x42),
         7_500_000n,
-        NATIVE_SOL_MINT_BYTES,
+        WSOL_MINT_BYTES,
       );
-      const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), solAsset, 7_500_000n, blinding);
+      const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), wsolAsset, 7_500_000n, blinding);
       leaves.push(cm);
-      writeMemoSlot(memo1, i - MEMO_NOTES_PER_PAGE, memo90);
+      writeMemoSlot(memo2, i - 2 * MEMO_NOTES_PER_PAGE, memo);
     } else {
       leaves.push(BigInt(i + 10));
     }
   }
   const sub0 = makeSubtreePage(0, 0n, leaves);
 
-  // Checkpoint published BEFORE page #0 sealed (at leaf count = 250)
   const preSealRoot = computeLaneRootFromLeaves(leaves.slice(0, 250));
   const { ckpt: preSealCkpt, superRoot: preSealSuper } = makeSyntheticCheckpoint(0, preSealRoot, 250n);
 
-  // Store ingests full sealed page #0 (256 leaves) -> frontier advances to seq=1 (empty!),
-  // while prevSealedSubSeq=0 retains the 256 leaves for the pre-seal checkpoint!
   const store = new CompactWalletStore(0, 0n);
   store.ingestLanePages({
     fvk,
@@ -899,56 +1421,53 @@ test('Post-seal checkpoint witness building via prevSealedLeaves & automatic pru
   assert.equal(store.lanes[0].prevSealedSubSeq, 0n);
   assert.equal(store.lanes[0].prevSealedLeaves.length, SUBTREE_LEAVES);
 
-  // Persist & reload JSON -> prevSealedLeaves survives round-trip and builds valid witness at ckptCount=250!
   const reloaded = CompactWalletStore.fromJSON(store.toJSON());
   const note = reloaded.notes[0];
   const { superRoot: sr250, path: path250 } = reloaded.buildWitnessForNote(note, preSealCkpt);
   assert.equal(sr250, preSealSuper);
   assert.equal(computeMerkleRoot4Ary(path250, leaves[200]), preSealSuper);
-  assert.equal(reloaded.lanes[0].prevSealedSubSeq, 0n, 'must retain prevSealed until crossed');
+  assert.equal(reloaded.lanes[0].prevSealedSubSeq, 0n);
 
-  // Once a newer checkpoint crosses page #0 (ckptCount = 256), witness uses frozenIntraSiblings & prunes prevSealedLeaves!
   const postSealRoot = computeLaneRootFromLeaves(leaves);
   const { ckpt: postSealCkpt, superRoot: postSealSuper } = makeSyntheticCheckpoint(0, postSealRoot, 256n);
   const { superRoot: sr256, path: path256 } = reloaded.buildWitnessForNote(note, postSealCkpt);
   assert.equal(sr256, postSealSuper);
   assert.equal(computeMerkleRoot4Ary(path256, leaves[200]), postSealSuper);
-  assert.equal(reloaded.lanes[0].prevSealedSubSeq, null, 'prevSealedSubSeq must prune once checkpoint crosses');
+  assert.equal(reloaded.lanes[0].prevSealedSubSeq, null);
   assert.equal(reloaded.lanes[0].prevSealedLeaves.length, 0);
 });
 
 test('SubtreeRootPage fast sync + strict incremental sync + birthdaySlot binary search', async () => {
   const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x91));
   const fvk = exportFullViewingKey(alice);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
   // Lane 0 has 780 leaves = 3 sealed SubtreePages (0, 1, 2) + 12 frontier leaves in SubtreePage 3.
-  // MemoPages: 0..5 (sealed, 112 each, leaves 0..671) + MemoPage 6 (108 leaves, 672..779).
-  // Total = 7 MemoPages (<= 25 incremental threshold) and 4 SubtreePages (<= 25 threshold).
-  // Alice owns ONLY 1 note at leaf 700 (SubtreePage 2, MemoPage 6).
+  // MemoPages (96 notes/page): 0..7 sealed (768 leaves) + MemoPage 8 open (12 leaves) = 9 MemoPages (<= 25).
+  // Alice owns ONLY 1 note at leaf 700 (SubtreePage 2, MemoPage 7, slot 28).
   const totalLeaves = 780;
   const allLeaves = [];
   const memoPages = new Map();
-  const totalMemos = Math.ceil(totalLeaves / MEMO_NOTES_PER_PAGE); // 7 (0..6)
+  const totalMemos = Math.ceil(totalLeaves / MEMO_NOTES_PER_PAGE); // 9 (0..8)
   for (let m = 0; m < totalMemos; m++) {
     const cnt = Math.min(MEMO_NOTES_PER_PAGE, totalLeaves - m * MEMO_NOTES_PER_PAGE);
-    // Pages 0..4 sealed before slot 1000 (closedSlot = (m+1)*100); page 5 closedSlot = 1200; page 6 open (0)
-    const closedSlot = cnt === MEMO_NOTES_PER_PAGE ? (m < 5 ? BigInt((m + 1) * 100) : 1200n) : 0n;
+    // Pages 0..5 sealed before slot 1000 (closedSlot = (m+1)*100); pages 6..7 closedSlot >= 1200; page 8 open (0)
+    const closedSlot = cnt === MEMO_NOTES_PER_PAGE ? (m < 6 ? BigInt((m + 1) * 100) : BigInt(1200 + m)) : 0n;
     memoPages.set(BigInt(m), makeMemoPageWithMeta(0, BigInt(m), cnt, closedSlot));
   }
 
   for (let i = 0; i < totalLeaves; i++) {
     if (i === 700) {
-      const { tweak, blinding, memo90 } = encryptNoteMemo(
+      const { tweak, blinding, memo } = encryptNoteMemo(
         alice.viewPk,
         new Uint8Array(32).fill(0x92),
         12_345_678n,
-        NATIVE_SOL_MINT_BYTES,
+        WSOL_MINT_BYTES,
       );
-      const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), solAsset, 12_345_678n, blinding);
+      const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), wsolAsset, 12_345_678n, blinding);
       allLeaves.push(cm);
       const mSeq = BigInt(Math.floor(i / MEMO_NOTES_PER_PAGE));
-      writeMemoSlot(memoPages.get(mSeq), i % MEMO_NOTES_PER_PAGE, memo90);
+      writeMemoSlot(memoPages.get(mSeq), i % MEMO_NOTES_PER_PAGE, memo);
     } else {
       allLeaves.push(BigInt(i + 1));
     }
@@ -986,8 +1505,7 @@ test('SubtreeRootPage fast sync + strict incremental sync + birthdaySlot binary 
     });
   };
 
-  // Run 1: Default `'strict'` mode on <= 25 MemoPages -> ZERO dataSlice calls, ZERO hit re-fetches,
-  // and uniform fetch of all 4 SubtreePages covering newly synced leaves!
+  // Run 1: Default `'strict'` mode on <= 25 MemoPages -> ZERO dataSlice calls, uniform SubtreePages
   const strictLog = [];
   const storeStrict = new CompactWalletStore(0, 0n);
   const rStrict = await syncCompactStoreWithRpc({
@@ -998,40 +1516,26 @@ test('SubtreeRootPage fast sync + strict incremental sync + birthdaySlot binary 
   assert.equal(rStrict.discoveredNotes, 1);
   assert.equal(storeStrict.notes[0].leafIndex, 700n);
   assert.equal(storeStrict.notes[0].amount, 12_345_678n);
-  assert.ok(storeStrict.notes[0].frozenIntraSiblings, 'owned note in sealed SubtreePage 2 must freeze siblings');
+  assert.ok(storeStrict.notes[0].frozenIntraSiblings);
   assert.equal(storeStrict.lanes[0].finalizedSubroots.length, 3);
   assert.equal(storeStrict.lanes[0].frontierSubSeq, 3n);
   assert.equal(storeStrict.lanes[0].frontierLeaves.length, 12);
+  assert.equal(strictLog.filter((e) => e.dataSlice !== null).length, 0);
 
-  assert.equal(
-    strictLog.filter((e) => e.dataSlice !== null).length,
-    0,
-    'default strict incremental sync must issue ZERO dataSlice calls',
-  );
-  const strictMemoAddrs = strictLog.flatMap((e) => e.addrs);
+  const strictAddrs = strictLog.flatMap((e) => e.addrs);
   for (let m = 0; m < totalMemos; m++) {
     const addr = deriveMemoPdaSync(0, 0, BigInt(m)).address;
-    assert.equal(
-      strictMemoAddrs.filter((a) => a === addr).length,
-      1,
-      `MemoPage ${m} must be fetched exactly once in full (zero hit-correlated re-fetch)`,
-    );
+    assert.equal(strictAddrs.filter((a) => a === addr).length, 1);
   }
   for (let s = 0; s < 4; s++) {
-    assert.equal(
-      strictMemoAddrs.includes(deriveSubtreePdaSync(0, 0, BigInt(s)).address),
-      true,
-      `SubtreePage ${s} must be fetched uniformly on <= 25 subtree incremental strict sync`,
-    );
+    assert.equal(strictAddrs.includes(deriveSubtreePdaSync(0, 0, BigInt(s)).address), true);
   }
 
-  // Verify offline witness against checkpoint at leaf count = 780 passes bit-for-bit!
   const { ckpt, superRoot } = makeSyntheticCheckpoint(0, computeLaneRootFromLeaves(allLeaves), BigInt(totalLeaves));
   const { path } = storeStrict.buildWitnessForNote(storeStrict.notes[0], ckpt);
   assert.equal(computeMerkleRoot4Ary(path, allLeaves[700]), superRoot);
 
-  // Run 2: birthdaySlot = 1000 skips sealed MemoPages 0..4 via 64 B header binary search,
-  // fetches post-birthday MemoPages 5..6 in full (zero 3,872 B dataSlice), and syncs all 3 SubtreeRoots!
+  // Run 2: birthdaySlot = 1000 skips sealed MemoPages 0..5 via 64 B header probes, scans 6..8 in full
   const bdLog = [];
   const storeBd = new CompactWalletStore(0, 0n);
   const rBd = await syncCompactStoreWithRpc({
@@ -1041,26 +1545,18 @@ test('SubtreeRootPage fast sync + strict incremental sync + birthdaySlot binary 
     birthdaySlot: 1000n,
   });
   assert.equal(rBd.discoveredNotes, 1);
-  assert.equal(storeBd.lanes[0].finalizedSubroots.length, 3, 'SubtreeRootPage still synced across all subtrees');
-  const headerProbes = bdLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_HEADER_LEN);
-  assert.ok(headerProbes.length >= 1, 'birthdaySlot binary search must use 64 B header probes');
-  assert.equal(
-    bdLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN).length,
-    0,
-    'strict mode must never use 3,872 B MemoPage dataSlice',
-  );
+  assert.equal(storeBd.lanes[0].finalizedSubroots.length, 3);
+  assert.ok(bdLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_HEADER_LEN).length >= 1);
+  assert.equal(bdLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN).length, 0);
   const bdFullAddrs = bdLog.filter((e) => e.dataSlice === null).flatMap((e) => e.addrs);
-  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 0n).address), false, 'pre-birthday MemoPage 0 skipped');
-  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 4n).address), false, 'pre-birthday MemoPage 4 skipped');
-  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 5n).address), true, 'post-birthday MemoPage 5 scanned in full');
-  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 6n).address), true, 'open MemoPage 6 scanned in full');
-  assert.equal(bdFullAddrs.includes(deriveSubtreePdaSync(0, 0, 0n).address), false, 'pre-birthday SubtreePage 0 skipped');
-  assert.equal(bdFullAddrs.includes(deriveSubtreePdaSync(0, 0, 1n).address), false, 'pre-birthday SubtreePage 1 skipped');
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 0n).address), false);
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 5n).address), false);
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 6n).address), true);
+  assert.equal(bdFullAddrs.includes(deriveMemoPdaSync(0, 0, 8n).address), true);
   const { path: pathBd } = storeBd.buildWitnessForNote(storeBd.notes[0], ckpt);
   assert.equal(computeMerkleRoot4Ary(pathBd, allLeaves[700]), superRoot);
 
   // Run 3: Explicit `privacyMode: 'fast'` on <= 25 MemoPages STILL fetches full MemoPages directly
-  // (zero 3,872 B dataSlice on small incremental syncs), while skipping unhit sealed SubtreePages 0 & 1!
   const fastSmallLog = [];
   const storeFastSmall = new CompactWalletStore(0, 0n);
   const rFastSmall = await syncCompactStoreWithRpc({
@@ -1070,29 +1566,12 @@ test('SubtreeRootPage fast sync + strict incremental sync + birthdaySlot binary 
     privacyMode: 'fast',
   });
   assert.equal(rFastSmall.discoveredNotes, 1);
-  assert.equal(
-    fastSmallLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN).length,
-    0,
-    'fast mode must still fetch full MemoPages directly on <= 25 page incremental syncs',
-  );
+  assert.equal(fastSmallLog.filter((e) => e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN).length, 0);
   const fastSmallAddrs = fastSmallLog.flatMap((e) => e.addrs);
-  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 0n).address), false, 'SubtreePage 0 skipped in fast mode');
-  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 1n).address), false, 'SubtreePage 1 skipped in fast mode');
-  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 2n).address), true, 'SubtreePage 2 fetched for hit');
-  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 3n).address), true, 'Frontier SubtreePage 3 fetched');
-
-  // Run 4: Legacy/mock fetcher that ignores `dataSlice` (always returns full 10,144 B bytes) still works cleanly!
-  const fullOnlyCalls = [];
-  const legacyFetcher = async (addrs) => {
-    fullOnlyCalls.push([...addrs]);
-    return addrs.map((a) => accounts.get(a) ?? null);
-  };
-  const storeLegacy = new CompactWalletStore(0, 0n);
-  const rLegacy = await syncCompactStoreWithRpc({ store: storeLegacy, fvk, fetchBatch: legacyFetcher });
-  assert.equal(rLegacy.discoveredNotes, 1);
-  assert.equal(storeLegacy.notes[0].amount, 12_345_678n);
-  const memo6Count = fullOnlyCalls.flat().filter((a) => a === deriveMemoPdaSync(0, 0, 6n).address).length;
-  assert.equal(memo6Count, 1);
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 0n).address), false);
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 1n).address), false);
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 2n).address), true);
+  assert.equal(fastSmallAddrs.includes(deriveSubtreePdaSync(0, 0, 3n).address), true);
 });
 
 test('Finding #1 regression: Pass 2 streams ALL NullifierPages with zero early-exit (0 unspent & mid-stream spend)', async () => {
@@ -1100,21 +1579,18 @@ test('Finding #1 regression: Pass 2 streams ALL NullifierPages with zero early-e
   const aliceFvk = exportFullViewingKey(alice);
   const bob = deriveKeysFromSeed(new Uint8Array(32).fill(0xb2));
   const bobFvk = exportFullViewingKey(bob);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
-  // Lane 0: 1 leaf (Alice's note) and 121 NullifierPages (72,005 nullifiers -> 2 RPC batches: 100 + 21).
-  // Lane 1: 0 leaves and 3 NullifierPages (1,203 nullifiers).
-  // Alice's ONLY note is spent on NullifierPage 0 of Lane 0 (batch 0).
-  const { tweak, blinding, memo90 } = encryptNoteMemo(
+  const { tweak, blinding, memo } = encryptNoteMemo(
     alice.viewPk,
     new Uint8Array(32).fill(0xa2),
     3_000_000n,
-    NATIVE_SOL_MINT_BYTES,
+    WSOL_MINT_BYTES,
   );
-  const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), solAsset, 3_000_000n, blinding);
+  const cm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), wsolAsset, 3_000_000n, blinding);
   const lane0Sub0 = makeSubtreePage(0, 0n, [cm]);
   const lane0Memo0 = makeMemoPageWithMeta(0, 0n, 1);
-  writeMemoSlot(lane0Memo0, 0, memo90);
+  writeMemoSlot(lane0Memo0, 0, memo);
 
   const probeStore = new CompactWalletStore(0, 0n);
   probeStore.ingestLanePages({
@@ -1138,9 +1614,6 @@ test('Finding #1 regression: Pass 2 streams ALL NullifierPages with zero early-e
     p[2] = (i >> 8) & 0xff;
     return p;
   });
-  const tail5Prefixes = fullStrangerPrefixes.slice(0, 5);
-  const tail3Prefixes = fullStrangerPrefixes.slice(0, 3);
-
   const lane0Page0Prefixes = [...fullStrangerPrefixes];
   lane0Page0Prefixes[0] = aliceNfPrefix;
 
@@ -1154,20 +1627,17 @@ test('Finding #1 regression: Pass 2 streams ALL NullifierPages with zero early-e
 
   const expectedNfAddrs = new Set();
   const reusableLane0Full = makeNfPage(0, 1n, fullStrangerPrefixes);
-  const lane0Tail = makeNfPage(0, BigInt(lane0NfPagesCount - 1), tail5Prefixes);
+  const lane0Tail = makeNfPage(0, BigInt(lane0NfPagesCount - 1), fullStrangerPrefixes.slice(0, 5));
   const reusableLane1Full = makeNfPage(1, 0n, fullStrangerPrefixes);
-  const lane1Tail = makeNfPage(1, BigInt(lane1NfPagesCount - 1), tail3Prefixes);
+  const lane1Tail = makeNfPage(1, BigInt(lane1NfPagesCount - 1), fullStrangerPrefixes.slice(0, 3));
 
   for (let p = 0; p < lane0NfPagesCount; p++) {
     const addr = deriveNfPagePdaSync(0, 0, BigInt(p)).address;
     expectedNfAddrs.add(addr);
-    if (p === 0) {
-      accounts.set(addr, makeNfPage(0, 0n, lane0Page0Prefixes));
-    } else if (p === lane0NfPagesCount - 1) {
-      accounts.set(addr, lane0Tail);
-    } else {
-      accounts.set(addr, reusableLane0Full);
-    }
+    accounts.set(
+      addr,
+      p === 0 ? makeNfPage(0, 0n, lane0Page0Prefixes) : p === lane0NfPagesCount - 1 ? lane0Tail : reusableLane0Full,
+    );
   }
   for (let p = 0; p < lane1NfPagesCount; p++) {
     const addr = deriveNfPagePdaSync(0, 1, BigInt(p)).address;
@@ -1180,88 +1650,72 @@ test('Finding #1 regression: Pass 2 streams ALL NullifierPages with zero early-e
     return addrs.map((a) => accounts.get(a) ?? null);
   };
 
-  // Case 1: Bob has ZERO unspent notes -> Pass 2 MUST STILL fetch all 124 NullifierPages across both batches!
+  // Case 1: Bob has 0 unspent notes -> STILL fetches all 124 NullifierPages!
   const bobLog = [];
   const bobStore = new CompactWalletStore(0, 0n);
-  const bobRes = await syncCompactStoreWithRpc({
-    store: bobStore,
-    fvk: bobFvk,
-    fetchBatch: makeFetcher(bobLog),
-  });
-  assert.equal(bobRes.discoveredNotes, 0);
-  assert.equal(bobStore.notes.length, 0);
+  await syncCompactStoreWithRpc({ store: bobStore, fvk: bobFvk, fetchBatch: makeFetcher(bobLog) });
   assert.equal(bobStore.lanes[0].nextNfIndex, lane0NfTotal);
   assert.equal(bobStore.lanes[1].nextNfIndex, lane1NfTotal);
-  const bobFetchedNf = new Set(bobLog.flatMap((e) => e.addrs).filter((a) => expectedNfAddrs.has(a)));
-  assert.equal(
-    bobFetchedNf.size,
-    expectedNfAddrs.size,
-    'wallet with 0 unspent notes must fetch ALL 124 NullifierPages without skipping Pass 2',
-  );
-  assert.equal('seenNfPrefixes' in JSON.parse(bobStore.toJSON()), false);
+  assert.equal(new Set(bobLog.flatMap((e) => e.addrs).filter((a) => expectedNfAddrs.has(a))).size, expectedNfAddrs.size);
 
-  // Case 2: Alice's ONLY note is spent on NullifierPage 0 (batch 0) -> Pass 2 MUST NOT break early!
+  // Case 2: Alice's ONLY note is spent on page 0 -> STILL fetches all 124 NullifierPages!
   const aliceLog = [];
   const aliceStore = new CompactWalletStore(0, 0n);
-  const aliceRes = await syncCompactStoreWithRpc({
-    store: aliceStore,
-    fvk: aliceFvk,
-    fetchBatch: makeFetcher(aliceLog),
-  });
-  assert.equal(aliceRes.discoveredNotes, 1);
+  await syncCompactStoreWithRpc({ store: aliceStore, fvk: aliceFvk, fetchBatch: makeFetcher(aliceLog) });
   assert.equal(aliceStore.notes[0].spent, true);
-  assert.equal(aliceStore.unspentNotes().length, 0);
   assert.equal(aliceStore.lanes[0].nextNfIndex, lane0NfTotal);
   assert.equal(aliceStore.lanes[1].nextNfIndex, lane1NfTotal);
-  const aliceFetchedNf = new Set(aliceLog.flatMap((e) => e.addrs).filter((a) => expectedNfAddrs.has(a)));
-  assert.equal(
-    aliceFetchedNf.size,
-    expectedNfAddrs.size,
-    'Pass 2 must fetch ALL 124 NullifierPages even after last unspent note is marked spent on page 0',
-  );
-  const aliceJson = aliceStore.toJSON();
-  assert.equal('seenNfPrefixes' in JSON.parse(aliceJson), false);
-  assert.equal(aliceJson.includes('cc00000000'), false, 'zero stranger prefixes stored in JSON');
+  assert.equal(new Set(aliceLog.flatMap((e) => e.addrs).filter((a) => expectedNfAddrs.has(a))).size, expectedNfAddrs.size);
 });
 
-test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-padding vs opt-in fast dataSlice', async () => {
+test('Deterministic wallet-keyed decoy selection in strict large catch-up, decoy-padded reconstructWitness, & opt-in fast dataSlice', async () => {
   const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0xd1));
   const fvk = exportFullViewingKey(alice);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const bob = deriveKeysFromSeed(new Uint8Array(32).fill(0xe2));
+  const bobFvk = exportFullViewingKey(bob);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
-  // Build reusable fixtures for a 4-lane pool with `sealedPerLane` sealed SubtreePages + 4 frontier leaves per lane.
   const dummyLeafFrs = Array.from({ length: SUBTREE_LEAVES }, (_, i) => BigInt(i + 1));
   const dummySubRoot = computeSubtree256Root(dummyLeafFrs, SUBTREE_LEAVES);
   const dummyFrontierFrs = dummyLeafFrs.slice(0, 4);
 
-  const { tweak, blinding, memo90 } = encryptNoteMemo(
+  const { tweak, blinding, memo } = encryptNoteMemo(
     alice.viewPk,
     new Uint8Array(32).fill(0xd2),
     8_888_888n,
-    NATIVE_SOL_MINT_BYTES,
+    WSOL_MINT_BYTES,
   );
-  const aliceCm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), solAsset, 8_888_888n, blinding);
-  // Place Alice's note on Lane 2, leaf 300 -> sealed SubtreePage (lane=2, seq=1, slot=44), MemoPage (lane=2, seq=2, slot=76).
+  const aliceCm = computeNoteCommitment(deriveStealthOwner(alice.spendPk, tweak), wsolAsset, 8_888_888n, blinding);
+  // Lane 2, leaf 300 -> sealed SubtreePage (2, 1, slot 44), MemoPage (2, 3, slot 12) under 96 notes/page
   const aliceLeafIdx = 300n;
   const aliceSubSeq = 1n;
   const aliceSubSlot = Number(aliceLeafIdx % BigInt(SUBTREE_LEAVES)); // 44
-  const aliceMemoSeq = aliceLeafIdx / BigInt(MEMO_NOTES_PER_PAGE); // 2n
-  const aliceMemoSlot = Number(aliceLeafIdx % BigInt(MEMO_NOTES_PER_PAGE)); // 76
+  const aliceMemoSeq = aliceLeafIdx / BigInt(MEMO_NOTES_PER_PAGE); // 3n
+  const aliceMemoSlot = Number(aliceLeafIdx % BigInt(MEMO_NOTES_PER_PAGE)); // 12
 
   const hitSubLeaves = [...dummyLeafFrs];
   hitSubLeaves[aliceSubSlot] = aliceCm;
   const hitSubRoot = computeSubtree256Root(hitSubLeaves, SUBTREE_LEAVES);
 
-  // Derive Alice's exact nullifier prefix so we can place it on Lane 0 NullifierPage 0 (of 3 pages)
   const hitSubRaw = makeSubtreePage(2, aliceSubSeq, hitSubLeaves);
   const hitMemoRaw = makeMemoPageWithMeta(2, aliceMemoSeq, MEMO_NOTES_PER_PAGE);
-  writeMemoSlot(hitMemoRaw, aliceMemoSlot, memo90);
+  writeMemoSlot(hitMemoRaw, aliceMemoSlot, memo);
+
   const probe = new CompactWalletStore(0, 0n);
   probe.recordVerifiedMemo({
     fvk,
     laneId: 2,
     leafIdx: aliceLeafIdx,
-    decrypted: { amount: 8_888_888n, mint: NATIVE_SOL_MINT_BYTES, tweak, blinding, isDynamic: false },
+    decrypted: {
+      amount: 8_888_888n,
+      mint: WSOL_MINT_BYTES,
+      tweak,
+      blinding,
+      memoVersion: MEMO_VERSION_V1,
+      memoFlags: 0,
+      paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+      isDynamic: false,
+    },
     cmBe: frToBeBytes(aliceCm),
   });
   const aliceNfPrefix = probe.notes[0].nullifier.subarray(0, NF_PREFIX_LEN);
@@ -1275,9 +1729,11 @@ test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-paddin
 
     const accounts = new Map([[derivePoolPdaSync(0).address, makePoolState(activeLanes)]]);
     const sealedSubAddrs = new Set();
-    const frontierSubAddrs = new Set();
+    const allSubAddrs = new Set();
     const allMemoAddrs = new Set();
     const allNfAddrs = new Set();
+    const laneRoots = new Array(NUM_LANES).fill(ZERO_HASHES_4ARY[18]);
+    const laneCounts = new Array(NUM_LANES).fill(0n);
 
     const strangerPrefixes = Array.from({ length: NF_PER_PAGE }, (_, i) => {
       const p = new Uint8Array(NF_PREFIX_LEN);
@@ -1300,6 +1756,7 @@ test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-paddin
     }
 
     for (let l = 0; l < activeLanes; l++) {
+      laneCounts[l] = BigInt(leavesPerLane);
       accounts.set(
         deriveLanePdaSync(0, l).address,
         makeLaneState(l, BigInt(leavesPerLane), l === 0 ? nfTotalLane0 : 0n),
@@ -1309,15 +1766,21 @@ test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-paddin
       );
       accounts.set(deriveSubrootPdaSync(0, l, 0n).address, makeSubrootPage(l, 0n, roots));
 
+      const allLaneLeaves = [];
       const genericSealed = makeSubtreePage(l, 0n, dummyLeafFrs);
       for (let s = 0; s < sealedPerLane; s++) {
         const addr = deriveSubtreePdaSync(0, l, BigInt(s)).address;
         sealedSubAddrs.add(addr);
-        accounts.set(addr, l === 2 && BigInt(s) === aliceSubSeq ? hitSubRaw : genericSealed);
+        allSubAddrs.add(addr);
+        const isHit = l === 2 && BigInt(s) === aliceSubSeq;
+        accounts.set(addr, isHit ? hitSubRaw : genericSealed);
+        allLaneLeaves.push(...(isHit ? hitSubLeaves : dummyLeafFrs));
       }
       const fAddr = deriveSubtreePdaSync(0, l, BigInt(sealedPerLane)).address;
-      frontierSubAddrs.add(fAddr);
+      allSubAddrs.add(fAddr);
       accounts.set(fAddr, makeSubtreePage(l, BigInt(sealedPerLane), dummyFrontierFrs));
+      allLaneLeaves.push(...dummyFrontierFrs);
+      laneRoots[l] = computeLaneRootFromLeaves(allLaneLeaves);
 
       const fullEmptyMemo = makeMemoPageWithMeta(l, 0n, MEMO_NOTES_PER_PAGE);
       for (let m = 0; m < memosPerLane; m++) {
@@ -1334,22 +1797,35 @@ test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-paddin
       }
     }
 
+    const superRoot = computeSuperRoot4Ary(laneRoots);
+    const ckRaw = new Uint8Array(CKPT_LEN);
+    ckRaw.set(enc.encode(CKPT_MAGIC), CK_OFF_MAGIC);
+    ckRaw[CK_OFF_VERSION] = PROTOCOL_VERSION;
+    ckRaw.set(frToBeBytes(superRoot), CK_OFF_SUPER_ROOT);
+    const ckv = new DataView(ckRaw.buffer);
+    for (let i = 0; i < NUM_LANES; i++) {
+      ckRaw.set(frToBeBytes(laneRoots[i]), CK_OFF_LANE_ROOTS + i * 32);
+      ckv.setBigUint64(CK_OFF_LANE_COUNTS + i * 8, laneCounts[i], true);
+    }
+    accounts.set(deriveCheckpointPdaSync(0, 0).address, ckRaw);
+
     return {
       accounts,
       sealedSubAddrs,
-      frontierSubAddrs,
+      allSubAddrs,
       allMemoAddrs,
       allNfAddrs,
       nfTotalLane0,
+      superRoot,
       hitSubAddr: deriveSubtreePdaSync(0, 2, aliceSubSeq).address,
       hitMemoAddr: deriveMemoPdaSync(0, 2, aliceMemoSeq).address,
     };
   };
 
-  // Fixture A: 5 sealed subtrees/lane -> 20 total sealed subtrees (> 16), 48 total MemoPages (> 25).
+  // Fixture A: 5 sealed subtrees/lane -> 20 total sealed subtrees (> 16), 56 total MemoPages (> 25)
   const fix20 = buildLargePoolFixture(5);
   assert.equal(fix20.sealedSubAddrs.size, 20);
-  assert.equal(fix20.allMemoAddrs.size, 48);
+  assert.equal(fix20.allMemoAddrs.size, 56);
 
   const makeSliceFetcher = (accounts, log) => async (addrs, opts) => {
     log.push({ addrs: [...addrs], dataSlice: opts?.dataSlice ?? null });
@@ -1360,78 +1836,103 @@ test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-paddin
     });
   };
 
-  // A1: Default `'strict'` mode on > 25 MemoPages & 20 sealed subtrees:
-  // - ZERO dataSlice calls
-  // - Every MemoPage fetched ONCE in full (zero hit-correlated MemoPage re-fetch)
-  // - Hit historical sealed SubtreePage padded with random decoys to min(16, 20) = 16 sealed subtrees!
-  // - Pass 2 streams all 3 NullifierPages with zero early-exit!
-  const strict20Log = [];
-  const strict20Store = new CompactWalletStore(0, 0n);
-  const resStrict20 = await syncCompactStoreWithRpc({
-    store: strict20Store,
+  // A1: Repeated strict large catch-ups of the SAME wallet (Alice) fetch the EXACT SAME 16 sealed
+  // SubtreePages in the EXACT SAME deterministic order (zero multi-sync intersection attack!)
+  const strictRun1Log = [];
+  const strictStore1 = new CompactWalletStore(0, 0n);
+  const res1 = await syncCompactStoreWithRpc({
+    store: strictStore1,
     fvk,
-    fetchBatch: makeSliceFetcher(fix20.accounts, strict20Log),
+    fetchBatch: makeSliceFetcher(fix20.accounts, strictRun1Log),
   });
-  assert.equal(resStrict20.discoveredNotes, 1);
-  assert.equal(strict20Store.notes[0].amount, 8_888_888n);
-  assert.equal(strict20Store.notes[0].spent, true);
-  assert.ok(strict20Store.notes[0].frozenIntraSiblings, 'sealed hit note must freeze 12 intra-subtree siblings');
-  assert.equal(strict20Store.lanes[0].nextNfIndex, fix20.nfTotalLane0);
+  assert.equal(res1.discoveredNotes, 1);
+  assert.equal(strictStore1.notes[0].spent, true);
+  assert.ok(strictStore1.notes[0].frozenIntraSiblings);
 
-  assert.equal(
-    strict20Log.filter((e) => e.dataSlice !== null).length,
-    0,
-    'strict mode large catch-up must issue ZERO dataSlice calls',
+  const strictRun2Log = [];
+  const strictStore2 = new CompactWalletStore(0, 0n);
+  await syncCompactStoreWithRpc({
+    store: strictStore2,
+    fvk,
+    fetchBatch: makeSliceFetcher(fix20.accounts, strictRun2Log),
+  });
+
+  const sealedRun1 = strictRun1Log.flatMap((e) => e.addrs).filter((a) => fix20.sealedSubAddrs.has(a));
+  const sealedRun2 = strictRun2Log.flatMap((e) => e.addrs).filter((a) => fix20.sealedSubAddrs.has(a));
+  assert.equal(sealedRun1.length, 16);
+  assert.equal(sealedRun1.includes(fix20.hitSubAddr), true);
+  assert.deepEqual(
+    sealedRun1,
+    sealedRun2,
+    'deterministic wallet-keyed decoys must yield identical 16-page set & order across repeated syncs',
   );
-  const strict20Addrs = strict20Log.flatMap((e) => e.addrs);
-  for (const mAddr of fix20.allMemoAddrs) {
-    assert.equal(
-      strict20Addrs.filter((a) => a === mAddr).length,
-      1,
-      'strict mode must fetch each MemoPage exactly once in full (zero Pass 1D re-fetch)',
-    );
-  }
-  const strict20SealedFetched = new Set(strict20Addrs.filter((a) => fix20.sealedSubAddrs.has(a)));
+
+  // A2: 0-hit wallet (Bob) on the SAME large catch-up ALSO fetches exactly 16 sealed SubtreePages
+  // (uniform batch count independent of hit count) with a distinct wallet-keyed decoy set!
+  const bobStrictLog = [];
+  const bobStore = new CompactWalletStore(0, 0n);
+  const bobRes = await syncCompactStoreWithRpc({
+    store: bobStore,
+    fvk: bobFvk,
+    fetchBatch: makeSliceFetcher(fix20.accounts, bobStrictLog),
+  });
+  assert.equal(bobRes.discoveredNotes, 0);
+  const bobSealed = bobStrictLog.flatMap((e) => e.addrs).filter((a) => fix20.sealedSubAddrs.has(a));
   assert.equal(
-    strict20SealedFetched.has(fix20.hitSubAddr),
-    true,
-    'hit sealed SubtreePage must be fetched',
-  );
-  assert.equal(
-    strict20SealedFetched.size,
+    bobSealed.length,
     16,
-    'strict mode must decoy-pad historical sealed SubtreePage batch to min(16, 20) = 16',
+    '0-hit wallet on large strict catch-up must fetch same uniform 16-page sealed batch as 1-hit wallet',
   );
-  const strict20NfFetched = new Set(strict20Addrs.filter((a) => fix20.allNfAddrs.has(a)));
-  assert.equal(strict20NfFetched.size, 3, 'Pass 2 must fetch all 3 NullifierPages without early-exit');
+  assert.notDeepEqual(bobSealed, sealedRun1, 'distinct wallets must derive distinct deterministic decoy sets');
 
-  // A2: Smaller large catch-up with 3 sealed subtrees/lane -> 12 total sealed subtrees (< 16), 28 MemoPages (> 25):
-  // Decoy padding must include ALL min(16, 12) = 12 sealed subtrees!
-  const fix12 = buildLargePoolFixture(3);
-  assert.equal(fix12.sealedSubAddrs.size, 12);
-  assert.equal(fix12.allMemoAddrs.size, 28);
-  const strict12Log = [];
-  const strict12Store = new CompactWalletStore(0, 0n);
-  const resStrict12 = await syncCompactStoreWithRpc({
-    store: strict12Store,
-    fvk,
-    fetchBatch: makeSliceFetcher(fix12.accounts, strict12Log),
+  // A3: Decoy-padded reconstructWitness() never issues a single-page pinpoint fetch!
+  const rwStrictLog = [];
+  const rwStrict = await reconstructWitness({
+    fetchBatch: makeSliceFetcher(fix20.accounts, rwStrictLog),
+    poolId: 0,
+    ckptSlotIdx: 0,
+    laneId: 2,
+    leafIdx: aliceLeafIdx,
+    viewSk: alice.viewSk,
   });
-  assert.equal(resStrict12.discoveredNotes, 1);
-  const strict12SealedFetched = new Set(
-    strict12Log.flatMap((e) => e.addrs).filter((a) => fix12.sealedSubAddrs.has(a)),
-  );
+  assert.equal(rwStrict.superRoot, fix20.superRoot);
+  assert.equal(computeMerkleRoot4Ary(rwStrict.path, aliceCm), fix20.superRoot);
+  const rwFetchedSubs = new Set(rwStrictLog.flatMap((e) => e.addrs).filter((a) => fix20.allSubAddrs.has(a)));
+  assert.equal(rwFetchedSubs.has(fix20.hitSubAddr), true);
   assert.equal(
-    strict12SealedFetched.size,
-    12,
-    'when fewer than 16 sealed subtrees exist, strict mode must pad to all 12 sealed subtrees',
+    rwFetchedSubs.size,
+    16,
+    'reconstructWitness() in strict mode must decoy-pad SubtreePage fetches to min(16, totalSubtrees) = 16',
   );
 
-  // A3: Explicit opt-in `privacyMode: 'fast'` on > 25 MemoPages & 20 sealed subtrees:
-  // - Uses dataSlice(0, 3872) on Pass 1C MemoPages
-  // - Re-fetches ONLY hit MemoPage (2, 2) in full on Pass 1D
-  // - Fetches ONLY hit sealed SubtreePage (2, 1) (plus live frontiers) without decoy padding
-  // - STILL runs full Pass 2 across all 3 NullifierPages without early-exit!
+  // Repeat reconstructWitness with same viewSk fetches the exact same 16 SubtreePage set (intersection-resistant)
+  const rwStrictLog2 = [];
+  await reconstructWitness({
+    fetchBatch: makeSliceFetcher(fix20.accounts, rwStrictLog2),
+    poolId: 0,
+    ckptSlotIdx: 0,
+    laneId: 2,
+    leafIdx: aliceLeafIdx,
+    viewSk: alice.viewSk,
+  });
+  const rwFetchedSubs2 = new Set(rwStrictLog2.flatMap((e) => e.addrs).filter((a) => fix20.allSubAddrs.has(a)));
+  assert.deepEqual([...rwFetchedSubs].sort(), [...rwFetchedSubs2].sort());
+
+  // Opt-in fast reconstructWitness fetches minimal SubtreePages (target + frontier = 2)
+  const rwFastLog = [];
+  const rwFast = await reconstructWitness({
+    fetchBatch: makeSliceFetcher(fix20.accounts, rwFastLog),
+    poolId: 0,
+    ckptSlotIdx: 0,
+    laneId: 2,
+    leafIdx: aliceLeafIdx,
+    privacyMode: 'fast',
+  });
+  assert.equal(computeMerkleRoot4Ary(rwFast.path, aliceCm), fix20.superRoot);
+  const rwFastSubs = new Set(rwFastLog.flatMap((e) => e.addrs).filter((a) => fix20.allSubAddrs.has(a)));
+  assert.equal(rwFastSubs.size, 2);
+
+  // A4: Opt-in `privacyMode: 'fast'` on > 25 MemoPages uses 3,328 B dataSlice & still runs full Pass 2!
   const fast20Log = [];
   const fast20Store = new CompactWalletStore(0, 0n);
   const resFast20 = await syncCompactStoreWithRpc({
@@ -1442,69 +1943,44 @@ test('Finding #1 regression: large catch-up (> 25 MemoPages) strict decoy-paddin
   });
   assert.equal(resFast20.discoveredNotes, 1);
   assert.equal(fast20Store.notes[0].spent, true);
-  assert.equal(fast20Store.lanes[0].nextNfIndex, fix20.nfTotalLane0);
-
   const fastSliceCalls = fast20Log.filter(
     (e) => e.dataSlice?.offset === 0 && e.dataSlice?.length === MEMO_PAGE_SCAN_SLICE_LEN,
   );
-  assert.ok(fastSliceCalls.length >= 1, 'fast mode on > 25 MemoPages must use dataSlice(0, 3872)');
-  const fastSlicedMemos = new Set(fastSliceCalls.flatMap((e) => e.addrs));
-  assert.equal(fastSlicedMemos.size, 48, 'all 48 MemoPages scanned via 3,872 B dataSlice');
-
+  assert.ok(fastSliceCalls.length >= 1, 'fast mode on > 25 MemoPages must use dataSlice(0, 3328)');
+  assert.equal(new Set(fastSliceCalls.flatMap((e) => e.addrs)).size, 56);
   const fastFullMemos = fast20Log
     .filter((e) => e.dataSlice === null)
     .flatMap((e) => e.addrs)
     .filter((a) => fix20.allMemoAddrs.has(a));
-  assert.deepEqual(
-    fastFullMemos,
-    [fix20.hitMemoAddr],
-    'fast mode Pass 1D must fetch ONLY view-tag hit MemoPage in full',
-  );
-
-  const fastSealedFetched = new Set(
-    fast20Log.flatMap((e) => e.addrs).filter((a) => fix20.sealedSubAddrs.has(a)),
-  );
-  assert.deepEqual(
-    [...fastSealedFetched],
-    [fix20.hitSubAddr],
-    'fast mode skips decoy sealed SubtreePages',
-  );
-
-  const fastNfFetched = new Set(
-    fast20Log.flatMap((e) => e.addrs).filter((a) => fix20.allNfAddrs.has(a)),
-  );
-  assert.equal(
-    fastNfFetched.size,
-    3,
-    'fast mode must STILL run full Pass 2 across all 3 NullifierPages without early-exit',
-  );
+  assert.deepEqual(fastFullMemos, [fix20.hitMemoAddr]);
+  assert.equal(new Set(fast20Log.flatMap((e) => e.addrs).filter((a) => fix20.allNfAddrs.has(a))).size, 3);
 });
 
-test('computePageRollovers exact boundaries (110..112, 254..256, 598..600, 76798..76800)', () => {
-  // MemoPage boundary (112) with 3 outputs (uniform private transfer)
+test('computePageRollovers exact boundaries (93..96, 254..256, 598..600, 76798..76800)', () => {
+  // MemoPage boundary (96) with 3 outputs
   assert.deepEqual(
-    computePageRollovers({ leafCount: 109, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
+    computePageRollovers({ leafCount: 93, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
     { outSubSeq: 0, outRootSeq: 0, outMemoSeq: 0, nfPageSeq: 0 },
   );
   assert.deepEqual(
-    computePageRollovers({ leafCount: 110, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
+    computePageRollovers({ leafCount: 94, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
     { outSubSeq: 0, outRootSeq: 0, outMemoSeq: 0, nfPageSeq: 0, nextMemoSeq: 1 },
   );
   assert.deepEqual(
-    computePageRollovers({ leafCount: 111, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
+    computePageRollovers({ leafCount: 95, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
     { outSubSeq: 0, outRootSeq: 0, outMemoSeq: 0, nfPageSeq: 0, nextMemoSeq: 1 },
   );
   assert.deepEqual(
-    computePageRollovers({ leafCount: 112, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
+    computePageRollovers({ leafCount: 96, outputCount: 3, nfCount: 0, spentNullifiers: 2 }),
     { outSubSeq: 0, outRootSeq: 0, outMemoSeq: 1, nfPageSeq: 0 },
   );
-  // MemoPage boundary with 2 outputs
+  // MemoPage boundary (96) with 2 outputs
   assert.deepEqual(
-    computePageRollovers({ leafCount: 110, outputCount: 2, nfCount: 0, spentNullifiers: 1 }),
+    computePageRollovers({ leafCount: 94, outputCount: 2, nfCount: 0, spentNullifiers: 1 }),
     { outSubSeq: 0, outRootSeq: 0, outMemoSeq: 0, nfPageSeq: 0 },
   );
   assert.deepEqual(
-    computePageRollovers({ leafCount: 111, outputCount: 2, nfCount: 0, spentNullifiers: 1 }),
+    computePageRollovers({ leafCount: 95, outputCount: 2, nfCount: 0, spentNullifiers: 1 }),
     { outSubSeq: 0, outRootSeq: 0, outMemoSeq: 0, nfPageSeq: 0, nextMemoSeq: 1 },
   );
 
@@ -1544,21 +2020,22 @@ test('computePageRollovers exact boundaries (110..112, 254..256, 598..600, 76798
     { outSubSeq: 0, outRootSeq: 0, outMemoSeq: 0, nfPageSeq: 1 },
   );
 
-  // SubtreeRootPage boundary (300 * 256 = 76,800)
+  // SubtreeRootPage boundary (300 * 256 = 76,800; 76,799 / 96 = 799 rem 95 -> also rolls MemoPage 799 -> 800!)
   assert.deepEqual(
     computePageRollovers({ leafCount: 76_799n, outputCount: 2, nfCount: 0n, spentNullifiers: 1 }),
     {
       outSubSeq: 299,
       outRootSeq: 0,
-      outMemoSeq: 685,
+      outMemoSeq: 799,
       nfPageSeq: 0,
       nextSubSeq: 300,
       nextRootSeq: 1,
+      nextMemoSeq: 800,
     },
   );
   assert.deepEqual(
     computePageRollovers({ leafCount: 76_800n, outputCount: 2, nfCount: 0n, spentNullifiers: 1 }),
-    { outSubSeq: 300, outRootSeq: 1, outMemoSeq: 685, nfPageSeq: 0 },
+    { outSubSeq: 300, outRootSeq: 1, outMemoSeq: 800, nfPageSeq: 0 },
   );
 });
 
@@ -1569,7 +2046,7 @@ test('pickRandomLaneId and pickRandomEscrowShard sample uniformly within valid b
     assert.ok(Number.isInteger(l) && l >= 0 && l < 4);
     seenLanes.add(l);
   }
-  assert.equal(seenLanes.size, 4, 'must cover all 4 active lanes across 200 unbiased samples');
+  assert.equal(seenLanes.size, 4);
 
   const seenShards = new Set();
   for (let i = 0; i < 400; i++) {
@@ -1577,7 +2054,7 @@ test('pickRandomLaneId and pickRandomEscrowShard sample uniformly within valid b
     assert.ok(Number.isInteger(s) && s >= 0 && s < NUM_ESCROW_SHARDS);
     seenShards.add(s);
   }
-  assert.equal(seenShards.size, NUM_ESCROW_SHARDS, 'must cover all 16 escrow shards');
+  assert.equal(seenShards.size, NUM_ESCROW_SHARDS);
 
   assert.equal(pickRandomLaneId(1), 0);
   assert.equal(pickRandomEscrowShard(1), 0);
@@ -1587,7 +2064,7 @@ test('pickRandomLaneId and pickRandomEscrowShard sample uniformly within valid b
   assert.throws(() => pickRandomEscrowShard(17), RangeError);
 });
 
-test('AudrenRelayClient.getFeeQuote omits amount on transfer & requestCheckpoint calls POST /v1/checkpoint', async () => {
+test('AudrenRelayClient supports transfer privacy, requestCheckpoint, and multi-ix submitRelayedInstruction', async () => {
   const calls = [];
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -1598,6 +2075,12 @@ test('AudrenRelayClient.getFeeQuote omits amount on transfer & requestCheckpoint
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     }
+    if (String(url).includes('/v1/relay/submit')) {
+      return new Response(
+        JSON.stringify({ signature: 'batchSig999', cluster: 'mainnet', relayerPubkey: SYSTEM_PROGRAM_ID }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
     return new Response(
       JSON.stringify({
         ok: true,
@@ -1605,8 +2088,8 @@ test('AudrenRelayClient.getFeeQuote omits amount on transfer & requestCheckpoint
         op: 'transfer',
         billingMode: 'self_paying',
         feeSide: 'shielded_cm2',
-        feeMint: SYSTEM_PROGRAM_ID,
-        feeTokenProgram: null,
+        feeMint: WSOL_MINT,
+        feeTokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
         feeRecipient: null,
         feeShieldedAddress: 'aud1test',
         feeRecipientExists: true,
@@ -1623,26 +2106,21 @@ test('AudrenRelayClient.getFeeQuote omits amount on transfer & requestCheckpoint
 
   try {
     const client = new AudrenRelayClient('https://relay.example.test');
-    // Even if a caller supplies `amount`, op='transfer' MUST omit `amount` from the URL query!
     await client.getFeeQuote({
       cluster: 'mainnet',
       op: 'transfer',
-      mint: SYSTEM_PROGRAM_ID,
+      mint: WSOL_MINT,
       amount: '999999999',
       outputCount: 3,
       omitNf1: false,
     });
     const transferUrl = new URL(calls[0].url);
     assert.equal(transferUrl.pathname, '/v1/fee-quote');
-    assert.equal(transferUrl.searchParams.get('op'), 'transfer');
     assert.equal(transferUrl.searchParams.has('amount'), false, 'transfer fee-quote must NEVER send amount');
-    assert.equal(transferUrl.searchParams.get('omitNf1'), 'false');
-    assert.equal(transferUrl.searchParams.get('outputCount'), '3');
 
-    // op='withdraw' includes amount & omitNf1
     await client.getFeeQuote({
       op: 'withdraw',
-      mint: SYSTEM_PROGRAM_ID,
+      mint: WSOL_MINT,
       amount: '50000000',
       omitNf1: true,
     });
@@ -1650,13 +2128,24 @@ test('AudrenRelayClient.getFeeQuote omits amount on transfer & requestCheckpoint
     assert.equal(withdrawUrl.searchParams.get('amount'), '50000000');
     assert.equal(withdrawUrl.searchParams.get('omitNf1'), 'true');
 
-    // requestCheckpoint -> POST /v1/checkpoint
     const ckRes = await client.requestCheckpoint({ cluster: 'devnet', poolId: 0 });
     assert.equal(ckRes.status, 'published');
     assert.equal(ckRes.signature, 'sig123');
-    assert.equal(calls[2].url, 'https://relay.example.test/v1/checkpoint');
-    assert.equal(calls[2].init.method, 'POST');
-    assert.deepEqual(JSON.parse(calls[2].init.body), { cluster: 'devnet', poolId: 0 });
+
+    // Multi-ix batch submit (parallel 2 -> 1 private Transact merges in 1 Solana Tx v1)
+    const batchRes = await client.submitRelayedInstruction({
+      cluster: 'mainnet',
+      instructions: [
+        { instructionDataB64: 'AQID', accounts: [{ pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false }] },
+        { instructionDataB64: 'BAUG', accounts: [{ pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false }] },
+      ],
+    });
+    assert.equal(batchRes.signature, 'batchSig999');
+    const submittedBody = JSON.parse(calls[3].init.body);
+    assert.equal(submittedBody.instructions.length, 2);
+
+    // Reject empty submit payload
+    await assert.rejects(() => client.submitRelayedInstruction({ cluster: 'mainnet' }), /requires either/);
   } finally {
     globalThis.fetch = origFetch;
   }

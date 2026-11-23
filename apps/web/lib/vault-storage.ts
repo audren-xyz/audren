@@ -28,7 +28,7 @@ function fromBase64(b64: string): Uint8Array {
 // intra-subtree siblings, 32 B finalized subroots, frontier leaves, & 16 B nf prefixes.
 // ============================================================================
 
-const IDB_NAME = 'audren_v2_vault_store'
+const IDB_NAME = 'audren_vault_store'
 const IDB_STORE = 'compact_stores'
 const IDB_VERSION = 1
 
@@ -38,7 +38,7 @@ function storeKey(
   spendPkBytes: Uint8Array,
   walletScope = 'local',
 ): string {
-  return `audren_v2_store:${cluster}:${poolId}:${walletScope}:${base58Encode(spendPkBytes)}`
+  return `audren_store:${cluster}:${poolId}:${walletScope}:${base58Encode(spendPkBytes)}`
 }
 
 async function openVaultDb(): Promise<IDBDatabase | null> {
@@ -118,7 +118,7 @@ async function deriveStoreAesKey(
   cluster: string,
   poolId: number,
 ): Promise<CryptoKey> {
-  const info = encoder.encode(`audren/v2/compact-store-key:${cluster}:${poolId}`)
+  const info = encoder.encode(`audren/v1/compact-store-key:${cluster}:${poolId}`)
   const preimage = new Uint8Array(viewSk.byteLength + info.byteLength)
   preimage.set(viewSk, 0)
   preimage.set(info, viewSk.byteLength)
@@ -210,6 +210,7 @@ export interface AudrenEncryptedBackupFile {
   createdAtIso: string
   cluster: 'devnet' | 'mainnet'
   audrenAddress: string
+  birthdaySlot?: string
 }
 
 const BACKUP_PBKDF2_ITERATIONS = 600_000
@@ -248,11 +249,12 @@ export async function exportEncryptedVaultBackup(params: {
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const aesKey = await deriveBackupAesKey(params.passphrase, salt, BACKUP_PBKDF2_ITERATIONS)
+  const birthdaySlotStr = (params.birthdaySlot ?? 0n).toString()
   const payload = {
-    version: 2,
+    version: 1,
     cluster: params.cluster,
     seedB64: toBase64(params.seed),
-    birthdaySlot: (params.birthdaySlot ?? 0n).toString(),
+    birthdaySlot: birthdaySlotStr,
   }
   const aad = encoder.encode(`audren-vault-backup-v1:${params.cluster}:${params.audrenAddress}`)
   const ct = await crypto.subtle.encrypt(
@@ -270,6 +272,7 @@ export async function exportEncryptedVaultBackup(params: {
     createdAtIso: new Date().toISOString(),
     cluster: params.cluster,
     audrenAddress: params.audrenAddress,
+    birthdaySlot: birthdaySlotStr,
   }
 }
 
@@ -299,14 +302,16 @@ export async function importEncryptedVaultBackup(
     seedB64: string
     birthdaySlot?: string
   }
-  if (parsed.version !== 2 || !parsed.seedB64) {
+  if (parsed.version !== 1 || !parsed.seedB64) {
     throw new Error('Malformed decrypted vault backup payload')
   }
   const seed = fromBase64(parsed.seedB64)
   if (seed.byteLength !== 32) throw new Error('Invalid vault seed length in backup')
+  const rawSlot = parsed.birthdaySlot ?? backup.birthdaySlot ?? '0'
+  const birthdaySlot = /^\d+$/.test(rawSlot) ? BigInt(rawSlot) : 0n
   return {
     seed,
     cluster: parsed.cluster,
-    birthdaySlot: BigInt(parsed.birthdaySlot ?? '0'),
+    birthdaySlot,
   }
 }

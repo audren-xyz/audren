@@ -3,8 +3,8 @@
  *
  * Supports all three protocol fee settlement modes:
  * 1. `transfer` (`ASSET_MODE_PRIVATE`): shielded `cm2` fee note verified via relayer read-only FVK.
- * 2. `withdraw` (`ASSET_MODE_SOL` / `ASSET_MODE_SPL` / `WITHDRAW_FLAG_UNWRAP_WSOL`): public fee deduction.
- * 3. `exec_escrow` (`ExecViaEscrow` Tag 7): input-leg fee or `EXEC_FLAG_FEE_ON_OUTPUT`.
+ * 2. `withdraw` (`ASSET_MODE_PUBLIC` / `WITHDRAW_FLAG_UNWRAP_WSOL`): public fee deduction.
+ * 3. `exec_escrow` (`ExecViaEscrow` Tag 6): input-leg fee or `EXEC_FLAG_FEE_ON_OUTPUT`.
  */
 
 import type { RouterAccountMeta, RouterSwapInstruction } from './swap.ts';
@@ -135,12 +135,24 @@ export interface RelaySetupAta {
   tokenProgram: string;
 }
 
-export interface RelaySubmitRequest {
-  cluster?: RelayCluster;
+export interface RelayInstructionPayload {
   instructionDataB64: string;
   accounts: RouterAccountMeta[];
+}
+
+export interface RelaySubmitRequest {
+  cluster?: RelayCluster;
+  /** Single-instruction wire payload (omit when passing batched `instructions`). */
+  instructionDataB64?: string;
+  /** Single-instruction accounts (omit when passing batched `instructions`). */
+  accounts?: RouterAccountMeta[];
+  /**
+   * Optional multi-instruction batch (up to 4 parallel `2 -> 1` private `Transact` merges
+   * packed into one Solana Transaction v1 `0x81`).
+   */
+  instructions?: RelayInstructionPayload[];
   setupAtas?: RelaySetupAta[];
-  /** Optional zero-signer crank pre-instructions allowlisted strictly for `ExecViaEscrow` (Tag 7). */
+  /** Optional zero-signer crank pre-instructions allowlisted strictly for `ExecViaEscrow` (Tag 6). */
   preInstructions?: RouterSwapInstruction[];
   computeUnitLimit?: number;
   priorityFeeLamports?: string;
@@ -156,7 +168,6 @@ export interface RelaySubmitResponse {
 }
 
 export const AUDREN_DEFAULT_RELAY_URL = 'https://relay.audren.xyz';
-export const DEFAULT_RELAY_URL = AUDREN_DEFAULT_RELAY_URL;
 
 export class AudrenRelayClient {
   readonly baseUrl: string;
@@ -260,6 +271,11 @@ export class AudrenRelayClient {
   }
 
   async submitRelayedInstruction(params: RelaySubmitRequest): Promise<RelaySubmitResponse> {
+    const hasBatch = Array.isArray(params.instructions) && params.instructions.length > 0;
+    const hasSingle = Boolean(params.instructionDataB64 && params.accounts);
+    if (!hasBatch && !hasSingle) {
+      throw new Error('RelaySubmitRequest requires either (instructionDataB64, accounts) or non-empty instructions');
+    }
     return this.requestJson<RelaySubmitResponse>('/v1/relay/submit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

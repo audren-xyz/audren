@@ -9,7 +9,6 @@ import {
   ASSET_ID_DOMAIN,
   BN254_FR_MODULUS,
   DOMAIN_DUMMY_NF,
-  DOMAIN_DYN_BLIND,
   DOMAIN_NK,
   DOMAIN_NOTE,
   DOMAIN_NULLIFIER,
@@ -152,7 +151,7 @@ export function poseidon5(a: bigint, b: bigint, c: bigint, d: bigint, e: bigint)
   return poseidonHash([a, b, c, d, e]);
 }
 
-/** `asset_id = mask_to_fr_be(SHA-256("audren/v2/asset" || mint_32))`. */
+/** `asset_id = mask_to_fr_be(SHA-256("audren/v1/asset" || mint_32))`. */
 export function deriveAssetId(mintBytes: Uint8Array): bigint {
   if (mintBytes.byteLength !== 32) {
     throw new RangeError(`mintBytes must be 32 bytes, got ${mintBytes.byteLength}`);
@@ -194,15 +193,6 @@ export function computeRealNullifier(nk: bigint, noteCm: bigint, globalLeafIndex
 
 export function computeDummyNullifier(nk: bigint, blinding: bigint): bigint {
   return poseidon3(DOMAIN_DUMMY_NF, nk, blinding);
-}
-
-export function computeDynamicBlinding(
-  slot: bigint,
-  laneId: bigint,
-  leafIndex: bigint,
-  ctxHash: bigint,
-): bigint {
-  return poseidon5(DOMAIN_DYN_BLIND, slot, laneId, leafIndex, ctxHash);
 }
 
 export function packPublicAmounts(publicAmountOut: bigint, relayerFeeAmount: bigint): bigint {

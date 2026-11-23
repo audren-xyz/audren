@@ -1,6 +1,8 @@
 /**
- * Pure TypeScript RFC 8439 ChaCha20-Poly1305 AEAD, X25519 memo encryption/decryption,
- * and dynamic XOR-masked swap memo helpers matching `crates/client/src/keys.rs` byte-for-byte.
+ * Pure TypeScript RFC 8439 ChaCha20-Poly1305 AEAD, X25519 low-order-safe versioned
+ * `106 B` SoA note memo encryption/decryption (with `34 B` AEAD AAD + `14 B` `paymentId`),
+ * and domain-separated `72 B` `AUD1DYN1` XOR-masked dynamic swap memo helpers matching
+ * `crates/client/src/keys.rs` byte-for-byte.
  */
 
 import { x25519 } from '@noble/curves/ed25519.js';
@@ -8,8 +10,19 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import {
   DYN_MEMO_HEAD_LEN,
   DYN_MEMO_MAGIC,
+  KDF_DOMAIN_BLIND,
+  KDF_DOMAIN_DYN_BLIND,
+  KDF_DOMAIN_DYN_MASK,
+  KDF_DOMAIN_DYN_TWEAK,
+  KDF_DOMAIN_MEMO_KEY,
+  KDF_DOMAIN_MEMO_NONCE,
+  KDF_DOMAIN_TWEAK,
+  KDF_DOMAIN_VIEW_TAG,
   MEMO_CT_LEN,
   MEMO_ENTRY_WIRE_LEN,
+  MEMO_PAYMENT_ID_LEN,
+  MEMO_PLAINTEXT_LEN,
+  MEMO_VERSION_V1,
   NUM_ESCROW_SHARDS,
   NUM_LANES,
 } from './constants.ts';
@@ -24,6 +37,7 @@ import {
 
 const utf8Encoder = new TextEncoder();
 const DYN_MAGIC_BYTES = utf8Encoder.encode(DYN_MEMO_MAGIC);
+const DYN_MASK_LABEL_BYTES = utf8Encoder.encode(KDF_DOMAIN_DYN_MASK);
 
 // =============================================================================
 // RFC 8439 ChaCha20-Poly1305 AEAD (zero extra dependencies)
@@ -182,7 +196,7 @@ export function chacha20Poly1305Decrypt(
 }
 
 // =============================================================================
-// Audren 90-Byte Compact SoA Note Memos
+// Audren v1 Versioned 106-Byte SoA Note Memos (72 B Ciphertext + 34 B AAD)
 // =============================================================================
 
 export interface DecryptedMemo {
@@ -190,12 +204,35 @@ export interface DecryptedMemo {
   blinding: bigint;
   amount: bigint;
   mint: Uint8Array;
+  memoVersion: number;
+  memoFlags: number;
+  paymentId: Uint8Array;
   isDynamic: boolean;
 }
 
 export interface MemoVerificationFvk {
   spendPk: Uint8Array;
   viewSk: Uint8Array;
+}
+
+function isAllZero32(bytes: Uint8Array): boolean {
+  if (bytes.byteLength !== 32) return true;
+  let acc = 0;
+  for (let i = 0; i < 32; i++) acc |= bytes[i]!;
+  return acc === 0;
+}
+
+function computeContributorySharedSecret(secret32: Uint8Array, public32: Uint8Array): Uint8Array | null {
+  let shared: Uint8Array;
+  try {
+    shared = x25519.getSharedSecret(secret32, public32);
+  } catch {
+    return null;
+  }
+  if (isAllZero32(shared)) {
+    return null;
+  }
+  return shared;
 }
 
 function sha256Labeled(label: string, data: Uint8Array): Uint8Array {
@@ -206,123 +243,173 @@ function sha256Labeled(label: string, data: Uint8Array): Uint8Array {
   return sha256(buf);
 }
 
+function deriveDynMask72(shared: Uint8Array): Uint8Array {
+  const buf = new Uint8Array(DYN_MASK_LABEL_BYTES.byteLength + 32 + 1);
+  buf.set(DYN_MASK_LABEL_BYTES, 0);
+  buf.set(shared, DYN_MASK_LABEL_BYTES.byteLength);
+  const out = new Uint8Array(MEMO_CT_LEN);
+  buf[DYN_MASK_LABEL_BYTES.byteLength + 32] = 0;
+  out.set(sha256(buf), 0);
+  buf[DYN_MASK_LABEL_BYTES.byteLength + 32] = 1;
+  out.set(sha256(buf), 32);
+  buf[DYN_MASK_LABEL_BYTES.byteLength + 32] = 2;
+  out.set(sha256(buf).subarray(0, 8), 64);
+  return out;
+}
+
 function deriveMemoSecrets(shared: Uint8Array): {
   viewTag: Uint8Array;
   aeadKey: Uint8Array;
   nonce: Uint8Array;
   tweak: bigint;
   blinding: bigint;
-  dynMask: Uint8Array;
+  dynTweak: bigint;
+  dynBlinding: bigint;
+  dynMask72: Uint8Array;
 } {
-  const vtRaw = sha256Labeled('audren/v2/vt', shared);
-  const viewTag = vtRaw.slice(0, 2);
-  const aeadKey = sha256Labeled('audren/v2/aead_key', shared);
-  const nonce = sha256Labeled('audren/v2/aead_nonce', shared).slice(0, 12);
-  const tweak = bytes32ToFrMasked(sha256Labeled('audren/v2/tweak', shared));
-  const blinding = bytes32ToFrMasked(sha256Labeled('audren/v2/blinding', shared));
-  const m0 = sha256Labeled('audren/v2/dyn_mask0', shared);
-  const m1 = sha256Labeled('audren/v2/dyn_mask1', shared);
-  const dynMask = new Uint8Array(MEMO_CT_LEN);
-  dynMask.set(m0, 0);
-  dynMask.set(m1.subarray(0, 24), 32);
-  return { viewTag, aeadKey, nonce, tweak, blinding, dynMask };
+  const viewTag = sha256Labeled(KDF_DOMAIN_VIEW_TAG, shared).slice(0, 2);
+  const aeadKey = sha256Labeled(KDF_DOMAIN_MEMO_KEY, shared);
+  const nonce = sha256Labeled(KDF_DOMAIN_MEMO_NONCE, shared).slice(0, 12);
+  const tweak = bytes32ToFrMasked(sha256Labeled(KDF_DOMAIN_TWEAK, shared));
+  const blinding = bytes32ToFrMasked(sha256Labeled(KDF_DOMAIN_BLIND, shared));
+  const dynTweak = bytes32ToFrMasked(sha256Labeled(KDF_DOMAIN_DYN_TWEAK, shared));
+  const dynBlinding = bytes32ToFrMasked(sha256Labeled(KDF_DOMAIN_DYN_BLIND, shared));
+  const dynMask72 = deriveDynMask72(shared);
+  return { viewTag, aeadKey, nonce, tweak, blinding, dynTweak, dynBlinding, dynMask72 };
 }
 
 /**
- * Encrypt a compact `90 B` SoA note memo (`view_tag[2] || epk[32] || ct[56]`).
- * Returns `{ tweak, blinding, memo90 }`.
+ * Encrypt a versioned `106 B` SoA note memo (`view_tag[2] || epk[32] || ct[72]`) with
+ * `34 B` AEAD AAD (`view_tag[2] || epk[32]`) and `56 B` plaintext
+ * (`amount_le[8] || mint[32] || memo_ver[1](1) || memo_flags[1](0) || payment_id[14]`).
+ *
+ * Rejects low-order X25519 recipient public keys (non-contributory all-zero shared secret).
  */
 export function encryptNoteMemo(
   recipientViewPk: Uint8Array,
   ephSecret32: Uint8Array,
   amount: bigint,
   mint32: Uint8Array,
-): { tweak: bigint; blinding: bigint; memo90: Uint8Array } {
+  paymentId?: Uint8Array,
+): { tweak: bigint; blinding: bigint; memo: Uint8Array } {
   if (recipientViewPk.byteLength !== 32 || ephSecret32.byteLength !== 32 || mint32.byteLength !== 32) {
     throw new RangeError('recipientViewPk, ephSecret32, and mint32 must be 32 bytes');
   }
+  if (paymentId !== undefined && paymentId.byteLength !== MEMO_PAYMENT_ID_LEN) {
+    throw new RangeError(`paymentId must be ${MEMO_PAYMENT_ID_LEN} bytes, got ${paymentId.byteLength}`);
+  }
   const ephPub = x25519.getPublicKey(ephSecret32);
-  const shared = x25519.getSharedSecret(ephSecret32, recipientViewPk);
+  const shared = computeContributorySharedSecret(ephSecret32, recipientViewPk);
+  if (!shared) {
+    throw new Error('Low-order X25519 recipientViewPk (non-contributory shared secret)');
+  }
   const { viewTag, aeadKey, nonce, tweak, blinding } = deriveMemoSecrets(shared);
 
-  const plain = new Uint8Array(40);
+  const aad = new Uint8Array(DYN_MEMO_HEAD_LEN);
+  aad.set(viewTag, 0);
+  aad.set(ephPub, 2);
+
+  const plain = new Uint8Array(MEMO_PLAINTEXT_LEN);
   new DataView(plain.buffer).setBigUint64(0, amount, true);
   plain.set(mint32, 8);
-  const ct = chacha20Poly1305Encrypt(aeadKey, nonce, plain);
+  plain[40] = MEMO_VERSION_V1;
+  plain[41] = 0;
+  if (paymentId) {
+    plain.set(paymentId, 42);
+  }
+  const ct72 = chacha20Poly1305Encrypt(aeadKey, nonce, plain, aad);
 
-  const memo90 = new Uint8Array(MEMO_ENTRY_WIRE_LEN);
-  memo90.set(viewTag, 0);
-  memo90.set(ephPub, 2);
-  memo90.set(ct, 34);
-  return { tweak, blinding, memo90 };
+  const memo = new Uint8Array(MEMO_ENTRY_WIRE_LEN);
+  memo.set(aad, 0);
+  memo.set(ct72, DYN_MEMO_HEAD_LEN);
+  return { tweak, blinding, memo };
 }
 
 /**
- * Prepare XOR-masked `AUD2DYN2` dynamic swap memo parameters for `ExecViaEscrow`.
+ * Prepare domain-separated XOR-masked `72 B` `AUD1DYN1` dynamic swap memo parameters for
+ * `ExecViaEscrow`. Rejects low-order X25519 recipient public keys.
  */
 export function prepareDynamicSwapMemo(
   recipientViewPk: Uint8Array,
   ephSecret32: Uint8Array,
-): { tweak: bigint; blinding: bigint; dynHead34: Uint8Array; dynMask56: Uint8Array } {
+): { tweak: bigint; blinding: bigint; dynHead34: Uint8Array; dynMask72: Uint8Array } {
   if (recipientViewPk.byteLength !== 32 || ephSecret32.byteLength !== 32) {
     throw new RangeError('recipientViewPk and ephSecret32 must be 32 bytes');
   }
   const ephPub = x25519.getPublicKey(ephSecret32);
-  const shared = x25519.getSharedSecret(ephSecret32, recipientViewPk);
-  const { viewTag, tweak, blinding, dynMask } = deriveMemoSecrets(shared);
+  const shared = computeContributorySharedSecret(ephSecret32, recipientViewPk);
+  if (!shared) {
+    throw new Error('Low-order X25519 recipientViewPk (non-contributory shared secret)');
+  }
+  const { viewTag, dynTweak, dynBlinding, dynMask72 } = deriveMemoSecrets(shared);
 
   const dynHead34 = new Uint8Array(DYN_MEMO_HEAD_LEN);
   dynHead34.set(viewTag, 0);
   dynHead34.set(ephPub, 2);
-  return { tweak, blinding, dynHead34, dynMask56: dynMask };
+  return { tweak: dynTweak, blinding: dynBlinding, dynHead34, dynMask72 };
 }
 
 /**
- * Decrypt or unmask a `90 B` `MemoPage` entry AND mandatorily verify
- * `computeNoteCommitment(stealthOwner, deriveAssetId(mint), amount, blinding) == onchainCmBe`.
+ * Decrypt or unmask a `106 B` `MemoPage` entry (`viewTag[2]`, `epk[32]`, `ct72[72]`) AND
+ * mandatorily verify `computeNoteCommitment(stealthOwner, deriveAssetId(mint), amount, blinding) == onchainCmBe`.
+ * Rejects low-order X25519 ephemeral keys, tampered AEAD AAD, non-v1 static memo versions,
+ * and non-zero trailing padding bytes on `AUD1DYN1` dynamic swap memos.
  */
 export function tryDecryptAndVerifyMemoEntry(
   fvk: MemoVerificationFvk,
   viewTag: Uint8Array,
   epk: Uint8Array,
-  ct56: Uint8Array,
+  ct72: Uint8Array,
   onchainCmBe: Uint8Array,
 ): DecryptedMemo | null {
   if (
     viewTag.byteLength !== 2 ||
     epk.byteLength !== 32 ||
-    ct56.byteLength !== MEMO_CT_LEN ||
+    ct72.byteLength !== MEMO_CT_LEN ||
     onchainCmBe.byteLength !== 32
   ) {
     return null;
   }
-  let shared: Uint8Array;
-  try {
-    shared = x25519.getSharedSecret(fvk.viewSk, epk);
-  } catch {
-    // Low-order / all-zero ephemeral pubkey in an unrelated or adversarial memo slot
+  const shared = computeContributorySharedSecret(fvk.viewSk, epk);
+  if (!shared) {
     return null;
   }
-  const { viewTag: expVt, aeadKey, nonce, tweak, blinding, dynMask } = deriveMemoSecrets(shared);
+  const {
+    viewTag: expVt,
+    aeadKey,
+    nonce,
+    tweak,
+    blinding,
+    dynTweak,
+    dynBlinding,
+    dynMask72,
+  } = deriveMemoSecrets(shared);
   if (expVt[0] !== viewTag[0] || expVt[1] !== viewTag[1]) {
     return null;
   }
 
+  const aad = new Uint8Array(DYN_MEMO_HEAD_LEN);
+  aad.set(viewTag, 0);
+  aad.set(epk, 2);
+
   let candidate: DecryptedMemo | null = null;
-  const plain = chacha20Poly1305Decrypt(aeadKey, nonce, ct56);
-  if (plain && plain.byteLength === 40) {
+  const plain = chacha20Poly1305Decrypt(aeadKey, nonce, ct72, aad);
+  if (plain && plain.byteLength === MEMO_PLAINTEXT_LEN && plain[40] === MEMO_VERSION_V1) {
     const dv = new DataView(plain.buffer, plain.byteOffset, plain.byteLength);
     candidate = {
       tweak,
       blinding,
       amount: dv.getBigUint64(0, true),
       mint: plain.slice(8, 40),
+      memoVersion: plain[40]!,
+      memoFlags: plain[41]!,
+      paymentId: plain.slice(42, 42 + MEMO_PAYMENT_ID_LEN),
       isDynamic: false,
     };
   } else {
     const unmasked = new Uint8Array(MEMO_CT_LEN);
     for (let i = 0; i < MEMO_CT_LEN; i++) {
-      unmasked[i] = ct56[i]! ^ dynMask[i]!;
+      unmasked[i] = ct72[i]! ^ dynMask72[i]!;
     }
     let magicOk = true;
     for (let i = 0; i < 8; i++) {
@@ -331,13 +418,24 @@ export function tryDecryptAndVerifyMemoEntry(
         break;
       }
     }
-    if (magicOk) {
+    let paddingOk = magicOk;
+    if (paddingOk) {
+      let padOr = 0;
+      for (let i = 48; i < MEMO_CT_LEN; i++) {
+        padOr |= unmasked[i]!;
+      }
+      paddingOk = padOr === 0;
+    }
+    if (paddingOk) {
       const dv = new DataView(unmasked.buffer);
       candidate = {
-        tweak,
-        blinding,
+        tweak: dynTweak,
+        blinding: dynBlinding,
         amount: dv.getBigUint64(8, true),
         mint: unmasked.slice(16, 48),
+        memoVersion: MEMO_VERSION_V1,
+        memoFlags: 0,
+        paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
         isDynamic: true,
       };
     }
@@ -355,15 +453,17 @@ export function tryDecryptAndVerifyMemoEntry(
   const expectedCm = frToBeBytes(
     computeNoteCommitment(stealth, assetId, candidate.amount, candidate.blinding),
   );
+  let cmDiff = 0;
   for (let i = 0; i < 32; i++) {
-    if (expectedCm[i] !== onchainCmBe[i]) return null;
+    cmDiff |= expectedCm[i]! ^ onchainCmBe[i]!;
   }
+  if (cmDiff !== 0) return null;
   return candidate;
 }
 
 /**
- * Fast X25519 + 2-byte view-tag prefilter for SoA `MemoPage` `dataSlice` scanning
- * (`1 / 65,536` false-positive rate; zero ciphertext bytes required).
+ * Fast X25519 + 2-byte view-tag prefilter for SoA `MemoPage` scanning
+ * (`1 / 65,536` false-positive rate; rejects low-order X25519 ephemeral keys).
  */
 export function checkMemoViewTag(
   viewSk: Uint8Array,
@@ -373,13 +473,11 @@ export function checkMemoViewTag(
   if (viewSk.byteLength !== 32 || viewTag.byteLength !== 2 || epk.byteLength !== 32) {
     return false;
   }
-  let shared: Uint8Array;
-  try {
-    shared = x25519.getSharedSecret(viewSk, epk);
-  } catch {
+  const shared = computeContributorySharedSecret(viewSk, epk);
+  if (!shared) {
     return false;
   }
-  const expVt = sha256Labeled('audren/v2/vt', shared);
+  const expVt = sha256Labeled(KDF_DOMAIN_VIEW_TAG, shared);
   return expVt[0] === viewTag[0] && expVt[1] === viewTag[1];
 }
 
@@ -420,18 +518,18 @@ export function pickRandomEscrowShard(numShards: number = NUM_ESCROW_SHARDS): nu
   return randomUniformInt(numShards);
 }
 
-/** Convenience wrapper accepting a single 90-byte wire memo slice. */
-export function tryDecryptAndVerifyMemo90(
+/** Convenience wrapper accepting a single 106-byte wire memo slice. */
+export function tryDecryptAndVerifyMemo(
   fvk: MemoVerificationFvk,
-  memo90: Uint8Array,
+  memo: Uint8Array,
   onchainCmBe: Uint8Array,
 ): DecryptedMemo | null {
-  if (memo90.byteLength !== MEMO_ENTRY_WIRE_LEN) return null;
+  if (memo.byteLength !== MEMO_ENTRY_WIRE_LEN) return null;
   return tryDecryptAndVerifyMemoEntry(
     fvk,
-    memo90.subarray(0, 2),
-    memo90.subarray(2, 34),
-    memo90.subarray(34, 90),
+    memo.subarray(0, 2),
+    memo.subarray(2, 34),
+    memo.subarray(34, MEMO_ENTRY_WIRE_LEN),
     onchainCmBe,
   );
 }

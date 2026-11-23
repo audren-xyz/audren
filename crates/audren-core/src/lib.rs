@@ -18,8 +18,9 @@ pub type Bytes32 = [u8; 32];
 pub const AUDREN_PROGRAM_ID: Bytes32 =
     decode_base58("AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3");
 
-/// Protocol version stored in `PoolState.version` (`2` = BN254 Groth16 4-ary Depth-20 global MASP).
-pub const PROTOCOL_VERSION: u8 = 2;
+/// Protocol version stored in `PoolState.version`, `LaneTreeState.version`, and
+/// `RootCheckpoint.version` (`1` = Audren v1 BN254 Groth16 4-ary Depth-20 global MASP).
+pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Maximum number of concurrent append lanes supported by the frozen 4-ary Depth-20 circuit (`0..16`).
 /// Pools launch with `DEFAULT_INITIAL_LANES = 4` active lanes and expand monotonically
@@ -57,25 +58,22 @@ pub const ASSOCIATED_TOKEN_PROGRAM_ID: Bytes32 =
 pub const SYSTEM_PROGRAM_ID: Bytes32 = [0u8; 32];
 
 /// Wrapped SOL mint address (`So11111111111111111111111111111111111111112`).
+/// Used as the canonical asset mint for both Native SOL and WSOL inside Audren v1.
 pub const WSOL_MINT: Bytes32 = decode_base58("So11111111111111111111111111111111111111112");
 
-/// Canonical 32-byte mint identifier for Native SOL inside Audren note commitments & memos.
-pub const NATIVE_SOL_MINT: Bytes32 = [0u8; 32];
-
-/// Canonical PDA seed prefixes on `AUDREN_PROGRAM_ID`.
-pub const POOL_SEED: &[u8] = b"audren_v2_pool";
-pub const LANE_SEED: &[u8] = b"audren_v2_lane";
-pub const LANE_RENT_SEED: &[u8] = b"audren_v2_lrent";
-pub const SUBTREE_SEED: &[u8] = b"audren_v2_sub";
-pub const SUBROOT_SEED: &[u8] = b"audren_v2_sroot";
-pub const MEMO_SEED: &[u8] = b"audren_v2_memo";
-pub const NF_PAGE_SEED: &[u8] = b"audren_v2_nfpage";
-pub const CKPT_SEED: &[u8] = b"audren_v2_ckpt";
-pub const NULLIFIER_SEED: &[u8] = b"audren_v2_null";
-pub const SOL_VAULT_SEED: &[u8] = b"audren_v2_sol";
-pub const VAULT_AUTH_SEED: &[u8] = b"audren_v2_vault";
-pub const ESCROW_SEED: &[u8] = b"audren_v2_escrow";
-pub const UNWRAP_SEED: &[u8] = b"audren_v2_unwrap";
+/// Canonical 12 PDA seed prefixes on `AUDREN_PROGRAM_ID`.
+pub const POOL_SEED: &[u8] = b"audren_pool";
+pub const VAULT_AUTH_SEED: &[u8] = b"audren_vault_auth";
+pub const LANE_SEED: &[u8] = b"audren_lane";
+pub const LANE_RENT_SEED: &[u8] = b"audren_lane_rent";
+pub const SUBTREE_SEED: &[u8] = b"audren_subtree";
+pub const SUBROOT_SEED: &[u8] = b"audren_subroot";
+pub const MEMO_SEED: &[u8] = b"audren_memo";
+pub const NF_PAGE_SEED: &[u8] = b"audren_nf_page";
+pub const NULLIFIER_SEED: &[u8] = b"audren_nf";
+pub const CKPT_SEED: &[u8] = b"audren_ckpt";
+pub const ESCROW_SEED: &[u8] = b"audren_escrow";
+pub const UNWRAP_SEED: &[u8] = b"audren_unwrap";
 
 /// Canonical BN254 Poseidon domain separation tags (shared across circuit, on-chain, and all 4 SDKs).
 pub const DOMAIN_PK: u64 = 1;
@@ -83,8 +81,7 @@ pub const DOMAIN_STEALTH: u64 = 2;
 pub const DOMAIN_NOTE: u64 = 3;
 pub const DOMAIN_NULLIFIER: u64 = 4;
 pub const DOMAIN_DUMMY_NF: u64 = 5;
-/// Reserved domain tag (never reused; dynamic swap outputs use user-supplied ECDH `out_blinding`).
-pub const DOMAIN_DYN_BLIND: u64 = 6;
+/// Tag 6 is reserved.
 pub const DOMAIN_PUB_HASH_A: u64 = 7;
 pub const DOMAIN_PUB_HASH_B: u64 = 8;
 pub const DOMAIN_PUB_HASH_FINAL: u64 = 9;
@@ -122,16 +119,6 @@ pub const ZERO_HASHES_4ARY: [Bytes32; TOTAL_DEPTH_4ARY + 1] = [
     [22, 225, 149, 197, 112, 242, 36, 204, 134, 33, 149, 39, 9, 111, 165, 85, 22, 204, 158, 225, 185, 103, 100, 221, 38, 61, 176, 136, 73, 131, 253, 175],
     [44, 62, 59, 73, 160, 154, 241, 79, 193, 134, 167, 30, 160, 162, 151, 159, 5, 125, 179, 38, 59, 130, 201, 229, 89, 50, 36, 50, 120, 13, 83, 1],
 ];
-
-/// Pool governance / privacy mode stored in `PoolState.mode`.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PoolMode {
-    /// Permissionless privacy pool (`vk_id = 0` minimal Groth16 circuit).
-    Permissionless = 0,
-    /// Reserved for opt-in institutional audited pools (`vk_id = 1`).
-    InstitutionalAudited = 1,
-}
 
 /// Custom on-chain error codes returned via `ProgramError::Custom(code)` (`6000..=6032`).
 #[repr(u32)]

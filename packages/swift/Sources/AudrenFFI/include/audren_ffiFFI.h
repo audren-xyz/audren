@@ -243,14 +243,9 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_SOL_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_SOL_IX
-RustBuffer uniffi_audren_ffi_fn_func_build_deposit_sol_ix(RustBuffer params, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_SPL_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_SPL_IX
-RustBuffer uniffi_audren_ffi_fn_func_build_deposit_spl_ix(RustBuffer params, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_DEPOSIT_IX
+RustBuffer uniffi_audren_ffi_fn_func_build_deposit_ix(RustBuffer params, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_EXEC_VIA_ESCROW_IX
@@ -268,11 +263,6 @@ RustBuffer uniffi_audren_ffi_fn_func_build_init_lane_ix(RustBuffer program_id, R
 RustBuffer uniffi_audren_ffi_fn_func_build_init_pool_ix(RustBuffer program_id, RustBuffer payer, uint32_t pool_id, uint64_t ckpt_interval, uint64_t max_ckpt_age, uint64_t note_rent_fee, uint64_t nf_rent_fee, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_JOINSPLIT_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_JOINSPLIT_IX
-RustBuffer uniffi_audren_ffi_fn_func_build_joinsplit_ix(RustBuffer params, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_IX
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_IX
 RustBuffer uniffi_audren_ffi_fn_func_build_open_page_ix(RustBuffer program_id, RustBuffer payer, uint8_t page_kind, uint32_t pool_id, uint8_t lane_id, uint64_t page_seq, RustCallStatus *_Nonnull out_status
@@ -288,10 +278,25 @@ RustBuffer uniffi_audren_ffi_fn_func_build_publish_checkpoint_ix(RustBuffer prog
 RustBuffer uniffi_audren_ffi_fn_func_build_set_paused_ix(RustBuffer program_id, RustBuffer authority, uint32_t pool_id, int8_t paused, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_TRANSACT_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_TRANSACT_IX
+RustBuffer uniffi_audren_ffi_fn_func_build_transact_ix(RustBuffer params, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_UPDATE_POOL_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_UPDATE_POOL_IX
+RustBuffer uniffi_audren_ffi_fn_func_build_update_pool_ix(RustBuffer program_id, RustBuffer signer, uint32_t pool_id, RustBuffer action, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_CANONICAL_PROGRAM_ID
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_CANONICAL_PROGRAM_ID
 RustBuffer uniffi_audren_ffi_fn_func_canonical_program_id(RustCallStatus *_Nonnull out_status
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_CHECK_MEMO_VIEW_TAG
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_CHECK_MEMO_VIEW_TAG
+int8_t uniffi_audren_ffi_fn_func_check_memo_view_tag(RustBuffer fvk, RustBuffer view_tag, RustBuffer epk, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_COMPACT_STORE_NEW_JSON
@@ -304,9 +309,14 @@ RustBuffer uniffi_audren_ffi_fn_func_compact_store_new_json(uint32_t pool_id, ui
 RustBuffer uniffi_audren_ffi_fn_func_compute_exec_ctx_hash_ffi(RustBuffer params, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_COMPUTE_JOINSPLIT_CTX_HASH_FFI
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_COMPUTE_JOINSPLIT_CTX_HASH_FFI
-RustBuffer uniffi_audren_ffi_fn_func_compute_joinsplit_ctx_hash_ffi(RustBuffer params, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_COMPUTE_PAGE_ROLLOVERS_FFI
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_COMPUTE_PAGE_ROLLOVERS_FFI
+RustBuffer uniffi_audren_ffi_fn_func_compute_page_rollovers_ffi(uint64_t leaf_count, uint32_t output_count, uint64_t nf_count, uint32_t spent_nullifiers, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_COMPUTE_TRANSACT_CTX_HASH_FFI
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_COMPUTE_TRANSACT_CTX_HASH_FFI
+RustBuffer uniffi_audren_ffi_fn_func_compute_transact_ctx_hash_ffi(RustBuffer params, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_AUDREN_ADDRESS
@@ -331,7 +341,7 @@ RustBuffer uniffi_audren_ffi_fn_func_decode_root_checkpoint_account(RustBuffer d
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECRYPT_AND_VERIFY_MEMO_ENTRY
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECRYPT_AND_VERIFY_MEMO_ENTRY
-RustBuffer uniffi_audren_ffi_fn_func_decrypt_and_verify_memo_entry(RustBuffer fvk, RustBuffer memo_90, RustBuffer onchain_commitment, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_audren_ffi_fn_func_decrypt_and_verify_memo_entry(RustBuffer fvk, RustBuffer memo_106, RustBuffer onchain_commitment, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DEFAULT_RELAY_URL
@@ -400,11 +410,6 @@ RustBuffer uniffi_audren_ffi_fn_func_derive_nullifier_pda(RustBuffer program_id,
 RustBuffer uniffi_audren_ffi_fn_func_derive_pool_pda(RustBuffer program_id, uint32_t pool_id, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_SOL_VAULT_PDA
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_SOL_VAULT_PDA
-RustBuffer uniffi_audren_ffi_fn_func_derive_sol_vault_pda(RustBuffer program_id, uint32_t pool_id, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_SUBACCOUNT_KEYS
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_SUBACCOUNT_KEYS
 RustBuffer uniffi_audren_ffi_fn_func_derive_subaccount_keys(RustBuffer seed, uint32_t account_index, RustCallStatus *_Nonnull out_status
@@ -437,7 +442,7 @@ uint64_t uniffi_audren_ffi_fn_func_deterministic_note_rent_fee_ffi(uint64_t pool
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_ENCRYPT_NOTE_MEMO
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_ENCRYPT_NOTE_MEMO
-RustBuffer uniffi_audren_ffi_fn_func_encrypt_note_memo(RustBuffer recipient_spend_pk, RustBuffer recipient_view_pk, RustBuffer eph_secret, uint64_t amount, RustBuffer mint, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_audren_ffi_fn_func_encrypt_note_memo(RustBuffer recipient_spend_pk, RustBuffer recipient_view_pk, RustBuffer eph_secret, uint64_t amount, RustBuffer mint, RustBuffer payment_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_EXPORT_FULL_VIEWING_KEY
@@ -732,15 +737,9 @@ void ffi_audren_ffi_rust_future_free_void(uint64_t handle
 void ffi_audren_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_SOL_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_SOL_IX
-uint16_t uniffi_audren_ffi_checksum_func_build_deposit_sol_ix(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_SPL_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_SPL_IX
-uint16_t uniffi_audren_ffi_checksum_func_build_deposit_spl_ix(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_DEPOSIT_IX
+uint16_t uniffi_audren_ffi_checksum_func_build_deposit_ix(void
     
 );
 #endif
@@ -762,12 +761,6 @@ uint16_t uniffi_audren_ffi_checksum_func_build_init_pool_ix(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_JOINSPLIT_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_JOINSPLIT_IX
-uint16_t uniffi_audren_ffi_checksum_func_build_joinsplit_ix(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_IX
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_IX
 uint16_t uniffi_audren_ffi_checksum_func_build_open_page_ix(void
@@ -786,9 +779,27 @@ uint16_t uniffi_audren_ffi_checksum_func_build_set_paused_ix(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_TRANSACT_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_TRANSACT_IX
+uint16_t uniffi_audren_ffi_checksum_func_build_transact_ix(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_UPDATE_POOL_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_UPDATE_POOL_IX
+uint16_t uniffi_audren_ffi_checksum_func_build_update_pool_ix(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_CANONICAL_PROGRAM_ID
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_CANONICAL_PROGRAM_ID
 uint16_t uniffi_audren_ffi_checksum_func_canonical_program_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_CHECK_MEMO_VIEW_TAG
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_CHECK_MEMO_VIEW_TAG
+uint16_t uniffi_audren_ffi_checksum_func_check_memo_view_tag(void
     
 );
 #endif
@@ -804,9 +815,15 @@ uint16_t uniffi_audren_ffi_checksum_func_compute_exec_ctx_hash_ffi(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_COMPUTE_JOINSPLIT_CTX_HASH_FFI
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_COMPUTE_JOINSPLIT_CTX_HASH_FFI
-uint16_t uniffi_audren_ffi_checksum_func_compute_joinsplit_ctx_hash_ffi(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_COMPUTE_PAGE_ROLLOVERS_FFI
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_COMPUTE_PAGE_ROLLOVERS_FFI
+uint16_t uniffi_audren_ffi_checksum_func_compute_page_rollovers_ffi(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_COMPUTE_TRANSACT_CTX_HASH_FFI
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_COMPUTE_TRANSACT_CTX_HASH_FFI
+uint16_t uniffi_audren_ffi_checksum_func_compute_transact_ctx_hash_ffi(void
     
 );
 #endif
@@ -915,12 +932,6 @@ uint16_t uniffi_audren_ffi_checksum_func_derive_nullifier_pda(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_POOL_PDA
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_POOL_PDA
 uint16_t uniffi_audren_ffi_checksum_func_derive_pool_pda(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_SOL_VAULT_PDA
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_SOL_VAULT_PDA
-uint16_t uniffi_audren_ffi_checksum_func_derive_sol_vault_pda(void
     
 );
 #endif

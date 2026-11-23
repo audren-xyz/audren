@@ -1,51 +1,48 @@
 /**
- * Canonical Audren constants matching `crates/audren-core` byte-for-byte.
+ * Canonical Audren v1 constants matching `crates/audren-core` byte-for-byte.
  */
 
 export const AUDREN_PROGRAM_ID = 'AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3';
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 1;
 
 export const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 export const CLASSIC_TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 export const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 export const ASSOCIATED_TOKEN_PROGRAM_ID = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
-export const NATIVE_SOL_MINT_BYTES = new Uint8Array(32);
 
 export const NUM_LANES = 16;
 export const DEFAULT_INITIAL_LANES = 4;
 export const NUM_ESCROW_SHARDS = 16;
-export const MAX_ESCROW_SHARDS = NUM_ESCROW_SHARDS;
 export const LANE_DEPTH_4ARY = 18;
 export const TOTAL_DEPTH_4ARY = 20;
 export const SUBTREE_LEVELS_4ARY = 4;
 export const CHECKPOINT_RING_SLOTS = 256;
 
-// Canonical namespaced PDA seed prefixes (`audren_v2_*`)
-export const POOL_SEED = 'audren_v2_pool';
-export const LANE_SEED = 'audren_v2_lane';
-export const LANE_RENT_SEED = 'audren_v2_lrent';
-export const SUBTREE_SEED = 'audren_v2_sub';
-export const SUBROOT_SEED = 'audren_v2_sroot';
-export const MEMO_SEED = 'audren_v2_memo';
-export const NF_PAGE_SEED = 'audren_v2_nfpage';
-export const CKPT_SEED = 'audren_v2_ckpt';
-export const NULLIFIER_SEED = 'audren_v2_null';
-export const SOL_VAULT_SEED = 'audren_v2_sol';
-export const VAULT_AUTH_SEED = 'audren_v2_vault';
-export const ESCROW_SEED = 'audren_v2_escrow';
-export const UNWRAP_SEED = 'audren_v2_unwrap';
+// Canonical 12 PDA seed prefixes (`audren_*`)
+export const POOL_SEED = 'audren_pool';
+export const VAULT_AUTH_SEED = 'audren_vault_auth';
+export const LANE_SEED = 'audren_lane';
+export const LANE_RENT_SEED = 'audren_lane_rent';
+export const SUBTREE_SEED = 'audren_subtree';
+export const SUBROOT_SEED = 'audren_subroot';
+export const MEMO_SEED = 'audren_memo';
+export const NF_PAGE_SEED = 'audren_nf_page';
+export const NULLIFIER_SEED = 'audren_nf';
+export const CKPT_SEED = 'audren_ckpt';
+export const ESCROW_SEED = 'audren_escrow';
+export const UNWRAP_SEED = 'audren_unwrap';
 
 // Instruction discriminators (0x00..=0x08; 9 instructions total)
 export const TAG_INIT_POOL = 0x00;
 export const TAG_INIT_LANE = 0x01;
 export const TAG_OPEN_PAGE = 0x02;
-export const TAG_DEPOSIT_SOL = 0x03;
-export const TAG_DEPOSIT_SPL = 0x04;
-export const TAG_PUBLISH_CHECKPOINT = 0x05;
-export const TAG_JOINSPLIT = 0x06;
-export const TAG_EXEC_VIA_ESCROW = 0x07;
-export const TAG_SET_PAUSED = 0x08;
+export const TAG_DEPOSIT = 0x03;
+export const TAG_PUBLISH_CHECKPOINT = 0x04;
+export const TAG_TRANSACT = 0x05;
+export const TAG_EXEC_VIA_ESCROW = 0x06;
+export const TAG_SET_PAUSED = 0x07;
+export const TAG_UPDATE_POOL = 0x08;
 export const INSTRUCTION_COUNT = 9;
 
 export const GROTH16_PROOF_LEN = 192;
@@ -59,28 +56,40 @@ export const OPEN_PAGE_KIND_SUBROOT = 1;
 export const OPEN_PAGE_KIND_MEMO = 2;
 export const OPEN_PAGE_KIND_NULLIFIER = 3;
 
-export const ASSET_MODE_PRIVATE = 0;
-export const ASSET_MODE_SOL = 1;
-export const ASSET_MODE_SPL = 2;
-
 export const DEPOSIT_FLAG_FEE_FROM_AMOUNT = 1 << 2;
+export const DEPOSIT_FLAG_NATIVE_SOL = 1 << 3;
+
+export const ASSET_MODE_PRIVATE = 0;
+export const ASSET_MODE_PUBLIC = 1;
+
 export const WITHDRAW_FLAG_UNWRAP_WSOL = 1 << 3;
-export const EXEC_KIND_SOL = 0;
-export const EXEC_KIND_SPL = 1;
 export const EXEC_FLAG_FEE_ON_OUTPUT = 1 << 3;
 
-export const ASSET_ID_DOMAIN = 'audren/v2/asset';
-export const CTX_DOMAIN_JOINSPLIT = 'audren/v2/joinsplit';
-export const CTX_DOMAIN_EXEC_VIA_ESCROW = 'audren/v2/exec_via_escrow';
-export const CTX_DOMAIN_ROUTER_ACCOUNTS = 'audren/v2/router_accs';
+export const UPDATE_POOL_PARAMS = 0;
+export const UPDATE_POOL_PROPOSE_AUTHORITY = 1;
+export const UPDATE_POOL_ACCEPT_AUTHORITY = 2;
+export const UPDATE_POOL_RENOUNCE_AUTHORITY = 3;
 
-// Poseidon domain tags
+// Canonical `audren/v1/*` domain tags (asset_id, ctx_hash, and ECDH/memo KDFs)
+export const ASSET_ID_DOMAIN = 'audren/v1/asset';
+export const CTX_DOMAIN_TRANSACT = 'audren/v1/ctx';
+export const CTX_DOMAIN_EXEC_VIA_ESCROW = 'audren/v1/exec_ctx';
+export const CTX_DOMAIN_ROUTER_ACCOUNTS = 'audren/v1/router_accs';
+export const KDF_DOMAIN_VIEW_TAG = 'audren/v1/vt';
+export const KDF_DOMAIN_MEMO_KEY = 'audren/v1/key';
+export const KDF_DOMAIN_MEMO_NONCE = 'audren/v1/nonce';
+export const KDF_DOMAIN_TWEAK = 'audren/v1/tweak';
+export const KDF_DOMAIN_BLIND = 'audren/v1/blind';
+export const KDF_DOMAIN_DYN_TWEAK = 'audren/v1/dyn_tweak';
+export const KDF_DOMAIN_DYN_BLIND = 'audren/v1/dyn_blind';
+export const KDF_DOMAIN_DYN_MASK = 'audren/v1/dyn_mask';
+
+// Poseidon domain tags (tag 6 is reserved)
 export const DOMAIN_PK = 1n;
 export const DOMAIN_STEALTH = 2n;
 export const DOMAIN_NOTE = 3n;
 export const DOMAIN_NULLIFIER = 4n;
 export const DOMAIN_DUMMY_NF = 5n;
-export const DOMAIN_DYN_BLIND = 6n;
 export const DOMAIN_PUB_HASH_A = 7n;
 export const DOMAIN_PUB_HASH_B = 8n;
 export const DOMAIN_PUB_HASH_FINAL = 9n;
@@ -90,33 +99,36 @@ export const DOMAIN_NK = 10n;
 export const MAX_CPI_ACCOUNT_ALLOC = 10_240;
 export const SUBTREE_LEAVES = 256;
 export const SUBROOTS_PER_PAGE = 300;
-export const MEMO_NOTES_PER_PAGE = 112;
-export const MEMO_CT_LEN = 56;
-export const MEMO_ENTRY_WIRE_LEN = 90;
+export const MEMO_NOTES_PER_PAGE = 96;
+export const MEMO_PLAINTEXT_LEN = 56;
+export const MEMO_VERSION_V1 = 1;
+export const MEMO_PAYMENT_ID_LEN = 14;
+export const MEMO_CT_LEN = 72;
+export const MEMO_ENTRY_WIRE_LEN = 106;
 export const DYN_MEMO_HEAD_LEN = 34;
 export const NF_PREFIX_LEN = 16;
 export const NF_PER_PAGE = 600;
 
-export const POOL_MAGIC = 'AUD2PL02';
-export const LANE_RENT_MAGIC = 'AUD2RV01';
-export const LANE_MAGIC = 'AUD2LN01';
-export const SUBTREE_MAGIC = 'AUD2SB01';
-export const SUBROOT_MAGIC = 'AUD2SR01';
-export const MEMO_MAGIC = 'AUD2MM03';
-export const NF_PAGE_MAGIC = 'AUD2NF01';
-export const CKPT_MAGIC = 'AUD2CK01';
-export const DYN_MEMO_MAGIC = 'AUD2DYN2';
+export const POOL_MAGIC = 'AUD1PL01';
+export const LANE_RENT_MAGIC = 'AUD1RV01';
+export const LANE_MAGIC = 'AUD1LN01';
+export const SUBTREE_MAGIC = 'AUD1SB01';
+export const SUBROOT_MAGIC = 'AUD1SR01';
+export const MEMO_MAGIC = 'AUD1MM01';
+export const NF_PAGE_MAGIC = 'AUD1NF01';
+export const CKPT_MAGIC = 'AUD1CK01';
+export const DYN_MEMO_MAGIC = 'AUD1DYN1';
 
 export const POOL_STATE_LEN = 128;
 export const SENTINEL_LEN = 16;
 export const LANE_STATE_LEN = 1_824;
 export const SUBTREE_PAGE_LEN = 8_256;
 export const SUBROOT_PAGE_LEN = 9_664;
-export const MEMO_PAGE_LEN = 10_144;
+export const MEMO_PAGE_LEN = 10_240;
 export const NF_PAGE_LEN = 9_664;
 export const CKPT_LEN = 704;
 
-// PoolState offsets
+// PoolState offsets (128 B)
 export const PL_OFF_MAGIC = 0;
 export const PL_OFF_VERSION = 8;
 export const PL_OFF_BUMP = 9;
@@ -126,14 +138,12 @@ export const PL_OFF_POOL_ID = 12;
 export const PL_OFF_CKPT_INTERVAL = 16;
 export const PL_OFF_MAX_CKPT_AGE = 24;
 export const PL_OFF_AUTHORITY = 32;
-export const PL_OFF_SOL_VAULT_BUMP = 64;
-export const PL_OFF_VAULT_AUTH_BUMP = 65;
-export const PL_OFF_MODE = 66;
+export const PL_OFF_VAULT_AUTH_BUMP = 64;
 export const PL_OFF_NOTE_RENT_FEE = 72;
 export const PL_OFF_NF_RENT_FEE = 80;
-export const PL_OFF_AUDITOR_PK = 88;
+export const PL_OFF_PENDING_AUTHORITY = 88;
 
-// LaneTreeState offsets
+// LaneTreeState offsets (1,824 B)
 export const LN_OFF_MAGIC = 0;
 export const LN_OFF_VERSION = 8;
 export const LN_OFF_LANE_ID = 9;
@@ -145,7 +155,7 @@ export const LN_OFF_NF_COUNT = 24;
 export const LN_OFF_CURRENT_ROOT = 64;
 export const LN_OFF_FRONTIER = 96;
 
-// SubtreePage offsets
+// SubtreePage offsets (8,256 B)
 export const SB_OFF_MAGIC = 0;
 export const SB_OFF_LANE_ID = 8;
 export const SB_OFF_BUMP = 9;
@@ -154,7 +164,7 @@ export const SB_OFF_POOL_ID = 12;
 export const SB_OFF_PAGE_SEQ = 16;
 export const SB_OFF_LEAVES = 64;
 
-// SubtreeRootPage offsets
+// SubtreeRootPage offsets (9,664 B)
 export const SR_OFF_MAGIC = 0;
 export const SR_OFF_LANE_ID = 8;
 export const SR_OFF_BUMP = 9;
@@ -163,7 +173,7 @@ export const SR_OFF_POOL_ID = 12;
 export const SR_OFF_ROOT_PAGE_SEQ = 16;
 export const SR_OFF_ROOTS = 64;
 
-// MemoPage offsets (SoA)
+// MemoPage offsets (10,240 B; Structure-of-Arrays)
 export const MM_OFF_MAGIC = 0;
 export const MM_OFF_LANE_ID = 8;
 export const MM_OFF_BUMP = 9;
@@ -173,12 +183,12 @@ export const MM_OFF_PAGE_SEQ = 16;
 export const MM_OFF_CREATED_SLOT = 24;
 export const MM_OFF_CLOSED_SLOT = 32;
 export const MM_OFF_VIEW_TAGS = 64;
-export const MM_OFF_EPHEMERAL_PKS = 288;
-export const MM_OFF_CIPHERTEXTS = 3_872;
+export const MM_OFF_EPHEMERAL_PKS = 256;
+export const MM_OFF_CIPHERTEXTS = 3_328;
 export const MEMO_PAGE_HEADER_LEN = 64;
-export const MEMO_PAGE_SCAN_SLICE_LEN = MM_OFF_CIPHERTEXTS;
+export const MEMO_PAGE_SCAN_SLICE_LEN = 3_328;
 
-// NullifierPage offsets
+// NullifierPage offsets (9,664 B)
 export const NF_OFF_MAGIC = 0;
 export const NF_OFF_LANE_ID = 8;
 export const NF_OFF_BUMP = 9;
@@ -190,7 +200,7 @@ export const NF_OFF_CLOSED_SLOT = 32;
 export const NF_OFF_PREFIXES = 64;
 export const NF_PAGE_HEADER_LEN = 64;
 
-// RootCheckpoint offsets
+// RootCheckpoint offsets (704 B)
 export const CK_OFF_MAGIC = 0;
 export const CK_OFF_VERSION = 8;
 export const CK_OFF_BUMP = 9;

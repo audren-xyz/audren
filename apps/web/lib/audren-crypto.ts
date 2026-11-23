@@ -3,11 +3,16 @@ import { base58Decode, type AudrenInstruction } from '@audren/sdk'
 
 export * from '@audren/sdk'
 export {
+  buildDepositInstruction,
+  buildTransactInstruction,
+  buildUpdatePoolInstruction,
   computePageRollovers,
   computeToken2022NetAmount,
+  computeTransactCtxHash,
   parseToken2022TransferFeeConfig,
   pickRandomEscrowShard,
   pickRandomLaneId,
+  tryDecryptAndVerifyMemo,
 } from '@audren/sdk'
 
 const utf8Encoder = new TextEncoder()

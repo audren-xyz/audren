@@ -3,12 +3,11 @@
 pub use audren_core::{
     instruction::*,
     layout::*,
-    AudrenError, PoolMode, ASSOCIATED_TOKEN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID, CKPT_SEED,
-    ESCROW_SEED, LANE_DEPTH_4ARY, LANE_RENT_SEED, LANE_SEED, MEMO_SEED, NATIVE_SOL_MINT,
-    NF_PAGE_SEED, NULLIFIER_SEED, NUM_ESCROW_SHARDS, NUM_LANES, POOL_SEED, PROTOCOL_VERSION,
-    SOL_VAULT_SEED, SUBROOT_SEED, SUBTREE_SEED, SYSTEM_PROGRAM_ID as SYSTEM_PROGRAM_BYTES,
-    TOKEN_2022_PROGRAM_ID, UNWRAP_SEED, VAULT_AUTH_SEED, WSOL_MINT as WSOL_MINT_BYTES,
-    ZERO_HASHES_4ARY, CHECKPOINT_RING_SLOTS,
+    AudrenError, ASSOCIATED_TOKEN_PROGRAM_ID, CHECKPOINT_RING_SLOTS, CLASSIC_TOKEN_PROGRAM_ID,
+    CKPT_SEED, ESCROW_SEED, LANE_DEPTH_4ARY, LANE_RENT_SEED, LANE_SEED, MEMO_SEED, NF_PAGE_SEED,
+    NULLIFIER_SEED, NUM_ESCROW_SHARDS, NUM_LANES, POOL_SEED, PROTOCOL_VERSION, SUBROOT_SEED,
+    SUBTREE_SEED, SYSTEM_PROGRAM_ID as SYSTEM_PROGRAM_BYTES, TOKEN_2022_PROGRAM_ID, UNWRAP_SEED,
+    VAULT_AUTH_SEED, WSOL_MINT as WSOL_MINT_BYTES, ZERO_HASHES_4ARY,
 };
 use pinocchio::{error::ProgramError, AccountView, Address};
 
@@ -62,10 +61,6 @@ pub fn check_owned_and_magic(
 
 pub fn pool_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
     Address::find_program_address(&[POOL_SEED, &pool_id.to_le_bytes()], program_id)
-}
-
-pub fn sol_vault_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
-    Address::find_program_address(&[SOL_VAULT_SEED, &pool_id.to_le_bytes()], program_id)
 }
 
 pub fn vault_auth_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {

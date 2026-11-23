@@ -2,6 +2,14 @@ import { ed25519 } from '@noble/curves/ed25519.js'
 import { getAggregatorAdapter, quoteWithSelection } from '../aggregators/registry'
 import { getRelayerSecretsB64, type Env, type RelayPolicyConfig } from '../env'
 import {
+  MEMO_NOTES_PER_PAGE,
+  NF_PER_PAGE,
+  OPEN_PAGE_KIND_MEMO,
+  OPEN_PAGE_KIND_NULLIFIER,
+  OPEN_PAGE_KIND_SUBROOT,
+  OPEN_PAGE_KIND_SUBTREE,
+  SUBROOTS_PER_PAGE,
+  SUBTREE_LEAVES,
   buildOpenPageSolanaIx,
   decodeLaneHeader,
   decodePoolState,
@@ -11,10 +19,6 @@ import {
   derivePoolPda,
   deriveSubrootPda,
   deriveSubtreePda,
-  OPEN_PAGE_KIND_MEMO,
-  OPEN_PAGE_KIND_NULLIFIER,
-  OPEN_PAGE_KIND_SUBROOT,
-  OPEN_PAGE_KIND_SUBTREE,
 } from '../solana/audren'
 import { publishCheckpointIfNeeded, type CheckpointLockAdapter } from '../solana/checkpoint'
 import {
@@ -46,12 +50,13 @@ import { fetchMintPricesUsd } from '../policy/pricing'
 
 /**
  * Permissionless Maintenance Crank (every 2 minutes):
- *   1. Publishes a fresh `RootCheckpoint` (`PublishCheckpoint`, Tag 5) when uncheckpointed leaves
+ *   1. Publishes a fresh `RootCheckpoint` (`PublishCheckpoint`, Tag 4) when uncheckpointed leaves
  *      (or an expired checkpoint on a non-empty pool) exist and `currentSlot >= nextCkptSlot`.
- *   2. Pre-opens upcoming `SubtreePage`/`MemoPage`/`NullifierPage` PDAs (`OpenPage`, Tag 2)
- *      reimbursed from `LaneRentVault` when any active lane approaches page boundary (`>= 80%` full).
+ *   2. Pre-opens upcoming `SubtreePage`/`SubtreeRootPage`/`MemoPage`/`NullifierPage` PDAs
+ *      (`OpenPage`, Tag 2) reimbursed from `LaneRentVault` when any active lane approaches
+ *      page boundaries (matching on-chain `OpenPage` lookahead rules).
  */
-export async function runV2MaintenanceCrank(
+export async function runMaintenanceCrank(
   env: Env,
   cluster: Cluster,
   checkpointLock?: CheckpointLockAdapter,
@@ -109,10 +114,15 @@ export async function runV2MaintenanceCrank(
     if (!raw) continue
     const hdr = decodeLaneHeader(raw)
 
-    const curSub = hdr.nextLeaf / 256n
-    const curSubroot = curSub / 300n
-    const curMemo = hdr.nextLeaf / 112n
-    const curNf = hdr.nfCount / 600n
+    const subSize = BigInt(SUBTREE_LEAVES)
+    const srSize = BigInt(SUBROOTS_PER_PAGE)
+    const memoSize = BigInt(MEMO_NOTES_PER_PAGE)
+    const nfSize = BigInt(NF_PER_PAGE)
+
+    const curSub = hdr.nextLeaf / subSize
+    const curSubroot = curSub / srSize
+    const curMemo = hdr.nextLeaf / memoSize
+    const curNf = hdr.nfCount / nfSize
 
     const candidates: Array<{ pageKind: number; pageSeq: bigint; pda: string }> = [
       {
@@ -137,7 +147,7 @@ export async function runV2MaintenanceCrank(
       },
     ]
 
-    if (Number(hdr.nextLeaf % 256n) >= 200) {
+    if (Number(hdr.nextLeaf % subSize) >= 200) {
       const nextSub = curSub + 1n
       candidates.push({
         pageKind: OPEN_PAGE_KIND_SUBTREE,
@@ -145,7 +155,8 @@ export async function runV2MaintenanceCrank(
         pda: base58Encode(deriveSubtreePda(0, l, nextSub).address),
       })
     }
-    if (Number(curSub % 300n) >= 240) {
+    // On-chain `OpenPage` permits SUBROOT lookahead strictly when `subroot_slot >= 280`.
+    if (Number(curSub % srSize) >= 280) {
       const nextSubroot = curSubroot + 1n
       candidates.push({
         pageKind: OPEN_PAGE_KIND_SUBROOT,
@@ -153,7 +164,7 @@ export async function runV2MaintenanceCrank(
         pda: base58Encode(deriveSubrootPda(0, l, nextSubroot).address),
       })
     }
-    if (Number(hdr.nextLeaf % 112n) >= 90) {
+    if (Number(hdr.nextLeaf % memoSize) >= 77) {
       const nextMemo = curMemo + 1n
       candidates.push({
         pageKind: OPEN_PAGE_KIND_MEMO,
@@ -161,7 +172,7 @@ export async function runV2MaintenanceCrank(
         pda: base58Encode(deriveMemoPda(0, l, nextMemo).address),
       })
     }
-    if (Number(hdr.nfCount % 600n) >= 500) {
+    if (Number(hdr.nfCount % nfSize) >= 500) {
       const nextNf = curNf + 1n
       candidates.push({
         pageKind: OPEN_PAGE_KIND_NULLIFIER,

@@ -46,9 +46,10 @@ export interface FullViewingKey {
  * (borrowing, perp margin, CLMM positions).
  *
  * **Privacy boundary:** Each `sessionIndex` is a pseudonymous Solana wallet unlinkable to the
- * user's primary public wallet or other sessions when funded via relayed `JoinSplit` Withdraw
- * and swept back via zero-dust `DepositSol`. All positions and transactions executed BY that
- * session wallet on external DeFi protocols remain public on Solana.
+ * user's primary public wallet or other sessions when funded via relayed `Transact` Withdraw
+ * and swept back via zero-dust `Deposit` (`DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT`).
+ * All positions and transactions executed BY that session wallet on external DeFi protocols remain
+ * public on Solana.
  */
 export interface DefiSessionKeypair {
   sessionIndex: number;
@@ -78,13 +79,13 @@ export function deriveKeysFromSeed(seed32: Uint8Array): AudrenKeys {
   if (seed32.byteLength !== 32) {
     throw new RangeError(`Master seed must be 32 bytes, got ${seed32.byteLength}`);
   }
-  const salt = utf8Encoder.encode('audren/v2/root');
-  const spendRaw = hkdf(sha256, seed32, salt, utf8Encoder.encode('audren/v2/spend_sk'), 32);
+  const salt = utf8Encoder.encode('audren/v1/root');
+  const spendRaw = hkdf(sha256, seed32, salt, utf8Encoder.encode('audren/v1/spend_sk'), 32);
   const spendSk = bytes32ToFrMasked(spendRaw);
   const spendPk = deriveSpendPk(spendSk);
   const nk = deriveNullifierKey(spendSk);
 
-  const viewSk = hkdf(sha256, seed32, salt, utf8Encoder.encode('audren/v2/view_sk'), 32);
+  const viewSk = hkdf(sha256, seed32, salt, utf8Encoder.encode('audren/v1/view_sk'), 32);
   const viewPk = x25519.getPublicKey(viewSk);
 
   const spendSkBytes = frToBeBytes(spendSk);
@@ -113,7 +114,7 @@ export function deriveSubaccountKeys(masterSeed32: Uint8Array, accountIndex: num
   const child = hkdf(
     sha256,
     masterSeed32,
-    utf8Encoder.encode('audren/v2/subaccount'),
+    utf8Encoder.encode('audren/v1/subaccount'),
     u32le(accountIndex),
     32,
   );
@@ -142,7 +143,7 @@ export function deriveDefiSessionKeypair(
   const secretSeed = hkdf(
     sha256,
     masterSeed32,
-    utf8Encoder.encode('audren/v2/defi_session'),
+    utf8Encoder.encode('audren/v1/defi_session'),
     u32le(sessionIndex),
     32,
   );

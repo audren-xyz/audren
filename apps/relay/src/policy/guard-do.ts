@@ -1,10 +1,15 @@
 import { DurableObject } from 'cloudflare:workers'
+import { sha256 } from '@noble/hashes/sha2.js'
 import type { Env } from '../env'
 import type { CheckpointLockAcquireResult } from '../solana/checkpoint'
+import { toHex, utf8 } from '../solana/codec'
 import type { AudrenOpKind, Cluster } from '../types'
 
 export interface GuardBeginRequest {
-  ipHash: string
+  /** Raw client IP hashed inside `RelayGuard` using its ephemeral per-day 32-byte secret salt. */
+  clientIp?: string
+  /** Optional pre-hashed identifier (used only by unit mocks; production callers pass `clientIp`). */
+  ipHash?: string
   nullifiers: string[]
 }
 
@@ -26,6 +31,8 @@ export interface GuardAuthorizeRequest {
 
 export interface GuardDecision {
   allowed: boolean
+  /** Ephemeral daily-salted client IP hash computed inside `RelayGuard` (returned by `begin`). */
+  ipHash?: string
   reservationId?: string
   status?: number
   code?: string
@@ -84,11 +91,14 @@ function utcDayKey(nowMs: number): string {
 /**
  * Strongly consistent SQLite Durable Object protecting `relay.audren.xyz`
  * against rent-drain / ping-pong / simulation-spam abuse:
+ *   - Ephemeral per-day random 32-byte secret IP-hash salt persisted strictly inside DO storage
+ *     (never derived from any public key or env constant; rotated & purged daily at UTC midnight)
+ *   - Zero IP-hash linkage on `inflight_nullifiers` (stores only `(nullifier, expires_at)`)
  *   - Global daily sponsored SOL budget cap per cluster
  *   - Per-IP sliding-window hourly & daily sponsored tx limits
  *   - Per-IP cooldown between sponsored txs (prevents rapid back-and-forth ping-pong)
  *   - Per-IP self-paying burst cap & failed-attempt flood guard
- *   - Atomic in-flight nullifier deduplication
+ *   - Atomic in-flight nullifier deduplication across single & batched transactions
  */
 export class RelayGuard extends DurableObject<Env> {
   private readonly sql: SqlStorage
@@ -98,6 +108,11 @@ export class RelayGuard extends DurableObject<Env> {
     this.sql = ctx.storage.sql
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS daily_ip_salts (
+          day TEXT PRIMARY KEY,
+          salt_hex TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS ip_events (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           ip_hash TEXT NOT NULL,
@@ -123,7 +138,6 @@ export class RelayGuard extends DurableObject<Env> {
 
         CREATE TABLE IF NOT EXISTS inflight_nullifiers (
           nullifier TEXT PRIMARY KEY,
-          ip_hash TEXT NOT NULL,
           expires_at INTEGER NOT NULL
         );
 
@@ -156,10 +170,58 @@ export class RelayGuard extends DurableObject<Env> {
         );
         CREATE INDEX IF NOT EXISTS idx_ckpt_ip_hits ON checkpoint_ip_hits (ip_hash, cluster, created_at);
       `)
+
+      // Privacy migration: drop & recreate legacy `inflight_nullifiers` if it carried `ip_hash`
+      // so nullifiers are NEVER linked to client IP hashes in DO storage.
+      const nfCols = this.sql.exec('PRAGMA table_info(inflight_nullifiers)').toArray()
+      if (nfCols.some((c) => String(c.name) === 'ip_hash')) {
+        this.sql.exec('DROP TABLE inflight_nullifiers')
+        this.sql.exec(`
+          CREATE TABLE inflight_nullifiers (
+            nullifier TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL
+          );
+        `)
+      }
     })
   }
 
+  /**
+   * Load or generate the current UTC day's random 32-byte secret salt inside DO storage,
+   * purging salts from prior UTC days so historical IP hashes cannot be inverted.
+   */
+  private getOrCreateDailySaltHex(now: number): string {
+    const day = utcDayKey(now)
+    this.sql.exec('DELETE FROM daily_ip_salts WHERE day < ?', day)
+    const rows = this.sql
+      .exec('SELECT salt_hex FROM daily_ip_salts WHERE day = ?', day)
+      .toArray()
+    const existing = rows[0]?.salt_hex
+    if (typeof existing === 'string' && existing.length === 64) {
+      return existing
+    }
+    const randomSalt = new Uint8Array(32)
+    crypto.getRandomValues(randomSalt)
+    const saltHex = toHex(randomSalt)
+    this.sql.exec(
+      'INSERT OR IGNORE INTO daily_ip_salts (day, salt_hex) VALUES (?, ?)',
+      day,
+      saltHex,
+    )
+    const persisted = this.sql
+      .exec('SELECT salt_hex FROM daily_ip_salts WHERE day = ?', day)
+      .one().salt_hex
+    return String(persisted)
+  }
+
+  private computeDailyIpHash(clientIp: string, now: number): string {
+    const saltHex = this.getOrCreateDailySaltHex(now)
+    return toHex(sha256(utf8(`${saltHex}|${clientIp}`))).slice(0, 32)
+  }
+
   private prune(now: number): void {
+    const day = utcDayKey(now)
+    this.sql.exec('DELETE FROM daily_ip_salts WHERE day < ?', day)
     this.sql.exec('DELETE FROM inflight_nullifiers WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM pending_reservations WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM ip_events WHERE created_at < ?', now - DAY_MS - HOUR_MS)
@@ -167,20 +229,42 @@ export class RelayGuard extends DurableObject<Env> {
   }
 
   /**
+   * Hash a client IP inside `RelayGuard` using the current UTC day's ephemeral 32-byte random salt.
+   * The secret salt never leaves Durable Object storage.
+   */
+  async hashClientIp(clientIp: string, nowMs: number = Date.now()): Promise<string> {
+    return this.computeDailyIpHash(clientIp || 'unknown', nowMs)
+  }
+
+  /**
    * Pre-simulation guard (before RPC simulation):
-   * Atomically dedup concurrent nullifiers and block IPs flooding invalid payloads.
+   * Atomically dedup concurrent nullifiers (without storing any IP association on nullifiers)
+   * and block IPs flooding invalid payloads.
    */
   async begin(req: GuardBeginRequest): Promise<GuardDecision> {
     const now = Date.now()
     this.prune(now)
+    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now)
 
+    const seenInReq = new Set<string>()
     for (const nf of req.nullifiers) {
+      if (seenInReq.has(nf)) {
+        return {
+          allowed: false,
+          ipHash,
+          status: 400,
+          code: 'DUPLICATE_NULLIFIER',
+          reason: 'Duplicate nullifier detected within the submitted transaction batch.',
+        }
+      }
+      seenInReq.add(nf)
       const existing = this.sql
         .exec('SELECT nullifier FROM inflight_nullifiers WHERE nullifier = ?', nf)
         .toArray()
       if (existing.length > 0) {
         return {
           allowed: false,
+          ipHash,
           status: 409,
           code: 'DUPLICATE_NULLIFIER',
           reason: 'This private note nullifier is already being submitted to Solana.',
@@ -191,13 +275,14 @@ export class RelayGuard extends DurableObject<Env> {
     const failedRow = this.sql
       .exec(
         'SELECT COUNT(*) AS cnt FROM ip_events WHERE ip_hash = ? AND failed = 1 AND created_at >= ?',
-        req.ipHash,
+        ipHash,
         now - HOUR_MS,
       )
       .one()
     if (Number(failedRow.cnt ?? 0) >= MAX_FAILED_ATTEMPTS_PER_HOUR) {
       return {
         allowed: false,
+        ipHash,
         status: 429,
         code: 'TOO_MANY_FAILURES',
         reason: 'Too many invalid relay attempts from this IP. Please wait before retrying.',
@@ -208,14 +293,13 @@ export class RelayGuard extends DurableObject<Env> {
     const expiresAt = now + INFLIGHT_TTL_MS
     for (const nf of req.nullifiers) {
       this.sql.exec(
-        'INSERT OR REPLACE INTO inflight_nullifiers (nullifier, ip_hash, expires_at) VALUES (?, ?, ?)',
+        'INSERT OR REPLACE INTO inflight_nullifiers (nullifier, expires_at) VALUES (?, ?)',
         nf,
-        req.ipHash,
         expiresAt,
       )
     }
 
-    return { allowed: true }
+    return { allowed: true, ipHash }
   }
 
   /**
@@ -482,18 +566,20 @@ export class RelayGuard extends DurableObject<Env> {
   }
 
   async checkCheckpointRateLimit(req: {
-    ipHash: string
+    clientIp?: string
+    ipHash?: string
     cluster: Cluster
     maxPerMinute?: number
   }): Promise<GuardDecision> {
     const now = Date.now()
+    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now)
     const limit = req.maxPerMinute ?? CHECKPOINT_MAX_PER_IP_PER_MIN
     this.sql.exec('DELETE FROM checkpoint_ip_hits WHERE created_at < ?', now - CHECKPOINT_IP_WINDOW_MS)
     const cnt = Number(
       this.sql
         .exec(
           'SELECT COUNT(*) AS cnt FROM checkpoint_ip_hits WHERE ip_hash = ? AND cluster = ? AND created_at >= ?',
-          req.ipHash,
+          ipHash,
           req.cluster,
           now - CHECKPOINT_IP_WINDOW_MS,
         )
@@ -502,6 +588,7 @@ export class RelayGuard extends DurableObject<Env> {
     if (cnt >= limit) {
       return {
         allowed: false,
+        ipHash,
         status: 429,
         code: 'CHECKPOINT_RATE_LIMITED',
         reason: 'Too many checkpoint requests from this IP. Please retry shortly.',
@@ -510,11 +597,11 @@ export class RelayGuard extends DurableObject<Env> {
     }
     this.sql.exec(
       'INSERT INTO checkpoint_ip_hits (ip_hash, cluster, created_at) VALUES (?, ?, ?)',
-      req.ipHash,
+      ipHash,
       req.cluster,
       now,
     )
-    return { allowed: true }
+    return { allowed: true, ipHash }
   }
 
   async acquireCheckpointLock(req: {

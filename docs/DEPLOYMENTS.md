@@ -2,20 +2,20 @@
 
 All addresses below are public on-chain Solana accounts. No private keys or RPC credentials are stored in this repository.
 
-## On-Chain Program (`audren` v1.1.1)
+## On-Chain Program (`audren` v1.2.0)
 
 | Field | Value |
 |---|---|
 | **Program ID (Mainnet & Devnet)** | `AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3` |
 | **ProgramData Account** | `Gj4hW4KuMTNR9YTPmixRPsNcMNwRvYTXdksxLgoGRiVM` |
-| **Pool #0 PDA (`audren_v2_pool`)** | `8CN7uxRdQGjuAaZQVVcHRZbptSzvgfUv7tg8EarLHztF` |
-| **Sol Vault PDA (`audren_v2_sol`)** | `CEpjPxvw68qVqCGAHmpYxVk6XRBqf6asLpiri8wFiD7K` |
-| **Vault Authority PDA (`audren_v2_vault`)** | `53H7qJDZxmFbEcBpCJ8GE3LNTL3zjdJwCjwWRKkXE8J7` |
+| **Protocol Version** | `PROTOCOL_VERSION = 1` (`audren_*` 12-PDA architecture, unified SOL=WSOL, `96` memos/page `10,240 B` `MemoPage`) |
+| **Pool #0 PDA (`audren_pool`)** | `5Bvt5f5QMfsVb9TyX8bzkRMvAX6JSWwRtnymGveF9U3G` |
+| **Vault Authority PDA (`audren_vault_auth`)** | `3aMtBvVMatfBvoBWQaTxCPwQ2SWyW5ejceVgLFTtk2WF` |
 | **Instruction Architecture** | Solana sBPFv3 (`pinocchio 0.11.1`, `#![no_std]`) + Transaction v1 (`0x81`, `4,096 B`) |
 | **ZK Proof Verification** | `192 B` BN254 Groth16 (`17,861` R1CS, 4-ary Depth-20 global MASP) via `alt_bn128` syscall (`groth16-solana`) |
 | **Verifying Key Provenance** | Phase 1: Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`, 71+ contributors) · Phase 2: Audren BGM17 ceremony (drand Quicknet `#34194203` + Solana Mainnet slot `472705896`, [`ceremony/transcript.json`](../ceremony/transcript.json)) · Pre-audit |
 | **Proving Key (`audren_joinsplit.pk`)** | `3,927,280 B` · SHA-256 `2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4` |
-| **Compiled sBPFv3 ELF (`v1.1.1`)** | `151,648 B` · SHA-256 `ce1e5d06247490022fcd75751db566d6eb2f57f840d43ef50a9d31a9197d90ba` · `solana-verify` `878f02a19a6cadc6e402b9938bc4276aa9aa29bbd023c271714b754537772f94` |
+| **Compiled sBPFv3 ELF (`v1.2.0`)** | `162,552 B` · SHA-256 `90ab38268ae434df9aa348784801fd6d4e816cc4d3720b1f7654f6549ef78e7e` · `solana-verify` `f55e117f23ec011365e317518484d292514523a2b1f081cce66506e24925dbcc` |
 | **Published IDLs** | [`idl/audren.codama.json`](../idl/audren.codama.json) (Codama v1.8.0) · [`idl/audren.anchor.json`](../idl/audren.anchor.json) (Anchor v0.30+) |
 | **Security Policy & Metadata** | [`SECURITY.md`](../SECURITY.md) · [`idl/security.json`](../idl/security.json) (`security@audren.xyz`) |
 
@@ -38,9 +38,9 @@ Mainnet releases use deterministic Linux/Docker builds via the Solana Foundation
 | **Target Architecture** | `sBPFv3` (`--arch v3 --cargo-build-sbf-args="--tools-version v1.57"`) |
 | **Workspace / Library** | `--workspace-path program --library-name audren` |
 | **Otter Verify PDA (Mainnet)** | `FUQpuou8R4iDA5iMVTZiCB6X8uMdWdhSXxgo85Viv4Qt` |
-| **Verified Source Commit (`v1.1.1`)** | `936cc659bd6286417a692e7970d3cbd91a49e9bd` |
+| **Verified Source Commit (`v1.2.0`)** | `936cc659bd6286417a692e7970d3cbd91a49e9bd` |
 | **Source Repository** | `https://github.com/audren-xyz/audren` |
-| **GitHub Release** | [`v1.1.1`](https://github.com/audren-xyz/audren/releases/tag/v1.1.1) |
+| **GitHub Release** | [`v1.2.0`](https://github.com/audren-xyz/audren/releases/tag/v1.2.0) |
 | **Explorer / OtterSec Status** | [Mainnet Verified Build](https://explorer.solana.com/address/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3/verified-build) · [`verify.osec.io`](https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3) |
 
 ## Deployment, Metadata, Verified Build & Release Workflow

@@ -25,7 +25,7 @@ DEVNET_RELAYER_SECRET_B64=""
 
 # --- DEX aggregator API credentials (configure the providers you want active!) ---
 # Each adapter follows the same standard pattern: <PROVIDER>_API_KEY (and optional <PROVIDER>_API_URL).
-# Configure at least one aggregator (e.g. Jupiter, DFlow, Titan, Bedrock, or OKX) to enable Tag 7 (ExecViaEscrow) private swaps.
+# Configure at least one aggregator (e.g. Jupiter, DFlow, Titan, Bedrock, or OKX) to enable Tag 6 (ExecViaEscrow) private swaps.
 JUPITER_API_KEY=""
 # JUPITER_API_URL="https://api.jup.ag"
 # BEDROCK_API_URL=""

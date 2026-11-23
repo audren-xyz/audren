@@ -15,14 +15,14 @@ use sha2::{Digest, Sha256};
 
 pub use audren_core::{
     DOMAIN_DUMMY_NF, DOMAIN_NK, DOMAIN_NOTE, DOMAIN_NULLIFIER, DOMAIN_PK, DOMAIN_PUB_HASH_A,
-    DOMAIN_PUB_HASH_B, DOMAIN_PUB_HASH_FINAL, DOMAIN_STEALTH, NATIVE_SOL_MINT,
+    DOMAIN_PUB_HASH_B, DOMAIN_PUB_HASH_FINAL, DOMAIN_STEALTH, WSOL_MINT,
 };
 
 use crate::poseidon::{poseidon2, poseidon3, poseidon4, poseidon5, poseidon_hash_var};
 
 /// Deterministic canonical `asset_id` derived directly from a 32-byte Solana mint pubkey
-/// (`[0u8; 32]` for Native SOL, or the SPL / Token-2022 mint address):
-/// `asset_id = mask_to_fr_be(SHA-256("audren/v2/asset" || mint_32))`.
+/// (`WSOL_MINT` for SOL/WSOL, or any Classic SPL / Token-2022 mint address):
+/// `asset_id = mask_to_fr_be(SHA-256("audren/v1/asset" || mint_32))`.
 #[inline]
 pub fn derive_asset_id(mint: &[u8; 32]) -> Fr {
     let mut h = Sha256::new();

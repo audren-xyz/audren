@@ -4,19 +4,22 @@
  * Reads a JSON request from stdin describing on-chain `RootCheckpoint` + `SubtreePage` + `MemoPage`
  * raw bytes from a live LiteSVM instance, ingests them via TypeScript `CompactWalletStore`,
  * builds a real BN254 Groth16 proof inside `@audren/sdk/prover` WASM, compiles a complete
- * Audren `JoinSplit` instruction (private transfer or public withdrawal), and writes the
- * resulting instruction JSON to stdout for Rust LiteSVM to execute on-chain against `audren.so`!
+ * Audren v1 instruction (`Deposit` / `Transact`), and writes the resulting instruction JSON
+ * to stdout for Rust LiteSVM to execute on-chain against `audren.so`.
  */
 
 import { readFileSync } from 'node:fs';
 import {
   ASSET_MODE_PRIVATE,
-  ASSET_MODE_SOL,
+  ASSET_MODE_PUBLIC,
+  CLASSIC_TOKEN_PROGRAM_ID,
   CompactWalletStore,
-  NATIVE_SOL_MINT_BYTES,
-  buildDepositSolInstruction,
-  buildJoinsplitInstruction,
-  computeJoinsplitCtxHash,
+  MEMO_ENTRY_WIRE_LEN,
+  WSOL_MINT,
+  base58Decode,
+  buildDepositInstruction,
+  buildTransactInstruction,
+  computeTransactCtxHash,
   decodeRootCheckpoint,
   deriveAssetId,
   deriveKeysFromSeed,
@@ -34,19 +37,20 @@ import {
 
 const fromHex = (h) => new Uint8Array(Buffer.from(h, 'hex'));
 const toHex = (b) => Buffer.from(b).toString('hex');
+const WSOL_MINT_BYTES = base58Decode(WSOL_MINT);
 
 const req = JSON.parse(readFileSync(0, 'utf8'));
 
 if (req.action === 'deposit_sol') {
   const recip = deriveKeysFromSeed(fromHex(req.recipient_seed_hex));
-  const { tweak, blinding, memo90 } = encryptNoteMemo(
+  const { tweak, blinding, memo } = encryptNoteMemo(
     recip.viewPk,
     fromHex(req.eph_secret_hex),
     BigInt(req.amount),
-    NATIVE_SOL_MINT_BYTES,
+    WSOL_MINT_BYTES,
   );
   const stealth = deriveStealthOwner(recip.spendPk, tweak);
-  const ix = buildDepositSolInstruction({
+  const ix = buildDepositInstruction({
     programId: req.program_id,
     depositor: req.depositor,
     poolId: req.pool_id,
@@ -54,11 +58,12 @@ if (req.action === 'deposit_sol') {
     subPageSeq: BigInt(req.sub_page_seq),
     rootPageSeq: BigInt(req.root_page_seq),
     memoPageSeq: BigInt(req.memo_page_seq),
+    nativeSol: true,
     feeFromAmount: Boolean(req.fee_from_amount),
     amount: BigInt(req.amount),
     stealthOwner: stealth,
     blinding,
-    memo90,
+    memo,
   });
   process.stdout.write(
     JSON.stringify({
@@ -71,7 +76,7 @@ if (req.action === 'deposit_sol') {
       data_hex: toHex(ix.data),
     }),
   );
-} else if (req.action === 'joinsplit_transfer') {
+} else if (req.action === 'transact_transfer') {
   const sender = deriveKeysFromSeed(fromHex(req.sender_seed_hex));
   const recip = deriveKeysFromSeed(fromHex(req.recipient_seed_hex));
   const fvk = exportFullViewingKey(sender);
@@ -90,7 +95,7 @@ if (req.action === 'deposit_sol') {
 
   const ckpt = decodeRootCheckpoint(fromHex(req.checkpoint_raw_hex));
   const { superRoot, path } = store.buildWitnessForNote(note, ckpt);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
   const sendAmt = BigInt(req.send_amount);
   const changeAmt = note.amount - sendAmt;
@@ -99,21 +104,22 @@ if (req.action === 'deposit_sol') {
     recip.viewPk,
     fromHex(req.eph0_hex),
     sendAmt,
-    NATIVE_SOL_MINT_BYTES,
+    WSOL_MINT_BYTES,
   );
   const out1 = encryptNoteMemo(
     sender.viewPk,
     fromHex(req.eph1_hex),
     changeAmt,
-    NATIVE_SOL_MINT_BYTES,
+    WSOL_MINT_BYTES,
   );
-  const memosBytes = new Uint8Array(180);
-  memosBytes.set(out0.memo90, 0);
-  memosBytes.set(out1.memo90, 90);
+  const memosBytes = new Uint8Array(2 * MEMO_ENTRY_WIRE_LEN);
+  memosBytes.set(out0.memo, 0);
+  memosBytes.set(out1.memo, MEMO_ENTRY_WIRE_LEN);
 
-  const ctxHash = computeJoinsplitCtxHash({
+  const ctxHash = computeTransactCtxHash({
     programId: req.program_id,
     poolId: req.pool_id,
+    vkId: 0,
     outLaneId: req.out_lane_id,
     outputMask: 0b011,
     assetMode: ASSET_MODE_PRIVATE,
@@ -128,7 +134,7 @@ if (req.action === 'deposit_sol') {
   const res = prover.proveJoinsplit(
     {
       superRoot,
-      txAssetId: solAsset,
+      txAssetId: wsolAsset,
       publicAssetId: 0n,
       publicAmountOut: 0n,
       relayerFeeAmount: 0n,
@@ -138,37 +144,38 @@ if (req.action === 'deposit_sol') {
         {
           spendSk: sender.spendSk,
           tweak: frFromBeBytesStrict(note.tweak),
-          assetId: solAsset,
+          assetId: wsolAsset,
           amount: note.amount,
           blinding: frFromBeBytesStrict(note.blinding),
           isDummy: false,
           merklePath: path,
         },
-        dummyInputWitness(sender.spendSk, solAsset, 0x7777n),
+        dummyInputWitness(sender.spendSk, wsolAsset, 0x7777n),
       ],
       outputs: [
         {
           stealthOwner: deriveStealthOwner(recip.spendPk, out0.tweak),
-          assetId: solAsset,
+          assetId: wsolAsset,
           amount: sendAmt,
           blinding: out0.blinding,
         },
         {
           stealthOwner: deriveStealthOwner(sender.spendPk, out1.tweak),
-          assetId: solAsset,
+          assetId: wsolAsset,
           amount: changeAmt,
           blinding: out1.blinding,
         },
-        dummyOutputWitness(solAsset, 0x8888n),
+        dummyOutputWitness(wsolAsset, 0x8888n),
       ],
     },
     new Uint8Array(32).fill(0xab),
   );
 
-  const ix = buildJoinsplitInstruction({
+  const ix = buildTransactInstruction({
     programId: req.program_id,
     payer: req.payer,
     poolId: req.pool_id,
+    vkId: 0,
     ckptSlotIdx: req.ckpt_slot_idx,
     outLaneId: req.out_lane_id,
     outSubSeq: BigInt(req.out_sub_seq),
@@ -202,7 +209,7 @@ if (req.action === 'deposit_sol') {
       cm1_hex: toHex(res.cm1),
     }),
   );
-} else if (req.action === 'joinsplit_withdraw_sol') {
+} else if (req.action === 'transact_withdraw_sol') {
   const sender = deriveKeysFromSeed(fromHex(req.sender_seed_hex));
   const fvk = exportFullViewingKey(sender);
   const store = new CompactWalletStore(req.pool_id, 0n);
@@ -218,20 +225,21 @@ if (req.action === 'deposit_sol') {
 
   const ckpt = decodeRootCheckpoint(fromHex(req.checkpoint_raw_hex));
   const { superRoot, path } = store.buildWitnessForNote(note, ckpt);
-  const solAsset = deriveAssetId(NATIVE_SOL_MINT_BYTES);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
   const feeAmt = BigInt(req.relayer_fee_amount);
   const pubOut = note.amount - feeAmt;
 
-  const ctxHash = computeJoinsplitCtxHash({
+  const ctxHash = computeTransactCtxHash({
     programId: req.program_id,
     poolId: req.pool_id,
+    vkId: 0,
     outLaneId: req.out_lane_id,
     outputMask: 0,
-    assetMode: ASSET_MODE_SOL,
-    unwrapWsol: false,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: true,
     recipient: req.recipient,
     relayerFeeRecipient: req.relayer_fee_recipient,
-    publicAssetId: frToBeBytes(solAsset),
+    publicAssetId: frToBeBytes(wsolAsset),
     publicAmountOut: pubOut,
     relayerFeeAmount: feeAmt,
     memosBytes: new Uint8Array(0),
@@ -241,8 +249,8 @@ if (req.action === 'deposit_sol') {
   const res = prover.proveJoinsplit(
     {
       superRoot,
-      txAssetId: solAsset,
-      publicAssetId: solAsset,
+      txAssetId: wsolAsset,
+      publicAssetId: wsolAsset,
       publicAmountOut: pubOut,
       relayerFeeAmount: feeAmt,
       ctxHash,
@@ -251,27 +259,28 @@ if (req.action === 'deposit_sol') {
         {
           spendSk: sender.spendSk,
           tweak: frFromBeBytesStrict(note.tweak),
-          assetId: solAsset,
+          assetId: wsolAsset,
           amount: note.amount,
           blinding: frFromBeBytesStrict(note.blinding),
           isDummy: false,
           merklePath: path,
         },
-        dummyInputWitness(sender.spendSk, solAsset, 0x9999n),
+        dummyInputWitness(sender.spendSk, wsolAsset, 0x9999n),
       ],
       outputs: [
-        dummyOutputWitness(solAsset, 0xa1n),
-        dummyOutputWitness(solAsset, 0xa2n),
-        dummyOutputWitness(solAsset, 0xa3n),
+        dummyOutputWitness(wsolAsset, 0xa1n),
+        dummyOutputWitness(wsolAsset, 0xa2n),
+        dummyOutputWitness(wsolAsset, 0xa3n),
       ],
     },
     new Uint8Array(32).fill(0xcd),
   );
 
-  const ix = buildJoinsplitInstruction({
+  const ix = buildTransactInstruction({
     programId: req.program_id,
     payer: req.payer,
     poolId: req.pool_id,
+    vkId: 0,
     ckptSlotIdx: req.ckpt_slot_idx,
     outLaneId: req.out_lane_id,
     outSubSeq: BigInt(req.out_sub_seq),
@@ -279,7 +288,12 @@ if (req.action === 'deposit_sol') {
     outMemoSeq: BigInt(req.out_memo_seq),
     outNfSeq: BigInt(req.out_nf_seq),
     outputMask: 0,
-    assetMode: ASSET_MODE_SOL,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: true,
+    publicOutflow: {
+      mint: WSOL_MINT,
+      tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    },
     proof192: res.proof192,
     nf0: res.nf0,
     nf1: res.nf1,

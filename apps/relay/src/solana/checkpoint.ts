@@ -101,7 +101,7 @@ export type CheckpointEvaluation =
     }
 
 /**
- * Pure state-machine evaluation matching on-chain `ix_publish_checkpoint` (`Tag 5`) semantics:
+ * Pure state-machine evaluation matching on-chain `ix_publish_checkpoint` (`Tag 4`) semantics:
  *   - `up_to_date`: no uncheckpointed leaves exist across active lanes (and latest checkpoint is not expired).
  *   - `cooldown`: uncheckpointed leaves (or an expired checkpoint on a non-empty pool) exist, but
  *     `currentSlot < nextCkptSlot` (either current epoch was already published or ring slot cooldown applies).
@@ -301,8 +301,8 @@ export async function fetchPoolCheckpointSnapshot(
 }
 
 /**
- * Permissionless on-demand `PublishCheckpoint` (`Tag 5`) coordinator used by both
- * `POST /v1/checkpoint` and the scheduled maintenance crank (`runV2MaintenanceCrank`).
+ * Permissionless on-demand `PublishCheckpoint` (`Tag 4`) coordinator used by both
+ * `POST /v1/checkpoint` and the scheduled maintenance crank (`runMaintenanceCrank`).
  */
 export async function publishCheckpointIfNeeded(params: {
   rpcUrl: string
@@ -416,10 +416,16 @@ export async function publishCheckpointIfNeeded(params: {
   try {
     let { signed, sim } = await buildAndSimulate(publishSlotIdx)
 
-    // Handle slot boundary tick or concurrent publisher race gracefully.
+    // Handle slot boundary tick or concurrent publisher race gracefully (including fast 8-slot epochs).
     if (sim.err) {
-      const freshSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'confirmed' }]))
+      let freshSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
       const ckptInterval = snapshot.pool.ckptInterval > 0n ? snapshot.pool.ckptInterval : 1n
+      const rem = freshSlot % ckptInterval
+      if (ckptInterval <= 16n && rem >= ckptInterval - 2n) {
+        const waitMs = Number(ckptInterval - rem) * SLOT_DURATION_MS + 150
+        await new Promise((r) => setTimeout(r, waitMs))
+        freshSlot = BigInt(await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'processed' }]))
+      }
       const freshEpoch = Number(freshSlot / ckptInterval)
       const freshSlotIdx = Number((freshSlot / ckptInterval) % BigInt(CHECKPOINT_RING_SLOTS))
       if (freshEpoch > publishEpoch) {

@@ -3,7 +3,7 @@
  * + Wallet Standard (`@wallet-standard/app` & `@solana/wallet-standard-features`).
  *
  * Works natively with Phantom, Solflare, Backpack, Coinbase, Jupiter Wallet, and any
- * Wallet Standard compliant Solana wallet — zero legacy `@solana/web3.js` dependencies.
+ * Wallet Standard compliant Solana wallet with zero legacy `@solana/web3.js` dependencies.
  */
 
 import {

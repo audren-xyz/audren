@@ -130,6 +130,15 @@ export default function TermsPage() {
                     </td>
                   </tr>
                   <tr>
+                    <td><span className={styles.tableLead}>Vault Authority (WSOL &amp; Token Custody)</span></td>
+                    <td><code>{AUDREN.vaultAuthPda}</code></td>
+                    <td>
+                      <a href={`${solscanAddress(AUDREN.vaultAuthPda)}#portfolio`} target="_blank" rel="noreferrer" className={styles.textLink}>
+                        Solscan <ArrowUpRight size={12} />
+                      </a>
+                    </td>
+                  </tr>
+                  <tr>
                     <td><span className={styles.tableLead}>Verified Build Hash ({AUDREN.releaseTag})</span></td>
                     <td><code>{AUDREN.executableHash}</code></td>
                     <td>

@@ -3,10 +3,10 @@
  *
  * Verifies every production relayer surface empirically against live RPC & aggregators:
  *   1. `/health`, `/v1/info?cluster=mainnet`, `/v1/info?cluster=devnet`, `/v1/aggregators`, `/v1/stats`
- *   2. `/v1/fee-quote` across JoinSplit withdraw (`unwrapWsol=true/false`) and ExecViaEscrow (`feeOnOutput=true/false`)
+ *   2. `/v1/fee-quote` across Transact withdraw (`unwrapWsol=true/false`) and ExecViaEscrow (`feeOnOutput=true/false`)
  *   3. Multi-aggregator `/v1/swap/quote` & `/v1/swap/instructions` (`jupiter`, `auto`, etc.)
  *   4. Zero-trust Firewall rejections:
- *        - Tag 3 (`DepositSol`) rejected with 400
+ *        - Tag 3 (`Deposit`) rejected with 400
  *        - Extra non-relayer signer rejected with 400
  *        - Wrong payer (not relayer) rejected with 400
  *        - Disallowed preInstruction program rejected with 400
@@ -15,14 +15,12 @@
 import {
   ASSET_MODE_PRIVATE,
   CLASSIC_TOKEN_PROGRAM_ID,
-  EXEC_KIND_SOL,
-  EXEC_KIND_SPL,
-  TAG_DEPOSIT_SOL,
+  TAG_DEPOSIT,
   WSOL_MINT,
   base58Decode,
   base58Encode,
   buildExecViaEscrowInstruction,
-  buildJoinsplitInstruction,
+  buildTransactInstruction,
   deriveAssociatedTokenAddressSync,
   deriveEscrowPdaSync,
   deriveVaultAuthPdaSync,
@@ -111,7 +109,7 @@ async function main() {
       quoteResponse: quoteObj.rawQuote,
       inputMint: WSOL_MINT_STR,
       outputMint: USDC_MAINNET_MINT_STR,
-      shardId: 0,
+      shardId: Number(q.body.shardId ?? 0),
     }),
   })
   assert(ix.status === 200 && ix.body.ok === true, `/v1/swap/instructions failed: ${JSON.stringify(ix.body)}`)
@@ -119,7 +117,7 @@ async function main() {
 
   // 4. Zero-Trust Firewall Rejections (realistic >=12-account payloads exercising each exact rule!)
   const devnetRelayer = String(infoDevnet.body.relayerPubkey)
-  const validJsIx = buildJoinsplitInstruction({
+  const validTxIx = buildTransactInstruction({
     payer: devnetRelayer,
     poolId: 0,
     ckptSlotIdx: 0,
@@ -141,27 +139,27 @@ async function main() {
     memosBytes: new Uint8Array(0),
   })
 
-  // 4a. Tag 3 (DepositSol) rejected on tag check
-  const depositTagPayload = new Uint8Array(validJsIx.data)
-  depositTagPayload[0] = TAG_DEPOSIT_SOL
+  // 4a. Tag 3 (Deposit) rejected on tag check
+  const depositTagPayload = new Uint8Array(validTxIx.data)
+  depositTagPayload[0] = TAG_DEPOSIT
   const badTag = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       cluster: 'devnet',
       instructionDataB64: toBase64(depositTagPayload),
-      accounts: validJsIx.accounts,
+      accounts: validTxIx.accounts,
     }),
   })
   assert(
     badTag.status === 400 &&
       badTag.body.code === 'FIREWALL_REJECTED' &&
-      String(badTag.body.error ?? '').includes('DepositSol'),
-    `Expected Tag 3 DepositSol FIREWALL_REJECTED (400), got ${badTag.status}: ${JSON.stringify(badTag.body)}`,
+      String(badTag.body.error ?? '').includes('Deposit'),
+    `Expected Tag 3 Deposit FIREWALL_REJECTED (400), got ${badTag.status}: ${JSON.stringify(badTag.body)}`,
   )
 
   // 4b. Extra non-relayer signer rejected on signer check
-  const extraSignerAccounts = validJsIx.accounts.map((a, idx) =>
+  const extraSignerAccounts = validTxIx.accounts.map((a, idx) =>
     idx === 1 ? { ...a, isSigner: true } : a,
   )
   const extraSigner = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
@@ -169,7 +167,7 @@ async function main() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       cluster: 'devnet',
-      instructionDataB64: toBase64(validJsIx.data),
+      instructionDataB64: toBase64(validTxIx.data),
       accounts: extraSignerAccounts,
     }),
   })
@@ -181,7 +179,7 @@ async function main() {
   )
 
   // 4c. Wrong payer (accounts[0] != devnet relayer) rejected on payer check
-  const wrongPayerAccounts = validJsIx.accounts.map((a, idx) =>
+  const wrongPayerAccounts = validTxIx.accounts.map((a, idx) =>
     idx === 0 ? { ...a, pubkey: base58Encode(new Uint8Array(32).fill(0x5a)) } : a,
   )
   const wrongPayer = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
@@ -189,7 +187,7 @@ async function main() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       cluster: 'devnet',
-      instructionDataB64: toBase64(validJsIx.data),
+      instructionDataB64: toBase64(validTxIx.data),
       accounts: wrongPayerAccounts,
     }),
   })
@@ -214,10 +212,14 @@ async function main() {
     outNfSeq: 0n,
     escrowShard: 0,
     changeMask: 0,
-    inKind: EXEC_KIND_SOL,
-    outKind: EXEC_KIND_SPL,
     feeOnOutput: false,
-    outSpl: {
+    inLeg: {
+      mint: WSOL_MINT_STR,
+      vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, WSOL_MINT_STR, CLASSIC_TOKEN_PROGRAM_ID).address,
+      escrowAta: deriveAssociatedTokenAddressSync(escrow, WSOL_MINT_STR, CLASSIC_TOKEN_PROGRAM_ID).address,
+      tokenProgram: CLASSIC_TOKEN_PROGRAM_ID,
+    },
+    outLeg: {
       mint: USDC_MAINNET_MINT_STR,
       vaultAta: deriveAssociatedTokenAddressSync(vaultAuth, USDC_MAINNET_MINT_STR, CLASSIC_TOKEN_PROGRAM_ID).address,
       escrowAta: deriveAssociatedTokenAddressSync(escrow, USDC_MAINNET_MINT_STR, CLASSIC_TOKEN_PROGRAM_ID).address,
@@ -235,7 +237,7 @@ async function main() {
     outStealthOwner: new Uint8Array(32).fill(0x03),
     outBlinding: new Uint8Array(32).fill(0x04),
     dynMemoHead: new Uint8Array(34).fill(0x05),
-    dynMask56: new Uint8Array(56).fill(0x06),
+    dynMemoMask: new Uint8Array(72).fill(0x06),
     routerProg: base58Encode(new Uint8Array(32).fill(0x77)),
     routerIxData: new Uint8Array([1, 2, 3]),
     routerAccounts: [{ pubkey: base58Encode(new Uint8Array(32).fill(0x88)), isSigner: false, isWritable: true }],

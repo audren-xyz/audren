@@ -1,18 +1,14 @@
-//! Deterministic Audren PDA derivation helpers matching `program/src/state.rs` bit-for-bit.
+//! Deterministic Audren v1 PDA derivation helpers matching `program/src/state.rs` bit-for-bit.
 
 use audren_core::{
     ASSOCIATED_TOKEN_PROGRAM_ID, CKPT_SEED, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MEMO_SEED,
-    NF_PAGE_SEED, NULLIFIER_SEED, POOL_SEED, SOL_VAULT_SEED, SUBROOT_SEED, SUBTREE_SEED,
-    UNWRAP_SEED, VAULT_AUTH_SEED,
+    NF_PAGE_SEED, NULLIFIER_SEED, POOL_SEED, SUBROOT_SEED, SUBTREE_SEED, UNWRAP_SEED,
+    VAULT_AUTH_SEED,
 };
 use solana_address::Address;
 
 pub fn derive_pool_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
     Address::find_program_address(&[POOL_SEED, &pool_id.to_le_bytes()], program_id)
-}
-
-pub fn derive_sol_vault_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
-    Address::find_program_address(&[SOL_VAULT_SEED, &pool_id.to_le_bytes()], program_id)
 }
 
 pub fn derive_vault_auth_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {

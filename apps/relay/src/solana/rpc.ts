@@ -11,7 +11,19 @@ import {
   readSplTokenAccountAmount,
   toBase64,
 } from './codec'
-import { decodePoolState, derivePoolPda } from './audren'
+import {
+  MEMO_NOTES_PER_PAGE,
+  MEMO_PAGE_LEN,
+  NF_PAGE_LEN,
+  NF_PER_PAGE,
+  SUBROOTS_PER_PAGE,
+  SUBROOT_PAGE_LEN,
+  SUBTREE_LEAVES,
+  SUBTREE_PAGE_LEN,
+  decodePoolState,
+  derivePoolPda,
+  deterministicNoteRentFee,
+} from './audren'
 import type { Cluster } from '../types'
 
 // ============================================================================
@@ -296,10 +308,6 @@ const RENT_CACHE = new Map<string, LiveRentSchedule>()
 const RENT_CACHE_TTL_MS = 300_000
 
 const NULLIFIER_ACCOUNT_LEN = 0 // On-chain claim_nullifier creates a 0-byte sentinel PDA
-const SUBTREE_PAGE_LEN = 8_256
-const SUBROOT_PAGE_LEN = 9_664
-const MEMO_PAGE_LEN = 10_144
-const NF_PAGE_LEN = 9_664
 const SPL_TOKEN_ACCOUNT_LEN = 165
 
 export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSchedule> {
@@ -323,15 +331,20 @@ export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSch
   const nullifierLamports = BigInt(nullifierRent)
   const ataLamports = BigInt(ataRent)
   const divCeil = (a: bigint, b: bigint) => (a + b - 1n) / b
+  const subRentBig = BigInt(subRent)
+  const srRentBig = BigInt(srRent)
+  const memoRentBig = BigInt(memoRent)
   const livePerNote =
-    divCeil(BigInt(subRent), 256n) +
-    divCeil(BigInt(srRent), 256n * 300n) +
-    divCeil(BigInt(memoRent), 112n)
-  const livePerNf = divCeil(BigInt(nfRent), 600n)
+    divCeil(subRentBig, BigInt(SUBTREE_LEAVES)) +
+    divCeil(srRentBig, BigInt(SUBTREE_LEAVES * SUBROOTS_PER_PAGE)) +
+    divCeil(memoRentBig, BigInt(MEMO_NOTES_PER_PAGE))
+  const livePerNf = divCeil(BigInt(nfRent), BigInt(NF_PER_PAGE))
   const decodedPool = poolAcc ? decodePoolState(poolAcc.bytes) : null
   const poolConfigured = decodedPool ? decodedPool.noteRentFee : livePerNote
   const pageRentPerNoteLamports =
-    poolConfigured > 0n && poolConfigured < livePerNote ? poolConfigured : livePerNote
+    poolConfigured > 0n
+      ? deterministicNoteRentFee(poolConfigured, subRentBig, srRentBig, memoRentBig)
+      : livePerNote
   const poolNfFee = decodedPool ? decodedPool.nfRentFee : livePerNf
   const nfPageRentPerNfLamports = poolNfFee < livePerNf ? poolNfFee : livePerNf
   const baseTxFeeLamports = 5_000n

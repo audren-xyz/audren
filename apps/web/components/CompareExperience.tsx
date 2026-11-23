@@ -55,7 +55,7 @@ const MODE_META: Record<
       },
       {
         method: 'Audren',
-        sub: 'JoinSplit Private Transfer (Tag 6)',
+        sub: 'Transact Private Transfer (Tag 5)',
         highlight: true,
         senderRecipient: { text: 'Hidden across global 4²⁰ pool · one-time stealth owner', state: 'hidden' },
         token: { text: 'Hidden inside Poseidon5 commitment', state: 'hidden' },
@@ -104,19 +104,19 @@ const MODE_META: Record<
       },
       {
         method: 'Audren',
-        sub: 'DepositSol / DepositSpl (Tags 3–4) · JoinSplit Exit (Tag 6)',
+        sub: 'Unified Deposit (Tag 3) · Transact Exit (Tag 5)',
         highlight: true,
         senderRecipient: { text: 'One-time stealth output on deposit; global pool proof on exit', state: 'partial' },
         token: { text: 'Public at entry & exit', state: 'public' },
         amount: { text: 'Public at entry & exit (change hidden)', state: 'public' },
-        assets: 'SOL, classic SPL, Token-2022 · permanent NullifierPDA rent (~0.002–0.0046 SOL/tx, SysvarRent-scaled) · full exits incl. atomic WSOL unwrap bypass SetPaused',
+        assets: 'SOL (WSOL), classic SPL, Token-2022 · permanent NullifierPDA rent (~0.002–0.0046 SOL/tx, SysvarRent-scaled) · full exits incl. atomic WSOL unwrap bypass SetPaused',
       },
     ],
   },
   swap: {
     label: 'Shielded DeFi',
     headline: 'Composing with public Solana DeFi vs. custom ZK-CPI escrow apps',
-    note: 'Two distinct architectural paths exist for shielded DeFi on Solana. Helius Privacy Rings uses programmable ZK-CPI escrows (utxo_data plus custom app Groth16 proofs) that can keep swap prices and amounts private, at the cost of building custom circuits and bootstrapping fresh liquidity per protocol under 2-proof CU and packet constraints. Audren takes the protocol-agnostic path: atomic ExecViaEscrow (Tag 7) hits live Solana DeFi liquidity today (Jupiter, Kamino, Jito, Sanctum, Raydium, Orca) in one transaction (~158k CU), keeping the external DeFi pair and amount public while concealing the funding notes and primary wallet inside the global 4²⁰ pool (plus deterministic Bᵢ session wallets for stateful borrowing or perps).',
+    note: 'Two distinct architectural paths exist for shielded DeFi on Solana. Helius Privacy Rings uses programmable ZK-CPI escrows (utxo_data plus custom app Groth16 proofs) that can keep swap prices and amounts private, at the cost of building custom circuits and bootstrapping fresh liquidity per protocol under 2-proof CU and packet constraints. Audren takes the protocol-agnostic path: atomic ExecViaEscrow (Tag 6) hits live Solana DeFi liquidity today (Jupiter, Kamino, Jito, Sanctum, Raydium, Orca) in one transaction (~158k CU), keeping the external DeFi pair and amount public while concealing the funding notes and primary wallet inside the global 4²⁰ pool (plus deterministic Bᵢ session wallets for stateful borrowing or perps).',
     col5Header: 'Liquidity & execution',
     rows: [
       {
@@ -153,7 +153,7 @@ const MODE_META: Record<
       },
       {
         method: 'Audren',
-        sub: 'Atomic ExecViaEscrow (Tag 7) + Self-Paying DeFi Sessions (Tag 6 + Tag 3)',
+        sub: 'Atomic ExecViaEscrow (Tag 6) + Self-Paying DeFi Sessions (Tag 5 + Tag 3)',
         highlight: true,
         senderRecipient: { text: 'Global 4²⁰ pool proof · sharded escrow CPI (or Bᵢ session) · fresh stealth note', state: 'partial' },
         token: { text: 'Public external DeFi mints', state: 'public' },
@@ -192,7 +192,7 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
       },
       {
         label: 'Rent, fan-in & exits',
-        text: 'Helius reclaims nullifier rent to 5,000 lamports, merges up to 49 to 52 inputs, and updates roots in 1 slot, while pause_tree halts withdrawals. Audren pays permanent NullifierPDA rent (~0.002 to 0.0046 SOL/tx, scaling via SysvarRent) with 2-in/3-out spends and ~6.4s checkpoints, while full exits stay immune to pause.',
+        text: 'Helius reclaims nullifier rent to 5,000 lamports, merges up to 49 to 52 inputs, and updates roots in 1 slot, while pause_tree halts withdrawals. Audren pays permanent NullifierPDA rent (~0.002 to 0.0046 SOL/tx, scaling via SysvarRent) with 2-in/3-out spends (and up to 4 parallel 2 → 1 private Transact merges per Solana Transaction v1) plus ~6.4s checkpoints, while full exits stay immune to pause.',
       },
     ],
     sources: [
@@ -236,7 +236,7 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
     comparisons: [
       {
         label: 'Assets & bridging',
-        text: 'Monero and Zcash run on dedicated L1s and cannot shield native Solana SOL, USDC, or Token-2022 without wrapping or bridging. Audren shields original Solana assets in place inside unified SOL and SPL custody vaults.',
+        text: 'Monero and Zcash run on dedicated L1s and cannot shield native Solana SOL, USDC, or Token-2022 without wrapping or bridging. Audren shields original Solana assets in place inside unified WSOL and SPL custody vaults (wrapping and unwrapping native SOL atomically).',
       },
       {
         label: 'DeFi liquidity',
@@ -510,7 +510,7 @@ export function CompareExperience() {
               <span className={styles.cellIndex}>Accounting</span>
               <h3>Vault assets ≠ solvency</h3>
               <p className={styles.cellLead}>
-                Inspectable SOL and SPL vault accounts show held assets. They do not independently
+                Inspectable WSOL and SPL vault accounts show held assets. They do not independently
                 reveal or verify all private liabilities.
               </p>
             </div>
@@ -545,8 +545,9 @@ export function CompareExperience() {
                 <span className={styles.cellIndex}>Assets</span>
                 <h3>Existing assets</h3>
                 <p className={styles.cellLead}>
-                  Original SOL, classic SPL, and transferable Token-2022 enter unified custody
-                  vaults without an Audren-issued wrapper token or bridge.
+                  Original SOL (wrapped atomically to WSOL), classic SPL, and transferable
+                  Token-2022 enter unified canonical <code>vault_auth</code> ATAs without an
+                  Audren-issued wrapper token or bridge.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
@@ -554,8 +555,8 @@ export function CompareExperience() {
                 <h3>One 3.93 MB local circuit</h3>
                 <p className={styles.cellLead}>
                   One frozen 17,861-R1CS circuit (3.93 MB proving key) generates 192 B BN254
-                  Groth16 proofs locally in browsers and mobile SDKs, avoiding 350 MB–1.27 GB
-                  multi-shape keys or remote GPU/TEE provers.
+                  Groth16 proofs locally in browser Web Workers and mobile SDKs, avoiding 350
+                  MB–1.27 GB multi-shape keys or remote GPU/TEE provers.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
@@ -563,19 +564,21 @@ export function CompareExperience() {
                 <h3>Ordinary Solana RPC only</h3>
                 <p className={styles.cellLead}>
                   <code>CompactWalletStore</code> runs a 2-pass sync over{' '}
-                  <code>SubtreeRootPage</code>, <code>MemoPage</code> SoA <code>dataSlice</code>,
-                  and <code>NullifierPage</code> via ordinary <code>getMultipleAccounts</code>,
-                  discarding stranger prefixes and raw pages (1.28 MB @ 10M notes) with no Photon
-                  indexer or Forester.
+                  <code>SubtreeRootPage</code>, full 10,240 B <code>MemoPage</code>s, and
+                  unconditional <code>NullifierPage</code> streaming via ordinary{' '}
+                  <code>getMultipleAccounts</code>, using deterministic wallet-keyed decoys in
+                  default <code>strict</code> mode and discarding stranger prefixes and raw pages
+                  (1.28 MB @ 10M notes) with no Photon indexer or Forester.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>DeFi and exits</span>
                 <h3>Live DeFi &amp; pause-immune exits</h3>
                 <p className={styles.cellLead}>
-                  Send uniformly padded private transfers, merge notes (2 → 1), compose with live
-                  Solana DeFi via atomic <code>ExecViaEscrow</code> (~158k CU), fund deterministic
-                  session wallets, or exit 100% (including atomic WSOL unwrap) even during{' '}
+                  Send uniformly padded private transfers, batch up to 4 parallel 2 → 1 private{' '}
+                  <code>Transact</code> merges per Solana Transaction v1, compose with live Solana
+                  DeFi via atomic <code>ExecViaEscrow</code> (~158k CU), fund deterministic session
+                  wallets, or exit 100% (including atomic WSOL unwrap) even during{' '}
                   <code>SetPaused</code>.
                 </p>
               </div>

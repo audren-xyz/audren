@@ -1,6 +1,6 @@
 //! Zero-indexer `CompactWalletStore` for ordinary Solana RPC (`getMultipleAccounts`) sync.
 //!
-//! Discards every sealed `SubtreePage` (`8,256 B`), `MemoPage` (`10,144 B`), and stranger
+//! Discards every sealed `SubtreePage` (`8,256 B`), `MemoPage` (`10,240 B`), and stranger
 //! `NullifierPage` prefix immediately after scanning, retaining ONLY:
 //! - Frozen 4-level (`12` siblings = `384 B`) intra-subtree siblings for each owned unspent note
 //! - `32 B` finalized level-4 subroots per 256-leaf page (`1.28 MB` total at 10M pool notes = `980x` smaller!)
@@ -21,10 +21,10 @@ use audren_circuits::{
 use audren_core::{
     layout::{
         read_32, read_u16, RootCheckpoint, MEMO_CT_LEN, MEMO_MAGIC, MEMO_NOTES_PER_PAGE,
-        MEMO_PAGE_LEN, MM_OFF_CIPHERTEXTS, MM_OFF_COUNT, MM_OFF_EPHEMERAL_PKS, MM_OFF_VIEW_TAGS,
-        NF_OFF_COUNT, NF_OFF_PREFIXES, NF_PAGE_LEN, NF_PAGE_MAGIC, NF_PER_PAGE, NF_PREFIX_LEN,
-        SB_OFF_COUNT, SB_OFF_LEAVES, SR_OFF_COUNT, SR_OFF_ROOTS, SUBROOTS_PER_PAGE, SUBROOT_MAGIC,
-        SUBROOT_PAGE_LEN, SUBTREE_LEAVES, SUBTREE_MAGIC, SUBTREE_PAGE_LEN,
+        MEMO_PAGE_LEN, MEMO_PAYMENT_ID_LEN, MM_OFF_CIPHERTEXTS, MM_OFF_COUNT, MM_OFF_EPHEMERAL_PKS,
+        MM_OFF_VIEW_TAGS, NF_OFF_COUNT, NF_OFF_PREFIXES, NF_PAGE_LEN, NF_PAGE_MAGIC, NF_PER_PAGE,
+        NF_PREFIX_LEN, SB_OFF_COUNT, SB_OFF_LEAVES, SR_OFF_COUNT, SR_OFF_ROOTS, SUBROOTS_PER_PAGE,
+        SUBROOT_MAGIC, SUBROOT_PAGE_LEN, SUBTREE_LEAVES, SUBTREE_MAGIC, SUBTREE_PAGE_LEN,
     },
     NUM_LANES,
 };
@@ -52,6 +52,8 @@ pub struct OwnedNote {
     pub stealth_owner: [u8; 32],
     pub commitment: [u8; 32],
     pub nullifier: [u8; 32],
+    #[serde(default)]
+    pub payment_id: [u8; MEMO_PAYMENT_ID_LEN],
     pub is_dynamic: bool,
     pub spent: bool,
     /// Frozen 4-level intra-subtree siblings (`12 x 32 B = 384 B`) populated once the note's
@@ -225,6 +227,7 @@ impl CompactWalletStore {
             stealth_owner: fr_to_be_bytes(&stealth),
             commitment: cm_be,
             nullifier: nf,
+            payment_id: dec.payment_id,
             is_dynamic: dec.is_dynamic,
             spent: false,
             frozen_intra_siblings: None,
@@ -477,9 +480,9 @@ impl CompactWalletStore {
             ];
             let epk = read_32(m_raw, MM_OFF_EPHEMERAL_PKS + m_slot * 32);
             let ct_off = MM_OFF_CIPHERTEXTS + m_slot * MEMO_CT_LEN;
-            let ct56: [u8; MEMO_CT_LEN] = m_raw[ct_off..ct_off + MEMO_CT_LEN].try_into().unwrap();
+            let ct72: [u8; MEMO_CT_LEN] = m_raw[ct_off..ct_off + MEMO_CT_LEN].try_into().unwrap();
 
-            if let Some(dec) = try_decrypt_and_verify_memo_entry(fvk, vt, &epk, &ct56, &cm_be) {
+            if let Some(dec) = try_decrypt_and_verify_memo_entry(fvk, vt, &epk, &ct72, &cm_be) {
                 if self.record_verified_memo(fvk, lane_id, leaf_idx, &dec, cm_be)? {
                     discovered += 1;
                 }
@@ -665,7 +668,7 @@ mod tests {
     use super::*;
     use crate::keys::{encrypt_note_memo, AudrenKeys};
     use audren_circuits::note::derive_stealth_owner;
-    use audren_core::NATIVE_SOL_MINT;
+    use audren_core::{layout::MEMO_ENTRY_WIRE_LEN, PROTOCOL_VERSION, WSOL_MINT};
 
     fn make_memo_page(count: u16) -> Vec<u8> {
         let mut buf = vec![0u8; MEMO_PAGE_LEN];
@@ -674,20 +677,20 @@ mod tests {
         buf
     }
 
-    fn write_memo_slot(buf: &mut [u8], slot: usize, memo_90: &[u8; 90]) {
+    fn write_memo_slot(buf: &mut [u8], slot: usize, memo_106: &[u8; MEMO_ENTRY_WIRE_LEN]) {
         buf[MM_OFF_VIEW_TAGS + slot * 2..MM_OFF_VIEW_TAGS + (slot + 1) * 2]
-            .copy_from_slice(&memo_90[0..2]);
+            .copy_from_slice(&memo_106[0..2]);
         buf[MM_OFF_EPHEMERAL_PKS + slot * 32..MM_OFF_EPHEMERAL_PKS + (slot + 1) * 32]
-            .copy_from_slice(&memo_90[2..34]);
+            .copy_from_slice(&memo_106[2..34]);
         buf[MM_OFF_CIPHERTEXTS + slot * MEMO_CT_LEN..MM_OFF_CIPHERTEXTS + (slot + 1) * MEMO_CT_LEN]
-            .copy_from_slice(&memo_90[34..90]);
+            .copy_from_slice(&memo_106[34..MEMO_ENTRY_WIRE_LEN]);
     }
 
     #[test]
     fn sealed_subtree_holds_frontier_until_lagged_memos_arrive_and_sorts_nf_pages() {
         let alice = AudrenKeys::from_seed(&[0x55u8; 32]);
         let fvk = alice.full_viewing_key();
-        let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+        let sol_asset = derive_asset_id(&WSOL_MINT);
 
         let mut sub_raw = vec![0u8; SUBTREE_PAGE_LEN];
         sub_raw[0..8].copy_from_slice(&SUBTREE_MAGIC);
@@ -700,8 +703,8 @@ mod tests {
 
         for i in 0..SUBTREE_LEAVES {
             if i == 150 {
-                let (tw, bl, memo_90) =
-                    encrypt_note_memo(&alice.view_pk, [0x66u8; 32], 5_000_000, &NATIVE_SOL_MINT);
+                let (tw, bl, memo_106) =
+                    encrypt_note_memo(&alice.view_pk, [0x66u8; 32], 5_000_000, &WSOL_MINT).unwrap();
                 let cm = compute_note_commitment(
                     derive_stealth_owner(alice.spend_pk, tw),
                     sol_asset,
@@ -710,7 +713,7 @@ mod tests {
                 );
                 sub_raw[SB_OFF_LEAVES + i * 32..SB_OFF_LEAVES + (i + 1) * 32]
                     .copy_from_slice(&fr_to_be_bytes(&cm));
-                write_memo_slot(&mut memo1, i - MEMO_NOTES_PER_PAGE, &memo_90);
+                write_memo_slot(&mut memo1, i - MEMO_NOTES_PER_PAGE, &memo_106);
             } else {
                 let leaf = Fr::from((i + 1) as u64);
                 sub_raw[SB_OFF_LEAVES + i * 32..SB_OFF_LEAVES + (i + 1) * 32]
@@ -724,7 +727,7 @@ mod tests {
             .ingest_lane_pages(&fvk, 0, &[(0, &sub_raw)], &[(0, &memo0)], &[])
             .unwrap();
         assert_eq!(d1, 0);
-        assert_eq!(store.lanes[0].next_memo_leaf, 112);
+        assert_eq!(store.lanes[0].next_memo_leaf, 96);
         assert_eq!(store.lanes[0].frontier_sub_seq, 0);
         assert_eq!(store.lanes[0].frontier_leaves.len(), SUBTREE_LEAVES);
 
@@ -733,7 +736,7 @@ mod tests {
             .ingest_lane_pages(&fvk, 0, &[], &[(1, &memo1)], &[])
             .unwrap();
         assert_eq!(d2, 1);
-        assert_eq!(store.lanes[0].next_memo_leaf, 224);
+        assert_eq!(store.lanes[0].next_memo_leaf, 192);
         assert_eq!(store.notes[0].amount, 5_000_000);
         assert!(store.notes[0].frozen_intra_siblings.is_some());
 
@@ -777,7 +780,7 @@ mod tests {
 
         let alice = AudrenKeys::from_seed(&[0x44u8; 32]);
         let fvk = alice.full_viewing_key();
-        let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+        let sol_asset = derive_asset_id(&WSOL_MINT);
 
         let mut sub_raw = vec![0u8; SUBTREE_PAGE_LEN];
         sub_raw[0..8].copy_from_slice(&SUBTREE_MAGIC);
@@ -785,14 +788,14 @@ mod tests {
             .copy_from_slice(&(SUBTREE_LEAVES as u16).to_le_bytes());
 
         let memo0 = make_memo_page(MEMO_NOTES_PER_PAGE as u16);
-        let mut memo1 = make_memo_page(MEMO_NOTES_PER_PAGE as u16);
-        let memo2 = make_memo_page((SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE) as u16);
+        let memo1 = make_memo_page(MEMO_NOTES_PER_PAGE as u16);
+        let mut memo2 = make_memo_page((SUBTREE_LEAVES - 2 * MEMO_NOTES_PER_PAGE) as u16);
 
         let mut leaves_fr = Vec::with_capacity(SUBTREE_LEAVES);
         for i in 0..SUBTREE_LEAVES {
             if i == 200 {
-                let (tw, bl, memo_90) =
-                    encrypt_note_memo(&alice.view_pk, [0x45u8; 32], 7_500_000, &NATIVE_SOL_MINT);
+                let (tw, bl, memo_106) =
+                    encrypt_note_memo(&alice.view_pk, [0x45u8; 32], 7_500_000, &WSOL_MINT).unwrap();
                 let cm = compute_note_commitment(
                     derive_stealth_owner(alice.spend_pk, tw),
                     sol_asset,
@@ -802,7 +805,7 @@ mod tests {
                 leaves_fr.push(cm);
                 sub_raw[SB_OFF_LEAVES + i * 32..SB_OFF_LEAVES + (i + 1) * 32]
                     .copy_from_slice(&fr_to_be_bytes(&cm));
-                write_memo_slot(&mut memo1, i - MEMO_NOTES_PER_PAGE, &memo_90);
+                write_memo_slot(&mut memo2, i - 2 * MEMO_NOTES_PER_PAGE, &memo_106);
             } else {
                 let leaf = Fr::from((i + 10) as u64);
                 leaves_fr.push(leaf);
@@ -846,7 +849,7 @@ mod tests {
             lane_counts[0] = count as u64;
             (
                 RootCheckpoint {
-                    version: 2,
+                    version: PROTOCOL_VERSION,
                     bump: 0,
                     slot_idx: 0,
                     pool_id: 0,
@@ -880,17 +883,22 @@ mod tests {
     fn from_json_bytes_migrates_legacy_seen_nf_prefixes_and_discards_strangers() {
         let alice = AudrenKeys::from_seed(&[0x33u8; 32]);
         let fvk = alice.full_viewing_key();
-        let sol_asset = derive_asset_id(&NATIVE_SOL_MINT);
+        let sol_asset = derive_asset_id(&WSOL_MINT);
 
-        let (tw, bl, memo_90) =
-            encrypt_note_memo(&alice.view_pk, [0x34u8; 32], 1_000_000, &NATIVE_SOL_MINT);
-        let cm = compute_note_commitment(derive_stealth_owner(alice.spend_pk, tw), sol_asset, 1_000_000, bl);
+        let (tw, bl, memo_106) =
+            encrypt_note_memo(&alice.view_pk, [0x34u8; 32], 1_000_000, &WSOL_MINT).unwrap();
+        let cm = compute_note_commitment(
+            derive_stealth_owner(alice.spend_pk, tw),
+            sol_asset,
+            1_000_000,
+            bl,
+        );
         let mut sub_raw = vec![0u8; SUBTREE_PAGE_LEN];
         sub_raw[0..8].copy_from_slice(&SUBTREE_MAGIC);
         sub_raw[SB_OFF_COUNT..SB_OFF_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
         sub_raw[SB_OFF_LEAVES..SB_OFF_LEAVES + 32].copy_from_slice(&fr_to_be_bytes(&cm));
         let mut memo0 = make_memo_page(1);
-        write_memo_slot(&mut memo0, 0, &memo_90);
+        write_memo_slot(&mut memo0, 0, &memo_106);
 
         let mut store = CompactWalletStore::new(0, 0);
         store

@@ -68,13 +68,19 @@ export interface NativeFeeQuote {
   feeShieldedAddress: string | null
   feeRecipientExists: boolean
   needsFeeAtaSetup: boolean
-  /** Exact raw fee in base units of `feeMint` (lamports for Native SOL / unwrap_wsol / shielded SOL note). */
+  /** Exact raw fee in base units of `feeMint` (lamports for WSOL / `unwrap_wsol` / shielded WSOL note). */
   relayerFee: string
   feeBps: number
   /** True when the fee is a flat per-mint rent/gas fee independent of transfer amount (`op === 'transfer'`). */
   flatFee?: boolean
   /** Number of NullifierPDA accounts priced into the quote (`1` when `omitNf1=true`, `2` when `omitNf1=false`). */
   nullifierCount?: number
+  /** Selected relayer fee-payer pubkey (rotated across configured `relayerPubkeys`). */
+  relayerPubkey?: string | null
+  /** Randomly assigned or requested `ExecViaEscrow` shard ID (`0..15`, populated for `op === 'exec_escrow'`). */
+  shardId?: number
+  /** Derived `ExecViaEscrow` escrow PDA for `shardId` (populated for `op === 'exec_escrow'`). */
+  escrowPda?: string
   estimatedRelayCostLamports: string
   estimatedRelayCostUsd: number | null
   reason: string
@@ -134,14 +140,26 @@ export interface NormalizedSwapInstructions {
   feeAccount: string | null
 }
 
-export interface RelaySubmitRequest {
-  cluster?: Cluster
+export interface RelayInstructionPayload {
   instructionDataB64: string
   accounts: SolanaAccountMetaJson[]
+}
+
+export interface RelaySubmitRequest {
+  cluster?: Cluster
+  /** Single-instruction wire payload (omit when submitting batched `instructions`). */
+  instructionDataB64?: string
+  /** Single-instruction accounts (omit when submitting batched `instructions`). */
+  accounts?: SolanaAccountMetaJson[]
+  /**
+   * Optional multi-instruction batch (1..=4 parallel `2 -> 1` private `Transact` merges
+   * submitted atomically inside one Solana Transaction v1 `0x81`).
+   */
+  instructions?: RelayInstructionPayload[]
   setupAtas?: Array<{ owner: string; mint: string; tokenProgram: string }>
   /**
    * Optional strictly-allowlisted zero-signer DeFi refresh cranks prepended BEFORE
-   * Tag 7 (`ExecViaEscrow`), e.g. Kamino `RefreshReserve` / Pyth oracle updates.
+   * Tag 6 (`ExecViaEscrow`), e.g. Kamino `RefreshReserve` / Pyth oracle updates.
    */
   preInstructions?: EncodedRouterInstruction[]
   computeUnitLimit?: number

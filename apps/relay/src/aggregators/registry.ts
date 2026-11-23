@@ -22,7 +22,7 @@ const CPI_EXCLUDED_NORMALIZED = CPI_EXCLUDED_VENUE_LIST.map((name) => ({
 
 /**
  * Returns the first PDA-CPI-hostile venue label present in `quote.routePlan`, or `null`
- * if every leg is safe to execute through Audren's `ExecViaEscrow` (`Tag 7`) PDA CPI.
+ * if every leg is safe to execute through Audren's `ExecViaEscrow` (`Tag 6`) PDA CPI.
  */
 export function findExcludedCpiVenue(quote: Pick<NormalizedQuote, 'routePlan'>): string | null {
   for (const leg of quote.routePlan ?? []) {

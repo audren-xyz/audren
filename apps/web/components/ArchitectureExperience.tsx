@@ -13,7 +13,7 @@ const INSTRUCTIONS = [
     tag: '0x00',
     name: 'InitPool',
     summary:
-      'Create PoolState (128 B, audren_v2_pool) and unified sol_vault PDA with ring-wrap deadlock guard (max_ckpt_age < 255 * ckpt_interval; ckpt_interval = 16 slots on Mainnet).',
+      'Create PoolState (128 B, audren_pool) with ring-wrap deadlock guard (max_ckpt_age < 255 * ckpt_interval; ckpt_interval = 16 slots on Mainnet) and canonical vault_auth PDA bump.',
   },
   {
     tag: '0x01',
@@ -25,43 +25,43 @@ const INSTRUCTIONS = [
     tag: '0x02',
     name: 'OpenPage',
     summary:
-      'Permissionless page opener for SubtreePage (8,256 B), SubtreeRootPage (9,664 B), MemoPage (10,144 B), or NullifierPage (9,664 B) reimbursed deterministically from LaneRentVault.',
+      'Permissionless page opener for SubtreePage (8,256 B), SubtreeRootPage (9,664 B), MemoPage (10,240 B), or NullifierPage (9,664 B) reimbursed deterministically from LaneRentVault.',
   },
   {
     tag: '0x03',
-    name: 'DepositSol',
+    name: 'Deposit',
     summary:
-      'Shield Native SOL into the unified sol_vault (~42.5k CU, 0 ZK proof). Computes Poseidon5 commitment on-chain, updates the lane 4-ary frontier, appends 90 B SoA memo, and supports DEPOSIT_FLAG_FEE_FROM_AMOUNT for zero-dust session sweeps.',
+      'Unified entry for Native SOL (atomic SyncNative wrap into canonical WSOL vault ATA with optional DEPOSIT_FLAG_FEE_FROM_AMOUNT zero-dust sweep), Classic SPL, and Token-2022 (~42k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe), validates sanitized TransferHook accounts, updates the lane 4-ary frontier, and appends a 106 B SoA memo.',
   },
   {
     tag: '0x04',
-    name: 'DepositSpl (SPL & Token-2022)',
-    summary:
-      'Shield Classic SPL or SPL Token-2022 tokens (~48k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe) and validates sanitized trailing TransferHook accounts.',
-  },
-  {
-    tag: '0x05',
     name: 'PublishCheckpoint',
     summary:
       'Permissionless 256-slot cyclic RootCheckpoint (704 B) publisher hashing all active lane roots (plus Z[18] for unactivated lanes) into one global 4-ary Depth-20 super_root (16.8k / 23.6k / 44.5k CU for 4 / 8 / 16 lanes; ~6.4s on-demand via relayer POST /v1/checkpoint matching ckpt_interval = 16 slots).',
   },
   {
-    tag: '0x06',
-    name: 'JoinSplit',
+    tag: '0x05',
+    name: 'Transact',
     summary:
-      '192 B BN254 Groth16 2-in/3-out spend (~103k–160k CU) across the global 4^20 MASP. Defaults to uniform padded private transfers (2 nullifiers, output_mask = 0b111, automatic 2-input coin selection and 2 → 1 merge) with opt-in omit_nf1 economy mode, public SOL/SPL exits, and atomic WSOL→SOL unwrap (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune when output_mask == 0).',
+      '192 B BN254 Groth16 2-in/3-out spend (~103k–160k CU) across the global 4^20 MASP. Defaults to uniform padded private transfers (2 nullifiers, output_mask = 0b111, automatic 2-input coin selection, and up to 4 parallel 2 → 1 merges per Solana Transaction v1) with opt-in omit_nf1 economy mode, public SPL/Token-2022 exits, and atomic WSOL→SOL unwrap via audren_unwrap PDA (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune when output_mask == 0).',
+  },
+  {
+    tag: '0x06',
+    name: 'ExecViaEscrow',
+    summary:
+      'Protocol-agnostic 1-tx SPL & Token-2022 shielded DeFi CPI (~158k–189k CU, leaving >1.2M CU for DeFi) through 16 sharded audren_escrow PDAs with canonical ATA enforcement, WatchedEscrowBuf firewall, ctx_hash-bound router_accounts, input or output relayer fees (EXEC_FLAG_FEE_ON_OUTPUT), and 72 B XOR-masked AUD1DYN1 dynamic output memos.',
   },
   {
     tag: '0x07',
-    name: 'ExecViaEscrow',
+    name: 'SetPaused',
     summary:
-      'Protocol-agnostic 1-tx shielded DeFi CPI (~158k–189k CU, leaving >1.2M CU for DeFi) through 16 sharded swap_escrow PDAs with WatchedEscrowBuf firewall, ctx_hash-bound router_accounts, input or output relayer fees (EXEC_FLAG_FEE_ON_OUTPUT), and XOR-masked dynamic output notes.',
+      'Emergency authority circuit breaker halting deposits, private transfers, DeFi CPIs, and partial exits while preserving permissionless full withdrawals (output_mask == 0, including atomic WSOL unwrap).',
   },
   {
     tag: '0x08',
-    name: 'SetPaused',
+    name: 'UpdatePool',
     summary:
-      'Emergency authority circuit breaker halting deposits, private transfers, DeFi CPIs, and partial exits while preserving permissionless full withdrawals (output_mask == 0, including WSOL unwrap).',
+      'Authority-signed governance instruction supporting parameter updates (checkpoint cadence and rent fees), 2-step authority transfer via pending_authority, and permanent authority renouncement.',
   },
 ] as const
 
@@ -113,40 +113,40 @@ const MEMO_PAGE_MAP = [
     inScan: true,
     bg: '#ebe7dc',
     color: '#2b2d26',
-    desc: 'AUD2MM03 magic, lane_id, bump, count (0..=112), pool_id, page_seq, created_slot, closed_slot (enables optional birthdaySlot skipping during cold wallet recovery).',
+    desc: 'AUD1MM01 magic, lane_id, bump, count (0..=96), pool_id, page_seq, created_slot, closed_slot (enables optional birthdaySlot skipping during cold wallet recovery).',
   },
   {
-    offset: '64..288',
-    bytes: '224 B',
+    offset: '64..256',
+    bytes: '192 B',
     weight: 14,
     short: 'view_tags',
-    field: 'view_tags[112] (2 B each)',
+    field: 'view_tags[96] (2 B each)',
     inScan: true,
     bg: '#184433',
     color: '#f4f1ea',
-    desc: '16-bit view tag rejects 65,535 / 65,536 non-owned notes locally before AEAD decryption.',
+    desc: '16-bit view tag rejects 65,535 / 65,536 non-owned notes locally before AEAD decryption and is bound into the 34 B AEAD AAD.',
   },
   {
-    offset: '288..3,872',
-    bytes: '3,584 B',
-    weight: 32,
+    offset: '256..3,328',
+    bytes: '3,072 B',
+    weight: 30,
     short: 'ephemeral_pks',
-    field: 'ephemeral_pks[112] (32 B each)',
+    field: 'ephemeral_pks[96] (32 B each)',
     inScan: true,
     bg: '#255a44',
     color: '#f4f1ea',
-    desc: 'X25519 ephemeral public keys for deterministic ECDH shared secret derivation; included with header and view_tags in the opt-in 3,872 B fast-mode dataSlice.',
+    desc: 'X25519 ephemeral public keys (low-order points rejected) bound with view_tag as 34 B AEAD AAD; included with header and view_tags in the opt-in 3,328 B fast-mode dataSlice.',
   },
   {
-    offset: '3,872..10,144',
-    bytes: '6,272 B',
-    weight: 46,
+    offset: '3,328..10,240',
+    bytes: '6,912 B',
+    weight: 48,
     short: 'ciphertexts',
-    field: 'ciphertexts[112] (56 B each)',
+    field: 'ciphertexts[96] (72 B each)',
     inScan: false,
     bg: '#e8efe8',
     color: '#1b2b22',
-    desc: 'ChaCha20-Poly1305 encrypted (amount_u64 || mint_32) + 16 B tag (or XOR-masked AUD2DYN2 swap note). Fetched in full in default strict mode; deferred until view-tag hit only in opt-in fast mode (> 25 pages) over self-hosted or trusted RPCs.',
+    desc: 'ChaCha20-Poly1305 AEAD ciphertext over 56 B versioned plaintext (amount_u64 || mint_32 || ver || flags || payment_id_14) + 16 B tag with 34 B AAD (or 72 B XOR-masked AUD1DYN1 swap memo). Fetched in full in default strict mode; deferred until view-tag hit only in opt-in fast mode (> 25 pages) over self-hosted or trusted RPCs.',
   },
 ] as const
 
@@ -170,7 +170,7 @@ export function ArchitectureExperience() {
             <h1>Audren cryptographic and on-chain specification</h1>
             <p className={styles.heroLead}>
               Minimal frozen BN254 Groth16 circuit ({AUDREN.circuitConstraints.toLocaleString()}{' '}
-              R1CS, 3.93 MB proving key, 4-ary Depth-20 global MASP), 9 instructions, fixed &lt;10
+              R1CS, 3.93 MB proving key, 4-ary Depth-20 global MASP), 9 instructions, fixed ≤10
               KiB zero-realloc accounts, 2-pass ordinary-RPC <code>CompactWalletStore</code>, and
               measured sBPFv3 Compute Units in{' '}
               <a
@@ -224,32 +224,32 @@ export function ArchitectureExperience() {
               <h2>Structure-of-Arrays MemoPage and CompactWalletStore</h2>
             </div>
             <p>
-              Every on-chain account fits strictly below Solana’s 10,240 B CPI allocation cap with
-              zero <code>realloc</code>. <code>CompactWalletStore</code> runs a 2-pass sync over
-              ordinary <code>getMultipleAccounts</code>: in default <code>strict</code> privacy
-              mode, Pass 1 ingests <code>SubtreeRootPage</code> (9,664 B, 300 sealed roots), fetches
-              full 10,144 B <code>MemoPage</code>s in uniform batches (with uniform newly-synced{' '}
+              Every on-chain account fits within Solana’s 10,240 B CPI allocation cap with zero{' '}
+              <code>realloc</code>. <code>CompactWalletStore</code> runs a 2-pass sync over ordinary{' '}
+              <code>getMultipleAccounts</code>: in default <code>strict</code> privacy mode, Pass 1
+              ingests <code>SubtreeRootPage</code> (9,664 B, 300 sealed roots), fetches full 10,240
+              B <code>MemoPage</code>s (96 notes/page) in uniform batches (with uniform newly-synced{' '}
               <code>SubtreePage</code> fetches on incremental syncs of 25 pages or fewer, and
-              decoy-padded shuffled historical <code>SubtreePage</code> batches on larger catch-up)
-              so the RPC never learns which page matched; Pass 2 streams every new{' '}
-              <code>NullifierPage</code> (9,664 B, 600 × 16 B prefixes) to lane head without
-              early-exit, matching only owned unspent notes and discarding stranger prefixes
-              permanently (<span style={{ fontWeight: 500, color: '#161614' }}>1.28 MB</span> local
-              store at 10M pool notes). Opt-in <code>fast</code> mode enables 3,872 B SoA{' '}
-              <code>dataSlice</code> scanning (<code>[0..3,872]</code>) on large historical catch-up
-              (&gt;25 pages) for self-hosted or trusted RPCs, trading RPC hit-visibility for lower
-              bandwidth.
+              deterministic wallet-keyed decoy-padded <code>SubtreePage</code> batches on larger
+              catch-up and witness reconstruction) so the RPC never learns which page matched; Pass
+              2 always streams <code>NullifierPage</code>s (9,664 B, 600 × 16 B prefixes)
+              unconditionally to lane head without early-exit, matching only owned unspent notes and
+              discarding stranger prefixes permanently (
+              <span style={{ fontWeight: 500, color: '#161614' }}>1.28 MB</span> local store at 10M
+              pool notes). Opt-in <code>fast</code> mode enables 3,328 B SoA <code>dataSlice</code>{' '}
+              scanning (<code>[0..3,328]</code>) on large historical catch-up (&gt;25 pages) for
+              self-hosted or trusted RPCs, trading RPC hit-visibility for lower bandwidth.
             </p>
           </div>
 
           <div className={styles.diagramStagePaper}>
             <div className={styles.stageHead}>
               <div className={styles.stageTitle}>
-                Interactive MemoPage byte layout (10,144 B; click any region to inspect)
+                Interactive MemoPage byte layout (10,240 B; click any region to inspect)
               </div>
               <span>
-                Default strict mode fetches full 10,144 B uniformly; opt-in fast mode (&gt;25 pages)
-                uses dataSlice [0..3,872] on trusted RPCs
+                Default strict mode fetches full 10,240 B uniformly; opt-in fast mode (&gt;25 pages)
+                uses dataSlice [0..3,328] on trusted RPCs
               </span>
             </div>
 
@@ -294,7 +294,7 @@ export function ArchitectureExperience() {
                 }}
               >
                 {slice.inScan
-                  ? 'Full in strict mode · in 3,872 B fast dataSlice'
+                  ? 'Full in strict mode · in 3,328 B fast dataSlice'
                   : 'Full in strict mode · on hit in opt-in fast mode'}
               </span>
             </div>
@@ -425,15 +425,15 @@ export function ArchitectureExperience() {
                     Public deposits, public withdrawals, external DeFi CPI legs (
                     <code>ExecViaEscrow</code>), and stateful positions opened by deterministic
                     session wallets (<code>Bᵢ</code> via{' '}
-                    <code>HKDF-SHA256(&quot;audren/v2/defi_session&quot;)</code>) remain public on
+                    <code>HKDF-SHA256(&quot;audren/v1/defi_session&quot;)</code>) remain public on
                     Solana.
                   </li>
                   <li>
                     Private transfers default to uniform padded shape (2 nullifiers,{' '}
-                    <code>output_mask = 0b111</code>, randomized append lane, plus automatic 2-input
-                    coin selection and 2 → 1 note merge); opt-in <code>omit_nf1 = true</code>{' '}
-                    economy mode saves 1 permanent <code>NullifierPDA</code> rent while exposing
-                    1-input arity.
+                    <code>output_mask = 0b111</code>, randomized append lane, automatic 2-input
+                    coin selection, and up to 4 parallel 2 → 1 private <code>Transact</code> merges
+                    per Solana Transaction v1); opt-in <code>omit_nf1 = true</code> economy mode
+                    saves 1 permanent <code>NullifierPDA</code> rent while exposing 1-input arity.
                   </li>
                   <li>
                     Audren pays permanent <code>NullifierPDA</code> plus amortized page rent
@@ -519,16 +519,19 @@ export function ArchitectureExperience() {
                   </li>
                   <li>
                     Supports Mode 1 shielded <code>cm2</code> transfer fees (flat per-mint quotes
-                    with zero plaintext transfer amount sent to the relayer, verified via read-only
-                    FVK), Mode 2 public withdraw fees, and Mode 3 <code>ExecViaEscrow</code>{' '}
-                    input/output fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>).
+                    defaulting to 2-nullifier spends with zero plaintext transfer amount sent to the
+                    relayer, verified via read-only FVK, plus up to 4 parallel 2 → 1 private{' '}
+                    <code>Transact</code> merges per Transaction v1), Mode 2 public withdraw fees,
+                    and Mode 3 <code>ExecViaEscrow</code> input/output fees (
+                    <code>EXEC_FLAG_FEE_ON_OUTPUT</code>) over random escrow shards.
                   </li>
                   <li>
                     Permissionless on-demand <code>POST /v1/checkpoint</code> (~6.4s cadence
                     matching <code>ckpt_interval = 16</code> slots, plus a 2-minute maintenance
-                    crank) checkpoints fresh notes without linking the user’s personal wallet;
-                    relayers hold zero spend keys and cannot alter <code>ctx_hash</code>-bound
-                    outputs or router accounts.
+                    crank) checkpoints fresh notes without linking the user’s personal wallet; rate
+                    limits use an ephemeral daily secret IP-hash salt never stored alongside
+                    nullifiers, and relayers hold zero spend keys and cannot alter{' '}
+                    <code>ctx_hash</code>-bound outputs or router accounts.
                   </li>
                 </ul>
                 <div className={styles.cellFoot}>
