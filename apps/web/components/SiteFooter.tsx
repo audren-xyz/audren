@@ -88,9 +88,9 @@ export function SiteFooter({ current }: { current?: NavSection }) {
         </div>
       </div>
 
-      <div className="container footer-bottom mono">
-        <span>AUDREN PROTOCOL · APACHE-2.0</span>
-        <span>PRE-AUDIT · UPGRADEABLE DEPLOYMENT</span>
+      <div className="container footer-bottom">
+        <span>Audren Protocol · Apache-2.0</span>
+        <span>Pre-audit · Upgradeable deployment</span>
       </div>
     </footer>
   )
