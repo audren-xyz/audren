@@ -164,48 +164,92 @@ const MODE_META: Record<
   },
 }
 
-const PEER_PROTOCOLS = [
+interface PeerComparison {
+  tag: string
+  name: string
+  lead: string
+  comparisons: ReadonlyArray<{ label: string; text: string }>
+  sources: ReadonlyArray<{ label: string; href: string }>
+}
+
+const PEER_COMPARISONS: readonly PeerComparison[] = [
   {
-    tag: 'Solana rings',
-    name: 'Helius Privacy Rings',
-    lead: 'Supports existing SOL, SPL, and Token-2022 assets with published independent program and circuit audits, 5,000-lamport Forester-compressed nullifiers, up to 49-in/52-in merge fan-in, 1-slot spendability, and programmable ZK-CPI escrows.',
-    points: [
-      'Live Default Ring encrypts both token mint and amount while leaving sender and recipient Ed25519 pubkeys visible on-chain; participant anonymity is only in separate Custom Policy Rings.',
-      'Relies on a Photon indexer, permissioned Forester (reclaiming nullifier rent down to 5,000 lamports), and remote GPU/TEE proving or 350 MB to 1.27 GB of multi-shape local proving keys; anonymous-ring sync uses delegated viewing access (no spend authority).',
-      'Programmable ZK-CPI escrows (utxo_data plus custom app Groth16 proofs) can keep DeFi swap prices and amounts private, requiring custom circuits and fresh liquidity per protocol under 2-proof CU and packet constraints.',
-      'pause_tree halts withdrawals during emergencies; Audren trades permanent NullifierPDA rent (~0.002–0.0046 SOL/tx) for 4-field default anonymity in one global pool, a single 3.93 MB local circuit, zero mandatory indexer or Forester, pause-immune exits, and instant composability with live Solana DeFi.',
+    tag: 'Shielded rings on Solana',
+    name: 'Audren vs. Helius Privacy Rings',
+    lead: 'Both shield existing SOL, SPL, and Token-2022 assets on Solana, while making opposite bets on default anonymity, prover infrastructure, nullifier rent, and DeFi.',
+    comparisons: [
+      {
+        label: 'Default visibility',
+        text: 'Helius’s live default ring encrypts mint and amount while leaving sender and recipient wallets public; participant anonymity lives in separate Custom Policy Rings. Audren hides spent notes, stealth recipient, mint, and amount by default inside one global 4²⁰ pool.',
+      },
+      {
+        label: 'Proving & state discovery',
+        text: 'Helius relies on a Photon indexer, permissioned Forester, and remote GPU/TEE proving (or 350 MB to 1.27 GB multi-shape keys), with delegated viewing access for anonymous-ring sync. Audren proves locally from one frozen 3.93 MB key and syncs directly from ordinary Solana RPC with zero indexer or Forester.',
+      },
+      {
+        label: 'DeFi composability',
+        text: 'Helius’s programmable ZK-CPI escrows can keep swap prices and amounts private, requiring custom app circuits and fresh liquidity per protocol. Audren’s atomic ExecViaEscrow (~158k CU) routes directly into live Solana DeFi liquidity today while keeping external DeFi legs public.',
+      },
+      {
+        label: 'Rent, fan-in & exits',
+        text: 'Helius reclaims nullifier rent to 5,000 lamports, merges up to 49 to 52 inputs, and updates roots in 1 slot, while pause_tree halts withdrawals. Audren pays permanent NullifierPDA rent (~0.002 to 0.0046 SOL/tx, scaling via SysvarRent) with 2-in/3-out spends and ~6.4s checkpoints, while full exits stay immune to pause.',
+      },
     ],
     sources: [
-      { label: 'Encryption modes', href: 'https://www.helius.dev/docs/privacy/concepts/encryption' },
-      { label: 'Architecture', href: 'https://www.helius.dev/docs/privacy/concepts/architecture' },
-      { label: 'Security evidence', href: 'https://www.helius.dev/docs/privacy/security' },
-      { label: 'Deployments', href: 'https://www.helius.dev/docs/privacy/addresses' },
+      { label: 'Helius encryption modes', href: 'https://www.helius.dev/docs/privacy/concepts/encryption' },
+      { label: 'Helius architecture', href: 'https://www.helius.dev/docs/privacy/concepts/architecture' },
+      { label: 'Helius security evidence', href: 'https://www.helius.dev/docs/privacy/security' },
+      { label: 'Helius deployments', href: 'https://www.helius.dev/docs/privacy/addresses' },
     ],
   },
   {
-    tag: 'Groth16 Merkle',
-    name: 'Privacy Cash',
-    lead: 'Groth16 membership proofs over asset-specific Merkle trees with published independent audits and ephemeral-wallet Jupiter routing.',
-    points: [
-      'Tree-based membership proofs do not publish a small explicit ring of candidate inputs.',
-      'Documented swap flow withdraws to an ephemeral wallet, trades on Jupiter, and reshields, concealing the primary wallet while keeping DEX trade details public.',
-      'Existing assets, local proving, and deposit-to-withdrawal unlinking are not unique to Audren.',
-      'Actual privacy still depends on public boundaries, timing, and external observations.',
+    tag: 'Per-asset Merkle pools',
+    name: 'Audren vs. Privacy Cash',
+    lead: 'Both use local BN254 Groth16 proofs over Merkle trees for existing Solana assets, while differing in pool structure, DeFi atomicity, and RPC discovery.',
+    comparisons: [
+      {
+        label: 'Anonymity pool scope',
+        text: 'Privacy Cash separates liquidity into one Merkle tree per supported asset. Audren merges SOL, classic SPL, and transferable Token-2022 into one shared 4²⁰ Multi-Asset Shielded Pool so activity across assets shares one global tree.',
+      },
+      {
+        label: 'DeFi execution',
+        text: 'Privacy Cash withdraws to an ephemeral wallet, trades on Jupiter, and reshields across multiple transactions. Audren settles compatible swaps, lending, and LST mints atomically in one transaction via sharded ExecViaEscrow (~158k CU), plus deterministic Bᵢ session wallets for stateful protocols.',
+      },
+      {
+        label: 'Sync & local state',
+        text: 'Audren syncs directly from ordinary Solana RPC getMultipleAccounts over fixed <10 KiB pages (CompactWalletStore, 1.28 MB at 10M notes) without requiring a dedicated indexer.',
+      },
+      {
+        label: 'Review & maturity',
+        text: 'Privacy Cash has published independent audits (including HashCloak). Audren is Apache-2.0 open source with an OtterSec-verified Mainnet build and live BGM17 ceremony, with independent audit pending.',
+      },
     ],
     sources: [
-      { label: 'User flows & limits', href: 'https://privacycash.mintlify.app/' },
-      { label: 'HashCloak audit case study', href: 'https://hashcloak.com/case-studies/privacy-cash-audit-case-study' },
+      { label: 'Privacy Cash flows', href: 'https://privacycash.mintlify.app/' },
+      { label: 'HashCloak audit study', href: 'https://hashcloak.com/case-studies/privacy-cash-audit-case-study' },
     ],
   },
   {
-    tag: 'Dedicated L1s',
-    name: 'Monero & Zcash',
-    lead: 'Dedicated privacy networks rather than direct integrations for existing Solana assets.',
-    points: [
-      'Monero makes ordinary payments private by default using ring signatures, stealth recipients, and confidential amounts.',
-      'Zcash shielded proofs prove pool-tree membership without publishing a small ring; modern Halo 2 proofs need no trusted setup.',
-      'Transparent legs and pool transitions remain important boundaries.',
-      'Neither a larger Audren global pool nor Solana compatibility establishes stronger privacy or assurance than these systems.',
+    tag: 'Dedicated privacy L1s',
+    name: 'Audren vs. Monero & Zcash',
+    lead: 'Monero and Zcash are battle-tested standalone privacy networks; Audren brings shielded pool proofs directly to native Solana assets and live DeFi without bridging.',
+    comparisons: [
+      {
+        label: 'Assets & bridging',
+        text: 'Monero and Zcash run on dedicated L1s and cannot shield native Solana SOL, USDC, or Token-2022 without wrapping or bridging. Audren shields original Solana assets in place inside unified SOL and SPL custody vaults.',
+      },
+      {
+        label: 'DeFi liquidity',
+        text: 'Dedicated privacy chains have limited on-chain DeFi. Audren composes atomically with live Solana DEXs, lending markets, and LSTs via ExecViaEscrow and deterministic session wallets.',
+      },
+      {
+        label: 'Proof system & setup',
+        text: 'Monero uses ring signatures with no trusted setup and Zcash Orchard uses Halo 2 with no trusted setup. Audren uses one frozen 17,861-R1CS BN254 Groth16 circuit (Perpetual Powers of Tau + BGM17 Phase 2) so proofs stay 192 B and verify via Solana’s native alt_bn128 syscalls.',
+      },
+      {
+        label: 'Production track record',
+        text: 'Monero and Zcash carry years of adversarial review and production history. Audren is a newer Solana protocol and does not claim stronger privacy assurance than dedicated privacy L1s.',
+      },
     ],
     sources: [
       { label: 'Monero specs', href: 'https://docs.getmonero.org/technical-specs/' },
@@ -215,13 +259,21 @@ const PEER_PROTOCOLS = [
   },
   {
     tag: 'Enclaves and MPC',
-    name: 'Nimbus, Umbra & Arcium',
-    lead: 'Enclave and MPC privacy infrastructure targeting broader computation models beyond payment proofs.',
-    points: [
-      'Do not conflate historical Umbra SDK documentation with Nimbus’s current architecture.',
-      'Nimbus documents attester and enclave dependencies and an emergency exit with distinct privacy and availability properties.',
-      'Arcium targets general multi-party computation (MPC) on private inputs with cluster honesty and availability assumptions.',
-      'Additional infrastructure can enable capabilities payment-only pools do not provide.',
+    name: 'Audren vs. Nimbus & Arcium',
+    lead: 'Enclave and MPC systems target general confidential compute; Audren narrows scope to client-side ZK proofs so no hardware enclave or MPC committee sits in the custody path.',
+    comparisons: [
+      {
+        label: 'Trust assumptions',
+        text: 'Nimbus relies on enclave hardware and attester assumptions (distinct from historical Umbra SDK docs), and Arcium relies on honest-majority MPC clusters. Audren verifies every spend purely in on-chain BN254 Groth16 math with spending keys remaining strictly on your device.',
+      },
+      {
+        label: 'Compute scope',
+        text: 'Enclave and MPC networks can execute arbitrary private programs beyond payment pools. Audren intentionally freezes one minimal payment and escrow-handoff circuit (ExecViaEscrow) to keep local proving at 3.93 MB and on-chain behavior deterministic.',
+      },
+      {
+        label: 'Liveness & emergency exits',
+        text: 'Enclave and MPC execution depends on attester or committee availability and separate emergency-exit mechanisms. Audren syncs over ordinary Solana RPC and keeps full 100% withdrawals (including atomic WSOL unwrap) directly executable on Solana even during SetPaused.',
+      },
     ],
     sources: [
       { label: 'Nimbus assumptions', href: 'https://docs.nimbusprivacy.xyz/security/assumptions' },
@@ -247,21 +299,22 @@ export function CompareExperience() {
           </Link>
           <div className={styles.heroGrid}>
             <div>
-              <h1>Private numbers are one part of the story.</h1>
+              <h1>How Audren compares to every other privacy model.</h1>
               <p className={styles.heroLead}>
-                Compare Solana privacy approaches by what an observer can learn, which assets work
-                without wrapping, what infrastructure is required, and what independent review
-                exists. Self-custody and open source matter; they are not exclusive to Audren.
+                Compare Audren side by side against Solana and dedicated-L1 privacy architectures
+                across on-chain visibility, native asset support, DeFi composability, proving
+                overhead, rent, and trust assumptions.
               </p>
             </div>
             <div className={styles.diagramStagePaper}>
               <div className={styles.stageHead}>
-                <div className={styles.stageTitle}>Native Confidential Balances scope</div>
+                <div className={styles.stageTitle}>Audren vs. Confidential Balances</div>
                 <span>Token-2022 extension</span>
               </div>
               <p className={styles.cellLead} style={{ marginBottom: 12 }}>
                 Solana’s native Confidential Balances encrypt transfer amounts on configured
-                Token-2022 mints while account relationships and mint identity remain visible.
+                Token-2022 mints while leaving sender, recipient, and mint public. Audren hides all
+                four fields across existing SOL, classic SPL, and Token-2022 inside one shared pool.
               </p>
               <a
                 className={styles.textLink}
@@ -376,28 +429,32 @@ export function CompareExperience() {
           </p>
         </section>
 
-        {/* PEER PROTOCOLS LEDGER */}
+        {/* HEAD-TO-HEAD COMPARISONS */}
         <section className={styles.sectionAlt}>
           <div className="container">
             <div className={styles.sectionIntro}>
               <div>
-                <h2>Other protocols also offer privacy.</h2>
+                <h2>Audren compared head to head.</h2>
               </div>
               <p>
-                The meaningful distinction is the cryptographic mechanism, operational dependencies,
-                and review evidence, not a claim that other systems cannot provide privacy.
+                Every privacy architecture makes concrete tradeoffs across anonymity, proving
+                overhead, DeFi composability, cost, and trust assumptions. Compare Audren directly
+                against each approach below.
               </p>
             </div>
 
             <div className={styles.ledger2}>
-              {PEER_PROTOCOLS.map((peer) => (
+              {PEER_COMPARISONS.map((peer) => (
                 <article key={peer.name} className={styles.ledgerCell}>
                   <span className={styles.cellIndex}>{peer.tag}</span>
                   <h3>{peer.name}</h3>
                   <p className={styles.cellLead}>{peer.lead}</p>
-                  <ul className={styles.dashList}>
-                    {peer.points.map((pt) => (
-                      <li key={pt}>{pt}</li>
+                  <ul className={styles.compareList}>
+                    {peer.comparisons.map((item) => (
+                      <li key={item.label}>
+                        <span className={styles.compareLabel}>{item.label}</span>
+                        {item.text}
+                      </li>
                     ))}
                   </ul>
                   <div className={styles.cellFoot}>
