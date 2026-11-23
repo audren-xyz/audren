@@ -39,11 +39,23 @@ export interface RelayFeeQuoteRequest {
   cluster?: RelayCluster;
   op: RelayOperation;
   mint: string;
-  amount: string;
+  amount?: string;
   unwrapWsol?: boolean;
   feeOnOutput?: boolean;
   outputCount?: number;
+  omitNf1?: boolean;
   missingAtaCount?: number;
+}
+
+export interface RelayCheckpointResponse {
+  ok: boolean;
+  cluster: RelayCluster;
+  status: 'published' | 'up_to_date' | 'cooldown';
+  signature?: string;
+  epoch?: number;
+  slotsRemaining?: number;
+  waitMs?: number;
+  [key: string]: unknown;
 }
 
 export interface RelayFeeQuoteResponse {
@@ -185,19 +197,38 @@ export class AudrenRelayClient {
   }
 
   async getFeeQuote(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
-    const qs = new URLSearchParams({
+    const query: Record<string, string> = {
       op: params.op,
       mint: params.mint,
-      amount: params.amount,
-      ...(params.cluster ? { cluster: params.cluster } : {}),
-      ...(params.unwrapWsol !== undefined ? { unwrapWsol: String(params.unwrapWsol) } : {}),
-      ...(params.feeOnOutput !== undefined ? { feeOnOutput: String(params.feeOnOutput) } : {}),
-      ...(params.outputCount !== undefined ? { outputCount: String(params.outputCount) } : {}),
-      ...(params.missingAtaCount !== undefined
-        ? { missingAtaCount: String(params.missingAtaCount) }
-        : {}),
-    });
+    };
+    // Privacy invariant: NEVER transmit private transfer amounts to the relayer.
+    if (params.op !== 'transfer' && params.amount !== undefined) {
+      query.amount = params.amount;
+    }
+    if (params.cluster) query.cluster = params.cluster;
+    if (params.unwrapWsol !== undefined) query.unwrapWsol = String(params.unwrapWsol);
+    if (params.feeOnOutput !== undefined) query.feeOnOutput = String(params.feeOnOutput);
+    if (params.outputCount !== undefined) query.outputCount = String(params.outputCount);
+    if (params.omitNf1 !== undefined) query.omitNf1 = String(params.omitNf1);
+    if (params.missingAtaCount !== undefined) {
+      query.missingAtaCount = String(params.missingAtaCount);
+    }
+    const qs = new URLSearchParams(query);
     return this.requestJson<RelayFeeQuoteResponse>(`/v1/fee-quote?${qs.toString()}`);
+  }
+
+  async requestCheckpoint(params?: {
+    cluster?: RelayCluster;
+    poolId?: number;
+  }): Promise<RelayCheckpointResponse> {
+    return this.requestJson<RelayCheckpointResponse>('/v1/checkpoint', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...(params?.cluster ? { cluster: params.cluster } : {}),
+        ...(params?.poolId !== undefined ? { poolId: params.poolId } : {}),
+      }),
+    });
   }
 
   async quoteSwap(params: RelaySwapQuoteRequest): Promise<Record<string, unknown>> {

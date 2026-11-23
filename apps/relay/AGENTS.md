@@ -4,7 +4,7 @@ Read the root [`AGENTS.md`](../../AGENTS.md) first. On-chain wire layouts and in
 
 ## Architectural boundaries
 
-- **Standalone, relayer-agnostic service:** `apps/relay` runs as an independent Cloudflare Worker decoupled from `apps/web`. Any web client, mobile wallet, or backend SDK can target a hosted instance or self-host via `wrangler.jsonc` implementing `/v1/info`, `/v1/fee-quote`, `/v1/swap/quote`, `/v1/swap/instructions`, and `/v1/relay/submit`.
+- **Standalone, relayer-agnostic service:** `apps/relay` runs as an independent Cloudflare Worker decoupled from `apps/web`. Any web client, mobile wallet, or backend SDK can target a hosted instance or self-host via `wrangler.jsonc` implementing `/v1/info`, `/v1/fee-quote`, `/v1/swap/quote`, `/v1/swap/instructions`, `/v1/checkpoint`, and `/v1/relay/submit`.
 - **Zero-trust Audren instruction firewall (`src/policy/firewall.ts`):**
   - Permit **only** Audren `Tag 6` (`JoinSplit` — private transfer or public SOL/SPL/WSOL-unwrap withdraw) and `Tag 7` (`ExecViaEscrow` — atomic DeFi CPI with optional `EXEC_FLAG_FEE_ON_OUTPUT`) targeting `AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3` on Pool #0 (`audren_v2_pool`), plus strictly allowlisted zero-signer `preInstructions` immediately preceding `Tag 7`.
   - Explicitly reject `Tag 3` (`DepositSol`) and `Tag 4` (`DepositSpl`) — deposits are public and signed directly by the depositor's wallet.

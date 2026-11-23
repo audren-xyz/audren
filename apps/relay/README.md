@@ -39,9 +39,10 @@ src/policy/pricing.ts         Dynamic SwapFeePlan & native fee-quote calculation
 src/policy/guard-do.ts        SQLite Durable Object (`RelayGuard`) atomic rate-limit & budget ledger
 src/solana/codec.ts           Base58, ATA builder, Solana Transaction v1 (`0x81`) serializer
 src/solana/audren.ts          Audren PoolState / LaneTreeState / Page decoders & rollover helpers (via `@audren/sdk`)
-src/solana/rpc.ts             Solana JSON-RPC client (`fetchMintMetas`, `fetchLiveRentSchedule`, `simulateV1Transaction`)
+src/solana/checkpoint.ts      Permissionless on-demand `PublishCheckpoint` (`Tag 5`) evaluator & publisher
+src/solana/rpc.ts             Solana JSON-RPC client (`fetchMintMetasWithData`, `fetchLiveRentSchedule`, Token-2022 fee deduction, `simulateV1Transaction`)
 src/aggregators/              Pluggable DEX adapters: `jupiter.ts`, `bedrock.ts`, `dflow.ts`, `titan.ts`, `okx.ts`, `registry.ts`
-src/cron/refill.ts            `*/15 * * * *` scheduled treasury refill & permissionless `PublishCheckpoint`/`OpenPage` crank
+src/cron/refill.ts            `*/2 * * * *` scheduled treasury refill & permissionless `PublishCheckpoint`/`OpenPage` crank
 scripts/bootstrap-relayer.ts  Idempotent keypair creation, funding & common ATA pre-opening
 scripts/e2e-relay.ts          Live empirical E2E suite (health, info, multi-aggregator quotes, firewall rejections)
 wrangler.jsonc                Self-hostable open-source Cloudflare Worker configuration
@@ -56,9 +57,10 @@ wrangler.jsonc                Self-hostable open-source Cloudflare Worker config
 | `GET` | `/v1/info?cluster=mainnet\|devnet` | Relayer pubkey(s), live SOL balance, live on-chain rent schedule, optional shielded fee address (`FullViewingKey`), active aggregators, and policy limits |
 | `GET` | `/v1/aggregators` | Configured DEX aggregators and per-adapter capabilities |
 | `GET` | `/v1/stats` | Daily aggregate relay counts and remaining sponsor budget (zero PII) |
-| `GET` | `/v1/fee-quote` | Dynamic native `relayer_fee` quote for self-paying `JoinSplit` (`Tag 6`, incl. `WITHDRAW_FLAG_UNWRAP_WSOL`) & `ExecViaEscrow` (`Tag 7`, incl. `EXEC_FLAG_FEE_ON_OUTPUT`) |
-| `GET` / `POST` | `/v1/swap/quote` | Multi-aggregator swap quote (`jupiter`, `bedrock`, `dflow`, `titan`, `okx`, or `auto` parallel race) + dynamic `SwapFeePlan` |
+| `GET` | `/v1/fee-quote` | Dynamic native `relayer_fee` quote: flat per-mint shielded `cm2` fee for `transfer` (`amount` omitted/ignored, `omitNf1` 1 vs 2 nullifiers) and self-paying quotes for `withdraw` (`WITHDRAW_FLAG_UNWRAP_WSOL`) & `ExecViaEscrow` (`EXEC_FLAG_FEE_ON_OUTPUT`) |
+| `GET` / `POST` | `/v1/swap/quote` | Multi-aggregator swap quote (`jupiter`, `bedrock`, `dflow`, `titan`, `okx`, or `auto` parallel race) with Token-2022 `TransferFeeConfig` net input deduction + dynamic `SwapFeePlan` |
 | `POST` | `/v1/swap/instructions` | Normalized `swapInstruction`, `missingAtas`, `lookupTables`, and fee-account wiring for `ExecViaEscrow` |
+| `POST` | `/v1/checkpoint` | Permissionless on-demand `PublishCheckpoint` (`Tag 5`) signed by the relayer when uncheckpointed leaves exist and cooldown has elapsed (`up_to_date` / `cooldown` / `published`) |
 | `POST` | `/v1/relay/submit` | Firewall (incl. allowlisted zero-signer `preInstructions` before Tag 7) -> `simulateV1Transaction` -> atomic `RelayGuard` reserve -> Solana Transaction v1 (`0x81`) sign, send & confirm |
 | `POST` | `/v1/admin/refill` | Manual treasury auto-refill & maintenance crank trigger (authenticated via constant-time `x-admin-token`) |
 
@@ -68,7 +70,7 @@ wrangler.jsonc                Self-hostable open-source Cloudflare Worker config
 - **Mode 1 — Shielded private transfer fee (`Tag 6`, `ASSET_MODE_PRIVATE`):** When `MAINNET_RELAYER_FVK_JSON` / `DEVNET_RELAYER_FVK_JSON` is configured, the hot Worker decrypts output memo `cm2` using its read-only `FullViewingKey` (zero spend key on the Worker) and verifies `cm2 == Poseidon5(owner, asset_id, fee_amount, blinding)` before sponsoring.
 - **Mode 2 — Public withdraw & atomic WSOL unwrap (`Tag 6`):** Reimburses the relayer via `relayer_fee` (quoted by `/v1/fee-quote`, covering 100% of live gas, rent, and any ATA creation) or atomic `WITHDRAW_FLAG_UNWRAP_WSOL` when funding a 0-SOL wallet or DeFi session keypair.
 - **Mode 3 — Self-paying DeFi swaps (`Tag 7`, `ExecViaEscrow`):** Supports both input-asset and output-asset (`EXEC_FLAG_FEE_ON_OUTPUT`) relayer fees deducted atomically from swap proceeds after CPI.
-- **Self-refill & maintenance cron (`*/15 * * * *`):** Refills native SOL from accumulated fee tokens when below `REFILL_MIN_SOL` and executes permissionless `PublishCheckpoint` (`Tag 5`) + `LaneRentVault`-subsidized `OpenPage` (`Tag 2`) lookahead cranks.
+- **Self-refill & maintenance cron (`*/2 * * * *`):** Refills native SOL from accumulated fee tokens when below `REFILL_MIN_SOL` and executes permissionless `PublishCheckpoint` (`Tag 5`) + `LaneRentVault`-subsidized `OpenPage` (`Tag 2`) lookahead cranks.
 
 ## Secrets & deployment
 

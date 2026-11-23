@@ -6,7 +6,6 @@ import {
   MEMO_NOTES_PER_PAGE,
   MEMO_PAGE_LEN,
   NATIVE_SOL_MINT_BYTES,
-  NF_PER_PAGE,
   NUM_ESCROW_SHARDS,
   OPEN_PAGE_KIND_MEMO,
   OPEN_PAGE_KIND_NULLIFIER,
@@ -19,6 +18,7 @@ import {
   TAG_EXEC_VIA_ESCROW,
   TAG_JOINSPLIT,
   TOKEN_2022_PROGRAM_ID,
+  WSOL_MINT,
   audrenInstructionToSolana,
   base58Decode,
   base58Encode,
@@ -27,6 +27,8 @@ import {
   buildPublishCheckpointInstruction,
   compileV1Message,
   computeNoteCommitment,
+  computePageRollovers,
+  computeToken2022NetAmount,
   decodeLaneHeader,
   decodePoolState,
   decodeRootCheckpoint,
@@ -48,6 +50,7 @@ import {
   frToBeBytes,
   fromBase64,
   parseAudrenAddress,
+  parseToken2022TransferFeeConfig,
   serializeV1Transaction,
   toBase64,
   toHex,
@@ -471,20 +474,40 @@ async function handleRpcAccounts(request: Request, env: Env): Promise<Response> 
     cluster?: string
     addresses?: unknown
     commitment?: 'confirmed' | 'finalized'
+    dataSlice?: { offset?: unknown; length?: unknown } | null
   } | null
   if (!body || !Array.isArray(body.addresses) || body.addresses.length === 0 || body.addresses.length > 200) {
     return jsonResponse({ error: 'addresses must be a non-empty array of <= 200 Solana pubkeys' }, 400)
   }
   const cluster = parseCluster(body.cluster)
   const commitment = body.commitment === 'finalized' ? 'finalized' : 'confirmed'
+  let dataSlice: { offset: number; length: number } | undefined
+  if (body.dataSlice && typeof body.dataSlice === 'object') {
+    const offset = Number(body.dataSlice.offset)
+    const length = Number(body.dataSlice.length)
+    if (
+      Number.isInteger(offset) &&
+      Number.isInteger(length) &&
+      offset >= 0 &&
+      length > 0 &&
+      length <= 16_384
+    ) {
+      dataSlice = { offset, length }
+    }
+  }
   const addresses = body.addresses.map((a) => String(a))
   const out: Array<string | null> = []
   const owners: Array<string | null> = []
+  const rpcCfg: { encoding: 'base64'; commitment: 'confirmed' | 'finalized'; dataSlice?: { offset: number; length: number } } = {
+    encoding: 'base64',
+    commitment,
+    ...(dataSlice ? { dataSlice } : {}),
+  }
   for (let off = 0; off < addresses.length; off += 100) {
     const chunk = addresses.slice(off, off + 100)
     const res = await solanaRpc<{
       value: Array<{ data: [string, string]; owner?: string } | null>
-    }>(env, cluster, 'getMultipleAccounts', [chunk, { encoding: 'base64', commitment }])
+    }>(env, cluster, 'getMultipleAccounts', [chunk, rpcCfg])
     for (let i = 0; i < chunk.length; i++) {
       out.push(res.value[i]?.data?.[0] ?? null)
       owners.push(res.value[i]?.owner ?? null)
@@ -709,9 +732,11 @@ async function handleTokensResolve(request: Request, env: Env): Promise<Response
 
 async function handleJupiterQuote(request: Request, env: Env): Promise<Response> {
   const body = (await request.json().catch(() => null)) as {
+    cluster?: string
     inputMint?: string
     outputMint?: string
     amount?: string
+    amountIsNet?: boolean
     slippageBps?: number
     maxAccounts?: number
     onlyDirectRoutes?: boolean
@@ -719,11 +744,50 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
   if (!body?.inputMint || !body.outputMint || !body.amount) {
     return jsonResponse({ error: 'inputMint, outputMint, and amount are required' }, 400)
   }
+  if (!/^\d+$/.test(body.amount) || BigInt(body.amount) <= 0n) {
+    return jsonResponse({ error: 'amount must be a positive integer string' }, 400)
+  }
+
+  let quoteAmount = body.amount
+  let inputTransferFeeBps = 0
+  if (!body.amountIsNet && body.inputMint !== WSOL_MINT) {
+    try {
+      const cluster = parseCluster(body.cluster)
+      const [accRes, epochInfo] = await Promise.all([
+        solanaRpc<{ value: Array<{ data: [string, string]; owner: string } | null> }>(
+          env,
+          cluster,
+          'getMultipleAccounts',
+          [[body.inputMint], { encoding: 'base64', commitment: 'confirmed' }],
+        ),
+        solanaRpc<{ epoch: number }>(env, cluster, 'getEpochInfo', [{ commitment: 'confirmed' }]),
+      ])
+      const mintAcc = accRes.value[0]
+      if (mintAcc?.owner === TOKEN_2022_PROGRAM_ID && mintAcc.data?.[0]) {
+        const fee = parseToken2022TransferFeeConfig(fromBase64(mintAcc.data[0]), epochInfo.epoch)
+        if (fee) {
+          const gross = BigInt(body.amount)
+          const net = computeToken2022NetAmount(gross, fee)
+          if (net <= 0n) {
+            return jsonResponse(
+              { error: 'Net swap input after Token-2022 TransferFeeConfig must be > 0' },
+              400,
+            )
+          }
+          quoteAmount = net.toString()
+          inputTransferFeeBps = Number(fee.bps)
+        }
+      }
+    } catch {
+      // Proceed with requested amount if RPC secret is unconfigured in local preview
+    }
+  }
+
   const base = (env.JUPITER_API_URL?.trim() || 'https://api.jup.ag').replace(/\/+$/, '').replace(/\/swap\/v1$/, '')
   const qs = new URLSearchParams({
     inputMint: body.inputMint,
     outputMint: body.outputMint,
-    amount: body.amount,
+    amount: quoteAmount,
     slippageBps: String(body.slippageBps ?? 100),
     maxAccounts: String(Math.min(28, body.maxAccounts ?? 28)),
     excludeDexes: JUPITER_CPI_EXCLUDED_DEXES.join(','),
@@ -735,7 +799,10 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
   }
   const res = await fetch(`${base}/swap/v1/quote?${qs.toString()}`, { headers })
   const data = await res.json().catch(() => ({ error: `Jupiter HTTP ${res.status}` }))
-  return jsonResponse(data, res.status)
+  return jsonResponse(data, res.status, {
+    'x-audren-net-input-amount': quoteAmount,
+    'x-audren-input-transfer-fee-bps': String(inputTransferFeeBps),
+  })
 }
 
 async function handleJupiterSwapInstructions(request: Request, env: Env): Promise<Response> {
@@ -964,7 +1031,7 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
     checkpointSignature = ckTx.signature
     checkpointSlotIndex = slotIdx
   } catch {
-    // Checkpoint already published in this epoch or slot advanced — deposit succeeded cleanly.
+    // Checkpoint already published in this epoch or slot advanced; deposit succeeded cleanly.
   }
 
   return jsonResponse({
@@ -1085,10 +1152,25 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
     decodedAccounts.push({ pubkey: pk, isSigner: Boolean(a.isSigner), isWritable: Boolean(a.isWritable) })
   }
 
-  // Ensure output/nullifier pages exist on Devnet Pool #0 outLaneId before Tag 6 JoinSplit
+  // Ensure primary and atomic rollover output/nullifier pages exist on Devnet Pool #0 outLaneId
   const preIxs: V1Instruction[] = []
-  if (tag === TAG_JOINSPLIT) {
+  if (tag === TAG_JOINSPLIT || tag === TAG_EXEC_VIA_ESCROW) {
     const outLaneId = ixData[6]!
+    const maskByte = tag === TAG_JOINSPLIT ? ixData[7]! : ixData[8]!
+    const maskPopcount =
+      ((maskByte & 1) !== 0 ? 1 : 0) +
+      ((maskByte & 2) !== 0 ? 1 : 0) +
+      ((maskByte & 4) !== 0 ? 1 : 0)
+    const outputCount = tag === TAG_JOINSPLIT ? maskPopcount : 1 + maskPopcount
+    const nf1Off = tag === TAG_JOINSPLIT ? 234 : 236
+    let hasNf1 = false
+    for (let i = 0; i < 32; i++) {
+      if (ixData[nf1Off + i] !== 0) {
+        hasNf1 = true
+        break
+      }
+    }
+    const spentNullifiers = hasNf1 ? 2 : 1
     const lanePda = deriveLanePdaSync(0, outLaneId, AUDREN_PROGRAM_ID).address
     const laneRes = await solanaRpc<{ value: Array<{ data: [string, string] } | null> }>(
       env,
@@ -1099,41 +1181,87 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
     const laneRaw = laneRes.value[0]?.data?.[0]
     if (laneRaw) {
       const hdr = decodeLaneHeader(fromBase64(laneRaw))
-      const subSeq = hdr.nextLeaf / BigInt(SUBTREE_LEAVES)
-      const rootSeq = subSeq / BigInt(SUBROOTS_PER_PAGE)
-      const memoSeq = hdr.nextLeaf / BigInt(MEMO_NOTES_PER_PAGE)
-      const nfSeq = hdr.nfCount / BigInt(NF_PER_PAGE)
-      const pageAddrs = [
-        deriveSubtreePdaSync(0, outLaneId, subSeq, AUDREN_PROGRAM_ID).address,
-        deriveSubrootPdaSync(0, outLaneId, rootSeq, AUDREN_PROGRAM_ID).address,
-        deriveMemoPdaSync(0, outLaneId, memoSeq, AUDREN_PROGRAM_ID).address,
-        deriveNfPagePdaSync(0, outLaneId, nfSeq, AUDREN_PROGRAM_ID).address,
+      const roll = computePageRollovers({
+        leafCount: hdr.nextLeaf,
+        outputCount,
+        nfCount: hdr.nfCount,
+        spentNullifiers,
+      })
+      const neededPages: Array<{ kind: number; seq: bigint; pda: string }> = [
+        {
+          kind: OPEN_PAGE_KIND_SUBTREE,
+          seq: BigInt(roll.outSubSeq),
+          pda: deriveSubtreePdaSync(0, outLaneId, BigInt(roll.outSubSeq), AUDREN_PROGRAM_ID).address,
+        },
+        {
+          kind: OPEN_PAGE_KIND_SUBROOT,
+          seq: BigInt(roll.outRootSeq),
+          pda: deriveSubrootPdaSync(0, outLaneId, BigInt(roll.outRootSeq), AUDREN_PROGRAM_ID).address,
+        },
+        {
+          kind: OPEN_PAGE_KIND_MEMO,
+          seq: BigInt(roll.outMemoSeq),
+          pda: deriveMemoPdaSync(0, outLaneId, BigInt(roll.outMemoSeq), AUDREN_PROGRAM_ID).address,
+        },
+        {
+          kind: OPEN_PAGE_KIND_NULLIFIER,
+          seq: BigInt(roll.nfPageSeq),
+          pda: deriveNfPagePdaSync(0, outLaneId, BigInt(roll.nfPageSeq), AUDREN_PROGRAM_ID).address,
+        },
       ]
+      if (roll.nextSubSeq !== undefined) {
+        const s = BigInt(roll.nextSubSeq)
+        neededPages.push({
+          kind: OPEN_PAGE_KIND_SUBTREE,
+          seq: s,
+          pda: deriveSubtreePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+        })
+      }
+      if (roll.nextRootSeq !== undefined) {
+        const s = BigInt(roll.nextRootSeq)
+        neededPages.push({
+          kind: OPEN_PAGE_KIND_SUBROOT,
+          seq: s,
+          pda: deriveSubrootPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+        })
+      }
+      if (roll.nextMemoSeq !== undefined) {
+        const s = BigInt(roll.nextMemoSeq)
+        neededPages.push({
+          kind: OPEN_PAGE_KIND_MEMO,
+          seq: s,
+          pda: deriveMemoPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+        })
+      }
+      if (roll.nextNfSeq !== undefined) {
+        const s = BigInt(roll.nextNfSeq)
+        neededPages.push({
+          kind: OPEN_PAGE_KIND_NULLIFIER,
+          seq: s,
+          pda: deriveNfPagePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address,
+        })
+      }
       const pageCheck = await solanaRpc<{ value: Array<unknown | null> }>(
         env,
         'devnet',
         'getMultipleAccounts',
-        [pageAddrs, { encoding: 'base64', commitment: 'confirmed' }],
+        [neededPages.map((p) => p.pda), { encoding: 'base64', commitment: 'confirmed' }],
       )
-      if (!pageCheck.value[0]) {
-        preIxs.push(
-          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_SUBTREE, pageSeq: subSeq, payer: demo.pubkeyStr })),
-        )
-      }
-      if (!pageCheck.value[1]) {
-        preIxs.push(
-          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_SUBROOT, pageSeq: rootSeq, payer: demo.pubkeyStr })),
-        )
-      }
-      if (!pageCheck.value[2]) {
-        preIxs.push(
-          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_MEMO, pageSeq: memoSeq, payer: demo.pubkeyStr })),
-        )
-      }
-      if (!pageCheck.value[3]) {
-        preIxs.push(
-          toV1Ix(buildOpenPageInstruction({ poolId: 0, laneId: outLaneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: nfSeq, payer: demo.pubkeyStr })),
-        )
+      for (let i = 0; i < neededPages.length; i++) {
+        if (!pageCheck.value[i]) {
+          const p = neededPages[i]!
+          preIxs.push(
+            toV1Ix(
+              buildOpenPageInstruction({
+                poolId: 0,
+                laneId: outLaneId,
+                pageKind: p.kind,
+                pageSeq: p.seq,
+                payer: demo.pubkeyStr,
+              }),
+            ),
+          )
+        }
       }
     }
   }

@@ -10,6 +10,8 @@ import {
   DYN_MEMO_MAGIC,
   MEMO_CT_LEN,
   MEMO_ENTRY_WIRE_LEN,
+  NUM_ESCROW_SHARDS,
+  NUM_LANES,
 } from './constants.ts';
 import {
   bytes32ToFrMasked,
@@ -357,6 +359,65 @@ export function tryDecryptAndVerifyMemoEntry(
     if (expectedCm[i] !== onchainCmBe[i]) return null;
   }
   return candidate;
+}
+
+/**
+ * Fast X25519 + 2-byte view-tag prefilter for SoA `MemoPage` `dataSlice` scanning
+ * (`1 / 65,536` false-positive rate; zero ciphertext bytes required).
+ */
+export function checkMemoViewTag(
+  viewSk: Uint8Array,
+  viewTag: Uint8Array,
+  epk: Uint8Array,
+): boolean {
+  if (viewSk.byteLength !== 32 || viewTag.byteLength !== 2 || epk.byteLength !== 32) {
+    return false;
+  }
+  let shared: Uint8Array;
+  try {
+    shared = x25519.getSharedSecret(viewSk, epk);
+  } catch {
+    return false;
+  }
+  const expVt = sha256Labeled('audren/v2/vt', shared);
+  return expVt[0] === viewTag[0] && expVt[1] === viewTag[1];
+}
+
+function randomUniformInt(bound: number): number {
+  if (!Number.isInteger(bound) || bound <= 0) {
+    throw new RangeError(`bound must be a positive integer, got ${bound}`);
+  }
+  if (bound === 1) return 0;
+  // Unbiased rejection sampling over uint32 using CSPRNG (`crypto.getRandomValues`).
+  const maxUnbiased = Math.floor(0x1_0000_0000 / bound) * bound;
+  const buf = new Uint32Array(1);
+  for (;;) {
+    globalThis.crypto.getRandomValues(buf);
+    const v = buf[0]!;
+    if (v < maxUnbiased) return v % bound;
+  }
+}
+
+/**
+ * Sample an unbiased uniform output lane ID in `0..activeLanes`, strictly independent of input notes.
+ */
+export function pickRandomLaneId(activeLanes: number): number {
+  if (!Number.isInteger(activeLanes) || activeLanes < 1 || activeLanes > NUM_LANES) {
+    throw new RangeError(`activeLanes must be an integer in 1..=${NUM_LANES}, got ${activeLanes}`);
+  }
+  return randomUniformInt(activeLanes);
+}
+
+/**
+ * Sample an unbiased uniform `ExecViaEscrow` shard ID in `0..numShards`, strictly independent of input notes.
+ */
+export function pickRandomEscrowShard(numShards: number = NUM_ESCROW_SHARDS): number {
+  if (!Number.isInteger(numShards) || numShards < 1 || numShards > NUM_ESCROW_SHARDS) {
+    throw new RangeError(
+      `numShards must be an integer in 1..=${NUM_ESCROW_SHARDS}, got ${numShards}`,
+    );
+  }
+  return randomUniformInt(numShards);
 }
 
 /** Convenience wrapper accepting a single 90-byte wire memo slice. */

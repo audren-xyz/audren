@@ -249,12 +249,14 @@ export function computeSwapFeePlan(params: {
 }
 
 /**
- * Compute an exact native protocol fee quote (`GET /v1/fee-quote`) for either:
+ * Compute an exact native protocol fee quote (`GET /v1/fee-quote`) for:
+ *   - `transfer` (`ASSET_MODE_PRIVATE`): flat per-mint shielded `cm2` fee independent of `amount`
  *   - `withdraw` (Native SOL, atomic `unwrap_wsol`, or SPL/Token-2022)
  *   - `exec_escrow` (any DEX swap, Kamino supply, yield vault, LST mint, RWA vault, etc.)
  *
  * Uses live on-chain rent from RPC + live token prices; falls back to `sponsored` cleanly
- * when an action is too small to self-pay without exceeding `maxSelfPayBps`.
+ * when an action is too small to self-pay without exceeding `maxSelfPayBps` or when a mint
+ * has no live USD price.
  */
 export function computeNativeFeeQuote(params: {
   cluster: Cluster
@@ -266,8 +268,11 @@ export function computeNativeFeeQuote(params: {
   feeMint: string
   feeTokenProgram: string | null
   feeDecimals: number
-  amount: bigint
+  /** Used for `withdraw` / `exec_escrow` self-pay sizing; optional and ignored for `transfer`. */
+  amount?: bigint
   outputCount?: number
+  /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers) on `transfer`, `true` (1 nullifier) otherwise. */
+  omitNf1?: boolean
   missingAtaCount?: number
   hasUnsafeSelfPayExt?: boolean
   feeRecipient: string | null
@@ -286,8 +291,8 @@ export function computeNativeFeeQuote(params: {
     feeMint,
     feeTokenProgram,
     feeDecimals,
-    amount,
     outputCount = op === 'transfer' ? 3 : op === 'exec_escrow' ? 2 : 0,
+    omitNf1 = op !== 'transfer',
     missingAtaCount = 0,
     hasUnsafeSelfPayExt = false,
     feeRecipient,
@@ -297,19 +302,132 @@ export function computeNativeFeeQuote(params: {
     feeTokenPriceUsd,
   } = params
 
+  const nullifierCount = omitNf1 ? 1n : 2n
   const clampedOutputs = BigInt(Math.max(0, Math.min(3, Math.trunc(outputCount))))
+  const nullifierRent = nullifierCount * rentSchedule.nullifierRentLamports
   const noteRent = clampedOutputs * rentSchedule.pageRentPerNoteLamports
-  const extraAtas = BigInt(Math.max(0, Math.min(6, Math.trunc(missingAtaCount)))) * rentSchedule.ataRentLamports
-  const txBaseLamports =
-    rentSchedule.nullifierRentLamports + noteRent + extraAtas + 20_000n
+  const extraAtas =
+    BigInt(Math.max(0, Math.min(6, Math.trunc(missingAtaCount)))) * rentSchedule.ataRentLamports
+  const txBaseLamports = nullifierRent + noteRent + extraAtas + 20_000n
   const withAtaLamports = txBaseLamports + rentSchedule.ataRentLamports
   const marginMult = cfg.selfPayMarginBps / 10_000
 
   const costUsd = (lamports: bigint) =>
     solPriceUsd && solPriceUsd > 0 ? (Number(lamports) / 1e9) * solPriceUsd : null
 
-  const activeTarget = op === 'transfer' ? feeShieldedAddress : feeRecipient
-  if (!activeTarget || amount <= 0n || hasUnsafeSelfPayExt) {
+  // Private transfers quote a strictly flat per-mint shielded cm2 fee; plaintext `amount` is never required or consulted.
+  if (op === 'transfer') {
+    if (!feeShieldedAddress || hasUnsafeSelfPayExt) {
+      return {
+        ok: true,
+        cluster,
+        op,
+        billingMode: 'sponsored',
+        feeSide: 'shielded_cm2',
+        feeMint,
+        feeTokenProgram: isNativeSolFee ? null : feeTokenProgram,
+        feeRecipient: null,
+        feeShieldedAddress,
+        feeRecipientExists: false,
+        needsFeeAtaSetup: false,
+        relayerFee: '0',
+        feeBps: 0,
+        flatFee: true,
+        nullifierCount: Number(nullifierCount),
+        estimatedRelayCostLamports: txBaseLamports.toString(),
+        estimatedRelayCostUsd: costUsd(txBaseLamports),
+        reason: hasUnsafeSelfPayExt
+          ? 'Token-2022 mint carries extensions excluded from self-pay fee credit; sponsored under rate limits.'
+          : 'Relayer shielded FVK target unavailable; sponsored under rate limits.',
+      }
+    }
+
+    const flatLamports = BigInt(Math.ceil(Number(txBaseLamports) * marginMult))
+
+    if (isNativeSolFee) {
+      return {
+        ok: true,
+        cluster,
+        op,
+        billingMode: 'self_paying',
+        feeSide: 'shielded_cm2',
+        feeMint,
+        feeTokenProgram: null,
+        feeRecipient: null,
+        feeShieldedAddress,
+        feeRecipientExists: true,
+        needsFeeAtaSetup: false,
+        relayerFee: flatLamports.toString(),
+        feeBps: 0,
+        flatFee: true,
+        nullifierCount: Number(nullifierCount),
+        estimatedRelayCostLamports: txBaseLamports.toString(),
+        estimatedRelayCostUsd: costUsd(txBaseLamports),
+        reason:
+          'Flat shielded cm2 SOL relay fee covering exact nullifier & page rent + gas (verified via read-only relayer FVK; transfer amount not required).',
+      }
+    }
+
+    let flatTokenUnits: bigint | null = null
+    if (feeMint === WSOL_MINT_STR) {
+      flatTokenUnits = flatLamports
+    } else if (solPriceUsd && solPriceUsd > 0 && feeTokenPriceUsd && feeTokenPriceUsd > 0) {
+      const neededSol = (Number(txBaseLamports) / 1e9) * marginMult
+      const neededUi = (neededSol * solPriceUsd) / feeTokenPriceUsd
+      if (Number.isFinite(neededUi) && neededUi > 0) {
+        flatTokenUnits = BigInt(Math.max(1, Math.ceil(neededUi * Math.pow(10, feeDecimals))))
+      }
+    }
+
+    if (flatTokenUnits !== null) {
+      return {
+        ok: true,
+        cluster,
+        op,
+        billingMode: 'self_paying',
+        feeSide: 'shielded_cm2',
+        feeMint,
+        feeTokenProgram,
+        feeRecipient: null,
+        feeShieldedAddress,
+        feeRecipientExists: true,
+        needsFeeAtaSetup: false,
+        relayerFee: flatTokenUnits.toString(),
+        feeBps: 0,
+        flatFee: true,
+        nullifierCount: Number(nullifierCount),
+        estimatedRelayCostLamports: txBaseLamports.toString(),
+        estimatedRelayCostUsd: costUsd(txBaseLamports),
+        reason:
+          'Flat shielded cm2 SPL relay fee covering exact nullifier & page rent + gas (verified via read-only relayer FVK; transfer amount not required).',
+      }
+    }
+
+    return {
+      ok: true,
+      cluster,
+      op,
+      billingMode: 'sponsored',
+      feeSide: 'shielded_cm2',
+      feeMint,
+      feeTokenProgram,
+      feeRecipient: null,
+      feeShieldedAddress,
+      feeRecipientExists: true,
+      needsFeeAtaSetup: false,
+      relayerFee: '0',
+      feeBps: 0,
+      flatFee: true,
+      nullifierCount: Number(nullifierCount),
+      estimatedRelayCostLamports: txBaseLamports.toString(),
+      estimatedRelayCostUsd: costUsd(txBaseLamports),
+      reason: 'Unpriced token transfer sponsored under relay rate limits.',
+    }
+  }
+
+  const amount = params.amount ?? 0n
+
+  if (!feeRecipient || amount <= 0n || hasUnsafeSelfPayExt) {
     return {
       ok: true,
       cluster,
@@ -324,6 +442,8 @@ export function computeNativeFeeQuote(params: {
       needsFeeAtaSetup: false,
       relayerFee: '0',
       feeBps: 0,
+      flatFee: false,
+      nullifierCount: Number(nullifierCount),
       estimatedRelayCostLamports: txBaseLamports.toString(),
       estimatedRelayCostUsd: costUsd(txBaseLamports),
       reason: hasUnsafeSelfPayExt
@@ -332,7 +452,7 @@ export function computeNativeFeeQuote(params: {
     }
   }
 
-  // Native SOL fee (Native SOL Withdraw, atomic `unwrap_wsol`, SOL ExecViaEscrow, or Mode 1 shielded SOL `cm2` note)
+  // Native SOL fee (Native SOL Withdraw, atomic `unwrap_wsol`, or SOL ExecViaEscrow)
   if (isNativeSolFee) {
     const neededLamports = BigInt(Math.ceil(Number(txBaseLamports) * marginMult))
     const pctFee = (amount * BigInt(cfg.baseSwapFeeBps)) / 10_000n
@@ -347,18 +467,18 @@ export function computeNativeFeeQuote(params: {
         feeSide,
         feeMint,
         feeTokenProgram: null,
-        feeRecipient: op === 'transfer' ? null : feeRecipient,
-        feeShieldedAddress: op === 'transfer' ? feeShieldedAddress : null,
+        feeRecipient,
+        feeShieldedAddress: null,
         feeRecipientExists: true,
         needsFeeAtaSetup: false,
         relayerFee: candidateFee.toString(),
         feeBps: Math.max(1, effBps),
+        flatFee: false,
+        nullifierCount: Number(nullifierCount),
         estimatedRelayCostLamports: txBaseLamports.toString(),
         estimatedRelayCostUsd: costUsd(txBaseLamports),
         reason:
-          op === 'transfer'
-            ? 'Self-paying shielded cm2 SOL relay fee verified via read-only relayer FVK — zero public wallet exposure.'
-            : 'Self-paying Native SOL relay fee covers nullifier rent & gas — zero SOL needed in caller wallet.',
+          'Self-paying Native SOL relay fee covers nullifier rent & gas — zero SOL needed in caller wallet.',
       }
     }
     return {
@@ -369,12 +489,14 @@ export function computeNativeFeeQuote(params: {
       feeSide,
       feeMint,
       feeTokenProgram: null,
-      feeRecipient: op === 'transfer' ? null : feeRecipient,
-      feeShieldedAddress: op === 'transfer' ? feeShieldedAddress : null,
+      feeRecipient,
+      feeShieldedAddress: null,
       feeRecipientExists: true,
       needsFeeAtaSetup: false,
       relayerFee: '0',
       feeBps: 0,
+      flatFee: false,
+      nullifierCount: Number(nullifierCount),
       estimatedRelayCostLamports: txBaseLamports.toString(),
       estimatedRelayCostUsd: costUsd(txBaseLamports),
       reason: 'Small action sponsored under relay rate limits.',
@@ -382,12 +504,12 @@ export function computeNativeFeeQuote(params: {
   }
 
   // SPL / Token-2022 fee mint (WSOL self-prices 1:1 with SOL; other mints use live USD price)
-  const needsAta = op !== 'transfer' && !feeRecipientExists
+  const needsAta = !feeRecipientExists
   const effectiveLamports = needsAta ? withAtaLamports : txBaseLamports
   const neededSol = (Number(effectiveLamports) / 1e9) * marginMult
   let neededTokenUnits: bigint | null = null
   if (feeMint === WSOL_MINT_STR) {
-    neededTokenUnits = BigInt(Math.ceil(neededSol * 1e9))
+    neededTokenUnits = BigInt(Math.ceil(Number(effectiveLamports) * marginMult))
   } else if (solPriceUsd && solPriceUsd > 0 && feeTokenPriceUsd && feeTokenPriceUsd > 0) {
     const neededUi = (neededSol * solPriceUsd) / feeTokenPriceUsd
     if (Number.isFinite(neededUi) && neededUi > 0) {
@@ -408,20 +530,19 @@ export function computeNativeFeeQuote(params: {
         feeSide,
         feeMint,
         feeTokenProgram,
-        feeRecipient: op === 'transfer' ? null : feeRecipient,
-        feeShieldedAddress: op === 'transfer' ? feeShieldedAddress : null,
-        feeRecipientExists: op === 'transfer' ? true : feeRecipientExists,
+        feeRecipient,
+        feeShieldedAddress: null,
+        feeRecipientExists,
         needsFeeAtaSetup: needsAta,
         relayerFee: candidateFee.toString(),
         feeBps: Math.max(1, effBps),
+        flatFee: false,
+        nullifierCount: Number(nullifierCount),
         estimatedRelayCostLamports: effectiveLamports.toString(),
         estimatedRelayCostUsd: costUsd(effectiveLamports),
-        reason:
-          op === 'transfer'
-            ? 'Self-paying shielded cm2 SPL relay fee verified via read-only relayer FVK.'
-            : feeRecipientExists
-              ? 'Self-paying protocol relay fee fully covers Solana rent & gas.'
-              : 'Self-paying protocol relay fee covers first-time relayer fee ATA creation + Solana rent.',
+        reason: feeRecipientExists
+          ? 'Self-paying protocol relay fee fully covers Solana rent & gas.'
+          : 'Self-paying protocol relay fee covers first-time relayer fee ATA creation + Solana rent.',
       }
     }
   }
@@ -434,12 +555,14 @@ export function computeNativeFeeQuote(params: {
     feeSide,
     feeMint,
     feeTokenProgram,
-    feeRecipient: op === 'transfer' ? null : feeRecipient,
-    feeShieldedAddress: op === 'transfer' ? feeShieldedAddress : null,
-    feeRecipientExists: op === 'transfer' ? true : feeRecipientExists,
+    feeRecipient,
+    feeShieldedAddress: null,
+    feeRecipientExists,
     needsFeeAtaSetup: false,
     relayerFee: '0',
     feeBps: 0,
+    flatFee: false,
+    nullifierCount: Number(nullifierCount),
     estimatedRelayCostLamports: txBaseLamports.toString(),
     estimatedRelayCostUsd: costUsd(txBaseLamports),
     reason: 'Small or unpriced token action sponsored under relay rate limits.',

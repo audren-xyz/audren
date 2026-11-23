@@ -26,7 +26,9 @@ import {
   LN_OFF_VERSION,
   MEMO_CT_LEN,
   MEMO_MAGIC,
+  MEMO_PAGE_HEADER_LEN,
   MEMO_PAGE_LEN,
+  MEMO_PAGE_SCAN_SLICE_LEN,
   MM_OFF_BUMP,
   MM_OFF_CIPHERTEXTS,
   MM_OFF_CLOSED_SLOT,
@@ -45,6 +47,7 @@ import {
   NF_OFF_PAGE_SEQ,
   NF_OFF_POOL_ID,
   NF_OFF_PREFIXES,
+  NF_PAGE_HEADER_LEN,
   NF_PAGE_LEN,
   NF_PAGE_MAGIC,
   NF_PREFIX_LEN,
@@ -165,6 +168,32 @@ export interface DecodedMemoPage {
   createdSlot: bigint;
   closedSlot: bigint;
   entries: DecodedMemoEntry[];
+}
+
+export interface DecodedMemoPageHeader {
+  laneId: number;
+  bump: number;
+  count: number;
+  poolId: number;
+  pageSeq: bigint;
+  createdSlot: bigint;
+  closedSlot: bigint;
+}
+
+export interface DecodedMemoPageScanSlice extends DecodedMemoPageHeader {
+  viewTags: Uint8Array[];
+  ephemeralPks: Uint8Array[];
+  hasCiphertexts: boolean;
+}
+
+export interface DecodedNullifierPageHeader {
+  laneId: number;
+  bump: number;
+  count: number;
+  poolId: number;
+  pageSeq: bigint;
+  createdSlot: bigint;
+  closedSlot: bigint;
 }
 
 export interface DecodedNullifierPage {
@@ -310,6 +339,59 @@ export function decodeMemoPage(data: Uint8Array): DecodedMemoPage {
     createdSlot: dv.getBigUint64(MM_OFF_CREATED_SLOT, true),
     closedSlot: dv.getBigUint64(MM_OFF_CLOSED_SLOT, true),
     entries,
+  };
+}
+
+export function decodeMemoPageHeader(data: Uint8Array): DecodedMemoPageHeader {
+  if (data.byteLength < MEMO_PAGE_HEADER_LEN || !checkMagic(data, MEMO_MAGIC)) {
+    throw new Error(`Invalid MemoPage header (len=${data.byteLength})`);
+  }
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  return {
+    laneId: data[MM_OFF_LANE_ID]!,
+    bump: data[MM_OFF_BUMP]!,
+    count: dv.getUint16(MM_OFF_COUNT, true),
+    poolId: dv.getUint32(MM_OFF_POOL_ID, true),
+    pageSeq: dv.getBigUint64(MM_OFF_PAGE_SEQ, true),
+    createdSlot: dv.getBigUint64(MM_OFF_CREATED_SLOT, true),
+    closedSlot: dv.getBigUint64(MM_OFF_CLOSED_SLOT, true),
+  };
+}
+
+export function decodeMemoPageScanSlice(data: Uint8Array): DecodedMemoPageScanSlice {
+  if (data.byteLength < MEMO_PAGE_SCAN_SLICE_LEN || !checkMagic(data, MEMO_MAGIC)) {
+    throw new Error(`Invalid MemoPage scan slice (len=${data.byteLength})`);
+  }
+  const hdr = decodeMemoPageHeader(data);
+  const viewTags: Uint8Array[] = [];
+  const ephemeralPks: Uint8Array[] = [];
+  for (let i = 0; i < hdr.count; i++) {
+    viewTags.push(data.subarray(MM_OFF_VIEW_TAGS + i * 2, MM_OFF_VIEW_TAGS + (i + 1) * 2));
+    ephemeralPks.push(
+      data.subarray(MM_OFF_EPHEMERAL_PKS + i * 32, MM_OFF_EPHEMERAL_PKS + (i + 1) * 32),
+    );
+  }
+  return {
+    ...hdr,
+    viewTags,
+    ephemeralPks,
+    hasCiphertexts: data.byteLength === MEMO_PAGE_LEN,
+  };
+}
+
+export function decodeNullifierPageHeader(data: Uint8Array): DecodedNullifierPageHeader {
+  if (data.byteLength < NF_PAGE_HEADER_LEN || !checkMagic(data, NF_PAGE_MAGIC)) {
+    throw new Error(`Invalid NullifierPage header (len=${data.byteLength})`);
+  }
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  return {
+    laneId: data[NF_OFF_LANE_ID]!,
+    bump: data[NF_OFF_BUMP]!,
+    count: dv.getUint16(NF_OFF_COUNT, true),
+    poolId: dv.getUint32(NF_OFF_POOL_ID, true),
+    pageSeq: dv.getBigUint64(NF_OFF_PAGE_SEQ, true),
+    createdSlot: dv.getBigUint64(NF_OFF_CREATED_SLOT, true),
+    closedSlot: dv.getBigUint64(NF_OFF_CLOSED_SLOT, true),
   };
 }
 

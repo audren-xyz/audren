@@ -12,7 +12,10 @@ use audren_core::{
         TAG_INIT_LANE, TAG_INIT_POOL, TAG_JOINSPLIT, TAG_OPEN_PAGE, TAG_PUBLISH_CHECKPOINT,
         TAG_SET_PAUSED, WITHDRAW_FLAG_UNWRAP_WSOL,
     },
-    layout::{DYN_MEMO_HEAD_LEN, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN},
+    layout::{
+        DYN_MEMO_HEAD_LEN, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_NOTES_PER_PAGE, NF_PER_PAGE,
+        SUBROOTS_PER_PAGE, SUBTREE_LEAVES,
+    },
     SYSTEM_PROGRAM_ID,
 };
 use serde::{Deserialize, Serialize};
@@ -79,6 +82,71 @@ pub fn deterministic_note_rent_fee(
 ) -> u64 {
     let live = sub_rent.div_ceil(256) + sr_rent.div_ceil(256 * 300) + memo_rent.div_ceil(112);
     pool_note_rent_fee_cap.min(live)
+}
+
+/// Primary page sequences and atomic rollover page sequences for a lane write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRolloverPlan {
+    pub out_sub_seq: u64,
+    pub out_root_seq: u64,
+    pub out_memo_seq: u64,
+    pub nf_page_seq: u64,
+    pub next_sub_seq: Option<u64>,
+    pub next_root_seq: Option<u64>,
+    pub next_memo_seq: Option<u64>,
+    pub next_nf_seq: Option<u64>,
+}
+
+/// Compute primary page sequences and atomic rollover page sequences matching
+/// `append_leaf_and_memo` and `append_nullifier_prefix` in `program/src/lib.rs` byte-for-byte.
+pub fn compute_page_rollovers(
+    leaf_count: u64,
+    output_count: usize,
+    nf_count: u64,
+    spent_nullifiers: usize,
+) -> PageRolloverPlan {
+    let sub_size = SUBTREE_LEAVES as u64;
+    let sr_size = SUBROOTS_PER_PAGE as u64;
+    let memo_size = MEMO_NOTES_PER_PAGE as u64;
+    let nf_size = NF_PER_PAGE as u64;
+
+    let out_sub_seq = leaf_count / sub_size;
+    let out_root_seq = out_sub_seq / sr_size;
+    let out_memo_seq = leaf_count / memo_size;
+    let nf_page_seq = nf_count / nf_size;
+
+    let (next_sub_seq, next_root_seq, next_memo_seq) = if output_count > 0 {
+        let last_leaf = leaf_count.saturating_add((output_count - 1) as u64);
+        let last_sub = last_leaf / sub_size;
+        let last_root = last_sub / sr_size;
+        let last_memo = last_leaf / memo_size;
+        (
+            (last_sub > out_sub_seq).then_some(last_sub),
+            (last_root > out_root_seq).then_some(last_root),
+            (last_memo > out_memo_seq).then_some(last_memo),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let next_nf_seq = if spent_nullifiers > 0 {
+        let last_nf = nf_count.saturating_add((spent_nullifiers - 1) as u64);
+        let last_nf_seq = last_nf / nf_size;
+        (last_nf_seq > nf_page_seq).then_some(last_nf_seq)
+    } else {
+        None
+    };
+
+    PageRolloverPlan {
+        out_sub_seq,
+        out_root_seq,
+        out_memo_seq,
+        nf_page_seq,
+        next_sub_seq,
+        next_root_seq,
+        next_memo_seq,
+        next_nf_seq,
+    }
 }
 
 /// Exact `JoinSplit` `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
@@ -856,5 +924,48 @@ pub fn build_set_paused(
             AudrenAccountMeta::writable(derive_pool_pda(&program_id, pool_id).0, false),
         ],
         data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_page_rollovers_exact_boundaries() {
+        assert_eq!(
+            compute_page_rollovers(109, 3, 0, 2),
+            PageRolloverPlan {
+                out_sub_seq: 0,
+                out_root_seq: 0,
+                out_memo_seq: 0,
+                nf_page_seq: 0,
+                next_sub_seq: None,
+                next_root_seq: None,
+                next_memo_seq: None,
+                next_nf_seq: None,
+            }
+        );
+        assert_eq!(compute_page_rollovers(110, 3, 0, 2).next_memo_seq, Some(1));
+        assert_eq!(compute_page_rollovers(111, 2, 0, 1).next_memo_seq, Some(1));
+        assert_eq!(compute_page_rollovers(112, 3, 0, 2).out_memo_seq, 1);
+        assert_eq!(compute_page_rollovers(112, 3, 0, 2).next_memo_seq, None);
+
+        assert_eq!(compute_page_rollovers(254, 2, 0, 1).next_sub_seq, None);
+        assert_eq!(compute_page_rollovers(254, 3, 0, 2).next_sub_seq, Some(1));
+        assert_eq!(compute_page_rollovers(255, 2, 0, 2).next_sub_seq, Some(1));
+        assert_eq!(compute_page_rollovers(256, 3, 0, 2).out_sub_seq, 1);
+        assert_eq!(compute_page_rollovers(256, 3, 0, 2).next_sub_seq, None);
+
+        assert_eq!(compute_page_rollovers(0, 0, 598, 2).next_nf_seq, None);
+        assert_eq!(compute_page_rollovers(0, 0, 599, 2).next_nf_seq, Some(1));
+        assert_eq!(compute_page_rollovers(0, 0, 599, 1).next_nf_seq, None);
+        assert_eq!(compute_page_rollovers(0, 0, 600, 2).nf_page_seq, 1);
+        assert_eq!(compute_page_rollovers(0, 0, 600, 2).next_nf_seq, None);
+
+        let sr_cross = compute_page_rollovers(76_799, 2, 0, 1);
+        assert_eq!(sr_cross.out_root_seq, 0);
+        assert_eq!(sr_cross.next_sub_seq, Some(300));
+        assert_eq!(sr_cross.next_root_seq, Some(1));
     }
 }

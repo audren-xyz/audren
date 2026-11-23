@@ -3,7 +3,6 @@ import { getAggregatorAdapter, quoteWithSelection } from '../aggregators/registr
 import { getRelayerSecretsB64, type Env, type RelayPolicyConfig } from '../env'
 import {
   buildOpenPageSolanaIx,
-  buildPublishCheckpointSolanaIx,
   decodeLaneHeader,
   decodePoolState,
   deriveLanePda,
@@ -17,6 +16,7 @@ import {
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
 } from '../solana/audren'
+import { publishCheckpointIfNeeded, type CheckpointLockAdapter } from '../solana/checkpoint'
 import {
   CLASSIC_TOKEN_PROGRAM_ID,
   WSOL_MINT,
@@ -45,14 +45,16 @@ import type { Cluster, SolanaInstruction } from '../types'
 import { fetchMintPricesUsd } from '../policy/pricing'
 
 /**
- * Permissionless Maintenance Crank:
- *   1. Publishes a fresh `RootCheckpoint` (`PublishCheckpoint`, Tag 5) when `slot >= nextEpoch`.
+ * Permissionless Maintenance Crank (every 2 minutes):
+ *   1. Publishes a fresh `RootCheckpoint` (`PublishCheckpoint`, Tag 5) when uncheckpointed leaves
+ *      (or an expired checkpoint on a non-empty pool) exist and `currentSlot >= nextCkptSlot`.
  *   2. Pre-opens upcoming `SubtreePage`/`MemoPage`/`NullifierPage` PDAs (`OpenPage`, Tag 2)
  *      reimbursed from `LaneRentVault` when any active lane approaches page boundary (`>= 80%` full).
  */
 export async function runV2MaintenanceCrank(
   env: Env,
   cluster: Cluster,
+  checkpointLock?: CheckpointLockAdapter,
 ): Promise<{ publishedCheckpoint: string | null; openedPages: string[]; notes: string[] }> {
   const rpcUrl = cluster === 'mainnet' ? env.MAINNET_RPC_URL : env.DEVNET_RPC_URL
   const firstSecret = getRelayerSecretsB64(env, cluster)[0] ?? null
@@ -71,35 +73,28 @@ export async function runV2MaintenanceCrank(
     return { publishedCheckpoint: null, openedPages: [], notes: ['no active lanes'] }
   }
 
-  const slot = await rpcCall<number>(rpcUrl, 'getSlot', [{ commitment: 'confirmed' }])
-  const epoch = Math.floor(slot / Number(pool.ckptInterval))
-  const slotIdx = epoch % 256
   const notes: string[] = []
   let publishedCheckpoint: string | null = null
   const openedPages: string[] = []
 
-  // Try publishing current epoch RootCheckpoint (simulation skips if already published)
-  const ckIx = buildPublishCheckpointSolanaIx({
-    payer: relayerB58,
-    poolId: 0,
-    slotIdx,
-    activeLanes: pool.activeLanes,
-  })
-  const bh = await rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
-    { commitment: 'confirmed' },
-  ])
-  const ckSigned = buildAndSignV1Transaction(secret32, bh.value.blockhash, [ckIx], {
-    computeUnitLimit: 120_000,
-    priorityFeeLamports: 5_000n,
-  })
-  const ckSim = await simulateV1Transaction(rpcUrl, ckSigned.wireBytes, [relayerB58])
-  if (!ckSim.err) {
-    const sig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
-      toBase64(ckSigned.wireBytes),
-      { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 2 },
-    ])
-    publishedCheckpoint = sig
-    notes.push(`Published RootCheckpoint slotIdx=${slotIdx} (${sig})`)
+  // Publish RootCheckpoint only when uncheckpointed leaves (or expired checkpoint) need publishing.
+  try {
+    const ckptRes = await publishCheckpointIfNeeded({
+      rpcUrl,
+      cluster,
+      poolId: 0,
+      relayerSecret32: secret32,
+      lock: checkpointLock,
+      confirm: false,
+    })
+    if (ckptRes.status === 'published' && ckptRes.signature) {
+      publishedCheckpoint = ckptRes.signature
+      notes.push(`Published RootCheckpoint epoch=${ckptRes.epoch} slotIdx=${ckptRes.slotIdx ?? ''} (${ckptRes.signature})`)
+    } else if (ckptRes.status === 'cooldown') {
+      notes.push(`Checkpoint cooldown (${ckptRes.slotsRemaining ?? 0} slots remaining)`)
+    }
+  } catch (err) {
+    notes.push(`Checkpoint crank skipped: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   // Ensure current pages exist AND pre-open next SubtreePage / SubtreeRootPage / MemoPage / NullifierPage
@@ -437,7 +432,7 @@ async function refillSinglePayer(
 }
 
 /**
- * Self-sustaining Treasury Auto-Refill job (invoked by 15-minute Cron Trigger or admin endpoint).
+ * Self-sustaining Treasury Auto-Refill job (invoked by 2-minute Cron Trigger or admin endpoint).
  *
  * Iterates over ALL configured Mainnet relayer payers (`MAINNET_RELAYER_SECRETS_JSON` or
  * `MAINNET_RELAYER_SECRET_B64`), scanning every Classic SPL & Token-2022 account owned by each

@@ -71,9 +71,31 @@ export interface NativeFeeQuote {
   /** Exact raw fee in base units of `feeMint` (lamports for Native SOL / unwrap_wsol / shielded SOL note). */
   relayerFee: string
   feeBps: number
+  /** True when the fee is a flat per-mint rent/gas fee independent of transfer amount (`op === 'transfer'`). */
+  flatFee?: boolean
+  /** Number of NullifierPDA accounts priced into the quote (`1` when `omitNf1=true`, `2` when `omitNf1=false`). */
+  nullifierCount?: number
   estimatedRelayCostLamports: string
   estimatedRelayCostUsd: number | null
   reason: string
+}
+
+export interface CheckpointResponse {
+  ok: true
+  cluster: Cluster
+  poolId: number
+  status: 'up_to_date' | 'cooldown' | 'published'
+  epoch: number
+  slotIdx?: number
+  slotsRemaining?: number
+  waitMs?: number
+  signature?: string
+  slot?: number
+  totalLeaves?: string
+  lastCkptTotalLeaves?: string
+  inFlight?: boolean
+  solscanUrl?: string
+  explorerUrl?: string
 }
 
 export interface MissingAtaPlan {

@@ -19,11 +19,15 @@ interface ComparisonRow {
   assets: string
 }
 
-const MODE_META: Record<ModeId, { label: string; headline: string; note: string; rows: ComparisonRow[] }> = {
+const MODE_META: Record<
+  ModeId,
+  { label: string; headline: string; note: string; col5Header: string; rows: ComparisonRow[] }
+> = {
   transfer: {
     label: 'Private transfer',
     headline: 'What a public Solana observer sees on a peer-to-peer transfer',
-    note: 'Transaction metadata and the fee payer remain public in every model. A separate relayer keeps your own wallet off the fee-payer field without removing network or timing metadata.',
+    note: 'Transaction metadata and the fee payer remain public in every model. A separate relayer keeps your own wallet off the fee-payer field without removing network or timing metadata. Audren defaults to uniform padded private transfers (2 nullifiers, 3 encrypted outputs, random append lane) so observers cannot distinguish 1-in vs 2-in or relayed vs self-paid sends.',
+    col5Header: 'Asset scope',
     rows: [
       {
         method: 'Ordinary Solana',
@@ -43,9 +47,9 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
       },
       {
         method: 'Helius Privacy Rings',
-        sub: 'Default vs. custom anonymous ring',
-        senderRecipient: { text: 'Public in default; hidden in custom mode', state: 'partial' },
-        token: { text: 'Ring-dependent', state: 'partial' },
+        sub: 'Default confidential ring vs. custom policy ring',
+        senderRecipient: { text: 'Public in default; hidden in custom ring', state: 'partial' },
+        token: { text: 'Encrypted', state: 'hidden' },
         amount: { text: 'Encrypted', state: 'hidden' },
         assets: 'SOL, classic SPL, Token-2022',
       },
@@ -62,8 +66,9 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
   },
   'entry-exit': {
     label: 'Deposit & withdraw',
-    headline: 'Public entry and exit boundaries when moving ordinary Solana assets',
-    note: 'Deposits and withdrawals touch ordinary Solana accounts by design. Concealing the spent note on withdrawal does not prevent timing, public amounts, or outside information from creating links.',
+    headline: 'Public entry and exit boundaries, nullifier cost, and pause behavior',
+    note: 'Deposits and withdrawals touch ordinary Solana accounts by design. Concealing the spent note on withdrawal does not prevent timing, public amounts, or outside information from creating links. Helius Privacy Rings reclaims nullifier rent down to 5,000 lamports via its permissioned Forester while pause_tree halts withdrawals; Audren pays permanent NullifierPDA rent on-chain (~0.002–0.0046 SOL/tx, scaling down automatically via SysvarRent if Solana lowers rent) and keeps full 100% withdrawals (including atomic WSOL unwrap) immune to SetPaused.',
+    col5Header: 'Assets, rent & pause',
     rows: [
       {
         method: 'Ordinary Solana',
@@ -71,7 +76,7 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
         senderRecipient: { text: 'Public accounts', state: 'public' },
         token: { text: 'Public mint', state: 'public' },
         amount: { text: 'Public', state: 'public' },
-        assets: 'SOL & all tokens',
+        assets: 'SOL & all tokens; standard tx fee',
       },
       {
         method: 'Confidential Balances',
@@ -79,7 +84,15 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
         senderRecipient: { text: 'Public owner account', state: 'public' },
         token: { text: 'Public mint', state: 'public' },
         amount: { text: 'Public at boundary', state: 'public' },
-        assets: 'Configured Token-2022 mints',
+        assets: 'Configured Token-2022 mints; issuer mint controls apply',
+      },
+      {
+        method: 'Helius Privacy Rings',
+        sub: 'Public SPL interface deposit / withdrawal',
+        senderRecipient: { text: 'Public SPL boundary; default ring exposes participants', state: 'partial' },
+        token: { text: 'Public at entry & exit', state: 'public' },
+        amount: { text: 'Public at entry & exit', state: 'public' },
+        assets: 'SOL, classic SPL, Token-2022 · 5,000-lamport Forester-reclaimed nullifiers · pause_tree halts exits',
       },
       {
         method: 'Privacy Cash',
@@ -87,7 +100,7 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
         senderRecipient: { text: 'Public depositor / destination; link broken by tree proof', state: 'partial' },
         token: { text: 'Public pool asset', state: 'public' },
         amount: { text: 'Public at entry & exit', state: 'public' },
-        assets: 'Supported pool assets',
+        assets: 'Supported pool assets; separate Merkle tree per asset',
       },
       {
         method: 'Audren',
@@ -96,14 +109,15 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
         senderRecipient: { text: 'One-time stealth output on deposit; global pool proof on exit', state: 'partial' },
         token: { text: 'Public at entry & exit', state: 'public' },
         amount: { text: 'Public at entry & exit (change hidden)', state: 'public' },
-        assets: 'SOL, classic SPL, transferable Token-2022',
+        assets: 'SOL, classic SPL, Token-2022 · permanent NullifierPDA rent (~0.002–0.0046 SOL/tx, SysvarRent-scaled) · full exits incl. atomic WSOL unwrap bypass SetPaused',
       },
     ],
   },
   swap: {
     label: 'Shielded DeFi',
-    headline: 'Composing with public Solana DeFi (DEXs, lending, LSTs, vaults)',
-    note: 'Solana DEXs, lending markets, liquid staking pools, and perp protocols are public state machines: external calls always observe the target program, mints, and routed amounts. The difference is whether your primary wallet signs publicly or settles atomically via sharded escrow (ExecViaEscrow) or a self-funded deterministic session wallet.',
+    headline: 'Composing with public Solana DeFi vs. custom ZK-CPI escrow apps',
+    note: 'Two distinct architectural paths exist for shielded DeFi on Solana. Helius Privacy Rings uses programmable ZK-CPI escrows (utxo_data plus custom app Groth16 proofs) that can keep swap prices and amounts private, at the cost of building custom circuits and bootstrapping fresh liquidity per protocol under 2-proof CU and packet constraints. Audren takes the protocol-agnostic path: atomic ExecViaEscrow (Tag 7) hits live Solana DeFi liquidity today (Jupiter, Kamino, Jito, Sanctum, Raydium, Orca) in one transaction (~158k CU), keeping the external DeFi pair and amount public while concealing the funding notes and primary wallet inside the global 4²⁰ pool (plus deterministic Bᵢ session wallets for stateful borrowing or perps).',
+    col5Header: 'Liquidity & execution',
     rows: [
       {
         method: 'Ordinary Solana',
@@ -111,7 +125,7 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
         senderRecipient: { text: 'Your public wallet signs', state: 'public' },
         token: { text: 'Public pair', state: 'public' },
         amount: { text: 'Public trade size', state: 'public' },
-        assets: 'All Solana DEX pairs',
+        assets: 'All live Solana DEX & DeFi liquidity',
       },
       {
         method: 'Confidential Balances',
@@ -119,7 +133,15 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
         senderRecipient: { text: 'Your public wallet signs', state: 'public' },
         token: { text: 'Public pair', state: 'public' },
         amount: { text: 'Public trade size', state: 'public' },
-        assets: 'Public SPL after unwrapping',
+        assets: 'Public SPL liquidity after unwrapping',
+      },
+      {
+        method: 'Helius Privacy Rings',
+        sub: 'Programmable ZK-CPI escrows (utxo_data + custom app Groth16)',
+        senderRecipient: { text: 'Public in default ring; hidden in custom policy rings', state: 'partial' },
+        token: { text: 'Private in custom ZK-CPI escrows', state: 'hidden' },
+        amount: { text: 'Private in custom ZK-CPI escrows', state: 'hidden' },
+        assets: 'Requires custom app circuits & fresh liquidity per protocol (plus 2-proof CU & packet constraints)',
       },
       {
         method: 'Privacy Cash',
@@ -127,16 +149,16 @@ const MODE_META: Record<ModeId, { label: string; headline: string; note: string;
         senderRecipient: { text: 'Ephemeral wallet trades (primary wallet hidden)', state: 'partial' },
         token: { text: 'Public pair', state: 'public' },
         amount: { text: 'Public trade size', state: 'public' },
-        assets: 'Supported pool assets',
+        assets: 'Multi-tx ephemeral Jupiter route on supported pool assets',
       },
       {
         method: 'Audren',
         sub: 'Atomic ExecViaEscrow (Tag 7) + Self-Paying DeFi Sessions (Tag 6 + Tag 3)',
         highlight: true,
-        senderRecipient: { text: 'Global pool proof · sharded escrow CPI (or Bᵢ session) · fresh stealth note', state: 'partial' },
+        senderRecipient: { text: 'Global 4²⁰ pool proof · sharded escrow CPI (or Bᵢ session) · fresh stealth note', state: 'partial' },
         token: { text: 'Public external DeFi mints', state: 'public' },
         amount: { text: 'Public external DeFi amounts (optional hidden change)', state: 'public' },
-        assets: 'Any compatible Token A → B DeFi CPI (DEX, lend, LST, vault, RWA) + stateful Bᵢ sessions',
+        assets: 'Live Solana DeFi liquidity today (Jupiter, Kamino, Jito, Sanctum, Raydium, Orca) in 1 tx (~158k CU) + stateful Bᵢ sessions',
       },
     ],
   },
@@ -146,12 +168,12 @@ const PEER_PROTOCOLS = [
   {
     tag: 'Solana rings',
     name: 'Helius Privacy Rings',
-    lead: 'Supports existing SOL, SPL, and Token-2022 assets, self-custody, and programmable escrow, with published independent program and circuit reviews.',
+    lead: 'Supports existing SOL, SPL, and Token-2022 assets with published independent program and circuit audits, 5,000-lamport Forester-compressed nullifiers, up to 49-in/52-in merge fan-in, 1-slot spendability, and programmable ZK-CPI escrows.',
     points: [
-      'Default confidential ring exposes sender and recipient; anonymous custom rings are a separate mode with separate availability and audit scope.',
-      'Documented anonymous-ring integration uses delegated viewing access for sync (no spend authority).',
-      'Indexer and Forester maintain tree state; proofs can be generated locally and indexers can be self-hosted.',
-      'Groth16 circuits rely on multi-party trusted-setup records and proving keys.',
+      'Live Default Ring encrypts both token mint and amount while leaving sender and recipient Ed25519 pubkeys visible on-chain; participant anonymity is only in separate Custom Policy Rings.',
+      'Relies on a Photon indexer, permissioned Forester (reclaiming nullifier rent down to 5,000 lamports), and remote GPU/TEE proving or 350 MB to 1.27 GB of multi-shape local proving keys; anonymous-ring sync uses delegated viewing access (no spend authority).',
+      'Programmable ZK-CPI escrows (utxo_data plus custom app Groth16 proofs) can keep DeFi swap prices and amounts private, requiring custom circuits and fresh liquidity per protocol under 2-proof CU and packet constraints.',
+      'pause_tree halts withdrawals during emergencies; Audren trades permanent NullifierPDA rent (~0.002–0.0046 SOL/tx) for 4-field default anonymity in one global pool, a single 3.93 MB local circuit, zero mandatory indexer or Forester, pause-immune exits, and instant composability with live Solana DeFi.',
     ],
     sources: [
       { label: 'Encryption modes', href: 'https://www.helius.dev/docs/privacy/concepts/encryption' },
@@ -289,10 +311,10 @@ export function CompareExperience() {
               <thead>
                 <tr>
                   <th>Model</th>
-                  <th>Sender / Recipient</th>
+                  <th>Sender / recipient</th>
                   <th>Token</th>
                   <th>Amount</th>
-                  <th>Asset Scope</th>
+                  <th>{active.col5Header}</th>
                 </tr>
               </thead>
               <tbody>
@@ -472,27 +494,32 @@ export function CompareExperience() {
               </div>
               <div className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>Proving</span>
-                <h3>Local Groth16 proving</h3>
+                <h3>One 3.93 MB local circuit</h3>
                 <p className={styles.cellLead}>
-                  Clients generate 192 B BN254 Groth16 proofs locally (native Rust/Swift/Kotlin or
-                  browser WASM). Optional permissionless relayers submit without spending keys.
+                  One frozen 17,861-R1CS circuit (3.93 MB proving key) generates 192 B BN254
+                  Groth16 proofs locally in browsers and mobile SDKs, avoiding 350 MB–1.27 GB
+                  multi-shape keys or remote GPU/TEE provers.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>Discovery</span>
                 <h3>Ordinary Solana RPC only</h3>
                 <p className={styles.cellLead}>
-                  <code>CompactWalletStore</code> scans sequential pages via{' '}
-                  <code>getMultipleAccounts</code>, freezes sealed siblings, and discards raw pages
-                  (1.28 MB @ 10M notes) with no mandatory indexer or CDN.
+                  <code>CompactWalletStore</code> runs a 2-pass sync over{' '}
+                  <code>SubtreeRootPage</code>, <code>MemoPage</code> SoA <code>dataSlice</code>,
+                  and <code>NullifierPage</code> via ordinary <code>getMultipleAccounts</code>,
+                  discarding stranger prefixes and raw pages (1.28 MB @ 10M notes) with no Photon
+                  indexer or Forester.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>Surface</span>
-                <h3>Unified workflow</h3>
+                <span className={styles.cellIndex}>DeFi and exits</span>
+                <h3>Live DeFi &amp; pause-immune exits</h3>
                 <p className={styles.cellLead}>
-                  Deposit, transfer, merge notes, execute compatible DeFi CPIs, withdraw or fund
-                  deterministic session wallets, or disclose a single receipt.
+                  Send uniformly padded private transfers, merge notes (2 → 1), compose with live
+                  Solana DeFi via atomic <code>ExecViaEscrow</code> (~158k CU), fund deterministic
+                  session wallets, or exit 100% (including atomic WSOL unwrap) even during{' '}
+                  <code>SetPaused</code>.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
@@ -500,15 +527,17 @@ export function CompareExperience() {
                 <h3>Open integration</h3>
                 <p className={styles.cellLead}>
                   Integrate the Apache-2.0 source, run a compatible client, or host your own relay
-                  without an Audren account. Hosted services apply their own policies.
+                  (including ~6.4s on-demand <code>POST /v1/checkpoint</code>) without an Audren
+                  account. Hosted services apply their own policies.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
-                <span className={styles.cellIndex}>Disclosure</span>
-                <h3>Pre-audit transparency</h3>
+                <span className={styles.cellIndex}>Tradeoffs</span>
+                <h3>Pre-audit &amp; permanent rent</h3>
                 <p className={styles.cellLead}>
-                  Audren remains pre-audit with a mutable upgrade authority. Read the exact
-                  boundaries before committing capital.
+                  Audren remains pre-audit with a mutable upgrade authority and pays permanent{' '}
+                  <code>NullifierPDA</code> rent (~0.002–0.0046 SOL/tx, scaling automatically via{' '}
+                  <code>SysvarRent</code>) rather than 5,000-lamport Forester-compressed nullifiers.
                 </p>
                 <div className={styles.cellFoot}>
                   <Link href="/faq" className={styles.textLink}>

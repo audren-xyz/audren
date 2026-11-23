@@ -175,6 +175,8 @@ export const MM_OFF_CLOSED_SLOT = 32;
 export const MM_OFF_VIEW_TAGS = 64;
 export const MM_OFF_EPHEMERAL_PKS = 288;
 export const MM_OFF_CIPHERTEXTS = 3_872;
+export const MEMO_PAGE_HEADER_LEN = 64;
+export const MEMO_PAGE_SCAN_SLICE_LEN = MM_OFF_CIPHERTEXTS;
 
 // NullifierPage offsets
 export const NF_OFF_MAGIC = 0;
@@ -186,6 +188,7 @@ export const NF_OFF_PAGE_SEQ = 16;
 export const NF_OFF_CREATED_SLOT = 24;
 export const NF_OFF_CLOSED_SLOT = 32;
 export const NF_OFF_PREFIXES = 64;
+export const NF_PAGE_HEADER_LEN = 64;
 
 // RootCheckpoint offsets
 export const CK_OFF_MAGIC = 0;

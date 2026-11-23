@@ -14,6 +14,7 @@ import {
   EyeOff,
   FileKey2,
   KeyRound,
+  Layers,
   Loader2,
   Lock,
   RefreshCw,
@@ -33,7 +34,6 @@ import {
   CompactWalletStore,
   MEMO_NOTES_PER_PAGE,
   NATIVE_SOL_MINT_BYTES,
-  NF_PER_PAGE,
   NUM_ESCROW_SHARDS,
   OPEN_PAGE_KIND_MEMO,
   OPEN_PAGE_KIND_NULLIFIER,
@@ -58,6 +58,7 @@ import {
   bytes32ToFrMasked,
   computeExecCtxHash,
   computeJoinsplitCtxHash,
+  computePageRollovers,
   computeToken2022NetAmount,
   concatBytes,
   decodePoolState,
@@ -82,6 +83,8 @@ import {
   fromBase64,
   parseAudrenAddress,
   parseToken2022TransferFeeConfig,
+  pickRandomEscrowShard,
+  pickRandomLaneId,
   prepareDynamicSwapMemo,
   prepareEscrowAccountsForAudren,
   reconstructWitness,
@@ -111,6 +114,7 @@ import {
   proveJoinsplitInBrowser,
   saveEncryptedCompactStore,
   type AudrenEncryptedBackupFile,
+  type JoinSplitInputWitness,
   type JoinSplitOutputWitness,
 } from '@/lib/audren-prover'
 import {
@@ -319,14 +323,19 @@ async function resolveMintOnChain(
 }
 
 function createWorkerBatchFetcher(cluster: SolanaCluster): AccountBatchFetcher {
-  return async (addresses: readonly string[]) => {
+  return async (addresses: readonly string[], options) => {
     const out: (Uint8Array | null)[] = new Array(addresses.length).fill(null)
+    const dataSlice = options?.dataSlice
     for (let off = 0; off < addresses.length; off += 100) {
       const chunk = addresses.slice(off, off + 100)
       const res = await fetch('/api/rpc/accounts', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cluster, addresses: chunk }),
+        body: JSON.stringify({
+          cluster,
+          addresses: chunk,
+          ...(dataSlice ? { dataSlice } : {}),
+        }),
       })
       const json = (await res.json()) as { accounts?: Array<string | null>; error?: string }
       if (!res.ok || !json.accounts) {
@@ -341,6 +350,63 @@ function createWorkerBatchFetcher(cluster: SolanaCluster): AccountBatchFetcher {
   }
 }
 
+function popcount3(mask: number): number {
+  return ((mask & 1) !== 0 ? 1 : 0) + ((mask & 2) !== 0 ? 1 : 0) + ((mask & 4) !== 0 ? 1 : 0)
+}
+
+function sameNote(a: OwnedNote, b: OwnedNote): boolean {
+  return a.laneId === b.laneId && a.leafIndex === b.leafIndex
+}
+
+function selectInputNotesForMint(
+  primaryNote: OwnedNote,
+  allUnspent: readonly OwnedNote[],
+  requiredAmount: bigint,
+): OwnedNote[] | null {
+  if (requiredAmount <= 0n || primaryNote.amount >= requiredAmount) return [primaryNote]
+  const targetMint = base58Encode(primaryNote.mint)
+  const sameMint = allUnspent.filter((n) => base58Encode(n.mint) === targetMint)
+  const othersAsc = sameMint
+    .filter((n) => !sameNote(n, primaryNote))
+    .sort((a, b) => (a.amount < b.amount ? -1 : a.amount > b.amount ? 1 : 0))
+
+  const deficit = requiredAmount - primaryNote.amount
+  const bestPartner = othersAsc.find((n) => n.amount >= deficit)
+  if (bestPartner) return [primaryNote, bestPartner]
+
+  const sortedDesc = [...sameMint].sort((a, b) => (a.amount > b.amount ? -1 : a.amount < b.amount ? 1 : 0))
+  if (sortedDesc.length >= 2 && sortedDesc[0]!.amount + sortedDesc[1]!.amount >= requiredAmount) {
+    return [sortedDesc[0]!, sortedDesc[1]!]
+  }
+  return null
+}
+
+function createZeroDummyOutput(
+  assetId: bigint,
+  mintBytes: Uint8Array,
+): { witness: JoinSplitOutputWitness; memo90: Uint8Array } {
+  const dummyKeys = deriveKeysFromSeed(crypto.getRandomValues(new Uint8Array(32)))
+  const m = encryptNoteMemo(
+    dummyKeys.viewPk,
+    crypto.getRandomValues(new Uint8Array(32)),
+    0n,
+    mintBytes,
+  )
+  const stealthOwner = deriveStealthOwner(dummyKeys.spendPk, m.tweak)
+  return {
+    witness: { stealthOwner, assetId, amount: 0n, blinding: m.blinding },
+    memo90: m.memo90,
+  }
+}
+
+function checkpointCoversNotes(snap: PoolApiSnapshot, notesToSpend: readonly OwnedNote[]): boolean {
+  if (!snap.initialized || !snap.latestCheckpoint) return false
+  return notesToSpend.every((n) => {
+    const covered = BigInt(snap.latestCheckpoint?.laneCounts[n.laneId] ?? '0')
+    return n.leafIndex < covered
+  })
+}
+
 async function ensureLanePagesPreIxs(params: {
   fetcher: AccountBatchFetcher
   payer: string
@@ -349,35 +415,86 @@ async function ensureLanePagesPreIxs(params: {
   rootSeq: bigint
   memoSeq: bigint
   nfSeq: bigint
+  nextSubSeq?: bigint | null
+  nextRootSeq?: bigint | null
+  nextMemoSeq?: bigint | null
+  nextNfSeq?: bigint | null
   includeOutputs: boolean
 }): Promise<AudrenInstruction[]> {
-  const { fetcher, payer, laneId, subSeq, rootSeq, memoSeq, nfSeq, includeOutputs } = params
-  const nfAddr = deriveNfPagePdaSync(0, laneId, nfSeq, AUDREN_PROGRAM_ID).address
-  const addrs = includeOutputs
-    ? [
-        deriveSubtreePdaSync(0, laneId, subSeq, AUDREN_PROGRAM_ID).address,
-        deriveSubrootPdaSync(0, laneId, rootSeq, AUDREN_PROGRAM_ID).address,
-        deriveMemoPdaSync(0, laneId, memoSeq, AUDREN_PROGRAM_ID).address,
-        nfAddr,
-      ]
-    : [nfAddr]
-  const res = await fetcher(addrs)
-  const ixs: AudrenInstruction[] = []
+  const {
+    fetcher,
+    payer,
+    laneId,
+    subSeq,
+    rootSeq,
+    memoSeq,
+    nfSeq,
+    nextSubSeq,
+    nextRootSeq,
+    nextMemoSeq,
+    nextNfSeq,
+    includeOutputs,
+  } = params
+  const needed: Array<{ kind: number; seq: bigint; addr: string }> = []
   if (includeOutputs) {
-    if (!res[0]) {
-      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_SUBTREE, pageSeq: subSeq, payer }))
+    needed.push(
+      {
+        kind: OPEN_PAGE_KIND_SUBTREE,
+        seq: subSeq,
+        addr: deriveSubtreePdaSync(0, laneId, subSeq, AUDREN_PROGRAM_ID).address,
+      },
+      {
+        kind: OPEN_PAGE_KIND_SUBROOT,
+        seq: rootSeq,
+        addr: deriveSubrootPdaSync(0, laneId, rootSeq, AUDREN_PROGRAM_ID).address,
+      },
+      {
+        kind: OPEN_PAGE_KIND_MEMO,
+        seq: memoSeq,
+        addr: deriveMemoPdaSync(0, laneId, memoSeq, AUDREN_PROGRAM_ID).address,
+      },
+    )
+    if (nextSubSeq != null) {
+      needed.push({
+        kind: OPEN_PAGE_KIND_SUBTREE,
+        seq: nextSubSeq,
+        addr: deriveSubtreePdaSync(0, laneId, nextSubSeq, AUDREN_PROGRAM_ID).address,
+      })
     }
-    if (!res[1]) {
-      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_SUBROOT, pageSeq: rootSeq, payer }))
+    if (nextRootSeq != null) {
+      needed.push({
+        kind: OPEN_PAGE_KIND_SUBROOT,
+        seq: nextRootSeq,
+        addr: deriveSubrootPdaSync(0, laneId, nextRootSeq, AUDREN_PROGRAM_ID).address,
+      })
     }
-    if (!res[2]) {
-      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_MEMO, pageSeq: memoSeq, payer }))
+    if (nextMemoSeq != null) {
+      needed.push({
+        kind: OPEN_PAGE_KIND_MEMO,
+        seq: nextMemoSeq,
+        addr: deriveMemoPdaSync(0, laneId, nextMemoSeq, AUDREN_PROGRAM_ID).address,
+      })
     }
-    if (!res[3]) {
-      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: nfSeq, payer }))
+  }
+  needed.push({
+    kind: OPEN_PAGE_KIND_NULLIFIER,
+    seq: nfSeq,
+    addr: deriveNfPagePdaSync(0, laneId, nfSeq, AUDREN_PROGRAM_ID).address,
+  })
+  if (nextNfSeq != null) {
+    needed.push({
+      kind: OPEN_PAGE_KIND_NULLIFIER,
+      seq: nextNfSeq,
+      addr: deriveNfPagePdaSync(0, laneId, nextNfSeq, AUDREN_PROGRAM_ID).address,
+    })
+  }
+  const res = await fetcher(needed.map((p) => p.addr))
+  const ixs: AudrenInstruction[] = []
+  for (let i = 0; i < needed.length; i++) {
+    if (!res[i]) {
+      const p = needed[i]!
+      ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: p.kind, pageSeq: p.seq, payer }))
     }
-  } else if (!res[0]) {
-    ixs.push(buildOpenPageInstruction({ poolId: 0, laneId, pageKind: OPEN_PAGE_KIND_NULLIFIER, pageSeq: nfSeq, payer }))
   }
   return ixs
 }
@@ -413,6 +530,8 @@ export function LiveWalletVault() {
   const [relayDraft, setRelayDraft] = useState<string>(defaultRelay)
   const [showRelayConfig, setShowRelayConfig] = useState(false)
   const [useRelayer, setUseRelayer] = useState(true)
+  const [economyMode, setEconomyMode] = useState(false)
+  const [relayerCkptFallback, setRelayerCkptFallback] = useState(false)
 
   const [depositMint, setDepositMint] = useState<string>(NATIVE_SOL_MINT_STR)
   const [depositAmount, setDepositAmount] = useState<string>('0.05')
@@ -422,11 +541,20 @@ export function LiveWalletVault() {
   const [selectedNoteKey, setSelectedNoteKey] = useState<string>('')
   const [sendRecipient, setSendRecipient] = useState<string>('')
   const [sendAmount, setSendAmount] = useState<string>('')
+  const [sendFeePreview, setSendFeePreview] = useState<{
+    relayerFee: bigint
+    billingMode: 'self_paying' | 'sponsored'
+    reason: string
+  } | null>(null)
 
   const [swapOutMint, setSwapOutMint] = useState<string>(USDC_MAINNET_MINT)
   const [swapAmount, setSwapAmount] = useState<string>('')
   const [swapSlippageBps, setSwapSlippageBps] = useState<number>(100)
   const [swapFeeOnOutput, setSwapFeeOnOutput] = useState<boolean>(true)
+  const [swapEscrowShard, setSwapEscrowShard] = useState<number | null>(null)
+  const [swapQuoteShard, setSwapQuoteShard] = useState<number | null>(null)
+  const [swapQuoteNetIn, setSwapQuoteNetIn] = useState<string | null>(null)
+  const [swapInputFeeBps, setSwapInputFeeBps] = useState<number>(0)
   const [swapQuoteOut, setSwapQuoteOut] = useState<string | null>(null)
   const [swapQuoteProvider, setSwapQuoteProvider] = useState<RelayAggregatorId | null>(null)
   const [swapQuoteLoading, setSwapQuoteLoading] = useState(false)
@@ -715,7 +843,13 @@ export function LiveWalletVault() {
     setSwapQuoteOut(null)
     setSwapQuoteRaw(null)
     setSwapQuoteProvider(null)
+    setSwapQuoteShard(null)
+    setSwapQuoteNetIn(null)
+    setSwapInputFeeBps(0)
+    setSwapEscrowShard(pickRandomEscrowShard(NUM_ESCROW_SHARDS))
+    setSendFeePreview(null)
     setWithdrawFeePreview(null)
+    setRelayerCkptFallback(false)
     setReceiptJson('')
     setReceiptVerdict(null)
     setPubSolLamports(0n)
@@ -856,9 +990,44 @@ export function LiveWalletVault() {
     return 0n
   }, [poolInfo])
 
-  // Live swap quote effect: strictly primitive dependencies.
+  // Live swap quote effect: strictly primitive dependencies, cryptographically random escrowShard independent of leafIndex.
   const selectedNoteDecimals = selectedNoteMeta.decimals
-  const selectedNoteShard = selectedNote ? Number(selectedNote.leafIndex % BigInt(NUM_ESCROW_SHARDS)) : 0
+
+  const sameMintNotesDesc = useMemo(() => {
+    if (!selectedNote) return []
+    return unspentNotes
+      .filter((n) => base58Encode(n.mint) === selectedNoteMintStr)
+      .sort((a, b) => (a.amount > b.amount ? -1 : a.amount < b.amount ? 1 : 0))
+  }, [selectedNote, selectedNoteMintStr, unspentNotes])
+
+  const maxSpendableNotePair = useMemo(() => {
+    if (!selectedNote) return 0n
+    if (sameMintNotesDesc.length >= 2) {
+      return sameMintNotesDesc[0]!.amount + sameMintNotesDesc[1]!.amount
+    }
+    return selectedNote.amount
+  }, [selectedNote, sameMintNotesDesc])
+
+  const plannedSendNotes = useMemo(() => {
+    if (!selectedNote) return null
+    const amt = parseUnits(sendAmount, selectedNoteDecimals) ?? 0n
+    const fee = useRelayer && sendFeePreview ? sendFeePreview.relayerFee : 0n
+    return selectInputNotesForMint(selectedNote, unspentNotes, amt + fee)
+  }, [selectedNote, sendAmount, selectedNoteDecimals, useRelayer, sendFeePreview, unspentNotes])
+
+  const plannedWithdrawNotes = useMemo(() => {
+    if (!selectedNote) return null
+    const amt = parseUnits(withdrawAmount, selectedNoteDecimals) ?? 0n
+    const fee = useRelayer && withdrawFeePreview ? withdrawFeePreview.relayerFee : 0n
+    return selectInputNotesForMint(selectedNote, unspentNotes, amt + fee)
+  }, [selectedNote, withdrawAmount, selectedNoteDecimals, useRelayer, withdrawFeePreview, unspentNotes])
+
+  const plannedSwapNotes = useMemo(() => {
+    if (!selectedNote) return null
+    const amt = parseUnits(swapAmount, selectedNoteDecimals) ?? 0n
+    return selectInputNotesForMint(selectedNote, unspentNotes, amt)
+  }, [selectedNote, swapAmount, selectedNoteDecimals, unspentNotes])
+
   const fetchSwapQuote = useCallback(
     async (
       inMint: string,
@@ -875,6 +1044,9 @@ export function LiveWalletVault() {
         setSwapQuoteOut(null)
         setSwapQuoteRaw(null)
         setSwapQuoteProvider(null)
+        setSwapQuoteShard(null)
+        setSwapQuoteNetIn(null)
+        setSwapInputFeeBps(0)
         return
       }
       const rawAmt = parseUnits(amountStr, inDecimals)
@@ -882,6 +1054,9 @@ export function LiveWalletVault() {
         setSwapQuoteOut(null)
         setSwapQuoteRaw(null)
         setSwapQuoteProvider(null)
+        setSwapQuoteShard(null)
+        setSwapQuoteNetIn(null)
+        setSwapInputFeeBps(0)
         return
       }
       setSwapQuoteLoading(true)
@@ -901,6 +1076,8 @@ export function LiveWalletVault() {
             provider?: string
             quote?: { provider?: string; outAmount?: string; rawQuote?: unknown }
             outAmount?: string
+            netInputAmount?: string
+            inputTransferFeeBps?: number
           }
           const outAmt =
             typeof resp.quote?.outAmount === 'string'
@@ -911,28 +1088,40 @@ export function LiveWalletVault() {
           setSwapQuoteOut(outAmt)
           setSwapQuoteProvider(parseAggregatorId(resp.provider ?? resp.quote?.provider))
           setSwapQuoteRaw(resp.quote?.rawQuote ?? resp)
+          setSwapQuoteShard(shardId)
+          setSwapQuoteNetIn(typeof resp.netInputAmount === 'string' ? resp.netInputAmount : rawAmt.toString())
+          setSwapInputFeeBps(typeof resp.inputTransferFeeBps === 'number' ? resp.inputTransferFeeBps : 0)
         } else {
           const res = await fetch('/api/jupiter/quote', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
+              cluster: targetCluster,
               inputMint: inMint,
               outputMint: outMint,
               amount: rawAmt.toString(),
               slippageBps: slippage,
             }),
           })
+          const netInHeader = res.headers.get('x-audren-net-input-amount')
+          const feeBpsHeader = res.headers.get('x-audren-input-transfer-fee-bps')
           const quote = (await res.json()) as Record<string, unknown>
           if (!res.ok) throw new Error(String(quote.error ?? `Quote HTTP ${res.status}`))
           const outAmt = typeof quote.outAmount === 'string' ? quote.outAmount : null
           setSwapQuoteOut(outAmt)
           setSwapQuoteProvider('jupiter')
           setSwapQuoteRaw(quote)
+          setSwapQuoteShard(shardId)
+          setSwapQuoteNetIn(netInHeader ?? (typeof quote.inAmount === 'string' ? quote.inAmount : rawAmt.toString()))
+          setSwapInputFeeBps(feeBpsHeader ? Number(feeBpsHeader) || 0 : 0)
         }
       } catch {
         setSwapQuoteOut(null)
         setSwapQuoteRaw(null)
         setSwapQuoteProvider(null)
+        setSwapQuoteShard(null)
+        setSwapQuoteNetIn(null)
+        setSwapInputFeeBps(0)
       } finally {
         setSwapQuoteLoading(false)
       }
@@ -941,7 +1130,7 @@ export function LiveWalletVault() {
   )
 
   useEffect(() => {
-    if (tab !== 'swap' || !swapAmount.trim() || isSelectedNoteNativeSol) return
+    if (tab !== 'swap' || !swapAmount.trim() || isSelectedNoteNativeSol || swapEscrowShard === null) return
     const timer = setTimeout(() => {
       void fetchSwapQuote(
         selectedNoteMintStr,
@@ -952,7 +1141,7 @@ export function LiveWalletVault() {
         cluster,
         relayUrl,
         useRelayer,
-        selectedNoteShard,
+        swapEscrowShard,
       )
     }, 350)
     return () => clearTimeout(timer)
@@ -966,22 +1155,60 @@ export function LiveWalletVault() {
     cluster,
     relayUrl,
     useRelayer,
-    selectedNoteShard,
+    swapEscrowShard,
     isSelectedNoteNativeSol,
     fetchSwapQuote,
   ])
 
-  // Live withdraw relayer fee preview (primitive dependencies only!)
+  // Live relayer fee preview for Send (zero amount leaked!) & Withdraw (primitive dependencies only!)
   const selectedNoteAmountStr = selectedNote ? selectedNote.amount.toString() : ''
+  const plannedSendInputCount = plannedSendNotes ? plannedSendNotes.length : 1
+  const plannedWithdrawInputCount = plannedWithdrawNotes ? plannedWithdrawNotes.length : 1
+  const plannedWithdrawTotalStr = plannedWithdrawNotes
+    ? plannedWithdrawNotes.reduce((s, n) => s + n.amount, 0n).toString()
+    : selectedNoteAmountStr
+
   useEffect(() => {
-    if (tab !== 'withdraw' || !useRelayer || !selectedNoteAmountStr) {
+    if ((tab !== 'send' && tab !== 'withdraw') || !useRelayer || !selectedNoteAmountStr) {
       return
     }
     let active = true
-    const rawAmt = parseUnits(withdrawAmount, selectedNoteDecimals) ?? BigInt(selectedNoteAmountStr)
+    if (tab === 'send') {
+      const timer = setTimeout(() => {
+        const client = new AudrenRelayClient(relayUrl)
+        const omitNf1 = economyMode && plannedSendInputCount <= 1
+        client
+          .getFeeQuote({
+            cluster,
+            op: 'transfer',
+            mint: selectedNoteMintStr === NATIVE_SOL_MINT_STR ? 'native' : selectedNoteMintStr,
+            outputCount: 3,
+            omitNf1,
+          })
+          .then((fq) => {
+            if (!active) return
+            setSendFeePreview({
+              relayerFee: BigInt(fq.relayerFee || '0'),
+              billingMode: fq.billingMode,
+              reason: fq.reason,
+            })
+          })
+          .catch(() => {
+            if (active) setSendFeePreview(null)
+          })
+      }, 250)
+      return () => {
+        active = false
+        clearTimeout(timer)
+      }
+    }
+
+    const totalAvail = BigInt(plannedWithdrawTotalStr || selectedNoteAmountStr)
+    const rawAmt = parseUnits(withdrawAmount, selectedNoteDecimals) ?? totalAvail
     if (rawAmt <= 0n) return
     const timer = setTimeout(() => {
       const client = new AudrenRelayClient(relayUrl)
+      const omitNf1 = economyMode && plannedWithdrawInputCount <= 1
       client
         .getFeeQuote({
           cluster,
@@ -989,7 +1216,8 @@ export function LiveWalletVault() {
           mint: selectedNoteMintStr === NATIVE_SOL_MINT_STR ? 'native' : selectedNoteMintStr,
           amount: rawAmt.toString(),
           unwrapWsol: unwrapWsol && selectedNoteMintStr === WSOL_MINT,
-          outputCount: rawAmt < BigInt(selectedNoteAmountStr) ? 1 : 0,
+          outputCount: rawAmt < totalAvail ? 1 : 0,
+          omitNf1,
         })
         .then((fq) => {
           if (!active) return
@@ -1015,6 +1243,10 @@ export function LiveWalletVault() {
     selectedNoteDecimals,
     withdrawAmount,
     unwrapWsol,
+    economyMode,
+    plannedSendInputCount,
+    plannedWithdrawInputCount,
+    plannedWithdrawTotalStr,
     cluster,
     relayUrl,
   ])
@@ -1049,11 +1281,119 @@ export function LiveWalletVault() {
     return { signature: sent.signature, slot: sent.slot }
   }
 
+  const requestRelayerCheckpointWithRetry = async (targetCluster: SolanaCluster) => {
+    const relayClient = new AudrenRelayClient(relayUrl)
+    const resp = await relayClient.requestCheckpoint({ cluster: targetCluster, poolId: 0 })
+    if (resp.status === 'cooldown') {
+      const waitMs = Number(resp.waitMs ?? (resp.slotsRemaining ?? 4) * 400)
+      if (Number.isFinite(waitMs) && waitMs > 0 && waitMs <= 12_000) {
+        setStatusMsg(
+          `Waiting ~${Math.ceil(waitMs / 1000)}s for checkpoint epoch cooldown, then requesting relayer checkpoint…`,
+        )
+        await new Promise((r) => setTimeout(r, waitMs))
+        return relayClient.requestCheckpoint({ cluster: targetCluster, poolId: 0 })
+      }
+      throw new Error(
+        `Checkpoint cooldown active (${resp.slotsRemaining ?? 'several'} slots remaining, ~${Math.ceil(waitMs / 1000)}s). Retry shortly.`,
+      )
+    }
+    return resp
+  }
+
+  const ensureCheckpointCoversNotes = async (
+    notesToSpend: readonly OwnedNote[],
+    initialSnap: PoolApiSnapshot,
+  ): Promise<PoolApiSnapshot> => {
+    if (checkpointCoversNotes(initialSnap, notesToSpend)) {
+      return initialSnap
+    }
+    if (!useRelayer) {
+      throw new Error(
+        'Selected note is newer than the latest RootCheckpoint. Click "Publish checkpoint" in the vault card to publish directly with your wallet, then retry.',
+      )
+    }
+    setStatusMsg('Requesting permissionless RootCheckpoint from Privacy Relayer…')
+    try {
+      const ckResp = await requestRelayerCheckpointWithRetry(cluster)
+      if (ckResp.status === 'cooldown') {
+        throw new Error(
+          `Checkpoint cooldown still active (${ckResp.slotsRemaining ?? 'several'} slots remaining). Retry shortly.`,
+        )
+      }
+      setRelayerCkptFallback(false)
+    } catch (ckErr) {
+      const msg = ckErr instanceof Error ? ckErr.message : String(ckErr)
+      if (!/cooldown/i.test(msg)) {
+        setRelayerCkptFallback(true)
+        throw new Error(
+          `Relayer checkpoint endpoint failed (${msg}). Use the fallback "Publish checkpoint" button in your vault card or switch to a relayer supporting POST /v1/checkpoint.`,
+        )
+      }
+      throw ckErr
+    }
+
+    let refreshed = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) =>
+      r.json(),
+    )) as PoolApiSnapshot
+    if (!checkpointCoversNotes(refreshed, notesToSpend)) {
+      await new Promise((r) => setTimeout(r, 1_200))
+      refreshed = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) =>
+        r.json(),
+      )) as PoolApiSnapshot
+    }
+    if (!checkpointCoversNotes(refreshed, notesToSpend)) {
+      throw new Error(
+        'Relayer checkpoint confirmed but RPC snapshot has not caught up yet. Wait a moment and retry.',
+      )
+    }
+    void refreshPoolAndBalances(cluster, connected?.address ?? null)
+    return refreshed
+  }
+
   const handlePublishCheckpoint = async () => {
     setBusy(true)
     setErrorMsg(null)
-    setStatusMsg('Publishing permissionless RootCheckpoint (Tag 5)…')
+    setStatusMsg(
+      useRelayer && !relayerCkptFallback
+        ? 'Requesting permissionless RootCheckpoint from Privacy Relayer…'
+        : 'Publishing permissionless RootCheckpoint (Tag 5)…',
+    )
     try {
+      if (useRelayer && !relayerCkptFallback) {
+        try {
+          const resp = await requestRelayerCheckpointWithRetry(cluster)
+          if (resp.status === 'cooldown') {
+            throw new Error(
+              `Checkpoint cooldown active (${resp.slotsRemaining ?? 'several'} slots remaining). Retry shortly.`,
+            )
+          }
+          if (resp.signature) {
+            setLastReceipt({
+              kind: 'PublishCheckpoint (Tag 5)',
+              signature: resp.signature,
+              cluster,
+              relayed: true,
+              summary: 'Published fresh RootCheckpoint via Privacy Relayer (zero wallet signature)',
+            })
+          }
+          setRelayerCkptFallback(false)
+          await refreshPoolAndBalances(cluster, connected?.address ?? null)
+          setStatusMsg(
+            resp.status === 'up_to_date'
+              ? 'RootCheckpoint is already up to date. Shielded notes are ready to spend.'
+              : 'RootCheckpoint published by Privacy Relayer. Shielded notes are ready to spend.',
+          )
+          return
+        } catch (relayErr) {
+          const msg = relayErr instanceof Error ? relayErr.message : String(relayErr)
+          if (/cooldown/i.test(msg)) throw relayErr
+          setRelayerCkptFallback(true)
+          throw new Error(
+            `Relayer checkpoint failed (${msg}). You can use the manual wallet fallback below (note: signing directly links your public wallet to this checkpoint timestamp).`,
+          )
+        }
+      }
+
       if (cluster === 'devnet' && !connected) {
         const res = await fetch('/api/devnet/checkpoint', { method: 'POST' })
         const json = (await res.json()) as { signature?: string; slotIdx?: number; error?: string }
@@ -1069,7 +1409,7 @@ export function LiveWalletVault() {
         })
       } else {
         if (!connected) {
-          throw new Error('Connect a Solana wallet to publish a permissionless RootCheckpoint on Mainnet')
+          throw new Error('Connect a Solana wallet to publish a RootCheckpoint directly in self-pay mode')
         }
         const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
         if (!snap.initialized) throw new Error(`Pool #0 is not initialized on ${cluster}`)
@@ -1110,21 +1450,24 @@ export function LiveWalletVault() {
     const ckptAddr = deriveCheckpointPdaSync(0, ckptSlotIdx, AUDREN_PROGRAM_ID).address
     const [ckptRaw] = await fetcher([ckptAddr])
     if (!ckptRaw) {
-      throw new Error(`RootCheckpoint #${ckptSlotIdx} not found. Click Publish checkpoint above.`)
+      throw new Error(`RootCheckpoint #${ckptSlotIdx} not found. Request a checkpoint above.`)
     }
     const ckpt = decodeRootCheckpoint(ckptRaw)
     const laneCount = ckpt.laneCounts[note.laneId] ?? 0n
     if (note.leafIndex >= laneCount) {
       throw new Error(
-        `Note (Lane #${note.laneId}, Leaf #${note.leafIndex.toString()}) is newer than the latest RootCheckpoint (covers ${laneCount.toString()} leaves). Click "Publish Checkpoint" above, then retry.`,
+        `Note (Lane #${note.laneId}, Leaf #${note.leafIndex.toString()}) is newer than the latest RootCheckpoint (covers ${laneCount.toString()} leaves). Request a fresh checkpoint, then retry.`,
       )
     }
     // Zero-leak local witness first using frozen intra-subtree siblings + subroots in CompactWalletStore
-    const localWitness = activeStore.buildWitnessForNote(note, ckpt)
-    if (localWitness) {
-      return { ckpt, superRoot: localWitness.superRoot, path: localWitness.path }
+    try {
+      const localWitness = activeStore.buildWitnessForNote(note, ckpt)
+      if (localWitness) {
+        return { ckpt, superRoot: localWitness.superRoot, path: localWitness.path }
+      }
+    } catch {
+      // Fall back cleanly to ordinary batched RPC reconstruction if local store missed frontier/siblings
     }
-    // Fallback to ordinary batched RPC reconstruction if local store was cleared
     return reconstructWitness({
       fetchBatch: fetcher,
       poolId: 0,
@@ -1275,8 +1618,10 @@ export function LiveWalletVault() {
       setStatusMsg('Waiting for wallet approval…')
       const res = await signAndBroadcastDirect(ixs, 280_000)
 
-      // Best-effort Devnet checkpoint crank so freshly deposited Devnet notes become spendable right away
-      if (cluster === 'devnet') {
+      // Best-effort permissionless checkpoint crank so newly deposited notes become spendable quickly
+      if (useRelayer) {
+        await new AudrenRelayClient(relayUrl).requestCheckpoint({ cluster, poolId: 0 }).catch(() => {})
+      } else if (cluster === 'devnet') {
         await fetch('/api/devnet/checkpoint', { method: 'POST' }).catch(() => {})
       }
 
@@ -1313,35 +1658,30 @@ export function LiveWalletVault() {
       const mintStr = base58Encode(selectedNote.mint)
       const isNativeSol = mintStr === NATIVE_SOL_MINT_STR
       const fetcher = createWorkerBatchFetcher(cluster)
-      const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
-      if (!snap.initialized || !snap.latestCheckpoint) {
-        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0. Click "Publish checkpoint" above.`)
+      let snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
+      if (!snap.initialized) {
+        throw new Error(`Pool #0 is not initialized on ${cluster} yet`)
       }
       const currentEpoch = BigInt(snap.currentEpoch ?? '0')
       const mintInfo = isNativeSol ? null : await resolveMintOnChain(cluster, mintStr, currentEpoch)
       const decimals = isNativeSol ? 9 : mintInfo?.decimals ?? getTokenMeta(mintStr).decimals
       const symbol = getTokenMeta(mintStr).symbol
       const amount = parseUnits(mode === 'send' ? sendAmount : withdrawAmount, decimals)
-      if (!amount || amount <= 0n || amount > selectedNote.amount) {
-        throw new Error(`Amount must be between 0 and ${formatUnits(selectedNote.amount, decimals)} ${symbol}`)
+      if (!amount || amount <= 0n) {
+        throw new Error(`Enter a valid positive ${symbol} amount`)
       }
 
-      const ckptSlotIdx = snap.latestCheckpoint.slotIndex
-      const { ckpt, superRoot, path } = await buildLocalOrRpcWitness({
-        activeStore: store,
-        fetcher,
-        ckptSlotIdx,
-        note: selectedNote,
-      })
-
-      const outLaneId = (selectedNote.laneId + 1) % (snap.activeLanes ?? 4)
-      const outLane = snap.lanes?.[outLaneId]
-      const outNextLeaf = BigInt(outLane?.nextLeaf ?? '0')
-      const outNfCount = BigInt(outLane?.nfCount ?? '0')
-      const outSubSeq = outNextLeaf / BigInt(SUBTREE_LEAVES)
-      const outRootSeq = outSubSeq / BigInt(SUBROOTS_PER_PAGE)
-      const outMemoSeq = outNextLeaf / BigInt(MEMO_NOTES_PER_PAGE)
-      const outNfSeq = outNfCount / BigInt(NF_PER_PAGE)
+      let inputNotes = selectInputNotesForMint(selectedNote, unspentNotes, amount)
+      if (!inputNotes) {
+        const noteCount = unspentNotes.filter((n) => base58Encode(n.mint) === mintStr).length
+        throw new Error(
+          noteCount >= 3
+            ? `Amount exceeds the largest 2-note combination (${formatUnits(maxSpendableNotePair, decimals)} ${symbol}). Click "Merge 2 notes" in your vault card to consolidate smaller notes first.`
+            : `Amount must be between 0 and ${formatUnits(maxSpendableNotePair, decimals)} ${symbol}`,
+        )
+      }
+      let totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
+      let omitNf1 = inputNotes.length === 1 && economyMode
 
       let payerPubkey = connected?.address ?? ''
       let relayerFeeAmount = 0n
@@ -1377,32 +1717,99 @@ export function LiveWalletVault() {
         missingRecipientAta = !recAcc
       }
 
+      const fetchRelayerFee = async (curOmitNf1: boolean, curTotalIn: bigint) => {
+        const fq =
+          mode === 'send'
+            ? await relayClient.getFeeQuote({
+                cluster,
+                op: 'transfer',
+                mint: isNativeSol ? 'native' : mintStr,
+                outputCount: 3,
+                omitNf1: curOmitNf1,
+              })
+            : await relayClient.getFeeQuote({
+                cluster,
+                op: 'withdraw',
+                mint: isNativeSol ? 'native' : mintStr,
+                amount: amount.toString(),
+                unwrapWsol: isWsolUnwrap,
+                outputCount: amount < curTotalIn ? 1 : 0,
+                missingAtaCount: missingRecipientAta ? 1 : 0,
+                omitNf1: curOmitNf1,
+              })
+        relayerFeeAmount = BigInt(fq.relayerFee || '0')
+        relayerFeeRecipient = fq.feeRecipient
+        feeShieldedAddr = fq.feeShieldedAddress
+        needsFeeAtaSetup = Boolean(fq.needsFeeAtaSetup)
+      }
+
       if (useRelayer) {
         setStatusMsg('Querying Privacy Relayer fee quote…')
         const info = await relayClient.getInfo(cluster)
         if (!info.relayerPubkey) throw new Error(`Relayer at ${relayUrl} has no fee payer for ${cluster}`)
         payerPubkey = info.relayerPubkey
-        const fq = await relayClient.getFeeQuote({
-          cluster,
-          op: mode === 'send' ? 'transfer' : 'withdraw',
-          mint: isNativeSol ? 'native' : mintStr,
-          amount: amount.toString(),
-          unwrapWsol: isWsolUnwrap,
-          outputCount: mode === 'send' ? 3 : amount < selectedNote.amount ? 1 : 0,
-          missingAtaCount: missingRecipientAta ? 1 : 0,
-        })
-        relayerFeeAmount = BigInt(fq.relayerFee || '0')
-        relayerFeeRecipient = fq.feeRecipient
-        feeShieldedAddr = fq.feeShieldedAddress
-        needsFeeAtaSetup = Boolean(fq.needsFeeAtaSetup)
+        await fetchRelayerFee(omitNf1, totalIn)
+
+        const requiredWithFee =
+          amount + (mode === 'send' ? (feeShieldedAddr ? relayerFeeAmount : 0n) : relayerFeeAmount)
+        if (totalIn < requiredWithFee) {
+          const expanded = selectInputNotesForMint(selectedNote, unspentNotes, requiredWithFee)
+          if (!expanded) {
+            throw new Error(
+              `Insufficient note balance to cover amount + relayer fee (${formatUnits(relayerFeeAmount, decimals)} ${symbol}). Use "Max" to auto-fit.`,
+            )
+          }
+          const grewToTwo = expanded.length === 2 && inputNotes.length === 1
+          inputNotes = expanded
+          totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
+          if (grewToTwo && omitNf1) {
+            omitNf1 = false
+            await fetchRelayerFee(false, totalIn)
+          }
+        }
       } else if (!connected) {
         throw new Error('Enable Privacy Relayer or connect a Solana wallet for Direct Self-Pay')
       }
 
+      // Guarantee 2-input spends never omit nf1
+      if (inputNotes.length > 1) omitNf1 = false
+
+      snap = await ensureCheckpointCoversNotes(inputNotes, snap)
+      const ckptSlotIdx = snap.latestCheckpoint!.slotIndex
+      const witnesses = await Promise.all(
+        inputNotes.map((note) =>
+          buildLocalOrRpcWitness({
+            activeStore: store,
+            fetcher,
+            ckptSlotIdx,
+            note,
+          }),
+        ),
+      )
+      const ckpt = witnesses[0]!.ckpt
+      const superRoot = witnesses[0]!.superRoot
+
+      const outLaneId = pickRandomLaneId(snap.activeLanes ?? 4)
+      const outLane = snap.lanes?.[outLaneId]
+      const outNextLeaf = BigInt(outLane?.nextLeaf ?? '0')
+      const outNfCount = BigInt(outLane?.nfCount ?? '0')
+
       const assetId = deriveAssetId(selectedNote.mint)
-      const noteTweak = frFromBeBytesStrict(selectedNote.tweak)
-      const noteBlinding = frFromBeBytesStrict(selectedNote.blinding)
-      const dummyIn = dummyInputWitness(keys.spendSk, assetId, randomFr())
+      const buildRealInput = (note: OwnedNote, path: MerklePath4Ary): JoinSplitInputWitness => ({
+        isDummy: false,
+        spendSk: keys.spendSk,
+        tweak: frFromBeBytesStrict(note.tweak),
+        assetId,
+        amount: note.amount,
+        blinding: frFromBeBytesStrict(note.blinding),
+        merklePath: path,
+      })
+      const inputs: [JoinSplitInputWitness, JoinSplitInputWitness] = [
+        buildRealInput(inputNotes[0]!, witnesses[0]!.path),
+        inputNotes[1]
+          ? buildRealInput(inputNotes[1]!, witnesses[1]!.path)
+          : dummyInputWitness(keys.spendSk, assetId, randomFr()),
+      ]
 
       const outputs: [JoinSplitOutputWitness, JoinSplitOutputWitness, JoinSplitOutputWitness] = [
         dummyOutputWitness(assetId, randomFr()),
@@ -1415,36 +1822,49 @@ export function LiveWalletVault() {
       if (mode === 'send') {
         const effectiveShieldedFee = feeShieldedAddr ? relayerFeeAmount : 0n
         const rec = parseAudrenAddress(sendRecipient.trim())
-        const mRec = encryptNoteMemo(rec.viewPk, crypto.getRandomValues(new Uint8Array(32)), amount, selectedNote.mint)
-        const recOwner = deriveStealthOwner(frFromBeBytesStrict(rec.spendPk), mRec.tweak)
-        outputs[0] = { stealthOwner: recOwner, assetId, amount, blinding: mRec.blinding }
-        outputMask |= 1
-        memos.push(mRec.memo90)
-
-        const changeAmt = selectedNote.amount - amount - effectiveShieldedFee
+        const changeAmt = totalIn - amount - effectiveShieldedFee
         if (changeAmt < 0n) {
           throw new Error(
             `Insufficient note balance to cover send + relayer fee (${formatUnits(effectiveShieldedFee, decimals)} ${symbol}). Use "Max" to auto-fit.`,
           )
         }
+
+        // Uniform outputMask = 0b111: always emit 3 indistinguishable encrypted 90 B memos
+        const mRec = encryptNoteMemo(rec.viewPk, crypto.getRandomValues(new Uint8Array(32)), amount, selectedNote.mint)
+        const recOwner = deriveStealthOwner(frFromBeBytesStrict(rec.spendPk), mRec.tweak)
+        outputs[0] = { stealthOwner: recOwner, assetId, amount, blinding: mRec.blinding }
+        memos.push(mRec.memo90)
+
         if (changeAmt > 0n) {
           const mCh = encryptNoteMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)), changeAmt, selectedNote.mint)
           const chOwner = deriveStealthOwner(keys.spendPk, mCh.tweak)
           outputs[1] = { stealthOwner: chOwner, assetId, amount: changeAmt, blinding: mCh.blinding }
-          outputMask |= 2
           memos.push(mCh.memo90)
+        } else {
+          const pad1 = createZeroDummyOutput(assetId, selectedNote.mint)
+          outputs[1] = pad1.witness
+          memos.push(pad1.memo90)
         }
 
         if (effectiveShieldedFee > 0n && feeShieldedAddr) {
           const feeRec = parseAudrenAddress(feeShieldedAddr)
-          const mFee = encryptNoteMemo(feeRec.viewPk, crypto.getRandomValues(new Uint8Array(32)), effectiveShieldedFee, selectedNote.mint)
+          const mFee = encryptNoteMemo(
+            feeRec.viewPk,
+            crypto.getRandomValues(new Uint8Array(32)),
+            effectiveShieldedFee,
+            selectedNote.mint,
+          )
           const feeOwner = deriveStealthOwner(frFromBeBytesStrict(feeRec.spendPk), mFee.tweak)
           outputs[2] = { stealthOwner: feeOwner, assetId, amount: effectiveShieldedFee, blinding: mFee.blinding }
-          outputMask |= 4
           memos.push(mFee.memo90)
+        } else {
+          const pad2 = createZeroDummyOutput(assetId, selectedNote.mint)
+          outputs[2] = pad2.witness
+          memos.push(pad2.memo90)
         }
+        outputMask = 0b111
       } else {
-        const changeAmt = selectedNote.amount - amount - relayerFeeAmount
+        const changeAmt = totalIn - amount - relayerFeeAmount
         if (changeAmt < 0n) {
           throw new Error(
             `Insufficient note balance to cover withdrawal + relayer fee (${formatUnits(relayerFeeAmount, decimals)} ${symbol}). Click "Max (net of fee)" to auto-fit.`,
@@ -1458,6 +1878,21 @@ export function LiveWalletVault() {
           memos.push(mCh.memo90)
         }
       }
+
+      const roll = computePageRollovers({
+        leafCount: outNextLeaf,
+        outputCount: popcount3(outputMask),
+        nfCount: outNfCount,
+        spentNullifiers: omitNf1 ? 1 : 2,
+      })
+      const outSubSeq = BigInt(roll.outSubSeq)
+      const outRootSeq = BigInt(roll.outRootSeq)
+      const outMemoSeq = BigInt(roll.outMemoSeq)
+      const outNfSeq = BigInt(roll.nfPageSeq)
+      const nextSubSeq = roll.nextSubSeq !== undefined ? BigInt(roll.nextSubSeq) : null
+      const nextRootSeq = roll.nextRootSeq !== undefined ? BigInt(roll.nextRootSeq) : null
+      const nextMemoSeq = roll.nextMemoSeq !== undefined ? BigInt(roll.nextMemoSeq) : null
+      const nextNfSeq = roll.nextNfSeq !== undefined ? BigInt(roll.nextNfSeq) : null
 
       const memosConcat = new Uint8Array(memos.reduce((s, m) => s + m.byteLength, 0))
       let mOff = 0
@@ -1492,19 +1927,8 @@ export function LiveWalletVault() {
         publicAmountOut: pubOutAmt,
         relayerFeeAmount: pubFeeAmt,
         ctxHash,
-        omitNf1: true,
-        inputs: [
-          {
-            isDummy: false,
-            spendSk: keys.spendSk,
-            tweak: noteTweak,
-            assetId,
-            amount: selectedNote.amount,
-            blinding: noteBlinding,
-            merklePath: path,
-          },
-          dummyIn,
-        ],
+        omitNf1,
+        inputs,
         outputs,
       })
 
@@ -1517,6 +1941,7 @@ export function LiveWalletVault() {
         outRootSeq,
         outMemoSeq,
         outNfSeq,
+        rollover: { nextSubSeq, nextMemoSeq, nextNfSeq },
         payer: payerPubkey,
         proof192: result.proof192,
         nf0: result.nf0,
@@ -1571,6 +1996,10 @@ export function LiveWalletVault() {
           rootSeq: outRootSeq,
           memoSeq: outMemoSeq,
           nfSeq: outNfSeq,
+          nextSubSeq,
+          nextRootSeq,
+          nextMemoSeq,
+          nextNfSeq,
           includeOutputs: outputMask !== 0,
         })
         if (missingRecipientAta && rawRecipient && recipientPubkey) {
@@ -1597,10 +2026,242 @@ export function LiveWalletVault() {
         relayed: useRelayer,
         summary:
           mode === 'send'
-            ? `Sent ${sendAmount} ${symbol} privately (192 B Groth16 · epoch #${ckpt.epochId.toString()})`
-            : `Withdrew ${withdrawAmount} ${symbol}${isWsolUnwrap ? ' (atomic WSOL unwrap)' : ''}`,
+            ? `Sent ${sendAmount} ${symbol} privately (${inputNotes.length} ${inputNotes.length === 1 ? 'note' : 'notes'} · 192 B Groth16 · epoch #${ckpt.epochId.toString()})`
+            : `Withdrew ${withdrawAmount} ${symbol}${isWsolUnwrap ? ' (atomic WSOL unwrap)' : ''}${inputNotes.length === 2 ? ' (2-note spend)' : ''}`,
       })
       setStatusMsg('Confirmed. Syncing CompactWalletStore…')
+      await syncVault(keys, cluster, store, walletScope)
+      await refreshPoolAndBalances(cluster, connected?.address ?? null)
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleMergeNotes = async (mintStr: string) => {
+    if (!keys || !store) return
+    const candidates = unspentNotes
+      .filter((n) => base58Encode(n.mint) === mintStr)
+      .sort((a, b) => (a.amount < b.amount ? -1 : a.amount > b.amount ? 1 : 0))
+    if (candidates.length < 2) return
+
+    const noteA = candidates[0]!
+    const noteB = candidates[1]!
+    const isNativeSol = mintStr === NATIVE_SOL_MINT_STR
+    const info = getTokenMeta(mintStr)
+
+    setBusy(true)
+    setErrorMsg(null)
+    setStatusMsg(`Consolidating 2 smallest ${info.symbol} notes into 1…`)
+    try {
+      const fetcher = createWorkerBatchFetcher(cluster)
+      let snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
+      if (!snap.initialized) {
+        throw new Error(`Pool #0 is not initialized on ${cluster} yet`)
+      }
+
+      const relayClient = new AudrenRelayClient(relayUrl)
+      let payerPubkey = connected?.address ?? ''
+      let relayerFeeAmount = 0n
+      let feeShieldedAddr: string | null = null
+
+      if (useRelayer) {
+        setStatusMsg('Querying Privacy Relayer fee quote…')
+        const relayInfo = await relayClient.getInfo(cluster)
+        if (!relayInfo.relayerPubkey) {
+          throw new Error(`Relayer at ${relayUrl} has no fee payer for ${cluster}`)
+        }
+        payerPubkey = relayInfo.relayerPubkey
+        const fq = await relayClient.getFeeQuote({
+          cluster,
+          op: 'transfer',
+          mint: isNativeSol ? 'native' : mintStr,
+          outputCount: 3,
+          omitNf1: false,
+        })
+        relayerFeeAmount = BigInt(fq.relayerFee || '0')
+        feeShieldedAddr = fq.feeShieldedAddress
+      } else if (!connected) {
+        throw new Error('Enable Privacy Relayer or connect a Solana wallet to merge notes')
+      }
+
+      const effectiveShieldedFee = feeShieldedAddr ? relayerFeeAmount : 0n
+      const mergedAmount = noteA.amount + noteB.amount - effectiveShieldedFee
+      if (mergedAmount <= 0n) {
+        throw new Error(
+          `Combined balance of the 2 smallest ${info.symbol} notes (${formatUnits(noteA.amount + noteB.amount, info.decimals)} ${info.symbol}) does not exceed the relayer fee (${formatUnits(effectiveShieldedFee, info.decimals)} ${info.symbol}).`,
+        )
+      }
+
+      snap = await ensureCheckpointCoversNotes([noteA, noteB], snap)
+      const ckptSlotIdx = snap.latestCheckpoint!.slotIndex
+      const [wA, wB] = await Promise.all([
+        buildLocalOrRpcWitness({ activeStore: store, fetcher, ckptSlotIdx, note: noteA }),
+        buildLocalOrRpcWitness({ activeStore: store, fetcher, ckptSlotIdx, note: noteB }),
+      ])
+
+      const outLaneId = pickRandomLaneId(snap.activeLanes ?? 4)
+      const outLane = snap.lanes?.[outLaneId]
+      const outNextLeaf = BigInt(outLane?.nextLeaf ?? '0')
+      const outNfCount = BigInt(outLane?.nfCount ?? '0')
+      const roll = computePageRollovers({
+        leafCount: outNextLeaf,
+        outputCount: 3,
+        nfCount: outNfCount,
+        spentNullifiers: 2,
+      })
+      const outSubSeq = BigInt(roll.outSubSeq)
+      const outRootSeq = BigInt(roll.outRootSeq)
+      const outMemoSeq = BigInt(roll.outMemoSeq)
+      const outNfSeq = BigInt(roll.nfPageSeq)
+      const nextSubSeq = roll.nextSubSeq !== undefined ? BigInt(roll.nextSubSeq) : null
+      const nextRootSeq = roll.nextRootSeq !== undefined ? BigInt(roll.nextRootSeq) : null
+      const nextMemoSeq = roll.nextMemoSeq !== undefined ? BigInt(roll.nextMemoSeq) : null
+      const nextNfSeq = roll.nextNfSeq !== undefined ? BigInt(roll.nextNfSeq) : null
+
+      const assetId = deriveAssetId(noteA.mint)
+      const mSelf = encryptNoteMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)), mergedAmount, noteA.mint)
+      const selfOwner = deriveStealthOwner(keys.spendPk, mSelf.tweak)
+      const pad1 = createZeroDummyOutput(assetId, noteA.mint)
+
+      let out2Witness: JoinSplitOutputWitness
+      let out2Memo: Uint8Array
+      if (effectiveShieldedFee > 0n && feeShieldedAddr) {
+        const feeRec = parseAudrenAddress(feeShieldedAddr)
+        const mFee = encryptNoteMemo(
+          feeRec.viewPk,
+          crypto.getRandomValues(new Uint8Array(32)),
+          effectiveShieldedFee,
+          noteA.mint,
+        )
+        out2Witness = {
+          stealthOwner: deriveStealthOwner(frFromBeBytesStrict(feeRec.spendPk), mFee.tweak),
+          assetId,
+          amount: effectiveShieldedFee,
+          blinding: mFee.blinding,
+        }
+        out2Memo = mFee.memo90
+      } else {
+        const pad2 = createZeroDummyOutput(assetId, noteA.mint)
+        out2Witness = pad2.witness
+        out2Memo = pad2.memo90
+      }
+
+      const memosConcat = concatBytes(mSelf.memo90, pad1.memo90, out2Memo)
+      const ctxHash = computeJoinsplitCtxHash({
+        poolId: 0,
+        outLaneId,
+        outputMask: 0b111,
+        assetMode: ASSET_MODE_PRIVATE,
+        unwrapWsol: false,
+        recipient: null,
+        relayerFeeRecipient: null,
+        publicAssetId: new Uint8Array(32),
+        publicAmountOut: 0n,
+        relayerFeeAmount: 0n,
+        memosBytes: memosConcat,
+      })
+
+      setStatusMsg('Generating 192-byte BN254 Groth16 proof in browser WASM…')
+      const { result, elapsedMs } = await proveJoinsplitInBrowser({
+        superRoot: wA.superRoot,
+        txAssetId: assetId,
+        publicAssetId: 0n,
+        publicAmountOut: 0n,
+        relayerFeeAmount: 0n,
+        ctxHash,
+        omitNf1: false,
+        inputs: [
+          {
+            isDummy: false,
+            spendSk: keys.spendSk,
+            tweak: frFromBeBytesStrict(noteA.tweak),
+            assetId,
+            amount: noteA.amount,
+            blinding: frFromBeBytesStrict(noteA.blinding),
+            merklePath: wA.path,
+          },
+          {
+            isDummy: false,
+            spendSk: keys.spendSk,
+            tweak: frFromBeBytesStrict(noteB.tweak),
+            assetId,
+            amount: noteB.amount,
+            blinding: frFromBeBytesStrict(noteB.blinding),
+            merklePath: wB.path,
+          },
+        ],
+        outputs: [
+          { stealthOwner: selfOwner, assetId, amount: mergedAmount, blinding: mSelf.blinding },
+          pad1.witness,
+          out2Witness,
+        ],
+      })
+
+      const ix = buildJoinsplitInstruction({
+        poolId: 0,
+        outLaneId,
+        ckptSlotIdx,
+        outSubSeq,
+        outRootSeq,
+        outMemoSeq,
+        outNfSeq,
+        rollover: { nextSubSeq, nextMemoSeq, nextNfSeq },
+        payer: payerPubkey,
+        proof192: result.proof192,
+        nf0: result.nf0,
+        nf1: result.nf1,
+        cm0: result.cm0,
+        cm1: result.cm1,
+        cm2: result.cm2,
+        outputMask: 0b111,
+        assetMode: ASSET_MODE_PRIVATE,
+        unwrapWsol: false,
+        publicAmountOut: 0n,
+        relayerFeeAmount: 0n,
+        memosBytes: memosConcat,
+      })
+
+      let signature: string
+      if (useRelayer) {
+        setStatusMsg('Submitting zero-signer 2-to-1 merge proof to Privacy Relayer…')
+        const sub = await relayClient.submitRelayedInstruction({
+          cluster,
+          instructionDataB64: toBase64(ix.data),
+          accounts: ix.accounts,
+          computeUnitLimit: 320_000,
+        })
+        signature = sub.signature
+      } else {
+        const preIxs = await ensureLanePagesPreIxs({
+          fetcher,
+          payer: payerPubkey,
+          laneId: outLaneId,
+          subSeq: outSubSeq,
+          rootSeq: outRootSeq,
+          memoSeq: outMemoSeq,
+          nfSeq: outNfSeq,
+          nextSubSeq,
+          nextRootSeq,
+          nextMemoSeq,
+          nextNfSeq,
+          includeOutputs: true,
+        })
+        setStatusMsg('Waiting for wallet approval…')
+        const sent = await signAndBroadcastDirect([...preIxs, ix], 350_000)
+        signature = sent.signature
+      }
+
+      setLastReceipt({
+        kind: 'JoinSplit Note Merge 2 -> 1 (Tag 6)',
+        signature,
+        cluster,
+        proverMs: elapsedMs,
+        relayed: useRelayer,
+        summary: `Consolidated 2 ${info.symbol} notes into 1 note (${formatUnits(mergedAmount, info.decimals)} ${info.symbol})`,
+      })
+      setStatusMsg('Merge confirmed. Syncing CompactWalletStore…')
       await syncVault(keys, cluster, store, walletScope)
       await refreshPoolAndBalances(cluster, connected?.address ?? null)
     } catch (err) {
@@ -1627,9 +2288,9 @@ export function LiveWalletVault() {
       }
 
       const fetcher = createWorkerBatchFetcher(cluster)
-      const snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
-      if (!snap.initialized || !snap.latestCheckpoint) {
-        throw new Error(`No fresh RootCheckpoint found on ${cluster} Pool #0. Click "Publish checkpoint" above.`)
+      let snap = (await fetch(`/api/pool?cluster=${cluster}&poolId=0`).then((r) => r.json())) as PoolApiSnapshot
+      if (!snap.initialized) {
+        throw new Error(`Pool #0 is not initialized on ${cluster} yet`)
       }
       const currentEpoch = BigInt(snap.currentEpoch ?? '0')
       const [inMintInfo, outMintInfo] = await Promise.all([
@@ -1642,17 +2303,65 @@ export function LiveWalletVault() {
       const inSym = getTokenMeta(inMintStr).symbol
 
       const amountIn = parseUnits(swapAmount, inDec)
-      if (!amountIn || amountIn <= 0n || amountIn > selectedNote.amount) {
-        throw new Error(`Invalid swap input amount (max ${formatUnits(selectedNote.amount, inDec)} ${inSym})`)
+      if (!amountIn || amountIn <= 0n) {
+        throw new Error(`Invalid swap input amount (max ${formatUnits(maxSpendableNotePair, inDec)} ${inSym})`)
       }
 
-      const escrowShard = Number(selectedNote.leafIndex % BigInt(NUM_ESCROW_SHARDS))
+      let inputNotes = selectInputNotesForMint(selectedNote, unspentNotes, amountIn)
+      if (!inputNotes) {
+        const noteCount = unspentNotes.filter((n) => base58Encode(n.mint) === inMintStr).length
+        throw new Error(
+          noteCount >= 3
+            ? `Swap input exceeds the largest 2-note combination (${formatUnits(maxSpendableNotePair, inDec)} ${inSym}). Click "Merge 2 notes" in your vault card first.`
+            : `Invalid swap input amount (max ${formatUnits(maxSpendableNotePair, inDec)} ${inSym})`,
+        )
+      }
+      let totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
+      let omitNf1 = inputNotes.length === 1 && economyMode
+
+      const escrowShard = swapQuoteShard ?? swapEscrowShard ?? pickRandomEscrowShard(NUM_ESCROW_SHARDS)
       const vaultAuth = deriveVaultAuthPdaSync(0, AUDREN_PROGRAM_ID).address
       const escrowPda = deriveEscrowPdaSync(0, escrowShard, AUDREN_PROGRAM_ID).address
       const inVaultAta = deriveAssociatedTokenAddressSync(vaultAuth, inMintStr, inTokenProgram).address
       const inEscrowAta = deriveAssociatedTokenAddressSync(escrowPda, inMintStr, inTokenProgram).address
       const outVaultAta = deriveAssociatedTokenAddressSync(vaultAuth, swapOutMint, outTokenProgram).address
       const outEscrowAta = deriveAssociatedTokenAddressSync(escrowPda, swapOutMint, outTokenProgram).address
+
+      let activeQuoteRaw: unknown = swapQuoteRaw
+      let activeQuoteOut: string = swapQuoteOut
+
+      // Defense-in-depth for Direct Self-Pay Token-2022 TransferFeeConfig input mints:
+      // ensure Jupiter's quoted input strictly matches net tokens arriving at escrow_in_ata.
+      if (!useRelayer && inMintInfo.transferFee) {
+        const expectedNetIn = computeToken2022NetAmount(amountIn, inMintInfo.transferFee)
+        if (expectedNetIn <= 0n) {
+          throw new Error('Net swap input after Token-2022 TransferFeeConfig must be > 0')
+        }
+        const quotedIn =
+          activeQuoteRaw && typeof activeQuoteRaw === 'object' && 'inAmount' in activeQuoteRaw
+            ? String((activeQuoteRaw as { inAmount?: unknown }).inAmount ?? '')
+            : ''
+        if (quotedIn !== expectedNetIn.toString()) {
+          const requoteRes = await fetch('/api/jupiter/quote', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              cluster,
+              inputMint: inMintStr,
+              outputMint: swapOutMint,
+              amount: expectedNetIn.toString(),
+              amountIsNet: true,
+              slippageBps: swapSlippageBps,
+            }),
+          })
+          const requoted = (await requoteRes.json()) as Record<string, unknown>
+          if (!requoteRes.ok || typeof requoted.outAmount !== 'string') {
+            throw new Error(String(requoted.error ?? 'Failed to quote Token-2022 net swap input'))
+          }
+          activeQuoteRaw = requoted
+          activeQuoteOut = requoted.outAmount
+        }
+      }
 
       const relayClient = new AudrenRelayClient(relayUrl)
       let routerProg: string
@@ -1673,7 +2382,7 @@ export function LiveWalletVault() {
 
         const built = await relayClient.buildSwapInstructions({
           provider: winningProvider,
-          quoteResponse: swapQuoteRaw,
+          quoteResponse: activeQuoteRaw,
           inputMint: inMintStr,
           outputMint: swapOutMint,
           cluster,
@@ -1691,21 +2400,41 @@ export function LiveWalletVault() {
           tokenProgram: m.tokenProgram,
         }))
 
-        const fq = await relayClient.getFeeQuote({
-          cluster,
-          op: 'exec_escrow',
-          mint: swapFeeOnOutput ? swapOutMint : inMintStr,
-          amount: swapFeeOnOutput ? swapQuoteOut : amountIn.toString(),
-          feeOnOutput: swapFeeOnOutput,
-          missingAtaCount: relaySetupAtas.length,
-        })
-        relayerFeeAmount = BigInt(fq.relayerFee || '0')
-        relayerFeeRecipient = fq.feeRecipient
-        if (relayerFeeAmount > 0n && fq.needsFeeAtaSetup) {
-          const feeMint = swapFeeOnOutput ? swapOutMint : inMintStr
-          const feeTp = swapFeeOnOutput ? outTokenProgram : inTokenProgram
-          if (!relaySetupAtas.some((a) => a.owner === payerPubkey && a.mint === feeMint)) {
-            relaySetupAtas.push({ owner: payerPubkey, mint: feeMint, tokenProgram: feeTp })
+        const fetchExecFee = async (curOmitNf1: boolean) => {
+          const fq = await relayClient.getFeeQuote({
+            cluster,
+            op: 'exec_escrow',
+            mint: swapFeeOnOutput ? swapOutMint : inMintStr,
+            amount: swapFeeOnOutput ? activeQuoteOut : amountIn.toString(),
+            feeOnOutput: swapFeeOnOutput,
+            missingAtaCount: relaySetupAtas.length,
+            omitNf1: curOmitNf1,
+          })
+          relayerFeeAmount = BigInt(fq.relayerFee || '0')
+          relayerFeeRecipient = fq.feeRecipient
+          if (relayerFeeAmount > 0n && fq.needsFeeAtaSetup) {
+            const feeMint = swapFeeOnOutput ? swapOutMint : inMintStr
+            const feeTp = swapFeeOnOutput ? outTokenProgram : inTokenProgram
+            if (!relaySetupAtas.some((a) => a.owner === payerPubkey && a.mint === feeMint)) {
+              relaySetupAtas.push({ owner: payerPubkey, mint: feeMint, tokenProgram: feeTp })
+            }
+          }
+        }
+        await fetchExecFee(omitNf1)
+
+        if (!swapFeeOnOutput && relayerFeeAmount > 0n && totalIn < amountIn + relayerFeeAmount) {
+          const expanded = selectInputNotesForMint(selectedNote, unspentNotes, amountIn + relayerFeeAmount)
+          if (!expanded) {
+            throw new Error(
+              `Insufficient note balance for swap + input fee (${formatUnits(relayerFeeAmount, inDec)} ${inSym})`,
+            )
+          }
+          const grewToTwo = expanded.length === 2 && inputNotes.length === 1
+          inputNotes = expanded
+          totalIn = inputNotes.reduce((s, n) => s + n.amount, 0n)
+          if (grewToTwo && omitNf1) {
+            omitNf1 = false
+            await fetchExecFee(false)
           }
         }
       } else {
@@ -1715,7 +2444,7 @@ export function LiveWalletVault() {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             cluster,
-            quoteResponse: swapQuoteRaw,
+            quoteResponse: activeQuoteRaw,
             poolId: 0,
             shardId: escrowShard,
             inputMint: inMintStr,
@@ -1740,6 +2469,8 @@ export function LiveWalletVault() {
         directLookupTables = built.lookupTables
       }
 
+      if (inputNotes.length > 1) omitNf1 = false
+
       // CRITICAL: on-chain ExecViaEscrow forbids EXEC_FLAG_FEE_ON_OUTPUT when relayer_fee_amount == 0!
       const effectiveFeeOnOutput = swapFeeOnOutput && relayerFeeAmount > 0n
 
@@ -1761,7 +2492,7 @@ export function LiveWalletVault() {
       )
 
       // Compute net slippage floor AFTER output relayer fee & output Token-2022 TransferFeeConfig
-      const grossMinOut = (BigInt(swapQuoteOut) * BigInt(10_000 - swapSlippageBps)) / 10_000n
+      const grossMinOut = (BigInt(activeQuoteOut) * BigInt(10_000 - swapSlippageBps)) / 10_000n
       const afterRelayerFee = effectiveFeeOnOutput
         ? grossMinOut > relayerFeeAmount
           ? grossMinOut - relayerFeeAmount
@@ -1770,31 +2501,31 @@ export function LiveWalletVault() {
       const netMinOut = computeToken2022NetAmount(afterRelayerFee, outMintInfo.transferFee)
       const minOut = netMinOut > 0n ? netMinOut : 1n
 
-      const ckptSlotIdx = snap.latestCheckpoint.slotIndex
-      const { superRoot, path } = await buildLocalOrRpcWitness({
-        activeStore: store,
-        fetcher,
-        ckptSlotIdx,
-        note: selectedNote,
-      })
+      snap = await ensureCheckpointCoversNotes(inputNotes, snap)
+      const ckptSlotIdx = snap.latestCheckpoint!.slotIndex
+      const witnesses = await Promise.all(
+        inputNotes.map((note) =>
+          buildLocalOrRpcWitness({
+            activeStore: store,
+            fetcher,
+            ckptSlotIdx,
+            note,
+          }),
+        ),
+      )
+      const superRoot = witnesses[0]!.superRoot
 
-      const outLaneId = (selectedNote.laneId + 1) % (snap.activeLanes ?? 4)
+      const outLaneId = pickRandomLaneId(snap.activeLanes ?? 4)
       const outLane = snap.lanes?.[outLaneId]
       const outNextLeaf = BigInt(outLane?.nextLeaf ?? '0')
       const outNfCount = BigInt(outLane?.nfCount ?? '0')
-      const outSubSeq = outNextLeaf / BigInt(SUBTREE_LEAVES)
-      const outRootSeq = outSubSeq / BigInt(SUBROOTS_PER_PAGE)
-      const outMemoSeq = outNextLeaf / BigInt(MEMO_NOTES_PER_PAGE)
-      const outNfSeq = outNfCount / BigInt(NF_PER_PAGE)
 
       const assetIn = deriveAssetId(selectedNote.mint)
       const outMintBytes = base58Decode(swapOutMint)
       const assetOut = deriveAssetId(outMintBytes)
-      const noteTweak = frFromBeBytesStrict(selectedNote.tweak)
-      const noteBlinding = frFromBeBytesStrict(selectedNote.blinding)
 
       const inFee = effectiveFeeOnOutput ? 0n : relayerFeeAmount
-      const changeAmt = selectedNote.amount - amountIn - inFee
+      const changeAmt = totalIn - amountIn - inFee
       if (changeAmt < 0n) {
         throw new Error(
           `Insufficient note balance for swap + input fee (${formatUnits(inFee, inDec)} ${inSym})`,
@@ -1815,6 +2546,21 @@ export function LiveWalletVault() {
         changeMask = 1
         changeMemos = mCh.memo90
       }
+
+      const roll = computePageRollovers({
+        leafCount: outNextLeaf,
+        outputCount: 1 + popcount3(changeMask),
+        nfCount: outNfCount,
+        spentNullifiers: omitNf1 ? 1 : 2,
+      })
+      const outSubSeq = BigInt(roll.outSubSeq)
+      const outRootSeq = BigInt(roll.outRootSeq)
+      const outMemoSeq = BigInt(roll.outMemoSeq)
+      const outNfSeq = BigInt(roll.nfPageSeq)
+      const nextSubSeq = roll.nextSubSeq !== undefined ? BigInt(roll.nextSubSeq) : null
+      const nextRootSeq = roll.nextRootSeq !== undefined ? BigInt(roll.nextRootSeq) : null
+      const nextMemoSeq = roll.nextMemoSeq !== undefined ? BigInt(roll.nextMemoSeq) : null
+      const nextNfSeq = roll.nextNfSeq !== undefined ? BigInt(roll.nextNfSeq) : null
 
       const dyn = prepareDynamicSwapMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)))
       const outStealthOwner = deriveStealthOwner(keys.spendPk, dyn.tweak)
@@ -1843,6 +2589,22 @@ export function LiveWalletVault() {
         changeMemos,
       })
 
+      const buildSwapInput = (note: OwnedNote, path: MerklePath4Ary): JoinSplitInputWitness => ({
+        isDummy: false,
+        spendSk: keys.spendSk,
+        tweak: frFromBeBytesStrict(note.tweak),
+        assetId: assetIn,
+        amount: note.amount,
+        blinding: frFromBeBytesStrict(note.blinding),
+        merklePath: path,
+      })
+      const swapInputs: [JoinSplitInputWitness, JoinSplitInputWitness] = [
+        buildSwapInput(inputNotes[0]!, witnesses[0]!.path),
+        inputNotes[1]
+          ? buildSwapInput(inputNotes[1]!, witnesses[1]!.path)
+          : dummyInputWitness(keys.spendSk, assetIn, randomFr()),
+      ]
+
       setStatusMsg('Generating 192-byte BN254 Groth16 proof in browser WASM…')
       const { result, elapsedMs } = await proveJoinsplitInBrowser({
         superRoot,
@@ -1851,19 +2613,8 @@ export function LiveWalletVault() {
         publicAmountOut: amountIn,
         relayerFeeAmount: inFee,
         ctxHash,
-        omitNf1: true,
-        inputs: [
-          {
-            isDummy: false,
-            spendSk: keys.spendSk,
-            tweak: noteTweak,
-            assetId: assetIn,
-            amount: selectedNote.amount,
-            blinding: noteBlinding,
-            merklePath: path,
-          },
-          dummyInputWitness(keys.spendSk, assetIn, randomFr()),
-        ],
+        omitNf1,
+        inputs: swapInputs,
         outputs,
       })
 
@@ -1876,6 +2627,7 @@ export function LiveWalletVault() {
         outRootSeq,
         outMemoSeq,
         outNfSeq,
+        rollover: { nextSubSeq, nextMemoSeq, nextNfSeq },
         payer: payerPubkey,
         proof192: result.proof192,
         nf0: result.nf0,
@@ -1935,6 +2687,10 @@ export function LiveWalletVault() {
           rootSeq: outRootSeq,
           memoSeq: outMemoSeq,
           nfSeq: outNfSeq,
+          nextSubSeq,
+          nextRootSeq,
+          nextMemoSeq,
+          nextNfSeq,
           includeOutputs: true,
         })
         const ataPrep = await fetcher([outVaultAta, outEscrowAta, inEscrowAta])
@@ -1982,8 +2738,10 @@ export function LiveWalletVault() {
         cluster,
         proverMs: elapsedMs,
         relayed: useRelayer,
-        summary: `Swapped ${swapAmount} ${inSym} → ${getTokenMeta(swapOutMint).symbol} via isolated Escrow #${escrowShard} (${winningProvider})`,
+        summary: `Swapped ${swapAmount} ${inSym} → ${getTokenMeta(swapOutMint).symbol} via isolated Escrow #${escrowShard} (${winningProvider})${inputNotes.length === 2 ? ' · 2-note spend' : ''}`,
       })
+      setSwapEscrowShard(pickRandomEscrowShard(NUM_ESCROW_SHARDS))
+      setSwapQuoteShard(null)
       setStatusMsg('Swap confirmed. Syncing CompactWalletStore…')
       await syncVault(keys, cluster, store, walletScope)
       await refreshPoolAndBalances(cluster, connected?.address ?? null)
@@ -2110,19 +2868,29 @@ export function LiveWalletVault() {
   }
 
   const totalShieldedByMint = useMemo(() => {
-    const map = new Map<string, bigint>()
+    const map = new Map<string, { total: bigint; count: number }>()
     for (const n of unspentNotes) {
       const m = base58Encode(n.mint)
-      map.set(m, (map.get(m) ?? 0n) + n.amount)
+      const prev = map.get(m)
+      map.set(m, { total: (prev?.total ?? 0n) + n.amount, count: (prev?.count ?? 0) + 1 })
     }
     return Array.from(map.entries())
   }, [unspentNotes])
 
+  const maxSendNet = useMemo(() => {
+    if (!selectedNote) return 0n
+    const fee = useRelayer && sendFeePreview ? sendFeePreview.relayerFee : 0n
+    return maxSpendableNotePair > fee ? maxSpendableNotePair - fee : 0n
+  }, [selectedNote, maxSpendableNotePair, useRelayer, sendFeePreview])
+
   const maxWithdrawNet = useMemo(() => {
     if (!selectedNote) return 0n
     const fee = useRelayer && withdrawFeePreview ? withdrawFeePreview.relayerFee : 0n
-    return selectedNote.amount > fee ? selectedNote.amount - fee : 0n
-  }, [selectedNote, useRelayer, withdrawFeePreview])
+    return maxSpendableNotePair > fee ? maxSpendableNotePair - fee : 0n
+  }, [selectedNote, maxSpendableNotePair, useRelayer, withdrawFeePreview])
+
+  const activePlannedNotes =
+    tab === 'send' ? plannedSendNotes : tab === 'withdraw' ? plannedWithdrawNotes : tab === 'swap' ? plannedSwapNotes : null
 
   return (
     <div className="lv-shell">
@@ -2335,17 +3103,27 @@ export function LiveWalletVault() {
               <div className="lv-notice-bar is-warn">
                 <AlertCircle size={14} />
                 <span style={{ flex: 1 }}>
-                  {slotsUntilNextCheckpoint > 0n
-                    ? `Recent deposit awaiting next checkpoint epoch (~${slotsUntilNextCheckpoint.toString()} slots). Refresh shortly to publish.`
-                    : 'A fresh RootCheckpoint is needed before spending your latest deposited note.'}
+                  {useRelayer && !relayerCkptFallback
+                    ? slotsUntilNextCheckpoint > 0n
+                      ? `Recent deposit awaiting next checkpoint epoch (~${slotsUntilNextCheckpoint.toString()} slots). Your Privacy Relayer publishes it automatically when you spend, or request it now.`
+                      : 'A fresh RootCheckpoint is needed before spending your latest note. Your Privacy Relayer can publish it permissionlessly without linking your wallet.'
+                    : relayerCkptFallback
+                      ? 'Custom relayer checkpoint endpoint unavailable. Privacy note: publishing directly with your wallet links your public address to this checkpoint timestamp.'
+                      : slotsUntilNextCheckpoint > 0n
+                        ? `Recent deposit awaiting next checkpoint epoch (~${slotsUntilNextCheckpoint.toString()} slots). Refresh shortly to publish.`
+                        : 'A fresh RootCheckpoint is needed before spending your latest deposited note.'}
                 </span>
                 <button
                   type="button"
                   className="lv-mini-btn"
-                  disabled={busy || slotsUntilNextCheckpoint > 0n || (cluster === 'mainnet' && !connected)}
+                  disabled={
+                    busy ||
+                    (!(useRelayer && !relayerCkptFallback) &&
+                      (slotsUntilNextCheckpoint > 0n || (cluster === 'mainnet' && !connected)))
+                  }
                   onClick={handlePublishCheckpoint}
                 >
-                  Publish checkpoint
+                  {useRelayer && !relayerCkptFallback ? 'Request relayer checkpoint' : 'Publish checkpoint'}
                 </button>
               </div>
             )}
@@ -2360,20 +3138,34 @@ export function LiveWalletVault() {
                   <span className="lv-balance-amt mono">0.00</span>
                 </div>
               ) : (
-                totalShieldedByMint.map(([m, total]) => {
+                totalShieldedByMint.map(([m, { total, count }]) => {
                   const info = getTokenMeta(m)
                   return (
                     <div key={m} className="lv-balance-row">
                       <div>
                         <span className="lv-row-title">{info.symbol}</span>
-                        <span className="mono">{shortHash(m, 6, 4)}</span>
+                        <span className="mono">
+                          {shortHash(m, 6, 4)} · {count} {count === 1 ? 'note' : 'notes'}
+                        </span>
                       </div>
                       {strangerView ? (
                         <span className="lv-redacted-bar mono">Encrypted 90 B memo</span>
                       ) : (
-                        <span className="lv-balance-amt is-pine mono">
-                          {formatUnits(total, info.decimals)} {info.symbol}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          <span className="lv-balance-amt is-pine mono">
+                            {formatUnits(total, info.decimals)} {info.symbol}
+                          </span>
+                          {count >= 2 && (
+                            <button
+                              type="button"
+                              className="lv-mini-btn"
+                              disabled={busy}
+                              onClick={() => handleMergeNotes(m)}
+                            >
+                              <Layers size={12} /> Merge 2 notes
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
                   )
@@ -2417,7 +3209,10 @@ export function LiveWalletVault() {
                     <input
                       type="checkbox"
                       checked={useRelayer}
-                      onChange={(e) => setUseRelayer(e.target.checked)}
+                      onChange={(e) => {
+                        setUseRelayer(e.target.checked)
+                        setRelayerCkptFallback(false)
+                      }}
                     />
                     <span>Route spends through Privacy Relayer (zero user signer on Solana)</span>
                   </label>
@@ -2444,6 +3239,7 @@ export function LiveWalletVault() {
                       onClick={() => {
                         if (isAllowedRelayUrl(relayDraft)) {
                           setRelayUrl(relayDraft)
+                          setRelayerCkptFallback(false)
                           window.localStorage.setItem(RELAY_STORAGE_KEY, relayDraft)
                           setShowRelayConfig(false)
                         } else {
@@ -2479,6 +3275,9 @@ export function LiveWalletVault() {
                   onClick={() => {
                     setTab(id)
                     setErrorMsg(null)
+                    if (id === 'swap') {
+                      setSwapEscrowShard((prev) => prev ?? pickRandomEscrowShard(NUM_ESCROW_SHARDS))
+                    }
                   }}
                 >
                   <span className="lv-verb-title">
@@ -2573,7 +3372,10 @@ export function LiveWalletVault() {
                     <select
                       className="lv-select mono"
                       value={selectedNote ? `${selectedNote.laneId}:${selectedNote.leafIndex.toString()}` : ''}
-                      onChange={(e) => setSelectedNoteKey(e.target.value)}
+                      onChange={(e) => {
+                        setSelectedNoteKey(e.target.value)
+                        setSwapEscrowShard(pickRandomEscrowShard(NUM_ESCROW_SHARDS))
+                      }}
                       disabled={unspentNotes.length === 0}
                     >
                       {unspentNotes.length === 0 ? (
@@ -2591,6 +3393,18 @@ export function LiveWalletVault() {
                         })
                       )}
                     </select>
+                    {activePlannedNotes && activePlannedNotes.length === 2 && (
+                      <span className="lv-quote-loading mono">
+                        Auto-combining 2 {selectedNoteMeta.symbol} notes (Lane #{activePlannedNotes[0]!.laneId} Leaf #
+                        {activePlannedNotes[0]!.leafIndex.toString()} + Lane #{activePlannedNotes[1]!.laneId} Leaf #
+                        {activePlannedNotes[1]!.leafIndex.toString()} ·{' '}
+                        {formatUnits(
+                          activePlannedNotes[0]!.amount + activePlannedNotes[1]!.amount,
+                          selectedNoteDecimals,
+                        )}{' '}
+                        {selectedNoteMeta.symbol}) with 2 nullifiers.
+                      </span>
+                    )}
                   </div>
 
                   {tab === 'send' && (
@@ -2613,10 +3427,10 @@ export function LiveWalletVault() {
                               type="button"
                               className="lv-inline-link mono"
                               onClick={() =>
-                                setSendAmount(formatUnitsExact(selectedNote.amount, selectedNoteMeta.decimals))
+                                setSendAmount(formatUnitsExact(maxSendNet, selectedNoteMeta.decimals))
                               }
                             >
-                              Max ({formatUnits(selectedNote.amount, selectedNoteMeta.decimals)})
+                              Max ({formatUnits(maxSendNet, selectedNoteMeta.decimals)})
                             </button>
                           )}
                         </div>
@@ -2629,6 +3443,34 @@ export function LiveWalletVault() {
                           placeholder="0.01"
                         />
                       </div>
+                      {useRelayer && sendFeePreview && (
+                        <div className="lv-quote-card">
+                          <div className="lv-quote-head">
+                            <span>
+                              Relayer fee preview ·{' '}
+                              {sendFeePreview.billingMode === 'self_paying' ? 'Self-paying' : 'Sponsored'}
+                            </span>
+                          </div>
+                          <p className="lv-quote-loading mono">
+                            Flat fee: {formatUnits(sendFeePreview.relayerFee, selectedNoteMeta.decimals)}{' '}
+                            {selectedNoteMeta.symbol} · private amount omitted from quote · uniform 3-output mask
+                          </p>
+                        </div>
+                      )}
+                      <label className="lv-checkbox-card">
+                        <input
+                          type="checkbox"
+                          checked={economyMode}
+                          onChange={(e) => setEconomyMode(e.target.checked)}
+                        />
+                        <div>
+                          <span className="lv-checkbox-title">Economy mode (1 nullifier on single-note spends)</span>
+                          <span>
+                            Saves ~0.00089 SOL in permanent NullifierPDA rent on 1-note spends by omitting the dummy second nullifier.
+                            Tradeoff: on-chain observers can distinguish 1-input spends from 2-input merges. Disabled automatically on 2-note spends.
+                          </span>
+                        </div>
+                      </label>
                       <button
                         type="button"
                         className="btn-primary lv-submit-btn"
@@ -2658,7 +3500,13 @@ export function LiveWalletVault() {
                           type="text"
                           className="lv-input mono"
                           value={swapOutMint}
-                          onChange={(e) => setSwapOutMint(e.target.value)}
+                          onChange={(e) => {
+                            const next = e.target.value
+                            setSwapOutMint(next)
+                            if (isValidSolanaPubkey(next)) {
+                              setSwapEscrowShard(pickRandomEscrowShard(NUM_ESCROW_SHARDS))
+                            }
+                          }}
                         />
                       </div>
                       <div className="lv-field-block">
@@ -2669,10 +3517,10 @@ export function LiveWalletVault() {
                               type="button"
                               className="lv-inline-link mono"
                               onClick={() =>
-                                setSwapAmount(formatUnitsExact(selectedNote.amount, selectedNoteMeta.decimals))
+                                setSwapAmount(formatUnitsExact(maxSpendableNotePair, selectedNoteMeta.decimals))
                               }
                             >
-                              Max ({formatUnits(selectedNote.amount, selectedNoteMeta.decimals)})
+                              Max ({formatUnits(maxSpendableNotePair, selectedNoteMeta.decimals)})
                             </button>
                           )}
                         </div>
@@ -2708,6 +3556,20 @@ export function LiveWalletVault() {
                           <span>Atomic post-CPI deduction from received output tokens when relayed with a non-zero relayer fee, with no upfront SOL needed.</span>
                         </div>
                       </label>
+                      <label className="lv-checkbox-card">
+                        <input
+                          type="checkbox"
+                          checked={economyMode}
+                          onChange={(e) => setEconomyMode(e.target.checked)}
+                        />
+                        <div>
+                          <span className="lv-checkbox-title">Economy mode (1 nullifier on single-note spends)</span>
+                          <span>
+                            Saves ~0.00089 SOL in permanent NullifierPDA rent on 1-note spends by omitting the dummy second nullifier.
+                            Disabled automatically when combining 2 notes.
+                          </span>
+                        </div>
+                      </label>
                       <div className="lv-quote-card">
                         <div className="lv-quote-head">
                           <span>
@@ -2731,6 +3593,12 @@ export function LiveWalletVault() {
                             {isSelectedNoteNativeSol
                               ? 'Select a shielded WSOL / SPL / Token-2022 note to quote a PDA-safe route.'
                               : 'Enter an amount to fetch a live PDA-safe route.'}
+                          </p>
+                        )}
+                        {swapInputFeeBps > 0 && swapQuoteNetIn && (
+                          <p className="lv-quote-loading mono">
+                            Token-2022 input fee ({(swapInputFeeBps / 100).toFixed(2)}%) deducted before route · net input{' '}
+                            {formatUnits(BigInt(swapQuoteNetIn), selectedNoteDecimals)} {selectedNoteMeta.symbol}
                           </p>
                         )}
                       </div>
@@ -2809,6 +3677,20 @@ export function LiveWalletVault() {
                           </div>
                         </label>
                       )}
+                      <label className="lv-checkbox-card">
+                        <input
+                          type="checkbox"
+                          checked={economyMode}
+                          onChange={(e) => setEconomyMode(e.target.checked)}
+                        />
+                        <div>
+                          <span className="lv-checkbox-title">Economy mode (1 nullifier on single-note spends)</span>
+                          <span>
+                            Saves ~0.00089 SOL in permanent NullifierPDA rent on 1-note spends by omitting the dummy second nullifier.
+                            Tradeoff: on-chain observers can distinguish 1-input spends from 2-input merges. Disabled automatically on 2-note spends.
+                          </span>
+                        </div>
+                      </label>
                       <button
                         type="button"
                         className="btn-primary lv-submit-btn"

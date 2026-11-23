@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { Env } from '../env'
+import type { CheckpointLockAcquireResult } from '../solana/checkpoint'
 import type { AudrenOpKind, Cluster } from '../types'
 
 export interface GuardBeginRequest {
@@ -71,6 +72,10 @@ const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
 const INFLIGHT_TTL_MS = 45_000
 const MAX_FAILED_ATTEMPTS_PER_HOUR = 30
+const CHECKPOINT_IP_WINDOW_MS = 60_000
+const CHECKPOINT_MAX_PER_IP_PER_MIN = 30
+const CHECKPOINT_LOCK_TTL_MS = 15_000
+const CHECKPOINT_RECENT_PUBLISH_GRACE_MS = 10_000
 
 function utcDayKey(nowMs: number): string {
   return new Date(nowMs).toISOString().slice(0, 10)
@@ -134,6 +139,22 @@ export class RelayGuard extends DurableObject<Env> {
         );
         CREATE INDEX IF NOT EXISTS idx_pending_cluster_day ON pending_reservations (day, cluster);
         CREATE INDEX IF NOT EXISTS idx_pending_ip ON pending_reservations (ip_hash, cluster);
+
+        CREATE TABLE IF NOT EXISTS checkpoint_locks (
+          cluster_pool TEXT PRIMARY KEY,
+          locked_until INTEGER NOT NULL DEFAULT 0,
+          last_published_at INTEGER NOT NULL DEFAULT 0,
+          last_epoch INTEGER NOT NULL DEFAULT -1,
+          last_signature TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS checkpoint_ip_hits (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ip_hash TEXT NOT NULL,
+          cluster TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ckpt_ip_hits ON checkpoint_ip_hits (ip_hash, cluster, created_at);
       `)
     })
   }
@@ -142,6 +163,7 @@ export class RelayGuard extends DurableObject<Env> {
     this.sql.exec('DELETE FROM inflight_nullifiers WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM pending_reservations WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM ip_events WHERE created_at < ?', now - DAY_MS - HOUR_MS)
+    this.sql.exec('DELETE FROM checkpoint_ip_hits WHERE created_at < ?', now - CHECKPOINT_IP_WINDOW_MS)
   }
 
   /**
@@ -456,6 +478,117 @@ export class RelayGuard extends DurableObject<Env> {
         'rejected',
         now,
       )
+    }
+  }
+
+  async checkCheckpointRateLimit(req: {
+    ipHash: string
+    cluster: Cluster
+    maxPerMinute?: number
+  }): Promise<GuardDecision> {
+    const now = Date.now()
+    const limit = req.maxPerMinute ?? CHECKPOINT_MAX_PER_IP_PER_MIN
+    this.sql.exec('DELETE FROM checkpoint_ip_hits WHERE created_at < ?', now - CHECKPOINT_IP_WINDOW_MS)
+    const cnt = Number(
+      this.sql
+        .exec(
+          'SELECT COUNT(*) AS cnt FROM checkpoint_ip_hits WHERE ip_hash = ? AND cluster = ? AND created_at >= ?',
+          req.ipHash,
+          req.cluster,
+          now - CHECKPOINT_IP_WINDOW_MS,
+        )
+        .one().cnt ?? 0,
+    )
+    if (cnt >= limit) {
+      return {
+        allowed: false,
+        status: 429,
+        code: 'CHECKPOINT_RATE_LIMITED',
+        reason: 'Too many checkpoint requests from this IP. Please retry shortly.',
+        retryAfterSec: 15,
+      }
+    }
+    this.sql.exec(
+      'INSERT INTO checkpoint_ip_hits (ip_hash, cluster, created_at) VALUES (?, ?, ?)',
+      req.ipHash,
+      req.cluster,
+      now,
+    )
+    return { allowed: true }
+  }
+
+  async acquireCheckpointLock(req: {
+    cluster: Cluster
+    poolId: number
+    epoch: number
+    lockTtlMs?: number
+  }): Promise<CheckpointLockAcquireResult> {
+    const now = Date.now()
+    const key = `${req.cluster}:${req.poolId}`
+    const rows = this.sql
+      .exec(
+        'SELECT locked_until, last_published_at, last_epoch, last_signature FROM checkpoint_locks WHERE cluster_pool = ?',
+        key,
+      )
+      .toArray()
+    const row = rows[0]
+    if (row) {
+      const lockedUntil = Number(row.locked_until ?? 0)
+      if (lockedUntil > now) {
+        return {
+          allowed: false,
+          inFlight: true,
+          waitMs: Math.min(Math.max(lockedUntil - now, 1_000), 4_000),
+        }
+      }
+      const lastEpoch = Number(row.last_epoch ?? -1)
+      const lastPublishedAt = Number(row.last_published_at ?? 0)
+      if (lastEpoch >= req.epoch && now - lastPublishedAt < CHECKPOINT_RECENT_PUBLISH_GRACE_MS) {
+        return {
+          allowed: false,
+          alreadyPublished: true,
+          lastEpoch,
+          lastSignature: String(row.last_signature ?? '') || undefined,
+        }
+      }
+    }
+
+    const lockedUntil = now + (req.lockTtlMs ?? CHECKPOINT_LOCK_TTL_MS)
+    this.sql.exec(
+      `INSERT INTO checkpoint_locks (cluster_pool, locked_until, last_published_at, last_epoch, last_signature)
+       VALUES (?, ?, 0, -1, '')
+       ON CONFLICT (cluster_pool) DO UPDATE SET locked_until = excluded.locked_until`,
+      key,
+      lockedUntil,
+    )
+    return { allowed: true }
+  }
+
+  async releaseCheckpointLock(req: {
+    cluster: Cluster
+    poolId: number
+    published: boolean
+    epoch?: number
+    signature?: string
+  }): Promise<void> {
+    const now = Date.now()
+    const key = `${req.cluster}:${req.poolId}`
+    if (req.published && req.epoch !== undefined) {
+      this.sql.exec(
+        `INSERT INTO checkpoint_locks (cluster_pool, locked_until, last_published_at, last_epoch, last_signature)
+         VALUES (?, 0, ?, ?, ?)
+         ON CONFLICT (cluster_pool) DO UPDATE SET
+           locked_until = 0,
+           last_published_at = excluded.last_published_at,
+           last_epoch = excluded.last_epoch,
+           last_signature = excluded.last_signature`,
+        key,
+        now,
+        req.epoch,
+        req.signature ?? '',
+      )
+    } else {
+      this.sql.exec('UPDATE checkpoint_locks SET locked_until = 0 WHERE cluster_pool = ?', key)
     }
   }
 

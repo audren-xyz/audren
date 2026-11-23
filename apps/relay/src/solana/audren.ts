@@ -3,6 +3,7 @@ import {
   ASSET_MODE_SOL,
   ASSET_MODE_SPL,
   AUDREN_PROGRAM_ID as AUDREN_PROGRAM_ID_STR,
+  CHECKPOINT_RING_SLOTS,
   CLASSIC_TOKEN_PROGRAM_ID as CLASSIC_TOKEN_PROGRAM_ID_STR,
   EXEC_FLAG_FEE_ON_OUTPUT,
   EXEC_KIND_SOL,
@@ -43,6 +44,9 @@ import {
   deriveUnwrapPdaSync,
   deriveVaultAuthPdaSync,
   tryDecryptAndVerifyMemo90,
+  type DecodedLaneHeader,
+  type DecodedPoolState,
+  type DecodedRootCheckpoint,
   type FullViewingKey,
 } from '@audren/sdk'
 import {
@@ -66,6 +70,7 @@ export {
   ASSET_MODE_SOL,
   ASSET_MODE_SPL,
   AUDREN_PROGRAM_ID_STR,
+  CHECKPOINT_RING_SLOTS,
   EXEC_FLAG_FEE_ON_OUTPUT,
   EXEC_KIND_SOL,
   EXEC_KIND_SPL,
@@ -88,6 +93,9 @@ export {
   decodeLaneHeader,
   decodePoolState,
   decodeRootCheckpoint,
+  type DecodedLaneHeader,
+  type DecodedPoolState,
+  type DecodedRootCheckpoint,
 }
 
 export const AUDREN_PROGRAM_ID = base58Decode(AUDREN_PROGRAM_ID_STR)

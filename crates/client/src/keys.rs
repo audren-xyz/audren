@@ -320,6 +320,14 @@ pub fn prepare_dynamic_swap_memo(
     (tweak, blinding, head, dyn_mask)
 }
 
+/// Fast X25519 + 2-byte view-tag prefilter for SoA `MemoPage` scanning (`1/65,536` false positives).
+pub fn check_memo_view_tag(fvk: &FullViewingKey, view_tag: [u8; 2], epk: &[u8; 32]) -> bool {
+    let vsec = X25519Sec::from(fvk.view_sk);
+    let shared = vsec.diffie_hellman(&X25519Pub::from(*epk));
+    let vt_raw = sha256_labeled(b"audren/v2/vt", shared.as_bytes());
+    vt_raw[0] == view_tag[0] && vt_raw[1] == view_tag[1]
+}
+
 /// Decrypt or unmask a `90 B` `MemoPage` entry AND **mandatorily verify** that
 /// `compute_note_commitment(stealth_owner, derive_asset_id(mint), amount, blinding) == onchain_cm_be`
 /// (from the local `SubtreePage` leaf) to block forged-memo balance poisoning.

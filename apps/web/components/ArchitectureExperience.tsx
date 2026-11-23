@@ -13,7 +13,7 @@ const INSTRUCTIONS = [
     tag: '0x00',
     name: 'InitPool',
     summary:
-      'Create PoolState (128 B, audren_v2_pool) and unified sol_vault PDA with ring-wrap deadlock guard (max_ckpt_age <= ckpt_interval * 256).',
+      'Create PoolState (128 B, audren_v2_pool) and unified sol_vault PDA with ring-wrap deadlock guard (max_ckpt_age < 255 * ckpt_interval; ckpt_interval = 16 slots on Mainnet).',
   },
   {
     tag: '0x01',
@@ -43,13 +43,13 @@ const INSTRUCTIONS = [
     tag: '0x05',
     name: 'PublishCheckpoint',
     summary:
-      'Permissionless 256-slot cyclic RootCheckpoint (704 B) publisher hashing all active lane roots (plus Z[18] for unactivated lanes) into one global 4-ary Depth-20 super_root (16.8k / 23.6k / 44.5k CU for 4 / 8 / 16 lanes).',
+      'Permissionless 256-slot cyclic RootCheckpoint (704 B) publisher hashing all active lane roots (plus Z[18] for unactivated lanes) into one global 4-ary Depth-20 super_root (16.8k / 23.6k / 44.5k CU for 4 / 8 / 16 lanes; ~6.4s on-demand via relayer POST /v1/checkpoint matching ckpt_interval = 16 slots).',
   },
   {
     tag: '0x06',
     name: 'JoinSplit',
     summary:
-      '192 B BN254 Groth16 2-in/3-out spend (~103k–160k CU) across the global 4^20 MASP. Supports private transfers (ASSET_MODE_PRIVATE with optional shielded cm2 relayer fee), public SOL/SPL exits, and atomic WSOL→SOL unwrap (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune when output_mask == 0).',
+      '192 B BN254 Groth16 2-in/3-out spend (~103k–160k CU) across the global 4^20 MASP. Defaults to uniform padded private transfers (2 nullifiers, output_mask = 0b111, automatic 2-input coin selection and 2 → 1 merge) with opt-in omit_nf1 economy mode, public SOL/SPL exits, and atomic WSOL→SOL unwrap (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune when output_mask == 0).',
   },
   {
     tag: '0x07',
@@ -110,10 +110,10 @@ const MEMO_PAGE_MAP = [
     weight: 8,
     short: 'Hdr',
     field: 'MemoPageHeader',
-    inScan: false,
+    inScan: true,
     bg: '#ebe7dc',
     color: '#2b2d26',
-    desc: 'AUD2MM03 magic, lane_id, bump, count (0..=112), pool_id, page_seq, created_slot, closed_slot.',
+    desc: 'AUD2MM03 magic, lane_id, bump, count (0..=112), pool_id, page_seq, created_slot, closed_slot (enables optional birthdaySlot skipping inside the 3,872 B dataSlice scan).',
   },
   {
     offset: '64..288',
@@ -135,7 +135,7 @@ const MEMO_PAGE_MAP = [
     inScan: true,
     bg: '#255a44',
     color: '#f4f1ea',
-    desc: 'X25519 ephemeral public keys for deterministic ECDH shared secret derivation.',
+    desc: 'X25519 ephemeral public keys for deterministic ECDH shared secret derivation inside the 3,872 B dataSlice scan.',
   },
   {
     offset: '3,872..10,144',
@@ -146,7 +146,7 @@ const MEMO_PAGE_MAP = [
     inScan: false,
     bg: '#e8efe8',
     color: '#1b2b22',
-    desc: 'ChaCha20-Poly1305 encrypted (amount_u64 || mint_32) + 16 B tag (or XOR-masked AUD2DYN2 swap note).',
+    desc: 'Fetched only on 1/65,536 view-tag hit: ChaCha20-Poly1305 encrypted (amount_u64 || mint_32) + 16 B tag (or XOR-masked AUD2DYN2 swap note).',
   },
 ] as const
 
@@ -170,9 +170,9 @@ export function ArchitectureExperience() {
             <h1>Audren cryptographic and on-chain specification</h1>
             <p className={styles.heroLead}>
               Minimal frozen BN254 Groth16 circuit ({AUDREN.circuitConstraints.toLocaleString()}{' '}
-              R1CS, 4-ary Depth-20 global MASP), 9 instructions, fixed &lt;10 KiB zero-realloc
-              accounts, ordinary-RPC <code>CompactWalletStore</code>, and measured sBPFv3 Compute
-              Units in{' '}
+              R1CS, 3.93 MB proving key, 4-ary Depth-20 global MASP), 9 instructions, fixed &lt;10
+              KiB zero-realloc accounts, 2-pass ordinary-RPC <code>CompactWalletStore</code>, and
+              measured sBPFv3 Compute Units in{' '}
               <a
                 href={AUDREN.githubCore}
                 target="_blank"
@@ -224,12 +224,15 @@ export function ArchitectureExperience() {
               <h2>Structure-of-Arrays MemoPage and CompactWalletStore</h2>
             </div>
             <p>
-              Every on-chain account fits strictly below Solana’s 10,240 B CPI allocation cap with zero{' '}
-              <code>realloc</code>. Wallets fetch sequential <code>SubtreePage</code> (8,256 B),{' '}
-              <code>MemoPage</code> (10,144 B), and <code>NullifierPage</code> (9,664 B, 600 × 16 B
-              prefixes) via ordinary <code>getMultipleAccounts</code>, verify every decrypted memo
-              against <code>SubtreePage</code>, freeze 12 intra-subtree siblings on sealed pages,
-              and discard raw pages permanently (
+              Every on-chain account fits strictly below Solana’s 10,240 B CPI allocation cap with
+              zero <code>realloc</code>. <code>CompactWalletStore</code> runs a 2-pass sync over
+              ordinary <code>getMultipleAccounts</code>: Pass 1 ingests{' '}
+              <code>SubtreeRootPage</code> (9,664 B, 300 sealed roots) and scans{' '}
+              <code>MemoPage</code> (10,144 B) via SoA <code>dataSlice</code> (<code>[0..3,872]</code>
+              ), fetching full memos and historical <code>SubtreePage</code>s (8,256 B) only on
+              owned hits to verify commitments and freeze 12 intra-subtree siblings; Pass 2 streams{' '}
+              <code>NullifierPage</code>s (9,664 B, 600 × 16 B prefixes) against owned unspent notes
+              and discards every stranger prefix and raw page permanently (
               <span style={{ fontWeight: 500, color: '#161614' }}>1.28 MB</span> local store at 10M
               pool notes).
             </p>
@@ -240,7 +243,10 @@ export function ArchitectureExperience() {
               <div className={styles.stageTitle}>
                 Interactive MemoPage byte layout (10,144 B; click any region to inspect)
               </div>
-              <span>Green highlight = 2-byte view_tags + X25519 ephemeral_pks (112 notes/page)</span>
+              <span>
+                dataSlice [0..3,872] scans header + view_tags + ephemeral_pks; full 10,144 B fetched
+                only on 1/65,536 hit
+              </span>
             </div>
 
             <div className={styles.soaBar} role="tablist" aria-label="MemoPage memory slices">
@@ -283,7 +289,7 @@ export function ArchitectureExperience() {
                   fontWeight: 500,
                 }}
               >
-                {slice.inScan ? 'Fast view-tag filter' : 'Header or AEAD payload'}
+                {slice.inScan ? 'Included in 3,872 B dataSlice' : 'Fetched only on view-tag hit'}
               </span>
             </div>
           </div>
@@ -341,9 +347,10 @@ export function ArchitectureExperience() {
             </div>
             <p>
               All 9 instructions settle in a single Solana Transaction v1 (<code>0x81</code>) with
-              no multi-tx upload buffers. One frozen <code>vk_id = 0</code> circuit
-              covers private transfers, public exits, atomic WSOL unwrap, and protocol-agnostic DeFi
-              CPIs while scaling monotonically across 4 → 8 → 16 append lanes.
+              no multi-tx upload buffers. One frozen <code>vk_id = 0</code> circuit (3.93 MB
+              compressed proving key, 2<sup>15</sup> FFT domain) covers private transfers, public
+              exits, atomic WSOL unwrap, and protocol-agnostic DeFi CPIs while scaling monotonically
+              across 4 → 8 → 16 append lanes.
             </p>
           </div>
 
@@ -416,9 +423,18 @@ export function ArchitectureExperience() {
                     Solana.
                   </li>
                   <li>
-                    <code>JoinSplit</code> supports both padded 2-nullifier mode (hides 1-in vs
-                    2-in arity) and economic 1-nullifier mode (<code>omit_nf1 = true</code>, saves
-                    1 permanent NullifierPDA rent while exposing 1-input count).
+                    Private transfers default to uniform padded shape (2 nullifiers,{' '}
+                    <code>output_mask = 0b111</code>, randomized append lane, plus automatic 2-input
+                    coin selection and 2 → 1 note merge); opt-in <code>omit_nf1 = true</code>{' '}
+                    economy mode saves 1 permanent <code>NullifierPDA</code> rent while exposing
+                    1-input arity.
+                  </li>
+                  <li>
+                    Audren pays permanent <code>NullifierPDA</code> plus amortized page rent
+                    (~0.002–0.0046 SOL/tx vs 5,000-lamport Forester-compressed nullifiers) instead
+                    of relying on a permissioned Forester; on-chain{' '}
+                    <code>rent_minimum_balance</code> reads <code>SysvarRent</code> dynamically so
+                    cost scales down automatically if Solana lowers rent.
                   </li>
                   <li>
                     More TVL alone does not guarantee more privacy; timing, public amounts, and
@@ -496,12 +512,16 @@ export function ArchitectureExperience() {
                     fee-payer pools (<code>&gt;= active_lanes</code> signers).
                   </li>
                   <li>
-                    Supports Mode 1 shielded <code>cm2</code> transfer fees verified via read-only
-                    relayer FVK, Mode 2 public withdraw fees, and Mode 3 <code>ExecViaEscrow</code>{' '}
+                    Supports Mode 1 shielded <code>cm2</code> transfer fees (flat per-mint quotes
+                    with zero plaintext transfer amount sent to the relayer, verified via read-only
+                    FVK), Mode 2 public withdraw fees, and Mode 3 <code>ExecViaEscrow</code>{' '}
                     input/output fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>).
                   </li>
                   <li>
-                    Relayers hold zero user spend keys and cannot alter <code>ctx_hash</code>-bound
+                    Permissionless on-demand <code>POST /v1/checkpoint</code> (~6.4s cadence
+                    matching <code>ckpt_interval = 16</code> slots, plus a 2-minute maintenance
+                    crank) checkpoints fresh notes without linking the user’s personal wallet;
+                    relayers hold zero spend keys and cannot alter <code>ctx_hash</code>-bound
                     outputs or router accounts.
                   </li>
                 </ul>

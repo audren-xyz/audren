@@ -2,6 +2,13 @@
 import { base58Decode, type AudrenInstruction } from '@audren/sdk'
 
 export * from '@audren/sdk'
+export {
+  computePageRollovers,
+  computeToken2022NetAmount,
+  parseToken2022TransferFeeConfig,
+  pickRandomEscrowShard,
+  pickRandomLaneId,
+} from '@audren/sdk'
 
 const utf8Encoder = new TextEncoder()
 

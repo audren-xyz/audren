@@ -1,4 +1,8 @@
-import { inspectToken2022UnsafeSelfPay } from '@audren/sdk'
+import {
+  computeToken2022NetAmount,
+  inspectToken2022UnsafeSelfPay,
+  parseToken2022TransferFeeConfig,
+} from '@audren/sdk'
 import {
   CLASSIC_TOKEN_PROGRAM_ID_STR,
   TOKEN_2022_PROGRAM_ID_STR,
@@ -103,18 +107,124 @@ export interface OnChainMintMeta {
   hasUnsafeSelfPayExt: boolean
 }
 
-const MINT_META_CACHE = new Map<string, OnChainMintMeta>()
+export interface OnChainMintMetaWithData {
+  meta: OnChainMintMeta
+  rawBytes: Uint8Array | null
+}
 
-export async function fetchMintMetas(
+export interface SwapInputTransferFeePlan {
+  grossInputAmount: string
+  netInputAmount: string
+  inputTransferFeeBps: number
+  inputTransferFeeAmount: string
+}
+
+interface CachedMintEntry {
+  meta: OnChainMintMeta
+  rawBytes: Uint8Array | null
+  fetchedAt: number
+}
+
+const MINT_META_CACHE = new Map<string, CachedMintEntry>()
+const MINT_META_T22_TTL_MS = 60_000
+
+const EPOCH_CACHE = new Map<string, { epoch: bigint; fetchedAt: number }>()
+const EPOCH_CACHE_TTL_MS = 60_000
+
+export async function fetchCurrentEpoch(rpcUrl: string): Promise<bigint> {
+  const now = Date.now()
+  const cached = EPOCH_CACHE.get(rpcUrl)
+  if (cached && now - cached.fetchedAt < EPOCH_CACHE_TTL_MS) {
+    return cached.epoch
+  }
+  const info = await rpcCall<{ epoch: number }>(rpcUrl, 'getEpochInfo', [{ commitment: 'confirmed' }])
+  const epoch = BigInt(info.epoch)
+  EPOCH_CACHE.set(rpcUrl, { epoch, fetchedAt: now })
+  return epoch
+}
+
+/**
+ * Pure helper computing the net balance arriving in `escrow_in_ata` when `ExecViaEscrow`
+ * transfers `grossAmount` from `vault_in_ata` -> `escrow_in_ata` prior to the DEX router CPI.
+ *
+ * Classic SPL and WSOL mints are 100% unchanged (`netInputAmount === grossAmount`).
+ * Token-2022 mints with an active `TransferFeeConfig` for `currentEpoch` deduct the exact
+ * SPL Token-2022 ceiling transfer fee so DEX swap quotes never over-spend `escrow_in_ata`.
+ */
+export function computeSwapInputTransferFee(params: {
+  tokenProgram: string
+  mintData: Uint8Array | null | undefined
+  currentEpoch: bigint | number
+  grossAmount: bigint
+}): SwapInputTransferFeePlan {
+  const { tokenProgram, mintData, currentEpoch, grossAmount } = params
+  if (tokenProgram !== TOKEN_2022_PROGRAM_ID_STR || !mintData || mintData.byteLength <= 166) {
+    return {
+      grossInputAmount: grossAmount.toString(),
+      netInputAmount: grossAmount.toString(),
+      inputTransferFeeBps: 0,
+      inputTransferFeeAmount: '0',
+    }
+  }
+  const activeFee = parseToken2022TransferFeeConfig(mintData, currentEpoch)
+  if (!activeFee || activeFee.bps <= 0n) {
+    return {
+      grossInputAmount: grossAmount.toString(),
+      netInputAmount: grossAmount.toString(),
+      inputTransferFeeBps: 0,
+      inputTransferFeeAmount: '0',
+    }
+  }
+  const net = computeToken2022NetAmount(grossAmount, activeFee)
+  const deducted = grossAmount > net ? grossAmount - net : 0n
+  return {
+    grossInputAmount: grossAmount.toString(),
+    netInputAmount: net.toString(),
+    inputTransferFeeBps: Number(activeFee.bps),
+    inputTransferFeeAmount: deducted.toString(),
+  }
+}
+
+export async function resolveSwapInputTransferFee(
+  rpcUrl: string,
+  inMeta: OnChainMintMeta,
+  inRawBytes: Uint8Array | null,
+  grossAmount: bigint,
+): Promise<SwapInputTransferFeePlan> {
+  if (
+    inMeta.tokenProgram !== TOKEN_2022_PROGRAM_ID_STR ||
+    !inRawBytes ||
+    inRawBytes.byteLength <= 166
+  ) {
+    return {
+      grossInputAmount: grossAmount.toString(),
+      netInputAmount: grossAmount.toString(),
+      inputTransferFeeBps: 0,
+      inputTransferFeeAmount: '0',
+    }
+  }
+  const currentEpoch = await fetchCurrentEpoch(rpcUrl)
+  return computeSwapInputTransferFee({
+    tokenProgram: inMeta.tokenProgram,
+    mintData: inRawBytes,
+    currentEpoch,
+    grossAmount,
+  })
+}
+
+export async function fetchMintMetasWithData(
   rpcUrl: string,
   mints: string[],
-): Promise<Record<string, OnChainMintMeta>> {
-  const out: Record<string, OnChainMintMeta> = {}
+): Promise<Record<string, OnChainMintMetaWithData>> {
+  const now = Date.now()
+  const out: Record<string, OnChainMintMetaWithData> = {}
   const missing: string[] = []
   for (const m of mints) {
     const cached = MINT_META_CACHE.get(`${rpcUrl}:${m}`)
-    if (cached) {
-      out[m] = cached
+    const isT22 = cached?.meta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR
+    const fresh = cached && (!isT22 || now - cached.fetchedAt < MINT_META_T22_TTL_MS)
+    if (fresh) {
+      out[m] = { meta: cached.meta, rawBytes: cached.rawBytes }
     } else if (!missing.includes(m)) {
       missing.push(m)
     }
@@ -126,7 +236,7 @@ export async function fetchMintMetas(
       const info = infos[idx]
       const isClassic = info?.owner === CLASSIC_TOKEN_PROGRAM_ID_STR
       const isT22 = info?.owner === TOKEN_2022_PROGRAM_ID_STR
-      const bytes = info?.bytes
+      const bytes = info?.bytes ?? null
       const isValidClassicMint = Boolean(isClassic && bytes && bytes.length === 82 && bytes[45] === 1)
       const isValidT22Mint = Boolean(
         isT22 &&
@@ -145,11 +255,24 @@ export async function fetchMintMetas(
         isValidT22Mint && bytes && inspectToken2022UnsafeSelfPay(bytes),
       )
       const meta: OnChainMintMeta = { mint, tokenProgram, decimals, isValidMint, hasUnsafeSelfPayExt }
+      const rawBytes = isValidT22Mint ? bytes : null
       if (isValidMint) {
-        MINT_META_CACHE.set(`${rpcUrl}:${mint}`, meta)
+        MINT_META_CACHE.set(`${rpcUrl}:${mint}`, { meta, rawBytes, fetchedAt: now })
       }
-      out[mint] = meta
+      out[mint] = { meta, rawBytes }
     })
+  }
+  return out
+}
+
+export async function fetchMintMetas(
+  rpcUrl: string,
+  mints: string[],
+): Promise<Record<string, OnChainMintMeta>> {
+  const detailed = await fetchMintMetasWithData(rpcUrl, mints)
+  const out: Record<string, OnChainMintMeta> = {}
+  for (const [k, v] of Object.entries(detailed)) {
+    out[k] = v.meta
   }
   return out
 }

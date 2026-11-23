@@ -57,7 +57,7 @@ const POOL_CASES: readonly PoolCase[] = [
       },
     ],
     resultText:
-      'Private JoinSplit settles in ~103k CU with hidden inputs, stealth recipient, hidden asset, and hidden amount.',
+      'Private JoinSplit settles in ~130k CU with hidden inputs, stealth recipient, hidden asset, and hidden amount.',
     hiddenLabel: 'Spent notes across global pool, recipient, token, and amount',
     publicLabel: 'Checkpoint root, lane append slot, timing, and fee payer',
     txHref: solscanTx(AUDREN.mainnet.transferTx),
@@ -166,7 +166,7 @@ function PrivacyComparisonCard() {
   return (
     <figure
       className={styles.comparison}
-      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances, and Audren shielded pool transfer"
+      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances and default confidential rings, and Audren shielded pool transfer"
     >
       <figcaption className={styles.figureHeader}>
         <h3>What Solscan shows on a transfer</h3>
@@ -197,8 +197,8 @@ function PrivacyComparisonCard() {
 
       <div className={styles.comparisonRow}>
         <div className={styles.rowName}>
-          <span className={styles.rowTitle}>Confidential Balances</span>
-          <span className={styles.rowMeta}>Configured Token&#8209;2022 only</span>
+          <span className={styles.rowTitle}>Confidential / Rings</span>
+          <span className={styles.rowMeta}>Token&#8209;2022 or default rings</span>
         </div>
         <div className={styles.people}>
           <span>Wallet A</span>
@@ -206,10 +206,12 @@ function PrivacyComparisonCard() {
           <span>Wallet B</span>
         </div>
         <div className={styles.value}>
-          <span className={styles.valueUnit}>Token&#8209;2022</span>
+          <span className={styles.valueUnit}>Mint / ••••</span>
           <span className={`${styles.valueAmount} ${styles.masked}`}>
             <span aria-hidden="true">••••••</span>
-            <span className={styles.visuallyHidden}>Amount hidden</span>
+            <span className={styles.visuallyHidden}>
+              Amount hidden; mint public on Token-2022 or encrypted in default rings
+            </span>
           </span>
         </div>
       </div>
@@ -240,8 +242,8 @@ function PrivacyComparisonCard() {
       </p>
 
       <p className={styles.figureNote}>
-        Deposits, public withdrawals, and external DEX legs keep public token and amount boundaries.{' '}
-        <Link href="/compare">Compare all models</Link>.
+        Deposits, public withdrawals, and external DeFi CPI legs keep public token and amount
+        boundaries. <Link href="/compare">Compare all models</Link>.
       </p>
     </figure>
   )
@@ -558,35 +560,47 @@ export function LandingExperience() {
             <article className={styles.compareCol}>
               <h3>Helius Privacy Rings</h3>
               <p className={styles.colLead}>
-                Existing Solana assets and self-custody, with published independent program and
-                circuit audits.
+                Existing Solana assets, self-custody, and 1-slot spendability, with published
+                independent program and circuit audits.
               </p>
               <ul className={styles.colList}>
-                <li>Indexer and Forester state services; proofs can be generated locally</li>
-                <li>Groth16 circuits rely on multi-party trusted setup and proving keys</li>
-                <li>Default ring exposes participants; anonymous custom rings are a separate mode</li>
+                <li>
+                  Default ring encrypts mint and amount while exposing sender and recipient wallets;
+                  anonymity requires custom rings
+                </li>
+                <li>
+                  Photon indexer, permissioned Forester, and remote GPU/TEE prover (or 350 MB to
+                  1.27 GB local keys) in exchange for 5,000-lamport nullifiers and 49-input fan-in
+                </li>
+                <li>
+                  Programmable ZK-CPI escrows enable private-amount DeFi, requiring custom circuits
+                  and fresh liquidity per app
+                </li>
               </ul>
             </article>
 
             <article className={`${styles.compareCol} ${styles.compareColAudren}`}>
               <h3>Audren</h3>
               <p className={styles.colLead}>
-                One 4<sup>20</sup> global Multi-Asset Shielded Pool with 192 B BN254 Groth16
-                proofs, ordinary Solana RPC discovery, and no Audren wrapper token.
+                One 4<sup>20</sup> global Multi-Asset Shielded Pool with a single 3.93 MB local
+                Groth16 circuit, ordinary Solana RPC discovery, and no wrapper token.
               </p>
               <ul className={styles.colList}>
                 <li>
-                  Private JoinSplit conceals spent notes across the entire pool history, recipient,
-                  token, and amount
-                </li>
-                <li>Supports SOL, Classic SPL, and transferable Token-2022 in one shared pool</li>
-                <li>
-                  Protocol-agnostic ExecViaEscrow CPI, fee-on-output, and self-paying WSOL unwrap
-                  (~103k to 158k CU)
+                  Default 4-field anonymity (spent notes, stealth recipient, token, amount) across
+                  SOL, Classic SPL, and transferable Token-2022
                 </li>
                 <li>
-                  Zero indexer or CDN required (CompactWalletStore is 1.28 MB at 10M notes); PPoT
-                  and BGM17 ceremony live, independent audit pending
+                  Zero mandatory indexer or Forester (CompactWalletStore is 1.28 MB at 10M notes);
+                  full exits including atomic WSOL unwrap bypass pause
+                </li>
+                <li>
+                  Atomic ExecViaEscrow CPI (~158k CU) hits live Solana DeFi liquidity today without
+                  per-protocol circuits (external DeFi leg stays public)
+                </li>
+                <li>
+                  Pre-audit release with permanent NullifierPDA rent (~0.002–0.0046 SOL/tx, scaling
+                  via SysvarRent); PPoT and BGM17 ceremony live
                 </li>
               </ul>
             </article>
@@ -619,8 +633,9 @@ export function LandingExperience() {
               <article className={styles.device}>
                 <h3>On your device</h3>
                 <p>
-                  Syncs state through ordinary Solana RPC and generates 192-byte BN254 Groth16
-                  proofs locally. Spending keys never leave your device.
+                  Syncs state through ordinary Solana RPC (2-pass CompactWalletStore) and generates
+                  192-byte BN254 Groth16 proofs locally from one 3.93 MB proving key. Spending keys
+                  never leave your device.
                 </p>
                 <span className={styles.deviceMeta}>Local key custody · CompactWalletStore</span>
               </article>

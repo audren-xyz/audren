@@ -19,10 +19,14 @@ import {
   GROTH16_PROOF_LEN,
   MEMO_CT_LEN,
   MEMO_ENTRY_WIRE_LEN,
+  MEMO_NOTES_PER_PAGE,
+  NF_PER_PAGE,
   OPEN_PAGE_KIND_MEMO,
   OPEN_PAGE_KIND_NULLIFIER,
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
+  SUBROOTS_PER_PAGE,
+  SUBTREE_LEAVES,
   SYSTEM_PROGRAM_ID,
   TAG_DEPOSIT_SOL,
   TAG_DEPOSIT_SPL,
@@ -121,6 +125,71 @@ export function deterministicNoteRentFee(
 ): bigint {
   const live = divCeil(subRent, 256n) + divCeil(srRent, 256n * 300n) + divCeil(memoRent, 112n);
   return poolNoteRentFeeCap < live ? poolNoteRentFeeCap : live;
+}
+
+export interface PageRolloverPlan {
+  outSubSeq: number;
+  outRootSeq: number;
+  outMemoSeq: number;
+  nfPageSeq: number;
+  nextSubSeq?: number;
+  nextRootSeq?: number;
+  nextMemoSeq?: number;
+  nextNfSeq?: number;
+}
+
+/**
+ * Compute primary page sequences and atomic rollover page sequences matching
+ * `append_leaf_and_memo` and `append_nullifier_prefix` in `program/src/lib.rs` byte-for-byte.
+ */
+export function computePageRollovers(params: {
+  leafCount: bigint | number;
+  outputCount: number;
+  nfCount: bigint | number;
+  spentNullifiers: number;
+}): PageRolloverPlan {
+  const leafCount = BigInt(params.leafCount);
+  const nfCount = BigInt(params.nfCount);
+  if (leafCount < 0n || nfCount < 0n) {
+    throw new RangeError('leafCount and nfCount must be non-negative');
+  }
+  const outputCount = Math.max(0, Math.trunc(params.outputCount));
+  const spentNullifiers = Math.max(0, Math.trunc(params.spentNullifiers));
+
+  const subSize = BigInt(SUBTREE_LEAVES);
+  const srSize = BigInt(SUBROOTS_PER_PAGE);
+  const memoSize = BigInt(MEMO_NOTES_PER_PAGE);
+  const nfSize = BigInt(NF_PER_PAGE);
+
+  const outSubSeqBig = leafCount / subSize;
+  const outRootSeqBig = outSubSeqBig / srSize;
+  const outMemoSeqBig = leafCount / memoSize;
+  const nfPageSeqBig = nfCount / nfSize;
+
+  const plan: PageRolloverPlan = {
+    outSubSeq: Number(outSubSeqBig),
+    outRootSeq: Number(outRootSeqBig),
+    outMemoSeq: Number(outMemoSeqBig),
+    nfPageSeq: Number(nfPageSeqBig),
+  };
+
+  if (outputCount > 0) {
+    const lastLeaf = leafCount + BigInt(outputCount - 1);
+    const lastSubSeqBig = lastLeaf / subSize;
+    const lastRootSeqBig = lastSubSeqBig / srSize;
+    const lastMemoSeqBig = lastLeaf / memoSize;
+    if (lastSubSeqBig > outSubSeqBig) plan.nextSubSeq = Number(lastSubSeqBig);
+    if (lastRootSeqBig > outRootSeqBig) plan.nextRootSeq = Number(lastRootSeqBig);
+    if (lastMemoSeqBig > outMemoSeqBig) plan.nextMemoSeq = Number(lastMemoSeqBig);
+  }
+
+  if (spentNullifiers > 0) {
+    const lastNf = nfCount + BigInt(spentNullifiers - 1);
+    const lastNfSeqBig = lastNf / nfSize;
+    if (lastNfSeqBig > nfPageSeqBig) plan.nextNfSeq = Number(lastNfSeqBig);
+  }
+
+  return plan;
 }
 
 /**

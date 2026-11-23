@@ -24,12 +24,8 @@ import { SiteFooter } from '@/components/SiteFooter'
 import { LiveWalletVault } from '@/components/LiveWalletVault'
 import {
   ASSET_MODE_PRIVATE,
-  MEMO_NOTES_PER_PAGE,
   NATIVE_SOL_MINT_BYTES,
-  NF_PER_PAGE,
   NUM_LANES,
-  SUBROOTS_PER_PAGE,
-  SUBTREE_LEAVES,
   ZERO_HASHES_4ARY,
   buildJoinsplitInstruction,
   buildWitnessFromFrozenSubsiblings,
@@ -37,6 +33,7 @@ import {
   computeJoinsplitCtxHash,
   computeMerkleRoot4Ary,
   computeNoteCommitment,
+  computePageRollovers,
   computeSubtree256Root,
   deriveAssetId,
   deriveKeysFromSeed,
@@ -48,6 +45,7 @@ import {
   frToBeBytes,
   fromBase64,
   fromHex,
+  pickRandomLaneId,
   reconstructWitness,
   toBase64,
   toHex,
@@ -60,7 +58,6 @@ import {
 } from '@/lib/audren-crypto'
 import {
   dummyInputWitness,
-  dummyOutputWitness,
   proveJoinsplitInBrowser,
 } from '@/lib/audren-prover'
 import { AUDREN, shortHash, solscanAddress, solscanTx } from '@/lib/protocol'
@@ -405,11 +402,12 @@ export function DevnetDemoExperience() {
       const changeAmt = sandboxNote.amountLamports - sendAmt
       const recKeys = deriveKeysFromSeed(crypto.getRandomValues(new Uint8Array(32)))
 
-      let outLaneId = 1
+      let outLaneId = pickRandomLaneId(4)
       let outSubSeq = 0n
       let outRootSeq = 0n
       let outMemoSeq = 0n
       let outNfSeq = 0n
+      let rollover: { nextSubSeq?: bigint | null; nextMemoSeq?: bigint | null; nextNfSeq?: bigint | null } | undefined
       let relayerPayer = devnetRelayerAddress
 
       if (broadcastLiveJoinSplit) {
@@ -420,14 +418,25 @@ export function DevnetDemoExperience() {
         relayerPayer = pool.relayerAddress
         setDevnetRelayerAddress(pool.relayerAddress)
         const activeLanes = pool.activeLanes ?? 4
-        outLaneId = (sandboxNote.laneId + 1) % activeLanes
+        outLaneId = pickRandomLaneId(activeLanes)
         const outLane = pool.lanes?.[outLaneId]
         const nextLeaf = BigInt(outLane?.nextLeaf ?? '0')
         const nfCount = BigInt(outLane?.nfCount ?? '0')
-        outSubSeq = nextLeaf / BigInt(SUBTREE_LEAVES)
-        outRootSeq = outSubSeq / BigInt(SUBROOTS_PER_PAGE)
-        outMemoSeq = nextLeaf / BigInt(MEMO_NOTES_PER_PAGE)
-        outNfSeq = nfCount / BigInt(NF_PER_PAGE)
+        const roll = computePageRollovers({
+          leafCount: nextLeaf,
+          outputCount: 3,
+          nfCount,
+          spentNullifiers: 2,
+        })
+        outSubSeq = BigInt(roll.outSubSeq)
+        outRootSeq = BigInt(roll.outRootSeq)
+        outMemoSeq = BigInt(roll.outMemoSeq)
+        outNfSeq = BigInt(roll.nfPageSeq)
+        rollover = {
+          nextSubSeq: roll.nextSubSeq !== undefined ? BigInt(roll.nextSubSeq) : null,
+          nextMemoSeq: roll.nextMemoSeq !== undefined ? BigInt(roll.nextMemoSeq) : null,
+          nextNfSeq: roll.nextNfSeq !== undefined ? BigInt(roll.nextNfSeq) : null,
+        }
       }
 
       const mintBytes = NATIVE_SOL_MINT_BYTES
@@ -435,15 +444,21 @@ export function DevnetDemoExperience() {
       const recOwner = deriveStealthOwner(recKeys.spendPk, m0.tweak)
       const m1 = encryptNoteMemo(keys.viewPk, crypto.getRandomValues(new Uint8Array(32)), changeAmt, mintBytes)
       const chOwner = deriveStealthOwner(keys.spendPk, m1.tweak)
+      const dummyKeys = deriveKeysFromSeed(crypto.getRandomValues(new Uint8Array(32)))
+      const m2 = encryptNoteMemo(dummyKeys.viewPk, crypto.getRandomValues(new Uint8Array(32)), 0n, mintBytes)
+      const dummyOwner = deriveStealthOwner(dummyKeys.spendPk, m2.tweak)
 
-      const memosConcat = new Uint8Array(m0.memo90.byteLength + m1.memo90.byteLength)
+      const memosConcat = new Uint8Array(
+        m0.memo90.byteLength + m1.memo90.byteLength + m2.memo90.byteLength,
+      )
       memosConcat.set(m0.memo90, 0)
       memosConcat.set(m1.memo90, m0.memo90.byteLength)
+      memosConcat.set(m2.memo90, m0.memo90.byteLength + m1.memo90.byteLength)
 
       const ctxHash = computeJoinsplitCtxHash({
         poolId: 0,
         outLaneId,
-        outputMask: 0b011,
+        outputMask: 0b111,
         assetMode: ASSET_MODE_PRIVATE,
         unwrapWsol: false,
         recipient: null,
@@ -461,7 +476,7 @@ export function DevnetDemoExperience() {
         publicAmountOut: 0n,
         relayerFeeAmount: 0n,
         ctxHash,
-        omitNf1: true,
+        omitNf1: false,
         inputs: [
           {
             isDummy: false,
@@ -487,7 +502,12 @@ export function DevnetDemoExperience() {
             amount: changeAmt,
             blinding: m1.blinding,
           },
-          dummyOutputWitness(sandboxNote.assetId, randomFr()),
+          {
+            stealthOwner: dummyOwner,
+            assetId: sandboxNote.assetId,
+            amount: 0n,
+            blinding: m2.blinding,
+          },
         ],
       })
 
@@ -505,6 +525,7 @@ export function DevnetDemoExperience() {
           outRootSeq,
           outMemoSeq,
           outNfSeq,
+          rollover,
           payer: relayerPayer,
           proof192: result.proof192,
           nf0: result.nf0,
@@ -512,7 +533,7 @@ export function DevnetDemoExperience() {
           cm0: result.cm0,
           cm1: result.cm1,
           cm2: result.cm2,
-          outputMask: 0b011,
+          outputMask: 0b111,
           assetMode: ASSET_MODE_PRIVATE,
           unwrapWsol: false,
           publicAmountOut: 0n,

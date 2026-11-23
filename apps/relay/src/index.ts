@@ -25,6 +25,11 @@ import {
   deriveVaultAuthPda,
 } from './solana/audren'
 import {
+  CheckpointError,
+  publishCheckpointIfNeeded,
+  type CheckpointLockAdapter,
+} from './solana/checkpoint'
+import {
   SYSTEM_PROGRAM_ID_STR,
   WSOL_MINT_STR,
   base58Decode,
@@ -44,8 +49,10 @@ import {
   fetchBalance,
   fetchLiveRentSchedule,
   fetchMintMetas,
+  fetchMintMetasWithData,
   fetchMultipleAccounts,
   resolveLookupTables,
+  resolveSwapInputTransferFee,
   resolveVaultOutDelta,
   rpcCall,
   simulateV1Transaction,
@@ -227,6 +234,7 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
     programId: AUDREN_PROGRAM_ID_STR,
     cluster: requestedCluster,
     configured: activeCluster.configured,
+    checkpointSupport: true,
     relayerPubkey: activeCluster.relayerPubkey,
     relayerPubkeys: activeCluster.relayerPubkeys,
     relayerShieldedAddress: activeCluster.relayerShieldedAddress,
@@ -237,6 +245,10 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
         tag: 6,
         assetMode: 0,
         shieldedCm2Fee: activeCluster.relayerShieldedAddress !== null,
+        flatFee: true,
+        requiresAmount: false,
+        defaultNullifiers: 2,
+        supportsOmitNf1: true,
         sponsored: true,
       },
       withdraw: {
@@ -253,6 +265,11 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
         supportsFeeOnOutput: true,
         supportsPreInstructions: true,
         microSwapSubsidy: cfg.allowMicroSwapSubsidy,
+      },
+      checkpoint: {
+        tag: 5,
+        permissionless: true,
+        endpoint: '/v1/checkpoint',
       },
       deposit: {
         tags: [3, 4],
@@ -312,9 +329,15 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         ? 'transfer'
         : 'withdraw'
   const rawMint = (u.searchParams.get('mint') ?? 'native').trim()
-  const rawAmount = (u.searchParams.get('amount') ?? '0').trim()
   const unwrapWsol = u.searchParams.get('unwrapWsol') === 'true'
   const feeOnOutput = u.searchParams.get('feeOnOutput') === 'true'
+  const rawOmitNf1 = u.searchParams.get('omitNf1')?.trim().toLowerCase()
+  const omitNf1 =
+    rawOmitNf1 === 'true' || rawOmitNf1 === '1'
+      ? true
+      : rawOmitNf1 === 'false' || rawOmitNf1 === '0'
+        ? false
+        : op !== 'transfer'
   const rawOutputs = u.searchParams.get('outputCount')
   const hasChange = u.searchParams.get('hasChange') === 'true'
   const outputCount =
@@ -334,10 +357,16 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
     ? Math.min(6, Math.max(0, Number(rawMissingAtas)))
     : 0
 
-  if (!/^\d+$/.test(rawAmount)) {
-    return json(request, cfg.corsOrigins, { error: 'amount must be a non-negative integer string' }, 400)
+  // For private transfers (`op === 'transfer'`), `amount` is optional and completely ignored
+  // (never read, validated, logged, or persisted) — fees are flat per mint.
+  let amount: bigint | undefined
+  if (op !== 'transfer') {
+    const rawAmount = (u.searchParams.get('amount') ?? '0').trim()
+    if (!/^\d+$/.test(rawAmount)) {
+      return json(request, cfg.corsOrigins, { error: 'amount must be a non-negative integer string' }, 400)
+    }
+    amount = BigInt(rawAmount)
   }
-  const amount = BigInt(rawAmount)
 
   const rpcUrl = getRpcUrl(env, cluster)
   const relayer = getRelayerPubkeyForCluster(env, cluster)
@@ -372,6 +401,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         feeDecimals: 9,
         amount,
         outputCount,
+        omitNf1,
         missingAtaCount,
         feeRecipient: relayer?.pubkeyB58 ?? null,
         feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
@@ -424,6 +454,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       feeDecimals: meta.decimals,
       amount,
       outputCount,
+      omitNf1,
       missingAtaCount,
       hasUnsafeSelfPayExt: meta.hasUnsafeSelfPayExt,
       feeRecipient,
@@ -531,23 +562,44 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
   const escrowPubkey = base58Encode(deriveEscrowPda(0, shardId).address)
 
   try {
-    // Dynamically fetch on-chain mint metadata (tokenProgram + decimals), live rent schedule,
-    // and live USD prices — ZERO hardcoded mint lists or rent estimates!
-    const [mintMetas, rentSchedule, prices] = await Promise.all([
-      fetchMintMetas(rpcUrl, [inputMint, outputMint]),
+    // Dynamically fetch on-chain mint metadata (tokenProgram + decimals + Token-2022 TLV bytes),
+    // live rent schedule, and live USD prices — ZERO hardcoded mint lists or rent estimates!
+    const [mintMetasWithData, rentSchedule, prices] = await Promise.all([
+      fetchMintMetasWithData(rpcUrl, [inputMint, outputMint]),
       fetchLiveRentSchedule(rpcUrl),
       cluster === 'mainnet'
         ? fetchMintPricesUsd(env, [WSOL_MINT_STR, inputMint, outputMint])
         : Promise.resolve({} as Record<string, number>),
     ])
 
-    const inMeta = mintMetas[inputMint]
-    const outMeta = mintMetas[outputMint]
+    const inEntry = mintMetasWithData[inputMint]
+    const outEntry = mintMetasWithData[outputMint]
+    const inMeta = inEntry?.meta
+    const outMeta = outEntry?.meta
     if (!inMeta?.isValidMint || !outMeta?.isValidMint) {
       return json(
         request,
         cfg.corsOrigins,
         { error: 'inputMint and outputMint must be valid on-chain SPL or Token-2022 mints' },
+        400,
+      )
+    }
+
+    // Account for Token-2022 TransferFeeConfig on the vault_in_ata -> escrow_in_ata transfer
+    // that runs BEFORE the external DEX router CPI inside ExecViaEscrow.
+    // Classic SPL and WSOL mints pass through unchanged (`netInputAmount === amount`).
+    const inputTransferFee = await resolveSwapInputTransferFee(
+      rpcUrl,
+      inMeta,
+      inEntry?.rawBytes ?? null,
+      BigInt(amount),
+    )
+    const quoteInputAmount = inputTransferFee.netInputAmount
+    if (BigInt(quoteInputAmount) <= 0n) {
+      return json(
+        request,
+        cfg.corsOrigins,
+        { error: 'amount is too small to cover Token-2022 input transfer fee into escrow' },
         400,
       )
     }
@@ -574,7 +626,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
     // Estimate output amount from live USD prices when available so we only make 1 aggregator call
     let preEstimatedOut: bigint | null = null
     if (inPriceUsd && outPriceUsd && inPriceUsd > 0 && outPriceUsd > 0) {
-      const inUi = Number(amount) / Math.pow(10, inMeta.decimals)
+      const inUi = Number(quoteInputAmount) / Math.pow(10, inMeta.decimals)
       const estOutUi = (inUi * inPriceUsd) / outPriceUsd
       if (Number.isFinite(estOutUi) && estOutUi > 0) {
         preEstimatedOut = BigInt(Math.max(1, Math.floor(estOutUi * Math.pow(10, outMeta.decimals))))
@@ -600,7 +652,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       const baseline = await quoteWithSelection(env, cfg, providerSelection, {
         inputMint,
         outputMint,
-        amount,
+        amount: quoteInputAmount,
         slippageBps,
         onlyDirectRoutes,
         maxAccounts,
@@ -623,7 +675,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
         quoteResult = await quoteWithSelection(env, cfg, baseline.winner.provider, {
           inputMint,
           outputMint,
-          amount,
+          amount: quoteInputAmount,
           slippageBps,
           onlyDirectRoutes,
           maxAccounts,
@@ -639,7 +691,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       quoteResult = await quoteWithSelection(env, cfg, providerSelection, {
         inputMint,
         outputMint,
-        amount,
+        amount: quoteInputAmount,
         slippageBps,
         onlyDirectRoutes,
         maxAccounts,
@@ -674,6 +726,9 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       feePlan,
       escrowPda: escrowPubkey,
       shardId,
+      grossInputAmount: inputTransferFee.grossInputAmount,
+      netInputAmount: inputTransferFee.netInputAmount,
+      inputTransferFeeBps: inputTransferFee.inputTransferFeeBps,
       mints: {
         input: inMeta,
         output: outMeta,
@@ -1342,6 +1397,105 @@ function timingSafeEqualStrings(a: string, b: string): boolean {
   return diff === 0
 }
 
+function makeCheckpointLockAdapter(guard: DurableObjectStub<RelayGuard>): CheckpointLockAdapter {
+  return {
+    acquire: (req) => guard.acquireCheckpointLock(req),
+    release: (req) => guard.releaseCheckpointLock(req),
+  }
+}
+
+async function handleCheckpoint(request: Request, env: Env): Promise<Response> {
+  const cfg = loadPolicyConfig(env)
+  let body: { cluster?: string; poolId?: number } = {}
+  const rawText = await request.text()
+  if (rawText.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(rawText) as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return json(request, cfg.corsOrigins, { error: 'Request body must be a JSON object' }, 400)
+      }
+      body = parsed as { cluster?: string; poolId?: number }
+    } catch {
+      return json(request, cfg.corsOrigins, { error: 'Invalid JSON body' }, 400)
+    }
+  }
+
+  const cluster = parseCluster(body.cluster, 'mainnet')
+  const rawPoolId = body.poolId === undefined ? 0 : Number(body.poolId)
+  if (!Number.isInteger(rawPoolId) || rawPoolId < 0) {
+    return json(request, cfg.corsOrigins, { error: 'poolId must be a non-negative integer' }, 400)
+  }
+  if (rawPoolId !== 0) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      { error: 'Only canonical Pool #0 is permitted on this relay' },
+      400,
+    )
+  }
+
+  const rpcUrl = getRpcUrl(env, cluster)
+  const relayer = getRelayerPubkeyForCluster(env, cluster)
+  if (!rpcUrl || !relayer) {
+    const reqHost = new URL(request.url).host
+    return json(
+      request,
+      cfg.corsOrigins,
+      { error: `${cluster} privacy relayer is not configured on ${reqHost}` },
+      503,
+    )
+  }
+
+  const ipHash = hashClientIp(request, relayer.pubkeyB58)
+  const guard = getGuardStub(env)
+  const rateDecision = await guard.checkCheckpointRateLimit({ ipHash, cluster })
+  if (!rateDecision.allowed) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      {
+        error: rateDecision.reason ?? 'Checkpoint rate limit reached',
+        code: rateDecision.code ?? 'CHECKPOINT_RATE_LIMITED',
+        retryAfterSec: rateDecision.retryAfterSec,
+      },
+      rateDecision.status ?? 429,
+      rateDecision.retryAfterSec ? { 'retry-after': String(rateDecision.retryAfterSec) } : undefined,
+    )
+  }
+
+  try {
+    const result = await publishCheckpointIfNeeded({
+      rpcUrl,
+      cluster,
+      poolId: rawPoolId,
+      relayerSecret32: relayer.secret32,
+      lock: makeCheckpointLockAdapter(guard),
+      confirm: true,
+    })
+    return json(request, cfg.corsOrigins, result)
+  } catch (err) {
+    if (err instanceof CheckpointError) {
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: err.message,
+          ...(err.code ? { code: err.code } : {}),
+          ...(err.retryAfterSec ? { retryAfterSec: err.retryAfterSec } : {}),
+        },
+        err.status,
+        err.retryAfterSec ? { 'retry-after': String(err.retryAfterSec) } : undefined,
+      )
+    }
+    return json(
+      request,
+      cfg.corsOrigins,
+      { error: sanitizeError(err, 'Checkpoint publish failed') },
+      502,
+    )
+  }
+}
+
 async function handleAdminRefill(request: Request, env: Env): Promise<Response> {
   const cfg = loadPolicyConfig(env)
   const expected = env.RELAY_ADMIN_TOKEN?.trim()
@@ -1352,6 +1506,18 @@ async function handleAdminRefill(request: Request, env: Env): Promise<Response> 
   const report = await runAutoRefill(env, cfg)
   return json(request, cfg.corsOrigins, { ok: true, report })
 }
+
+const RELAY_ENDPOINTS = [
+  'GET  /health',
+  'GET  /v1/info?cluster=mainnet|devnet',
+  'GET  /v1/fee-quote?op=transfer|withdraw|exec_escrow&mint=...(&amount=...&omitNf1=true|false)',
+  'GET  /v1/aggregators',
+  'GET  /v1/stats',
+  'GET|POST /v1/swap/quote',
+  'POST /v1/swap/instructions',
+  'POST /v1/checkpoint',
+  'POST /v1/relay/submit',
+] as const
 
 // ============================================================================
 // Worker Entrypoint (`fetch` + `scheduled` Cron Trigger)
@@ -1373,6 +1539,7 @@ export default {
         domain: url.host,
         programId: AUDREN_PROGRAM_ID_STR,
         timestamp: new Date().toISOString(),
+        ...(url.pathname === '/' ? { endpoints: RELAY_ENDPOINTS } : {}),
       })
     }
 
@@ -1407,6 +1574,10 @@ export default {
       return handleSwapInstructions(request, env)
     }
 
+    if (url.pathname === '/v1/checkpoint' && request.method === 'POST') {
+      return handleCheckpoint(request, env)
+    }
+
     if (url.pathname === '/v1/relay/submit' && request.method === 'POST') {
       return handleRelaySubmit(request, env)
     }
@@ -1420,16 +1591,7 @@ export default {
       cfg.corsOrigins,
       {
         error: `Not found: ${request.method} ${url.pathname}`,
-        endpoints: [
-          'GET  /health',
-          'GET  /v1/info?cluster=mainnet|devnet',
-          'GET  /v1/fee-quote?op=withdraw|exec_escrow&mint=...&amount=...',
-          'GET  /v1/aggregators',
-          'GET  /v1/stats',
-          'GET|POST /v1/swap/quote',
-          'POST /v1/swap/instructions',
-          'POST /v1/relay/submit',
-        ],
+        endpoints: RELAY_ENDPOINTS,
       },
       404,
     )
@@ -1437,15 +1599,16 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const cfg = loadPolicyConfig(env)
+    const ckptLock = makeCheckpointLockAdapter(getGuardStub(env))
     ctx.waitUntil(
       Promise.all([
         runAutoRefill(env, cfg).then((report) => {
           console.log('[audren-relay cron refill]', JSON.stringify(report))
         }),
-        runV2MaintenanceCrank(env, 'mainnet').then((crank) => {
+        runV2MaintenanceCrank(env, 'mainnet', ckptLock).then((crank) => {
           console.log('[audren-relay cron crank mainnet]', JSON.stringify(crank))
         }),
-        runV2MaintenanceCrank(env, 'devnet').then((crank) => {
+        runV2MaintenanceCrank(env, 'devnet', ckptLock).then((crank) => {
           console.log('[audren-relay cron crank devnet]', JSON.stringify(crank))
         }),
       ]).catch((err) => {

@@ -35,7 +35,7 @@
     }
   ],
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["*/2 * * * *"]
   },
   "vars": {
     "DEFAULT_AGGREGATOR": "jupiter",

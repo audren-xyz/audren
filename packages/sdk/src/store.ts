@@ -2,9 +2,11 @@
  * Zero-indexer `CompactWalletStore` & 4-ary Depth-20 Merkle witness builder matching
  * `crates/audren-circuits/src/merkle.rs` and `crates/client/src/store.rs` bit-for-bit.
  *
- * Discards every sealed `SubtreePage` (`8,256 B`) and `MemoPage` (`10,144 B`) immediately after
- * scanning, persisting only frozen 12-sibling intra-subtree paths (`384 B` per owned note),
- * `32 B` finalized level-4 subroots, frontier tail leaves, and `16 B` nullifier prefixes.
+ * Discards every sealed `SubtreePage` (`8,256 B`), `MemoPage` (`10,144 B`), and stranger
+ * `NullifierPage` prefix immediately after scanning, persisting only frozen 12-sibling
+ * intra-subtree paths (`384 B` per owned note), `32 B` finalized level-4 subroots (`1.28 MB`
+ * at 10M pool notes), unsealed frontier tail leaves, and at most one just-sealed page per lane
+ * until a newer `RootCheckpoint` crosses it.
  */
 
 import {
@@ -13,18 +15,20 @@ import {
   NF_PER_PAGE,
   NF_PREFIX_LEN,
   NUM_LANES,
+  SUBROOTS_PER_PAGE,
   SUBTREE_LEAVES,
   SUBTREE_LEVELS_4ARY,
   TOTAL_DEPTH_4ARY,
   ZERO_HASHES_4ARY,
 } from './constants.ts';
-import { tryDecryptAndVerifyMemoEntry } from './crypto.ts';
+import { tryDecryptAndVerifyMemoEntry, type DecryptedMemo } from './crypto.ts';
 import type { FullViewingKey, SelectiveDisclosureProof } from './keys.ts';
 import { fvkRealNullifier, fvkStealthOwner } from './keys.ts';
 import {
   decodeMemoPage,
   decodeNullifierPage,
   decodeSubtreePage,
+  decodeSubtreeRootPage,
   type DecodedRootCheckpoint,
 } from './layout.ts';
 import {
@@ -270,6 +274,8 @@ export interface CompactLaneState {
   finalizedSubroots: Uint8Array[];
   frontierSubSeq: bigint;
   frontierLeaves: Uint8Array[];
+  prevSealedSubSeq: bigint | null;
+  prevSealedLeaves: Uint8Array[];
   nextMemoLeaf: bigint;
   nextNfIndex: bigint;
 }
@@ -306,7 +312,6 @@ export class CompactWalletStore {
   birthdaySlot: bigint;
   lanes: CompactLaneState[];
   notes: OwnedNote[];
-  seenNfPrefixes: Set<string>;
 
   constructor(poolId = 0, birthdaySlot = 0n) {
     this.poolId = poolId;
@@ -315,11 +320,12 @@ export class CompactWalletStore {
       finalizedSubroots: [],
       frontierSubSeq: 0n,
       frontierLeaves: [],
+      prevSealedSubSeq: null,
+      prevSealedLeaves: [],
       nextMemoLeaf: 0n,
       nextNfIndex: 0n,
     }));
     this.notes = [];
-    this.seenNfPrefixes = new Set<string>();
   }
 
   unspentNotes(mintHex?: string): OwnedNote[] {
@@ -334,6 +340,199 @@ export class CompactWalletStore {
       out.set(k, (out.get(k) ?? 0n) + n.amount);
     }
     return out;
+  }
+
+  /** Record a decrypted and commitment-verified owned note if not already tracked. */
+  recordVerifiedMemo(params: {
+    fvk: FullViewingKey;
+    laneId: number;
+    leafIdx: bigint;
+    decrypted: DecryptedMemo;
+    cmBe: Uint8Array;
+  }): boolean {
+    const { fvk, laneId, leafIdx, decrypted, cmBe } = params;
+    if (laneId < 0 || laneId >= NUM_LANES) throw new RangeError(`Invalid laneId ${laneId}`);
+    if (this.notes.some((n) => n.laneId === laneId && n.leafIndex === leafIdx)) {
+      return false;
+    }
+    const globalLeaf = (BigInt(laneId) << 36n) | leafIdx;
+    const stealth = fvkStealthOwner(fvk, decrypted.tweak);
+    const cmFr = computeNoteCommitment(
+      stealth,
+      deriveAssetId(decrypted.mint),
+      decrypted.amount,
+      decrypted.blinding,
+    );
+    const nf = fvkRealNullifier(fvk, cmFr, globalLeaf);
+    this.notes.push({
+      poolId: this.poolId,
+      laneId,
+      leafIndex: leafIdx,
+      globalLeafIndex: globalLeaf,
+      mint: new Uint8Array(decrypted.mint),
+      amount: decrypted.amount,
+      tweak: frToBeBytes(decrypted.tweak),
+      blinding: frToBeBytes(decrypted.blinding),
+      stealthOwner: frToBeBytes(stealth),
+      commitment: new Uint8Array(cmBe),
+      nullifier: nf,
+      isDynamic: decrypted.isDynamic,
+      spent: false,
+      frozenIntraSiblings: null,
+      frozenIntraPositions: null,
+    });
+    return true;
+  }
+
+  /**
+   * Freeze 12-sibling intra-subtree Merkle paths for every owned note in sealed
+   * `(laneId, subSeq)` so the `8,256 B` `SubtreePage` can be permanently discarded.
+   */
+  freezeOwnedNotesInSubtreePage(
+    laneId: number,
+    subSeq: bigint,
+    leaves: readonly Uint8Array[],
+  ): void {
+    if (laneId < 0 || laneId >= NUM_LANES) throw new RangeError(`Invalid laneId ${laneId}`);
+    if (leaves.length !== SUBTREE_LEAVES) return;
+    let frLeaves: bigint[] | null = null;
+    for (const note of this.notes) {
+      if (
+        note.laneId === laneId &&
+        note.leafIndex / BigInt(SUBTREE_LEAVES) === subSeq &&
+        !note.frozenIntraSiblings
+      ) {
+        if (!frLeaves) frLeaves = leaves.map((b) => frFromBeBytesStrict(b));
+        const offset = Number(note.leafIndex % BigInt(SUBTREE_LEAVES));
+        const { siblings, positions } = extractIntraSubtreeSiblings(
+          frLeaves,
+          SUBTREE_LEAVES,
+          offset,
+        );
+        note.frozenIntraSiblings = siblings.map((lvl) => lvl.map((x) => frToBeBytes(x)));
+        note.frozenIntraPositions = positions;
+      }
+    }
+  }
+
+  /**
+   * Ingest one or more `SubtreeRootPage` accounts (`9,664 B`, 300 finalized subroots each)
+   * without downloading sealed `SubtreePage` accounts for subtrees containing no owned notes.
+   */
+  ingestSubrootPages(params: {
+    laneId: number;
+    subrootPages: ReadonlyArray<{ rootPageSeq: bigint; raw: Uint8Array }>;
+    finalizedCount?: bigint;
+  }): void {
+    const { laneId, subrootPages, finalizedCount } = params;
+    if (laneId < 0 || laneId >= NUM_LANES) throw new RangeError(`Invalid laneId ${laneId}`);
+    const lane = this.lanes[laneId]!;
+    const maxRoots = finalizedCount !== undefined ? Number(finalizedCount) : Number.MAX_SAFE_INTEGER;
+    for (const { rootPageSeq, raw } of subrootPages) {
+      const dec = decodeSubtreeRootPage(raw);
+      const baseIdx = Number(rootPageSeq) * SUBROOTS_PER_PAGE;
+      for (let i = 0; i < dec.roots.length; i++) {
+        const subIdx = baseIdx + i;
+        if (subIdx >= maxRoots) break;
+        while (lane.finalizedSubroots.length < subIdx) {
+          lane.finalizedSubroots.push(new Uint8Array(32));
+        }
+        lane.finalizedSubroots[subIdx] = new Uint8Array(dec.roots[i]!);
+      }
+    }
+  }
+
+  /**
+   * Stream a single `NullifierPage` against our `O(owned_unspent_notes)` prefix index,
+   * marking matches `spent = true`, advancing `nextNfIndex`, and discarding stranger prefixes.
+   */
+  ingestNullifierPage(params: {
+    laneId: number;
+    pageSeq: bigint;
+    raw: Uint8Array;
+    maxNfIndex?: bigint;
+  }): number {
+    return this.ingestNullifierPages({
+      laneId: params.laneId,
+      nfPages: [{ pageSeq: params.pageSeq, raw: params.raw }],
+      maxNfIndex: params.maxNfIndex,
+    });
+  }
+
+  /**
+   * Stream `NullifierPage`s in ascending sequence order against an `O(owned_unspent_notes)`
+   * lookup map (across all lanes), marking matching notes `spent = true`, advancing
+   * `nextNfIndex`, and immediately discarding every stranger prefix.
+   */
+  ingestNullifierPages(params: {
+    laneId: number;
+    nfPages: ReadonlyArray<{ pageSeq: bigint; raw: Uint8Array }>;
+    maxNfIndex?: bigint;
+  }): number {
+    const { laneId, nfPages, maxNfIndex } = params;
+    if (laneId < 0 || laneId >= NUM_LANES) throw new RangeError(`Invalid laneId ${laneId}`);
+    if (nfPages.length === 0) return 0;
+    const lane = this.lanes[laneId]!;
+
+    // Build an O(owned_unspent_notes) prefix lookup table across ALL lanes.
+    const unspentByPrefix = new Map<string, OwnedNote[]>();
+    for (const note of this.notes) {
+      if (note.spent) continue;
+      const prefHex = bytesToHex(note.nullifier.subarray(0, NF_PREFIX_LEN));
+      const bucket = unspentByPrefix.get(prefHex);
+      if (bucket) {
+        bucket.push(note);
+      } else {
+        unspentByPrefix.set(prefHex, [note]);
+      }
+    }
+
+    const sortedNfPages = [...nfPages].sort((a, b) =>
+      a.pageSeq < b.pageSeq ? -1 : a.pageSeq > b.pageSeq ? 1 : 0,
+    );
+    let newlySpent = 0;
+    for (const { pageSeq, raw } of sortedNfPages) {
+      const nfPage = decodeNullifierPage(raw);
+      const pageBase = pageSeq * BigInt(NF_PER_PAGE);
+      const startSlot = lane.nextNfIndex > pageBase ? Number(lane.nextNfIndex - pageBase) : 0;
+      let limitSlot = nfPage.count;
+      if (maxNfIndex !== undefined) {
+        const capSlots = maxNfIndex > pageBase ? Number(maxNfIndex - pageBase) : 0;
+        if (capSlots < limitSlot) limitSlot = capSlots;
+      }
+      for (let slot = startSlot; slot < limitSlot; slot++) {
+        if (unspentByPrefix.size > 0) {
+          const prefHex = bytesToHex(nfPage.prefixes[slot]!);
+          const matched = unspentByPrefix.get(prefHex);
+          if (matched) {
+            for (const note of matched) {
+              if (!note.spent) {
+                note.spent = true;
+                newlySpent++;
+              }
+            }
+            unspentByPrefix.delete(prefHex);
+          }
+        }
+        const nextIdx = pageBase + BigInt(slot) + 1n;
+        if (nextIdx > lane.nextNfIndex) lane.nextNfIndex = nextIdx;
+      }
+    }
+    return newlySpent;
+  }
+
+  /**
+   * Prune retained `prevSealedLeaves` on any lane whose checkpoint has crossed past it.
+   */
+  pruneSealedBeforeCheckpoint(ckpt: DecodedRootCheckpoint): void {
+    for (let l = 0; l < NUM_LANES; l++) {
+      const lane = this.lanes[l]!;
+      const ckptFrontierPage = ckpt.laneCounts[l]! / BigInt(SUBTREE_LEAVES);
+      if (lane.prevSealedSubSeq !== null && ckptFrontierPage > lane.prevSealedSubSeq) {
+        lane.prevSealedSubSeq = null;
+        lane.prevSealedLeaves = [];
+      }
+    }
   }
 
   ingestLanePages(params: {
@@ -388,31 +587,15 @@ export class CompactWalletStore {
         cmBe!,
       );
       if (dec) {
-        const globalLeaf = (BigInt(laneId) << 36n) | leafIdx;
-        const stealth = fvkStealthOwner(fvk, dec.tweak);
-        const cmFr = computeNoteCommitment(stealth, deriveAssetId(dec.mint), dec.amount, dec.blinding);
-        const nf = fvkRealNullifier(fvk, cmFr, globalLeaf);
-        const prefHex = bytesToHex(nf.subarray(0, NF_PREFIX_LEN));
-        const alreadySpent = this.seenNfPrefixes.has(prefHex);
-
-        if (!this.notes.some((n) => n.laneId === laneId && n.leafIndex === leafIdx)) {
-          this.notes.push({
-            poolId: this.poolId,
+        if (
+          this.recordVerifiedMemo({
+            fvk,
             laneId,
-            leafIndex: leafIdx,
-            globalLeafIndex: globalLeaf,
-            mint: dec.mint,
-            amount: dec.amount,
-            tweak: frToBeBytes(dec.tweak),
-            blinding: frToBeBytes(dec.blinding),
-            stealthOwner: frToBeBytes(stealth),
-            commitment: new Uint8Array(cmBe!),
-            nullifier: nf,
-            isDynamic: dec.isDynamic,
-            spent: alreadySpent,
-            frozenIntraSiblings: null,
-            frozenIntraPositions: null,
-          });
+            leafIdx,
+            decrypted: dec,
+            cmBe: cmBe!,
+          })
+        ) {
           discovered++;
         }
       }
@@ -442,11 +625,14 @@ export class CompactWalletStore {
       lane.frontierLeaves.length === SUBTREE_LEAVES &&
       !pageLeavesMap.has(lane.frontierSubSeq)
     ) {
+      const heldSeq = lane.frontierSubSeq;
       const frLeaves = lane.frontierLeaves.map((b) => frFromBeBytesStrict(b));
-      freezeNotesInPage(lane.frontierSubSeq, frLeaves);
-      const pageEndLeaf = (lane.frontierSubSeq + 1n) * BigInt(SUBTREE_LEAVES);
+      freezeNotesInPage(heldSeq, frLeaves);
+      const pageEndLeaf = (heldSeq + 1n) * BigInt(SUBTREE_LEAVES);
       if (lane.nextMemoLeaf >= pageEndLeaf) {
-        lane.frontierSubSeq = lane.frontierSubSeq + 1n;
+        lane.prevSealedSubSeq = heldSeq;
+        lane.prevSealedLeaves = lane.frontierLeaves;
+        lane.frontierSubSeq = heldSeq + 1n;
         lane.frontierLeaves = [];
       }
     }
@@ -468,6 +654,8 @@ export class CompactWalletStore {
         const pageEndLeaf = (seq + 1n) * BigInt(SUBTREE_LEAVES);
         if (lane.nextMemoLeaf >= pageEndLeaf) {
           if (seq >= lane.frontierSubSeq) {
+            lane.prevSealedSubSeq = seq;
+            lane.prevSealedLeaves = leaves.map((b) => new Uint8Array(b));
             lane.frontierSubSeq = seq + 1n;
             lane.frontierLeaves = [];
           }
@@ -482,26 +670,7 @@ export class CompactWalletStore {
       }
     }
 
-    const sortedNfPages = [...nfPages].sort((a, b) =>
-      a.pageSeq < b.pageSeq ? -1 : a.pageSeq > b.pageSeq ? 1 : 0,
-    );
-    for (const { pageSeq, raw } of sortedNfPages) {
-      const nfPage = decodeNullifierPage(raw);
-      const pageBase = pageSeq * BigInt(NF_PER_PAGE);
-      const startSlot =
-        lane.nextNfIndex > pageBase ? Number(lane.nextNfIndex - pageBase) : 0;
-      for (let slot = startSlot; slot < nfPage.count; slot++) {
-        this.seenNfPrefixes.add(bytesToHex(nfPage.prefixes[slot]!));
-        const nextIdx = pageBase + BigInt(slot) + 1n;
-        if (nextIdx > lane.nextNfIndex) lane.nextNfIndex = nextIdx;
-      }
-    }
-    for (const note of this.notes) {
-      if (!note.spent) {
-        const prefHex = bytesToHex(note.nullifier.subarray(0, NF_PREFIX_LEN));
-        if (this.seenNfPrefixes.has(prefHex)) note.spent = true;
-      }
-    }
+    this.ingestNullifierPages({ laneId, nfPages });
     return discovered;
   }
 
@@ -519,6 +688,20 @@ export class CompactWalletStore {
     const frontierPage = ckptCount / BigInt(SUBTREE_LEAVES);
     const frontierRem = Number(ckptCount % BigInt(SUBTREE_LEAVES));
 
+    const resolveFrontierLeaves = (): Uint8Array[] | null => {
+      if (lane.frontierSubSeq === frontierPage && lane.frontierLeaves.length >= frontierRem) {
+        return lane.frontierLeaves;
+      }
+      if (
+        lane.prevSealedSubSeq !== null &&
+        lane.prevSealedSubSeq === frontierPage &&
+        lane.prevSealedLeaves.length >= frontierRem
+      ) {
+        return lane.prevSealedLeaves;
+      }
+      return null;
+    };
+
     let intraSiblings: bigint[][];
     let intraPositions: number[];
     if (targetPage < frontierPage) {
@@ -530,10 +713,11 @@ export class CompactWalletStore {
       );
       intraPositions = [...note.frozenIntraPositions];
     } else {
-      if (lane.frontierSubSeq !== frontierPage || lane.frontierLeaves.length < frontierRem) {
+      const fLeaves = resolveFrontierLeaves();
+      if (!fLeaves) {
         throw new Error('Missing frontier SubtreePage leaves');
       }
-      const fFr = lane.frontierLeaves.slice(0, frontierRem).map((b) => frFromBeBytesStrict(b));
+      const fFr = fLeaves.slice(0, frontierRem).map((b) => frFromBeBytesStrict(b));
       const res = extractIntraSubtreeSiblings(fFr, frontierRem, targetOffset);
       intraSiblings = res.siblings;
       intraPositions = res.positions;
@@ -548,10 +732,11 @@ export class CompactWalletStore {
       .map((b) => frFromBeBytesStrict(b));
     let frontierFr: bigint[] | undefined;
     if (frontierRem > 0) {
-      if (lane.frontierSubSeq !== frontierPage || lane.frontierLeaves.length < frontierRem) {
+      const fLeaves = resolveFrontierLeaves();
+      if (!fLeaves) {
         throw new Error('Missing frontier SubtreePage leaves');
       }
-      frontierFr = lane.frontierLeaves.slice(0, frontierRem).map((b) => frFromBeBytesStrict(b));
+      frontierFr = fLeaves.slice(0, frontierRem).map((b) => frFromBeBytesStrict(b));
     }
 
     const path = buildWitnessFromFrozenSubsiblings({
@@ -569,6 +754,10 @@ export class CompactWalletStore {
     if (computeMerkleRoot4Ary(path, cm) !== superRoot) {
       throw new Error('Reconstructed Merkle root mismatch');
     }
+    if (lane.prevSealedSubSeq !== null && frontierPage > lane.prevSealedSubSeq) {
+      lane.prevSealedSubSeq = null;
+      lane.prevSealedLeaves = [];
+    }
     return { superRoot, path };
   }
 
@@ -580,6 +769,12 @@ export class CompactWalletStore {
         finalizedSubroots: l.finalizedSubroots.map(bytesToHex),
         frontierSubSeq: l.frontierSubSeq.toString(),
         frontierLeaves: l.frontierLeaves.map(bytesToHex),
+        ...(l.prevSealedSubSeq !== null && l.prevSealedLeaves.length > 0
+          ? {
+              prevSealedSubSeq: l.prevSealedSubSeq.toString(),
+              prevSealedLeaves: l.prevSealedLeaves.map(bytesToHex),
+            }
+          : {}),
         nextMemoLeaf: l.nextMemoLeaf.toString(),
         nextNfIndex: l.nextNfIndex.toString(),
       })),
@@ -602,7 +797,6 @@ export class CompactWalletStore {
           : null,
         frozenIntraPositions: n.frozenIntraPositions,
       })),
-      seenNfPrefixes: [...this.seenNfPrefixes],
     });
   }
 
@@ -614,6 +808,8 @@ export class CompactWalletStore {
         finalizedSubroots: string[];
         frontierSubSeq: string;
         frontierLeaves: string[];
+        prevSealedSubSeq?: string | null;
+        prevSealedLeaves?: string[];
         nextMemoLeaf: string;
         nextNfIndex: string;
       }>;
@@ -634,13 +830,18 @@ export class CompactWalletStore {
         frozenIntraSiblings: string[][] | null;
         frozenIntraPositions: number[] | null;
       }>;
-      seenNfPrefixes: string[];
+      seenNfPrefixes?: string[];
     };
     const store = new CompactWalletStore(raw.poolId, BigInt(raw.birthdaySlot));
     store.lanes = raw.lanes.map((l) => ({
       finalizedSubroots: l.finalizedSubroots.map(hexToBytes),
       frontierSubSeq: BigInt(l.frontierSubSeq),
       frontierLeaves: l.frontierLeaves.map(hexToBytes),
+      prevSealedSubSeq:
+        l.prevSealedSubSeq !== undefined && l.prevSealedSubSeq !== null
+          ? BigInt(l.prevSealedSubSeq)
+          : null,
+      prevSealedLeaves: l.prevSealedLeaves ? l.prevSealedLeaves.map(hexToBytes) : [],
       nextMemoLeaf: BigInt(l.nextMemoLeaf),
       nextNfIndex: BigInt(l.nextNfIndex),
     }));
@@ -663,7 +864,17 @@ export class CompactWalletStore {
         : null,
       frozenIntraPositions: n.frozenIntraPositions,
     }));
-    store.seenNfPrefixes = new Set(raw.seenNfPrefixes);
+    // Backwards-compatible migration: honor any legacy `seenNfPrefixes` against owned notes,
+    // then discard stranger prefixes permanently so RAM & disk stay bounded.
+    if (Array.isArray(raw.seenNfPrefixes) && raw.seenNfPrefixes.length > 0) {
+      const legacySet = new Set(raw.seenNfPrefixes);
+      for (const note of store.notes) {
+        if (!note.spent) {
+          const prefHex = bytesToHex(note.nullifier.subarray(0, NF_PREFIX_LEN));
+          if (legacySet.has(prefHex)) note.spent = true;
+        }
+      }
+    }
     return store;
   }
 }

@@ -17,14 +17,6 @@ interface FaqItem {
   a: string
 }
 
-const CATEGORIES: { id: CategoryId; label: string }[] = [
-  { id: 'all', label: 'All questions (12)' },
-  { id: 'privacy', label: 'Privacy & global MASP' },
-  { id: 'swaps', label: 'DeFi & tokens' },
-  { id: 'crypto', label: 'Groth16 & RPC sync' },
-  { id: 'custody', label: 'Custody, MPC & audits' },
-]
-
 const FAQS: readonly FaqItem[] = [
   {
     id: 'boundaries',
@@ -38,7 +30,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'privacy',
     catLabel: 'Privacy & global MASP',
     q: 'Does a global Merkle tree or high TVL guarantee absolute anonymity?',
-    a: 'No. Proving membership over the entire historical 4^20 global pool eliminates small ring-selection leaks, but timing correlation, public entry/exit amounts, IP/RPC metadata, and input-count selection (padded 2-nullifier mode vs economic 1-nullifier omit_nf1 mode) still narrow practical anonymity. More independent, plausible pool activity helps; raw TVL alone does not establish anonymity.',
+    a: 'No. Proving membership over the entire historical 4^20 global pool eliminates small ring-selection leaks, and private transfers default to a uniform padded shape (2 nullifiers, 3 encrypted outputs with output_mask = 0b111, randomized append lane, plus automatic 2-input coin selection and 2 → 1 note merging), with an opt-in omit_nf1 economy mode that saves rent while exposing 1-input arity. Timing correlation, public entry/exit amounts, and IP/RPC metadata still narrow practical anonymity. More independent, plausible pool activity helps; raw TVL alone does not establish anonymity.',
   },
   {
     id: 'solvency',
@@ -52,7 +44,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'privacy',
     catLabel: 'Privacy & global MASP',
     q: 'What appears on Solscan for a private JoinSplit transfer versus a deposit or exit?',
-    a: 'A private JoinSplit (Tag 6, ASSET_MODE_PRIVATE) reveals only the checkpoint root, output append lane, 1–2 nullifiers, opaque 32 B commitments, 90 B encrypted memos, and the fee payer (relayer). Sender identity, recipient stealth owner, token mint, and amount remain hidden. Deposits, public withdrawals, and external DeFi CPIs expose their public boundary mints and amounts.',
+    a: 'A default private JoinSplit (Tag 6, ASSET_MODE_PRIVATE) emits a uniform padded footprint: checkpoint root, randomized output append lane, 2 nullifiers, 3 opaque 32 B commitments, 3 × 90 B encrypted memos, and the fee payer (relayer, which quotes flat per-mint fees without seeing transfer amounts). Opt-in omit_nf1 mode uses 1 nullifier on single-input spends to reduce rent. Sender identity, recipient stealth owner, token mint, and amount remain hidden. Deposits, public withdrawals, and external DeFi CPIs expose their public boundary mints and amounts.',
   },
   {
     id: 'dex',
@@ -80,14 +72,21 @@ const FAQS: readonly FaqItem[] = [
     category: 'crypto',
     catLabel: 'Groth16 & RPC sync',
     q: 'Why does every Audren instruction fit in a single Solana Transaction v1?',
-    a: 'A compressed BN254 Groth16 proof is only 192 bytes (verified via Solana native alt_bn128 pairing syscalls in ~103k–160k CU). Together with Solana Transaction v1 (SIMD-0385, 0x81, 4,096 B limit and inline compute budget), every instruction, including JoinSplit and complex multi-hop ExecViaEscrow CPIs, settles atomically in one transaction without multi-step proof uploads.',
+    a: 'One frozen 17,861-R1CS circuit (3.93 MB compressed proving key) produces a 192-byte compressed BN254 Groth16 proof verified locally in browsers or mobile SDKs and on-chain via Solana native alt_bn128 pairing syscalls in ~103k–160k CU. Together with Solana Transaction v1 (SIMD-0385, 0x81, 4,096 B limit and inline compute budget), every instruction, including JoinSplit and complex multi-hop ExecViaEscrow CPIs, settles atomically in one transaction without multi-step proof uploads.',
   },
   {
     id: 'scanning',
     category: 'crypto',
     catLabel: 'Groth16 & RPC sync',
     q: 'How do wallets sync and build Merkle proofs with zero mandatory indexer?',
-    a: 'CompactWalletStore fetches sequential SubtreePage (8,256 B), MemoPage (10,144 B, 112 × 90 B SoA entries), and NullifierPage (9,664 B, 600 × 16 B prefixes) PDAs via ordinary Solana RPC getMultipleAccounts. A 2-byte view tag skips 65,535/65,536 stranger notes instantly, every decrypted memo is verified against SubtreePage to block forged memos, sealed pages freeze 12 intra-subtree siblings and are discarded permanently (1.28 MB local store at 10M pool notes), and Merkle proofs are built 100% offline with zero targeted per-note RPC queries.',
+    a: 'CompactWalletStore runs a 2-pass sync over ordinary Solana RPC getMultipleAccounts with zero mandatory indexer or Forester. Pass 1 reads SubtreeRootPage (9,664 B, 300 finalized subtree roots = 126 KB per 1M notes) and scans MemoPage (10,144 B) via SoA dataSlice ([0..3,872] covering header, 2-byte view_tags, and X25519 ephemeral_pks, with optional birthdaySlot skipping), fetching full 10,144 B memos and historical SubtreePages (8,256 B) only on 1/65,536 hits to verify commitments and freeze 12 intra-subtree siblings. Pass 2 streams NullifierPages (9,664 B, 600 × 16 B prefixes) against only the wallet’s own unspent note prefixes and discards every stranger prefix immediately, keeping local storage bounded at 1.28 MB at 10M pool notes while building Merkle proofs 100% offline.',
+  },
+  {
+    id: 'rent-checkpoints',
+    category: 'crypto',
+    catLabel: 'Groth16 & RPC sync',
+    q: 'How fast are checkpoints, and what does NullifierPDA rent cost?',
+    a: 'New deposits and notes become spendable after the next RootCheckpoint publication. Because PoolState sets ckpt_interval = 16 slots (~6.4 seconds), the open-source relayer exposes permissionless on-demand POST /v1/checkpoint (plus a 2-minute maintenance crank), so fresh notes checkpoint in ~6.4 seconds without waiting on a slow cron or linking your personal wallet as fee payer. On rent, Audren avoids a permissioned Forester by storing permanent 0-byte NullifierPDAs plus amortized page rent (~0.002–0.0046 SOL/tx depending on 1 vs 2 nullifiers and output count, compared to ~5,000 lamports with Forester-compressed nullifiers); on-chain checks read SysvarRent dynamically, so per-transaction cost scales down automatically if Solana lowers rent.',
   },
   {
     id: 'scaling',
@@ -110,6 +109,14 @@ const FAQS: readonly FaqItem[] = [
     q: 'What is the Groth16 trusted-setup status, pause escape hatch, and audit status?',
     a: 'Audren freezes one minimal 17,861-R1CS circuit and anchors vk_id = 0 to the official Hermez/PSE Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 71+ independent public contributors) plus Audren’s verifiable BGM17 Phase-2 ceremony (zeroized OS CSPRNG + live drand Quicknet #34194203 and Solana Mainnet finalized blockhash beacon, published in ceremony/transcript.json). Additional community Phase-2 contributions remain open, full 100% withdrawals (output_mask == 0, including WSOL unwrap) bypass SetPaused, and an independent third-party audit is pending prior to revoking BPF upgrade authority.',
   },
+]
+
+const CATEGORIES: { id: CategoryId; label: string }[] = [
+  { id: 'all', label: `All questions (${FAQS.length})` },
+  { id: 'privacy', label: 'Privacy & global MASP' },
+  { id: 'swaps', label: 'DeFi & tokens' },
+  { id: 'crypto', label: 'Groth16 & RPC sync' },
+  { id: 'custody', label: 'Custody, MPC & audits' },
 ]
 
 export function FaqExperience() {
@@ -160,8 +167,8 @@ export function FaqExperience() {
               <span className={styles.heroMetaValue}>Ordinary Solana RPC · 1.28 MB @ 10M notes</span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span className={styles.heroMetaLabel}>Relayers &amp; custody</span>
-              <span className={styles.heroMetaValue}>Optional, permissionless, zero user spend keys</span>
+              <span className={styles.heroMetaLabel}>Relayers &amp; checkpoints</span>
+              <span className={styles.heroMetaValue}>Optional, ~6.4s POST /v1/checkpoint, zero spend keys</span>
             </div>
             <div className={styles.heroMetaCell}>
               <span className={styles.heroMetaLabel}>Ceremony &amp; audit</span>
