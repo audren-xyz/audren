@@ -41,10 +41,10 @@ async function main() {
   }
   if (
     AUDREN.version !== '1.3.0' ||
-    AUDREN.mainnet.pool0Alt.entries.length !== 40 ||
-    AUDREN.devnet.pool0Alt.entries.length !== 40
+    AUDREN.mainnet.pool0Alt.entries.length !== 73 ||
+    AUDREN.devnet.pool0Alt.entries.length !== 73
   ) {
-    throw new Error('AUDREN protocol register missing v1.3.0 version or 40-entry frozen Pool #0 ALTs')
+    throw new Error('AUDREN protocol register missing v1.3.0 version or 73-entry frozen Pool #0 ALTs')
   }
 
   const pool = await assertOkJson('/api/pool?cluster=devnet&poolId=0')

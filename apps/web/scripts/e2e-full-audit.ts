@@ -272,7 +272,7 @@ async function main() {
 
   for (const cluster of ['mainnet', 'devnet'] as const) {
     const alt = AUDREN[cluster].pool0Alt
-    if (alt.entries.length !== 40 || alt.entries[0] !== AUDREN_PROGRAM_ID) {
+    if (alt.entries.length !== 73 || alt.entries[0] !== AUDREN_PROGRAM_ID) {
       throw new Error(`Invalid ${cluster} Pool #0 ALT register`)
     }
     for (const addr of alt.entries) {
