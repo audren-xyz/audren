@@ -220,7 +220,7 @@ async function main() {
   if (forgedAmountOk) throw new Error('SelectiveDisclosureProof failed to reject amount > u64::MAX')
 
   // Verify v1.3.0 register, canonical rootsPda, GlobalRootHistory decoder + selector,
-  // frozen Pool #0 ALTs (40 entries each), prover-worker.js, tight CU limits, & v0 ALT compression <= 1,232 B
+  // frozen Pool #0 ALTs (73 entries each), prover-worker.js, tight CU limits, & v0 ALT compression <= 1,232 B
   if (AUDREN.version !== '1.3.0' || AUDREN.releaseTag !== 'v1.3.0') {
     throw new Error(`Expected AUDREN version 1.3.0 / v1.3.0, got ${AUDREN.version} / ${AUDREN.releaseTag}`)
   }

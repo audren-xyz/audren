@@ -62,7 +62,7 @@ const POOL_CASES: readonly PoolCase[] = [
       },
     ],
     resultText:
-      'Private Transact settles in ~205k CU (235k budget) with inline GlobalRootHistory update (~400ms confirmation today; ~150ms under Alpenglow), hidden inputs, stealth recipient, hidden asset, and hidden amount.',
+      'Private Transact settles in ~205k CU (235k budget) with inline GlobalRootHistory update (~150ms Alpenglow finality), hidden inputs, stealth recipient, hidden asset, and hidden amount.',
     hiddenLabel: 'Which pool note was spent, recipient, token, and amount',
     publicLabel: 'GlobalRootHistory ring index, lane append slot, timing, and fee payer',
     txHref: solscanTx(AUDREN.mainnet.transferTx),
@@ -799,8 +799,8 @@ export function LandingExperience() {
                 <li>
                   Zero mandatory indexer, Forester, or background cranks (~1.28 MB kept at 10M
                   notes): inline GlobalRootHistory (128-entry recent slot_ring + 89-entry stable
-                  epoch_ring) gives instant spendability on confirmation (~400ms today; ~150ms under
-                  Alpenglow) with auto-prepended idempotent OpenPage, and full exits including
+                  epoch_ring) gives instant spendability on confirmation (~150ms Alpenglow
+                  finality) with auto-prepended idempotent OpenPage, and full exits including
                   atomic WSOL unwrap bypass pause
                 </li>
                 <li>

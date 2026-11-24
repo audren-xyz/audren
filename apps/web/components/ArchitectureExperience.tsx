@@ -33,7 +33,7 @@ const INSTRUCTIONS = [
     tag: '0x03',
     name: 'Deposit',
     summary:
-      'Unified entry for Native SOL (atomic SyncNative wrap into canonical WSOL vault ATA with optional DEPOSIT_FLAG_FEE_FROM_AMOUNT zero-dust sweep), Classic SPL, and Token-2022 (53,971–55,590 CU measured, 75k budget; Token-2022 Fee+Hook 67,117 CU / 140k budget; 0 ZK proof). Commits measured net vault balance delta, updates the lane 4-ary frontier and write-locked inline GlobalRootHistory super_root (~160–222 deposits/slot, ~400–555 TPS at 400ms slots under Solana’s 12M CU/slot writable-account cap; ~400ms confirmation today, ~150ms under Alpenglow), and appends a 106 B SoA memo.',
+      'Unified entry for Native SOL (atomic SyncNative wrap into canonical WSOL vault ATA with optional DEPOSIT_FLAG_FEE_FROM_AMOUNT zero-dust sweep), Classic SPL, and Token-2022 (53,971–55,590 CU measured, 75k budget; Token-2022 Fee+Hook 67,117 CU / 140k budget; 0 ZK proof). Commits measured net vault balance delta, updates the lane 4-ary frontier and write-locked inline GlobalRootHistory super_root (~160–222 deposits/slot, ~744–1,033 TPS at ~215ms Alpenglow slots under Solana’s 12M CU/slot writable-account cap inside 100M CU blocks; ~150ms Alpenglow finality), and appends a 106 B SoA memo.',
   },
   {
     tag: '0x04',
@@ -45,7 +45,7 @@ const INSTRUCTIONS = [
     tag: '0x05',
     name: 'Transact',
     summary:
-      '192 B BN254 Groth16 2-in/3-out spend across the global 4^20 MASP proving against GlobalRootHistory. Pause-immune full exits (output_mask == 0, read-only roots, zero global write-lock contention) take 115,691–121,091 CU (165k budget); SPL / WSOL unwrap withdrawals take 144,813–217,442 CU (255k budget; Token-2022 + Hook 2in/3out 231,828 CU / 295k budget); private 2-in/3-out transfers with inline GlobalRootHistory write-lock updates take 204,906 CU (235k budget, sustaining ~51–58 private transfers/slot or ~127–145 TPS at 400ms slots under Solana’s 12M CU/slot per-writable-account ceiling).',
+      '192 B BN254 Groth16 2-in/3-out spend across the global 4^20 MASP proving against GlobalRootHistory. Pause-immune full exits (output_mask == 0, read-only roots, zero global write-lock contention across Solana’s 100M CU blocks) take 115,691–121,091 CU (165k budget); SPL / WSOL unwrap withdrawals take 144,813–217,442 CU (255k budget; Token-2022 + Hook 2in/3out 231,828 CU / 295k budget); private 2-in/3-out transfers with inline GlobalRootHistory write-lock updates take 204,906 CU (235k budget, sustaining ~51–58 private transfers/slot or ~237–270 TPS at ~215ms Alpenglow slots under Solana’s 12M CU/slot per-writable-account ceiling).',
   },
   {
     tag: '0x06',
@@ -522,9 +522,10 @@ export function ArchitectureExperience() {
                     Every note-appending write (<code>Deposit</code>, <code>Transact</code> with
                     outputs, and <code>ExecViaEscrow</code>) write-locks the single{' '}
                     <code>GlobalRootHistory</code> PDA (<code>accounts[2]</code>) for instant inline
-                    root updates (bounded by Solana’s 12M CU/slot per-writable-account ceiling:
-                    ~51–58 private transfers/slot or ~127–145 TPS, and ~160–222 deposits/slot or
-                    ~400–555 TPS at 400ms slots). Pools launch with 4 active lanes and expand
+                    root updates (bounded by Solana’s 12M CU/slot per-writable-account ceiling
+                    inside 100M CU blocks: ~51–58 private transfers/slot or ~237–270 TPS, and
+                    ~160–222 deposits/slot or ~744–1,033 TPS at ~215ms Alpenglow slots). Pools
+                    launch with 4 active lanes and expand
                     monotonically to 8 or 16 lanes via <code>InitLane</code> with zero circuit
                     changes and zero migration of existing notes, scaling global tree capacity to
                     4<sup>20</sup> (1.099T notes), isolating per-lane page rollovers (enabling

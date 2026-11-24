@@ -438,14 +438,14 @@ export const MEASURED_CU_ROWS = [
     cu: 53_971,
     maxCu: 55_590,
     budgetCu: 75_000,
-    note: 'Unified native SOL (SyncNative WSOL) and SPL / Token-2022 net delta solvency + inline GlobalRootHistory update (~160–222 deposits/slot, ~400–555 TPS at 400ms slots under 12M CU/slot lock) · Token-2022 Fee+Hook 67,117 CU (140k budget) · 0 ZK proof',
+    note: 'Unified native SOL (SyncNative WSOL) and SPL / Token-2022 net delta solvency + inline GlobalRootHistory update (~160–222 deposits/slot, ~744–1,033 TPS at ~215ms Alpenglow slots under 12M CU/slot lock inside 100M CU blocks) · Token-2022 Fee+Hook 67,117 CU (140k budget) · 0 ZK proof',
   },
   {
     ix: 'Transact Full Exit · RO roots (Tag 5)',
     cu: 115_691,
     maxCu: 121_091,
     budgetCu: 165_000,
-    note: '0-output full exit with read-only GlobalRootHistory (zero global write-lock contention) · 192 B BN254 Groth16 · atomic WSOL unwrap · bypasses pool pause',
+    note: '0-output full exit with read-only GlobalRootHistory (zero global write-lock contention across Solana 100M CU blocks) · 192 B BN254 Groth16 · atomic WSOL unwrap · bypasses pool pause',
   },
   {
     ix: 'Transact Withdraw / Unwrap (Tag 5)',
@@ -459,7 +459,7 @@ export const MEASURED_CU_ROWS = [
     cu: 204_906,
     maxCu: 204_906,
     budgetCu: 235_000,
-    note: 'Global 4^20 MASP (1.099T note capacity) · 2-in/3-out hidden asset, hidden amount + inline GlobalRootHistory update · ~51–58 private transfers/slot (~127–145 TPS at 400ms slots under Solana 12M CU/slot write-lock cap)',
+    note: 'Global 4^20 MASP (1.099T note capacity) · 2-in/3-out hidden asset, hidden amount + inline GlobalRootHistory update · ~51–58 private transfers/slot (~237–270 TPS at ~215ms Alpenglow slots under Solana 12M CU/slot write-lock cap inside 100M CU blocks)',
   },
   {
     ix: 'ExecViaEscrow + Fee-on-Output (Tag 6)',

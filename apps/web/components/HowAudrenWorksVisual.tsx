@@ -95,8 +95,8 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'CompactWalletStore scans MemoPages and freezes siblings',
         packetLabel: '+500 USDC Private',
         detail:
-          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts and checks each memo’s 2-byte view tag (one cheap key exchange per memo; about 65,535 of every 65,536 stranger memos are skipped without decryption). It verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages. Because Deposit updates GlobalRootHistory inline on-chain, the note is spendable immediately upon confirmation (~400ms today; ~150ms under Alpenglow, zero checkpoint wait, zero cranks, zero checkpoint fees).',
-        cryptoTag: 'Ordinary Solana RPC · Zero indexer · ~400ms today (~150ms under Alpenglow)',
+          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts and checks each memo’s 2-byte view tag (one cheap key exchange per memo; about 65,535 of every 65,536 stranger memos are skipped without decryption). It verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages. Because Deposit updates GlobalRootHistory inline on-chain, the note is spendable immediately upon confirmation (~150ms Alpenglow finality, zero checkpoint wait, zero cranks, zero checkpoint fees).',
+        cryptoTag: 'Ordinary Solana RPC · Zero indexer · ~150ms Alpenglow finality',
       },
     ],
     solscan: [
@@ -171,7 +171,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Bob gets 500 USDC · You keep hidden change',
         packetLabel: 'Bob +500 · Your Change',
         detail:
-          'Solana verifies the 192 B Groth16 proof via native alt_bn128 pairing syscalls, locks NullifierPDA(s) and appends 16 B prefixes to NullifierPage, updates GlobalRootHistory inline (~400ms confirmation today; ~150ms under Alpenglow), and writes the new commitments and 106 B SoA memos to your chosen append lane (auto-prepending idempotent OpenPage when needed).',
+          'Solana verifies the 192 B Groth16 proof via native alt_bn128 pairing syscalls, locks NullifierPDA(s) and appends 16 B prefixes to NullifierPage, updates GlobalRootHistory inline (~150ms Alpenglow finality), and writes the new commitments and 106 B SoA memos to your chosen append lane (auto-prepending idempotent OpenPage when needed).',
         cryptoTag: 'alt_bn128 syscall verified · Inline root update · Auto-OpenPage',
       },
     ],

@@ -46,7 +46,7 @@ console.log(alice.address, trading.address);
 const poolPda  = derivePoolPdaSync(0).address;
 const rootsPda = deriveRootsPdaSync(0).address;
 
-// 3. Sync over ordinary Solana RPC + finalized-first GlobalRootHistory (~400ms today; ~150ms under Alpenglow)
+// 3. Sync over ordinary Solana RPC + finalized-first GlobalRootHistory (~150ms Alpenglow finality)
 const fetchBatch = createSolanaRpcBatchFetcher(rpcUrl);
 const store = new CompactWalletStore(0);
 await syncCompactStoreWithRpc({ store, fvk, fetchBatch });
@@ -500,7 +500,7 @@ export function DevelopersExperience() {
                   <li>Persist <code>CompactWalletStore</code> locally (IndexedDB / mobile disk) with an optional birthday slot so recovery skips pages closed before the wallet existed.</li>
                   <li>Back up the encrypted 32-byte master seed; lost spend keys cannot be recovered by any operator.</li>
                   <li>Surface clear UX notices that deposits, withdrawals, DeFi CPI legs, and session wallet positions remain public on Solana.</li>
-                  <li>Fetch <code>GlobalRootHistory</code> via <code>fetchGlobalRootHistory</code> (finalized-first with confirmed fallback for instant spendability on confirmation: ~400ms today, ~150ms under Alpenglow), pass all input notes to <code>selectRootSnapshotForNotes</code>, and prepend <code>buildAutoOpenPageInstructions</code> on direct transactions with calibrated tight CU limits.</li>
+                  <li>Fetch <code>GlobalRootHistory</code> via <code>fetchGlobalRootHistory</code> (finalized-first with confirmed fallback for instant spendability on ~150ms Alpenglow finality), pass all input notes to <code>selectRootSnapshotForNotes</code>, and prepend <code>buildAutoOpenPageInstructions</code> on direct transactions with calibrated tight CU limits.</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <Link href="/architecture" className={styles.textLink}>

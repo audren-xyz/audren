@@ -193,7 +193,7 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
       },
       {
         label: 'Rent, fan-in & instant spendability',
-        text: 'Solana Privacy Rings charges a default 5,000-lamport fee per state tree updated, supports high-fan-in merges, and its pause_tree halts withdrawals. Audren pays permanent nullifier and page rent (~0.0007–0.0036 SOL/tx at current rent) with 2-in/3-out spends (up to 4 parallel 2 → 1 merges per Solana Transaction v1 across distinct lanes), updates GlobalRootHistory inline for instant spendability on confirmation (~400ms today; ~150ms under Alpenglow) with zero cranks (auto-prepended OpenPage), and keeps full exits available during pause.',
+        text: 'Solana Privacy Rings charges a default 5,000-lamport fee per state tree updated, supports high-fan-in merges, and its pause_tree halts withdrawals. Audren pays permanent nullifier and page rent (~0.0007–0.0036 SOL/tx at current rent) with 2-in/3-out spends (up to 4 parallel 2 → 1 merges per Solana Transaction v1 across distinct lanes), updates GlobalRootHistory inline for instant spendability on confirmation (~150ms Alpenglow finality) with zero cranks (auto-prepended OpenPage), and keeps full exits available during pause.',
       },
       {
         label: 'Review & maturity',
