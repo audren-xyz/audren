@@ -26,6 +26,13 @@ const FORBIDDEN_SNIPPETS = [
   'DepositSol',
   'DepositSpl',
   'audren_v2_',
+  ['Publish', 'Checkpoint'].join(''),
+  ['Root', 'Checkpoint'].join(''),
+  ['AUD1', 'CK01'].join(''),
+  ['audren_', 'ckpt'].join(''),
+  ['/v1/', 'checkpoint'].join(''),
+  ['ckpt_', 'interval'].join(''),
+  ['max_ckpt', '_age'].join(''),
 ] as const
 
 async function main() {
@@ -60,13 +67,13 @@ async function main() {
   if (
     !workerJs.includes('wasm_prove_joinsplit') ||
     !workerJs.includes('wasm_load_pk_compressed') ||
-    !workerJs.includes('?v=1.2.1') ||
+    !workerJs.includes('?v=1.3.0') ||
     !workerJs.includes('WebAssembly.RuntimeError')
   ) {
     throw new Error('Invalid or stale /wasm/prover-worker.js payload')
   }
   console.log(
-    `Audren v1.2.1 Web UI route, WASM (${wasmBytes.byteLength} B), & Web Worker check PASSED (${ROUTES.length} routes)`,
+    `Audren v1.3.0 Web UI route, WASM (${wasmBytes.byteLength} B), & Web Worker check PASSED (${ROUTES.length} routes)`,
   )
 }
 

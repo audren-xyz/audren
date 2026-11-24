@@ -8,9 +8,9 @@ use audren_circuits::{
     load_canonical_joinsplit_keys,
     note::{derive_asset_id, JoinSplitPublicInputs},
     poseidon::fr_to_be_bytes,
-    prove_joinsplit, serialize_pk_compressed,
+    serialize_pk_compressed,
     solana_export::proof_to_solana_compressed_192,
-    verify_joinsplit_offchain,
+    try_prove_joinsplit, verify_joinsplit_offchain,
 };
 use audren_core::instruction::GROTH16_PROOF_LEN;
 use rand::{CryptoRng, RngCore};
@@ -84,8 +84,9 @@ impl AudrenProver {
     }
 
     /// Generate a deterministic 192-byte compressed BN254 Groth16 proof from an explicit 32-byte seed,
-    /// verifying off-chain satisfaction and returning `Err(ClientError::InvalidProofInput)` instead of
-    /// panicking if the witness does not satisfy the circuit constraints.
+    /// checking R1CS satisfaction BEFORE proving (zero debug-build panic) and verifying off-chain
+    /// satisfaction afterwards as defense-in-depth, returning `Err(ClientError::InvalidProofInput)`
+    /// if the witness does not satisfy the circuit constraints.
     pub fn try_prove_with_seed(
         &self,
         circuit: JoinSplit4AryCircuit,
@@ -93,7 +94,9 @@ impl AudrenProver {
     ) -> Result<JoinSplitProofBundle, ClientError> {
         let public_inputs = circuit.public_inputs();
         let pub_hash = public_inputs.compute_hash();
-        let proof = prove_joinsplit(&self.pk, circuit, seed);
+        let proof = try_prove_joinsplit(&self.pk, circuit, seed).map_err(|_| {
+            ClientError::InvalidProofInput("unsatisfied joinsplit circuit witness")
+        })?;
         if !verify_joinsplit_offchain(&self.vk, &proof, pub_hash) {
             return Err(ClientError::InvalidProofInput(
                 "unsatisfied joinsplit circuit witness",
@@ -149,5 +152,57 @@ impl AudrenProver {
             outputs,
         );
         self.prove_with_seed(circuit, seed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use audren_circuits::merkle::MerklePath4Ary;
+
+    #[test]
+    fn r2_p2_try_prove_with_seed_rejects_unsatisfied_witness_without_debug_panic() {
+        let prover = AudrenProver::from_canonical_pk();
+        let asset = asset_id_for_mint(None);
+        // Unbalanced witness (0 in != 999_999 out): must return Err(InvalidProofInput)
+        // in BOTH debug and release builds without triggering ark-groth16's debug_assert!
+        let bad_circuit = JoinSplit4AryCircuit::new_with_options(
+            Fr::from(0u64),
+            asset,
+            asset,
+            999_999,
+            0,
+            Fr::from(0u64),
+            true,
+            [
+                JoinSplitInputWitness {
+                    spend_sk: Fr::from(1u64),
+                    tweak: Fr::from(0u64),
+                    asset_id: asset,
+                    amount: 0,
+                    blinding: Fr::from(1u64),
+                    is_dummy: true,
+                    merkle_path: MerklePath4Ary::default(),
+                },
+                JoinSplitInputWitness {
+                    spend_sk: Fr::from(1u64),
+                    tweak: Fr::from(0u64),
+                    asset_id: asset,
+                    amount: 0,
+                    blinding: Fr::from(2u64),
+                    is_dummy: true,
+                    merkle_path: MerklePath4Ary::default(),
+                },
+            ],
+            [
+                JoinSplitOutputWitness::dummy(asset, Fr::from(3u64)),
+                JoinSplitOutputWitness::dummy(asset, Fr::from(4u64)),
+                JoinSplitOutputWitness::dummy(asset, Fr::from(5u64)),
+            ],
+        );
+        let err = prover
+            .try_prove_with_seed(bad_circuit, [0x42u8; 32])
+            .expect_err("unsatisfied witness must return Err without panicking");
+        assert!(matches!(err, ClientError::InvalidProofInput(_)));
     }
 }

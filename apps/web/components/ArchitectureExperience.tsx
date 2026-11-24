@@ -15,55 +15,55 @@ const INSTRUCTIONS = [
     tag: '0x00',
     name: 'InitPool',
     summary:
-      'Create PoolState (128 B, audren_pool) with ring-wrap deadlock guard (max_ckpt_age < 255 * ckpt_interval; Pool #0 uses ckpt_interval = 8 slots) and canonical vault_auth PDA bump.',
+      'Create PoolState (128 B, audren_pool) and inline GlobalRootHistory (10,216 B, audren_roots, AUD1RT01) with immutable root_epoch_interval (default 32 slots, max 256) and canonical vault_auth PDA bump (10,433 CU measured, 45k budget).',
   },
   {
     tag: '0x01',
     name: 'InitLane',
     summary:
-      'Authority-signed lane initializer that activates one lane at a time (4 at launch, up to 16), creating LaneTreeState (1,824 B), LaneRentVault, and seq-0 SubtreePage/SubtreeRootPage/MemoPage/NullifierPage PDAs.',
+      'Authority-signed lane initializer that activates one lane at a time (4 at launch, expanding monotonically to 8 or 16), creating LaneTreeState (1,824 B), LaneRentVault, and seq-0 SubtreePage/SubtreeRootPage/MemoPage/NullifierPage PDAs (36,665 CU measured, 75k budget).',
   },
   {
     tag: '0x02',
     name: 'OpenPage',
     summary:
-      'Permissionless page opener for SubtreePage (8,256 B), SubtreeRootPage (9,664 B), MemoPage (10,240 B), or NullifierPage (9,664 B) reimbursed deterministically from LaneRentVault.',
+      'Idempotent, permissionless page opener for SubtreePage (8,256 B), SubtreeRootPage (9,664 B), MemoPage (10,240 B), or NullifierPage (9,664 B) reimbursed deterministically from LaneRentVault (13,514 CU measured, 40k budget). Auto-prepended inline by wallets and relayers for true zero-crank operation.',
   },
   {
     tag: '0x03',
     name: 'Deposit',
     summary:
-      'Unified entry for Native SOL (atomic SyncNative wrap into canonical WSOL vault ATA with optional DEPOSIT_FLAG_FEE_FROM_AMOUNT zero-dust sweep), Classic SPL, and Token-2022 (~48k–53k CU, 0 ZK proof). Commits measured net vault balance delta (TransferFeeConfig safe), validates sanitized TransferHook accounts, updates the lane 4-ary frontier, and appends a 106 B SoA memo.',
+      'Unified entry for Native SOL (atomic SyncNative wrap into canonical WSOL vault ATA with optional DEPOSIT_FLAG_FEE_FROM_AMOUNT zero-dust sweep), Classic SPL, and Token-2022 (53,971–55,590 CU measured, 75k budget; Token-2022 Fee+Hook 67,117 CU / 140k budget; 0 ZK proof). Commits measured net vault balance delta, updates the lane 4-ary frontier and write-locked inline GlobalRootHistory super_root (~160–222 deposits/slot, ~400–555 TPS at 400ms slots under Solana’s 12M CU/slot writable-account cap; ~400ms confirmation today, ~150ms under Alpenglow), and appends a 106 B SoA memo.',
   },
   {
     tag: '0x04',
-    name: 'PublishCheckpoint',
+    name: 'InitRootHistory',
     summary:
-      'Permissionless 256-entry cyclic RootCheckpoint ring (704 B each) publisher hashing all active lane roots (plus Z[18] for unactivated lanes) into one global 4-ary Depth-20 super_root (16.8k / 23.6k / 44.5k CU for 4 / 8 / 16 lanes; on demand via relayer POST /v1/checkpoint, at most once per 8-slot epoch on Pool #0).',
+      'One-shot initializer creating canonical GlobalRootHistory (AUD1RT01, 10,216 B PDA, 249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7) across all active lanes (17,169 CU measured for 4 lanes, 41,755 CU for 16 lanes, 75k budget). Its dual ring (128-entry recent slot_ring holding 64–128 active slots / ~13.8s–27.5s under saturation + 89-entry stable epoch_ring holding >= 2,848 slots / >= 10.2m with zero idle wall-clock expiry) updates inline on every note-appending deposit and spend with zero external cranks.',
   },
   {
     tag: '0x05',
     name: 'Transact',
     summary:
-      '192 B BN254 Groth16 2-in/3-out spend (~103k–160k CU) across the global 4^20 MASP. Defaults to uniform padded private transfers (2 nullifiers, output_mask = 0b111, automatic 2-input coin selection, and up to 4 parallel 2 → 1 merges per Solana Transaction v1) with opt-in omit_nf1 economy mode, public SPL/Token-2022 exits, and atomic WSOL→SOL unwrap via audren_unwrap PDA (WITHDRAW_FLAG_UNWRAP_WSOL, pause-immune when output_mask == 0).',
+      '192 B BN254 Groth16 2-in/3-out spend across the global 4^20 MASP proving against GlobalRootHistory. Pause-immune full exits (output_mask == 0, read-only roots, zero global write-lock contention) take 115,691–121,091 CU (165k budget); SPL / WSOL unwrap withdrawals take 144,813–217,442 CU (255k budget; Token-2022 + Hook 2in/3out 231,828 CU / 295k budget); private 2-in/3-out transfers with inline GlobalRootHistory write-lock updates take 204,906 CU (235k budget, sustaining ~51–58 private transfers/slot or ~127–145 TPS at 400ms slots under Solana’s 12M CU/slot per-writable-account ceiling).',
   },
   {
     tag: '0x06',
     name: 'ExecViaEscrow',
     summary:
-      'Protocol-agnostic 1-tx SPL & Token-2022 shielded DeFi CPI (~158k–189k CU, leaving >1.2M CU for DeFi) through 16 sharded audren_escrow PDAs with canonical ATA enforcement, WatchedEscrowBuf firewall, ctx_hash-bound router_accounts, input or output relayer fees (EXEC_FLAG_FEE_ON_OUTPUT), and 72 B XOR-masked AUD1DYN1 dynamic output memos.',
+      'Protocol-agnostic 1-tx SPL & Token-2022 shielded DeFi CPI (164,563–237,889 CU across 1in/0chg to 2in/2chg+fee 30-acc mocks, 285k base budget + router CPI, leaving >1.11M CU for DeFi) through 16 sharded audren_escrow PDAs with inline GlobalRootHistory update, canonical ATA enforcement, WatchedEscrowBuf firewall, ctx_hash-bound router_accounts, input or output relayer fees (EXEC_FLAG_FEE_ON_OUTPUT), and 72 B XOR-masked AUD1DYN1 dynamic output memos.',
   },
   {
     tag: '0x07',
     name: 'SetPaused',
     summary:
-      'Emergency authority circuit breaker halting deposits, private transfers, DeFi CPIs, and partial exits while preserving permissionless full withdrawals (output_mask == 0, including atomic WSOL unwrap).',
+      'Emergency authority circuit breaker halting deposits, private transfers, DeFi CPIs, and partial exits while preserving permissionless full withdrawals (output_mask == 0, read-only GlobalRootHistory, including atomic WSOL unwrap).',
   },
   {
     tag: '0x08',
     name: 'UpdatePool',
     summary:
-      'Authority-signed governance instruction supporting parameter updates (ckpt_interval and max_ckpt_age within ring-safe bounds, note_rent_fee, nf_rent_fee), 2-step authority transfer via pending_authority, and permanent authority renouncement (forbidden while paused).',
+      'Authority-signed governance instruction supporting rent-fee cap updates (note_rent_fee, nf_rent_fee; root_epoch_interval stays immutable after initialization), 2-step authority transfer via pending_authority, and permanent authority renouncement (forbidden while paused).',
   },
 ] as const
 
@@ -86,7 +86,7 @@ const CIRCUIT_CONSTRAINTS = [
   {
     id: 'Tree',
     label: '4-ary Depth-20 global Merkle membership',
-    formula: '20 levels × Poseidon4(c0, c1, c2, c3) == RootCheckpoint.super_root  (4²⁰ = 1.099T notes)',
+    formula: '20 levels × Poseidon4(c0, c1, c2, c3) == GlobalRootHistory.super_root  (4²⁰ = 1.099T notes)',
   },
   {
     id: 'Nullifier',
@@ -207,9 +207,9 @@ export function ArchitectureExperience() {
               </span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span>Compiled ELF</span>
+              <span>Compiled ELF ({AUDREN.releaseTag})</span>
               <span className={`${styles.heroMetaValue} mono`}>
-                {AUDREN.elfBytes.toLocaleString()} B · sBPFv3
+                {AUDREN.sourceElfBytes.toLocaleString()} B · sBPFv3
               </span>
             </div>
             <div className={styles.heroMetaCell}>
@@ -319,7 +319,7 @@ export function ArchitectureExperience() {
               </div>
               <p>
                 Measured in the LiteSVM end-to-end suite against the compiled{' '}
-                {AUDREN.elfBytes.toLocaleString()}-byte sBPFv3 ELF, using native Solana <code>sol_poseidon</code> and{' '}
+                {AUDREN.sourceElfBytes.toLocaleString()}-byte {AUDREN.releaseTag} sBPFv3 ELF, using native Solana <code>sol_poseidon</code> and{' '}
                 <code>alt_bn128</code> pairing syscalls over Solana Transaction v1 (
                 <code>0x81</code>).
               </p>
@@ -328,24 +328,31 @@ export function ArchitectureExperience() {
             <div className={styles.diagramStagePaper}>
               <div className={styles.stageHead}>
                 <div className={styles.stageTitle}>
-                  CU consumption vs. 1,400,000 CU Solana transaction cap
+                  Empirical CU consumption and tight CU limits vs. 1,400,000 CU Solana cap
                 </div>
-                <span>ExecViaEscrow leaves &gt;1.2M CU for external DeFi CPI</span>
+                <span>ExecViaEscrow leaves &gt;1.11M CU for external DeFi CPI</span>
               </div>
               <div ref={cuRef} className={styles.cuList} data-inview={!hydrated || cuSeen ? 'true' : 'false'}>
                 {MEASURED_CU_ROWS.map((row, rowIdx) => {
                   const pct = Math.max(2, Math.min(100, (row.maxCu / MAX_TX_CU) * 100))
+                  const measuredText =
+                    row.cu === row.maxCu
+                      ? `${(row.cu / 1000).toFixed(1)}k`
+                      : `${(row.cu / 1000).toFixed(1)}k–${(row.maxCu / 1000).toFixed(1)}k`
                   return (
                     <div key={row.ix} className={styles.cuRow}>
                       <span className={styles.cuName}>{row.ix}</span>
-                      <div className={styles.cuTrack} aria-label={`${row.ix}: ${row.cu.toLocaleString()} to ${row.maxCu.toLocaleString()} CU`}>
+                      <div
+                        className={styles.cuTrack}
+                        aria-label={`${row.ix}: ${row.cu.toLocaleString()} to ${row.maxCu.toLocaleString()} CU measured, ${row.budgetCu.toLocaleString()} CU budget`}
+                      >
                         <div
                           className={`${styles.cuFill} ${pct > 65 ? styles.cuFillHigh : ''}`}
                           style={{ '--cu': (pct / 100).toFixed(3), '--i': rowIdx } as CSSProperties}
                         />
                       </div>
                       <span className={styles.cuVal}>
-                        {Math.round(row.cu / 1000)}k–{Math.round(row.maxCu / 1000)}k CU
+                        {measuredText} CU · {Math.round(row.budgetCu / 1000)}k req
                       </span>
                       <span className={styles.cuNote}>{row.note}</span>
                     </div>
@@ -512,9 +519,18 @@ export function ArchitectureExperience() {
                 <h3>Append lane scaling and two-mode compliance</h3>
                 <ul className={styles.dashList}>
                   <li>
-                    Pools launch with 4 active lanes, so appends to different lanes do not contend
-                    for one write lock, and expand monotonically to 8 or 16 lanes via <code>InitLane</code>{' '}
-                    with zero circuit changes and zero migration of existing notes.
+                    Every note-appending write (<code>Deposit</code>, <code>Transact</code> with
+                    outputs, and <code>ExecViaEscrow</code>) write-locks the single{' '}
+                    <code>GlobalRootHistory</code> PDA (<code>accounts[2]</code>) for instant inline
+                    root updates (bounded by Solana’s 12M CU/slot per-writable-account ceiling:
+                    ~51–58 private transfers/slot or ~127–145 TPS, and ~160–222 deposits/slot or
+                    ~400–555 TPS at 400ms slots). Pools launch with 4 active lanes and expand
+                    monotonically to 8 or 16 lanes via <code>InitLane</code> with zero circuit
+                    changes and zero migration of existing notes, scaling global tree capacity to
+                    4<sup>20</sup> (1.099T notes), isolating per-lane page rollovers (enabling
+                    4-merge Tx v1 batches across distinct lanes), and parallelizing read-only Full
+                    Exits (<code>output_mask == 0</code>, which lock <code>GlobalRootHistory</code>{' '}
+                    read-only).
                   </li>
                   <li>
                     Mode 1 <code>SelectiveDisclosureProof</code> verifies one note against{' '}
@@ -547,11 +563,14 @@ export function ArchitectureExperience() {
                     currently sponsors private transfers with no fee note.
                   </li>
                   <li>
-                    Permissionless on-demand <code>POST /v1/checkpoint</code> (at most once per
-                    8-slot epoch on Pool #0, plus a 2-minute maintenance crank) checkpoints fresh notes without linking the user’s personal wallet; rate
-                    limits use an ephemeral daily secret IP-hash salt never stored alongside
-                    nullifiers, and relayers hold zero spend keys and cannot alter{' '}
-                    <code>ctx_hash</code>-bound outputs or router accounts.
+                    True zero-crank architecture: inline <code>GlobalRootHistory</code> (
+                    <code>AUD1RT01</code>, 10,216 B PDA) updates on every deposit and spend with
+                    zero checkpoint requests, zero checkpoint cranks, and zero checkpoint fees,
+                    while relayers and direct wallets auto-prepend idempotent <code>OpenPage</code>{' '}
+                    instructions subsidized by <code>LaneRentVault</code>. Rate limits use an
+                    ephemeral daily secret IP-hash salt never stored alongside nullifiers, and
+                    relayers hold zero spend keys and cannot alter <code>ctx_hash</code>-bound
+                    outputs or router accounts.
                   </li>
                 </ul>
                 <div className={styles.cellFoot}>

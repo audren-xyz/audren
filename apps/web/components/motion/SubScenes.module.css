@@ -235,21 +235,22 @@
   gap: 4px;
   height: 100%;
   padding: 0 16px 16px;
-  border-radius: 6px;
-  border: 1px solid transparent;
+  border-radius: 4px;
+  border: 0;
+  border-top: 2px solid transparent;
   background: var(--sheet);
   transition: border-color 0.3s ease, background 0.3s ease, opacity 0.3s ease;
   overflow: hidden;
 }
 
 .pipeCard[data-state='active'] .pipeBody {
-  border-color: var(--carbon);
+  border-top-color: var(--carbon);
 }
 
 .pipeCard[data-state='todo'] .pipeBody {
-  background: transparent;
-  border-color: var(--rule);
-  border-style: dashed;
+  background: var(--paper);
+  border-top: 1px dashed var(--rule);
+  opacity: 0.72;
 }
 
 .pipeWire {

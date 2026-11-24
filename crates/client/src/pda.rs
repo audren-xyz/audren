@@ -1,8 +1,8 @@
 //! Deterministic Audren v1 PDA derivation helpers matching `program/src/state.rs` bit-for-bit.
 
 use audren_core::{
-    ASSOCIATED_TOKEN_PROGRAM_ID, CKPT_SEED, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MEMO_SEED,
-    NF_PAGE_SEED, NULLIFIER_SEED, POOL_SEED, SUBROOT_SEED, SUBTREE_SEED, UNWRAP_SEED,
+    ASSOCIATED_TOKEN_PROGRAM_ID, ESCROW_SEED, LANE_RENT_SEED, LANE_SEED, MEMO_SEED, NF_PAGE_SEED,
+    NULLIFIER_SEED, POOL_SEED, ROOTS_SEED, SUBROOT_SEED, SUBTREE_SEED, UNWRAP_SEED,
     VAULT_AUTH_SEED,
 };
 use solana_address::Address;
@@ -94,11 +94,8 @@ pub fn derive_nf_page_pda(
     )
 }
 
-pub fn derive_checkpoint_pda(program_id: &Address, pool_id: u32, slot_idx: u16) -> (Address, u8) {
-    Address::find_program_address(
-        &[CKPT_SEED, &pool_id.to_le_bytes(), &slot_idx.to_le_bytes()],
-        program_id,
-    )
+pub fn derive_roots_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
+    Address::find_program_address(&[ROOTS_SEED, &pool_id.to_le_bytes()], program_id)
 }
 
 pub fn derive_nullifier_pda(program_id: &Address, pool_id: u32, nf: &[u8; 32]) -> (Address, u8) {

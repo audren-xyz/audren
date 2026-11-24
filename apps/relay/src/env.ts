@@ -13,7 +13,8 @@ export interface Env {
   DEVNET_RELAYER_SECRET_B64?: string
   /**
    * Optional JSON array of base64 32- or 64-byte Ed25519 fee-payer secrets (`>= active_lanes`)
-   * for zero-contention parallel lane submission. Falls back to single `*_RELAYER_SECRET_B64`.
+   * for parallel fee-payer isolation across independent lane rollovers and read-only full exits.
+   * Falls back to single `*_RELAYER_SECRET_B64`.
    */
   MAINNET_RELAYER_SECRETS_JSON?: string
   DEVNET_RELAYER_SECRETS_JSON?: string
@@ -40,7 +41,7 @@ export interface Env {
   OKX_SECRET_KEY?: string
   OKX_PASSPHRASE?: string
 
-  // Optional internal admin bearer token for manual refill / maintenance crank
+  // Optional internal admin bearer token for manual treasury refill
   RELAY_ADMIN_TOKEN?: string
 
   // Non-secret tunable policy vars (from wrangler.jsonc)
@@ -71,8 +72,10 @@ export interface RelayPolicyConfig {
   /** Strictly allowlisted zero-signer crank programs permitted in `preInstructions` before Tag 6. */
   allowedPreIxPrograms: Set<string>
   /**
-   * Audited Solana DEX aggregator router programs allowed to settle zero-protocol-fee
-   * (`relayerFee === 0`) `ExecViaEscrow` platformFee swaps and auto-refill swaps.
+   * Audited Solana DEX aggregator router programs governing BOTH automated treasury refill swaps
+   * AND `/v1/relay/submit` `ExecViaEscrow` untrusted-CPI classification (unlisted routers are
+   * treated as untrusted CPI targets: `5_000` vs `50_000` lamport priority-fee cap, pre-sim and
+   * in-flight revert-burn cooldown serialization, and `DAILY_SPONSOR_BUDGET_REACHED` gating).
    */
   auditedSwapRouterPrograms: Set<string>
   /**
@@ -114,14 +117,17 @@ export const DEFAULT_ALLOWED_PRE_IX_PROGRAMS: readonly string[] = [
 ]
 
 /**
- * Audited Solana mainnet DEX aggregator router programs permitted for zero-protocol-fee
- * (`relayerFee === 0`) `ExecViaEscrow` platformFee credit and automated treasury refill swaps:
+ * Audited Solana mainnet DEX aggregator router programs governing BOTH automated treasury refill
+ * swaps AND `/v1/relay/submit` `ExecViaEscrow` untrusted-CPI classification:
  *   - Jupiter v6 Aggregator (`JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`)
  *   - DFlow Aggregator v4 (`DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH`)
  *   - OKX DEX Router (`6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma`)
  *   - Titan Meta-Aggregator (`T1TANpTeScyeqVzzgNViGDNrkQ6qHz9KrSBS4aNXvGT`)
  *
- * Operators adding a custom audited router (e.g. Bedrock) may override via `AUDITED_SWAP_ROUTER_PROGRAMS`.
+ * Unlisted `ExecViaEscrow` routers are classified as untrusted CPI targets on `/v1/relay/submit`
+ * (priority-fee cap `5_000` vs `50_000` lamports, pre-sim/in-flight revert-burn cooldown
+ * serialization, and `DAILY_SPONSOR_BUDGET_REACHED` gating). Operators adding a custom audited
+ * router (e.g. Bedrock) may override via `AUDITED_SWAP_ROUTER_PROGRAMS`.
  */
 export const DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS: readonly string[] = [
   'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',
@@ -144,7 +150,7 @@ export const DEFAULT_SELF_PAY_FEE_MINTS: readonly string[] = [
   'bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1', // bSOL
   'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN', // JUP
   '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // PYUSD
-  'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXdi3ragP28x6W36', // EURC
+  'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', // EURC
   'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', // cbBTC
   '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', // WBTC
   '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', // WETH
@@ -158,7 +164,7 @@ export const TRUSTED_FREEZE_AUTHORITY_MINTS: ReadonlySet<string> = new Set([
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
   'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
   '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // PYUSD
-  'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXdi3ragP28x6W36', // EURC
+  'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', // EURC
 ])
 
 function parseNum(raw: string | undefined, fallback: number, min: number, max: number): number {

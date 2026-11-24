@@ -682,9 +682,9 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_init_pool_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_open_page_ix(
+    external fun uniffi_audren_ffi_checksum_func_build_init_root_history_ix(
     ): Int
-    external fun uniffi_audren_ffi_checksum_func_build_publish_checkpoint_ix(
+    external fun uniffi_audren_ffi_checksum_func_build_open_page_ix(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_build_set_paused_ix(
     ): Int
@@ -706,11 +706,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_decode_audren_address(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_decode_global_root_history_account(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_decode_lane_header_account(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_decode_pool_state_account(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_decode_root_checkpoint_account(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_decrypt_and_verify_memo_entry(
     ): Int
@@ -719,8 +719,6 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_audren_ffi_checksum_func_derive_asset_id_bytes(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_ata(
-    ): Int
-    external fun uniffi_audren_ffi_checksum_func_derive_checkpoint_pda(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_defi_session_keypair(
     ): Int
@@ -740,6 +738,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_pool_pda(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_derive_roots_pda(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_subaccount_keys(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_derive_subroot_pda(
@@ -758,11 +758,23 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes(
     ): Int
+    external fun uniffi_audren_ffi_checksum_func_plan_auto_open_pages(
+    ): Int
     external fun uniffi_audren_ffi_checksum_func_prepare_dynamic_swap_memo(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_protocol_version(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_prove_joinsplit_witness_bytes(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_recommended_cu_limit_deposit(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_recommended_cu_limit_exec_via_escrow(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_recommended_cu_limit_open_page(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_recommended_cu_limit_transact(
+    ): Int
+    external fun uniffi_audren_ffi_checksum_func_select_root_snapshot_for_notes(
     ): Int
     external fun uniffi_audren_ffi_checksum_func_verify_selective_disclosure_proof(
     ): Int
@@ -787,11 +799,11 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_init_lane_ix(`programId`: RustBuffer.ByValue,`authority`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_init_pool_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`ckptInterval`: Long,`maxCkptAge`: Long,`noteRentFee`: Long,`nfRentFee`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_init_pool_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`rootEpochInterval`: Long,`noteRentFee`: Long,`nfRentFee`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_build_init_root_history_ix(`programId`: RustBuffer.ByValue,`authority`: RustBuffer.ByValue,`poolId`: Int,`rootEpochInterval`: Long,`activeLanes`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_open_page_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`pageKind`: Byte,`poolId`: Int,`laneId`: Byte,`pageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_publish_checkpoint_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`poolId`: Int,`slotIdx`: Short,`activeLanes`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_set_paused_ix(`programId`: RustBuffer.ByValue,`authority`: RustBuffer.ByValue,`poolId`: Int,`paused`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -813,11 +825,11 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_decode_audren_address(`encoded`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_decode_global_root_history_account(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_decode_lane_header_account(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_decode_pool_state_account(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_decode_root_checkpoint_account(`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_decrypt_and_verify_memo_entry(`fvk`: RustBuffer.ByValue,`memo106`: RustBuffer.ByValue,`onchainCommitment`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -826,8 +838,6 @@ internal object UniffiLib {
     external fun uniffi_audren_ffi_fn_func_derive_asset_id_bytes(`mintBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_ata(`owner`: RustBuffer.ByValue,`tokenProgram`: RustBuffer.ByValue,`mint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_derive_checkpoint_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`slotIdx`: Short,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_defi_session_keypair(`seed`: RustBuffer.ByValue,`sessionIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -847,6 +857,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_pool_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_derive_roots_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_subaccount_keys(`seed`: RustBuffer.ByValue,`accountIndex`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_derive_subroot_pda(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,`rootPageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -865,11 +877,23 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_jupiter_cpi_excluded_dexes(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_plan_auto_open_pages(`programId`: RustBuffer.ByValue,`poolId`: Int,`laneId`: Byte,`nextLeaf`: Long,`nfCount`: Long,`numOutputs`: Byte,`numNfs`: Byte,`existingPages`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_prepare_dynamic_swap_memo(`recipientViewPk`: RustBuffer.ByValue,`ephSecret`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_protocol_version(uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun uniffi_audren_ffi_fn_func_prove_joinsplit_witness_bytes(`witness4611`: RustBuffer.ByValue,`seed32`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_audren_ffi_fn_func_recommended_cu_limit_deposit(`hasTransferHook`: Byte,`openPageCount`: Int,`createAtaCount`: Int,`createToken2022AtaCount`: Int,`bumps`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_audren_ffi_fn_func_recommended_cu_limit_exec_via_escrow(`routerCuLimit`: Int,`hasToken2022Leg`: Byte,`openPageCount`: Int,`createAtaCount`: Int,`createToken2022AtaCount`: Int,`bumps`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_audren_ffi_fn_func_recommended_cu_limit_open_page(`openPageCount`: Int,`bumps`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_audren_ffi_fn_func_recommended_cu_limit_transact(`isPublicWithdraw`: Byte,`hasTransferHook`: Byte,`outputMask`: Byte,`openPageCount`: Int,`createAtaCount`: Int,`createToken2022AtaCount`: Int,`bumps`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_audren_ffi_fn_func_select_root_snapshot_for_notes(`rootHistoryData`: RustBuffer.ByValue,`expectedPoolId`: Int,`notes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_verify_selective_disclosure_proof(`proof`: RustBuffer.ByValue,`onchainSubtreeLeaf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -1001,13 +1025,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_build_init_lane_ix() and 0xFFFF) != 35978) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_init_pool_ix() and 0xFFFF) != 47421) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_init_pool_ix() and 0xFFFF) != 17188) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_build_init_root_history_ix() and 0xFFFF) != 53324) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_build_open_page_ix() and 0xFFFF) != 6216) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_publish_checkpoint_ix() and 0xFFFF) != 16790) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_build_set_paused_ix() and 0xFFFF) != 31548) {
@@ -1040,13 +1064,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_decode_audren_address() and 0xFFFF) != 50185) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_decode_global_root_history_account() and 0xFFFF) != 21068) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_decode_lane_header_account() and 0xFFFF) != 44261) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_decode_pool_state_account() and 0xFFFF) != 4069) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_decode_root_checkpoint_account() and 0xFFFF) != 11058) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_decrypt_and_verify_memo_entry() and 0xFFFF) != 21943) {
@@ -1059,9 +1083,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_derive_ata() and 0xFFFF) != 3908) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_audren_ffi_checksum_func_derive_checkpoint_pda() and 0xFFFF) != 58125) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_derive_defi_session_keypair() and 0xFFFF) != 61459) {
@@ -1091,6 +1112,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_derive_pool_pda() and 0xFFFF) != 18695) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_derive_roots_pda() and 0xFFFF) != 19671) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_derive_subaccount_keys() and 0xFFFF) != 16825) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1118,6 +1142,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes() and 0xFFFF) != 47827) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_audren_ffi_checksum_func_plan_auto_open_pages() and 0xFFFF) != 55313) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_audren_ffi_checksum_func_prepare_dynamic_swap_memo() and 0xFFFF) != 60466) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1125,6 +1152,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_prove_joinsplit_witness_bytes() and 0xFFFF) != 37274) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_recommended_cu_limit_deposit() and 0xFFFF) != 58170) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_recommended_cu_limit_exec_via_escrow() and 0xFFFF) != 23050) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_recommended_cu_limit_open_page() and 0xFFFF) != 14459) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_recommended_cu_limit_transact() and 0xFFFF) != 38536) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_audren_ffi_checksum_func_select_root_snapshot_for_notes() and 0xFFFF) != 64955) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_verify_selective_disclosure_proof() and 0xFFFF) != 65119) {
@@ -2012,7 +2054,9 @@ data class FfiExecViaEscrowParams (
     , 
     var `vkId`: kotlin.UByte
     , 
-    var `ckptSlotIdx`: kotlin.UShort
+    var `rootRingKind`: kotlin.UByte
+    , 
+    var `rootRingIdx`: kotlin.UByte
     , 
     var `outLaneId`: kotlin.UByte
     , 
@@ -2097,7 +2141,8 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUByte.read(buf),
-            FfiConverterUShort.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
             FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
@@ -2138,7 +2183,8 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.allocationSize(value.`payer`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
             FfiConverterUByte.allocationSize(value.`vkId`) +
-            FfiConverterUShort.allocationSize(value.`ckptSlotIdx`) +
+            FfiConverterUByte.allocationSize(value.`rootRingKind`) +
+            FfiConverterUByte.allocationSize(value.`rootRingIdx`) +
             FfiConverterUByte.allocationSize(value.`outLaneId`) +
             FfiConverterULong.allocationSize(value.`outSubSeq`) +
             FfiConverterULong.allocationSize(value.`outRootSeq`) +
@@ -2178,7 +2224,8 @@ public object FfiConverterTypeFfiExecViaEscrowParams: FfiConverterRustBuffer<Ffi
             FfiConverterString.write(value.`payer`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
             FfiConverterUByte.write(value.`vkId`, buf)
-            FfiConverterUShort.write(value.`ckptSlotIdx`, buf)
+            FfiConverterUByte.write(value.`rootRingKind`, buf)
+            FfiConverterUByte.write(value.`rootRingIdx`, buf)
             FfiConverterUByte.write(value.`outLaneId`, buf)
             FfiConverterULong.write(value.`outSubSeq`, buf)
             FfiConverterULong.write(value.`outRootSeq`, buf)
@@ -2259,6 +2306,124 @@ public object FfiConverterTypeFfiFullViewingKey: FfiConverterRustBuffer<FfiFullV
             FfiConverterByteArray.write(value.`nk`, buf)
             FfiConverterByteArray.write(value.`viewSk`, buf)
             FfiConverterByteArray.write(value.`viewPk`, buf)
+    }
+}
+
+
+
+data class FfiGlobalRootHistory (
+    var `version`: kotlin.UByte
+    , 
+    var `bump`: kotlin.UByte
+    , 
+    var `poolId`: kotlin.UInt
+    , 
+    var `slotCursor`: kotlin.UShort
+    , 
+    var `epochCursor`: kotlin.UShort
+    , 
+    var `slotCount`: kotlin.UShort
+    , 
+    var `epochCount`: kotlin.UShort
+    , 
+    var `sameSlotBumped`: kotlin.Boolean
+    , 
+    var `latestSlot`: kotlin.ULong
+    , 
+    var `stableEpochId`: kotlin.ULong
+    , 
+    var `stableSlot`: kotlin.ULong
+    , 
+    var `epochInterval`: kotlin.ULong
+    , 
+    var `latestSuperRoot`: kotlin.ByteArray
+    , 
+    var `latestLaneRoots`: List<kotlin.ByteArray>
+    , 
+    var `latestLaneCounts`: List<kotlin.ULong>
+    , 
+    var `stableSuperRoot`: kotlin.ByteArray
+    , 
+    var `stableLaneRoots`: List<kotlin.ByteArray>
+    , 
+    var `stableLaneCounts`: List<kotlin.ULong>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiGlobalRootHistory: FfiConverterRustBuffer<FfiGlobalRootHistory> {
+    override fun read(buf: ByteBuffer): FfiGlobalRootHistory {
+        return FfiGlobalRootHistory(
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterSequenceByteArray.read(buf),
+            FfiConverterSequenceULong.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterSequenceByteArray.read(buf),
+            FfiConverterSequenceULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiGlobalRootHistory) = (
+            FfiConverterUByte.allocationSize(value.`version`) +
+            FfiConverterUByte.allocationSize(value.`bump`) +
+            FfiConverterUInt.allocationSize(value.`poolId`) +
+            FfiConverterUShort.allocationSize(value.`slotCursor`) +
+            FfiConverterUShort.allocationSize(value.`epochCursor`) +
+            FfiConverterUShort.allocationSize(value.`slotCount`) +
+            FfiConverterUShort.allocationSize(value.`epochCount`) +
+            FfiConverterBoolean.allocationSize(value.`sameSlotBumped`) +
+            FfiConverterULong.allocationSize(value.`latestSlot`) +
+            FfiConverterULong.allocationSize(value.`stableEpochId`) +
+            FfiConverterULong.allocationSize(value.`stableSlot`) +
+            FfiConverterULong.allocationSize(value.`epochInterval`) +
+            FfiConverterByteArray.allocationSize(value.`latestSuperRoot`) +
+            FfiConverterSequenceByteArray.allocationSize(value.`latestLaneRoots`) +
+            FfiConverterSequenceULong.allocationSize(value.`latestLaneCounts`) +
+            FfiConverterByteArray.allocationSize(value.`stableSuperRoot`) +
+            FfiConverterSequenceByteArray.allocationSize(value.`stableLaneRoots`) +
+            FfiConverterSequenceULong.allocationSize(value.`stableLaneCounts`)
+    )
+
+    override fun write(value: FfiGlobalRootHistory, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`version`, buf)
+            FfiConverterUByte.write(value.`bump`, buf)
+            FfiConverterUInt.write(value.`poolId`, buf)
+            FfiConverterUShort.write(value.`slotCursor`, buf)
+            FfiConverterUShort.write(value.`epochCursor`, buf)
+            FfiConverterUShort.write(value.`slotCount`, buf)
+            FfiConverterUShort.write(value.`epochCount`, buf)
+            FfiConverterBoolean.write(value.`sameSlotBumped`, buf)
+            FfiConverterULong.write(value.`latestSlot`, buf)
+            FfiConverterULong.write(value.`stableEpochId`, buf)
+            FfiConverterULong.write(value.`stableSlot`, buf)
+            FfiConverterULong.write(value.`epochInterval`, buf)
+            FfiConverterByteArray.write(value.`latestSuperRoot`, buf)
+            FfiConverterSequenceByteArray.write(value.`latestLaneRoots`, buf)
+            FfiConverterSequenceULong.write(value.`latestLaneCounts`, buf)
+            FfiConverterByteArray.write(value.`stableSuperRoot`, buf)
+            FfiConverterSequenceByteArray.write(value.`stableLaneRoots`, buf)
+            FfiConverterSequenceULong.write(value.`stableLaneCounts`, buf)
     }
 }
 
@@ -2438,6 +2603,87 @@ public object FfiConverterTypeFfiLaneHeader: FfiConverterRustBuffer<FfiLaneHeade
 
 
 
+data class FfiNoteCoord (
+    var `laneId`: kotlin.UByte
+    , 
+    var `leafIndex`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiNoteCoord: FfiConverterRustBuffer<FfiNoteCoord> {
+    override fun read(buf: ByteBuffer): FfiNoteCoord {
+        return FfiNoteCoord(
+            FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiNoteCoord) = (
+            FfiConverterUByte.allocationSize(value.`laneId`) +
+            FfiConverterULong.allocationSize(value.`leafIndex`)
+    )
+
+    override fun write(value: FfiNoteCoord, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`laneId`, buf)
+            FfiConverterULong.write(value.`leafIndex`, buf)
+    }
+}
+
+
+
+data class FfiOpenPageSpec (
+    var `pageKind`: kotlin.UByte
+    , 
+    var `pageSeq`: kotlin.ULong
+    , 
+    var `pdaB58`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiOpenPageSpec: FfiConverterRustBuffer<FfiOpenPageSpec> {
+    override fun read(buf: ByteBuffer): FfiOpenPageSpec {
+        return FfiOpenPageSpec(
+            FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiOpenPageSpec) = (
+            FfiConverterUByte.allocationSize(value.`pageKind`) +
+            FfiConverterULong.allocationSize(value.`pageSeq`) +
+            FfiConverterString.allocationSize(value.`pdaB58`)
+    )
+
+    override fun write(value: FfiOpenPageSpec, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`pageKind`, buf)
+            FfiConverterULong.write(value.`pageSeq`, buf)
+            FfiConverterString.write(value.`pdaB58`, buf)
+    }
+}
+
+
+
 data class FfiPageRolloverPlan (
     var `outSubSeq`: kotlin.ULong
     , 
@@ -2555,9 +2801,7 @@ data class FfiPoolState (
     , 
     var `poolId`: kotlin.UInt
     , 
-    var `ckptInterval`: kotlin.ULong
-    , 
-    var `maxCkptAge`: kotlin.ULong
+    var `rootEpochInterval`: kotlin.ULong
     , 
     var `authorityB58`: kotlin.String
     , 
@@ -2590,7 +2834,6 @@ public object FfiConverterTypeFfiPoolState: FfiConverterRustBuffer<FfiPoolState>
             FfiConverterUByte.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
@@ -2605,8 +2848,7 @@ public object FfiConverterTypeFfiPoolState: FfiConverterRustBuffer<FfiPoolState>
             FfiConverterBoolean.allocationSize(value.`paused`) +
             FfiConverterUByte.allocationSize(value.`activeLanes`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`ckptInterval`) +
-            FfiConverterULong.allocationSize(value.`maxCkptAge`) +
+            FfiConverterULong.allocationSize(value.`rootEpochInterval`) +
             FfiConverterString.allocationSize(value.`authorityB58`) +
             FfiConverterUByte.allocationSize(value.`vaultAuthBump`) +
             FfiConverterULong.allocationSize(value.`noteRentFee`) +
@@ -2620,8 +2862,7 @@ public object FfiConverterTypeFfiPoolState: FfiConverterRustBuffer<FfiPoolState>
             FfiConverterBoolean.write(value.`paused`, buf)
             FfiConverterUByte.write(value.`activeLanes`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`ckptInterval`, buf)
-            FfiConverterULong.write(value.`maxCkptAge`, buf)
+            FfiConverterULong.write(value.`rootEpochInterval`, buf)
             FfiConverterString.write(value.`authorityB58`, buf)
             FfiConverterUByte.write(value.`vaultAuthBump`, buf)
             FfiConverterULong.write(value.`noteRentFee`, buf)
@@ -2632,18 +2873,12 @@ public object FfiConverterTypeFfiPoolState: FfiConverterRustBuffer<FfiPoolState>
 
 
 
-data class FfiRootCheckpoint (
-    var `version`: kotlin.UByte
+data class FfiRootSnapshotChoice (
+    var `ringKind`: kotlin.UByte
     , 
-    var `bump`: kotlin.UByte
+    var `ringIdx`: kotlin.UByte
     , 
-    var `slotIdx`: kotlin.UShort
-    , 
-    var `poolId`: kotlin.UInt
-    , 
-    var `epochId`: kotlin.ULong
-    , 
-    var `publishedSlot`: kotlin.ULong
+    var `slot`: kotlin.ULong
     , 
     var `superRoot`: kotlin.ByteArray
     , 
@@ -2663,14 +2898,11 @@ data class FfiRootCheckpoint (
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiRootCheckpoint: FfiConverterRustBuffer<FfiRootCheckpoint> {
-    override fun read(buf: ByteBuffer): FfiRootCheckpoint {
-        return FfiRootCheckpoint(
+public object FfiConverterTypeFfiRootSnapshotChoice: FfiConverterRustBuffer<FfiRootSnapshotChoice> {
+    override fun read(buf: ByteBuffer): FfiRootSnapshotChoice {
+        return FfiRootSnapshotChoice(
             FfiConverterUByte.read(buf),
             FfiConverterUByte.read(buf),
-            FfiConverterUShort.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterSequenceByteArray.read(buf),
@@ -2678,25 +2910,19 @@ public object FfiConverterTypeFfiRootCheckpoint: FfiConverterRustBuffer<FfiRootC
         )
     }
 
-    override fun allocationSize(value: FfiRootCheckpoint) = (
-            FfiConverterUByte.allocationSize(value.`version`) +
-            FfiConverterUByte.allocationSize(value.`bump`) +
-            FfiConverterUShort.allocationSize(value.`slotIdx`) +
-            FfiConverterUInt.allocationSize(value.`poolId`) +
-            FfiConverterULong.allocationSize(value.`epochId`) +
-            FfiConverterULong.allocationSize(value.`publishedSlot`) +
+    override fun allocationSize(value: FfiRootSnapshotChoice) = (
+            FfiConverterUByte.allocationSize(value.`ringKind`) +
+            FfiConverterUByte.allocationSize(value.`ringIdx`) +
+            FfiConverterULong.allocationSize(value.`slot`) +
             FfiConverterByteArray.allocationSize(value.`superRoot`) +
             FfiConverterSequenceByteArray.allocationSize(value.`laneRoots`) +
             FfiConverterSequenceULong.allocationSize(value.`laneCounts`)
     )
 
-    override fun write(value: FfiRootCheckpoint, buf: ByteBuffer) {
-            FfiConverterUByte.write(value.`version`, buf)
-            FfiConverterUByte.write(value.`bump`, buf)
-            FfiConverterUShort.write(value.`slotIdx`, buf)
-            FfiConverterUInt.write(value.`poolId`, buf)
-            FfiConverterULong.write(value.`epochId`, buf)
-            FfiConverterULong.write(value.`publishedSlot`, buf)
+    override fun write(value: FfiRootSnapshotChoice, buf: ByteBuffer) {
+            FfiConverterUByte.write(value.`ringKind`, buf)
+            FfiConverterUByte.write(value.`ringIdx`, buf)
+            FfiConverterULong.write(value.`slot`, buf)
             FfiConverterByteArray.write(value.`superRoot`, buf)
             FfiConverterSequenceByteArray.write(value.`laneRoots`, buf)
             FfiConverterSequenceULong.write(value.`laneCounts`, buf)
@@ -2875,7 +3101,9 @@ data class FfiTransactParams (
     , 
     var `vkId`: kotlin.UByte
     , 
-    var `ckptSlotIdx`: kotlin.UShort
+    var `rootRingKind`: kotlin.UByte
+    , 
+    var `rootRingIdx`: kotlin.UByte
     , 
     var `outLaneId`: kotlin.UByte
     , 
@@ -2948,7 +3176,8 @@ public object FfiConverterTypeFfiTransactParams: FfiConverterRustBuffer<FfiTrans
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUByte.read(buf),
-            FfiConverterUShort.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterUByte.read(buf),
             FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
@@ -2983,7 +3212,8 @@ public object FfiConverterTypeFfiTransactParams: FfiConverterRustBuffer<FfiTrans
             FfiConverterString.allocationSize(value.`payer`) +
             FfiConverterUInt.allocationSize(value.`poolId`) +
             FfiConverterUByte.allocationSize(value.`vkId`) +
-            FfiConverterUShort.allocationSize(value.`ckptSlotIdx`) +
+            FfiConverterUByte.allocationSize(value.`rootRingKind`) +
+            FfiConverterUByte.allocationSize(value.`rootRingIdx`) +
             FfiConverterUByte.allocationSize(value.`outLaneId`) +
             FfiConverterULong.allocationSize(value.`outSubSeq`) +
             FfiConverterULong.allocationSize(value.`outRootSeq`) +
@@ -3017,7 +3247,8 @@ public object FfiConverterTypeFfiTransactParams: FfiConverterRustBuffer<FfiTrans
             FfiConverterString.write(value.`payer`, buf)
             FfiConverterUInt.write(value.`poolId`, buf)
             FfiConverterUByte.write(value.`vkId`, buf)
-            FfiConverterUShort.write(value.`ckptSlotIdx`, buf)
+            FfiConverterUByte.write(value.`rootRingKind`, buf)
+            FfiConverterUByte.write(value.`rootRingIdx`, buf)
             FfiConverterUByte.write(value.`outLaneId`, buf)
             FfiConverterULong.write(value.`outSubSeq`, buf)
             FfiConverterULong.write(value.`outRootSeq`, buf)
@@ -3135,8 +3366,6 @@ public object FfiConverterTypeAudrenFfiError : FfiConverterRustBuffer<AudrenFfiE
 sealed class FfiUpdatePoolAction {
     
     data class UpdateParams(
-        val `ckptInterval`: kotlin.ULong, 
-        val `maxCkptAge`: kotlin.ULong, 
         val `noteRentFee`: kotlin.ULong, 
         val `nfRentFee`: kotlin.ULong) : FfiUpdatePoolAction()
         
@@ -3180,8 +3409,6 @@ public object FfiConverterTypeFfiUpdatePoolAction : FfiConverterRustBuffer<FfiUp
             1 -> FfiUpdatePoolAction.UpdateParams(
                 FfiConverterULong.read(buf),
                 FfiConverterULong.read(buf),
-                FfiConverterULong.read(buf),
-                FfiConverterULong.read(buf),
                 )
             2 -> FfiUpdatePoolAction.ProposeAuthority(
                 FfiConverterString.read(buf),
@@ -3197,8 +3424,6 @@ public object FfiConverterTypeFfiUpdatePoolAction : FfiConverterRustBuffer<FfiUp
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterULong.allocationSize(value.`ckptInterval`)
-                + FfiConverterULong.allocationSize(value.`maxCkptAge`)
                 + FfiConverterULong.allocationSize(value.`noteRentFee`)
                 + FfiConverterULong.allocationSize(value.`nfRentFee`)
             )
@@ -3228,8 +3453,6 @@ public object FfiConverterTypeFfiUpdatePoolAction : FfiConverterRustBuffer<FfiUp
         when(value) {
             is FfiUpdatePoolAction.UpdateParams -> {
                 buf.putInt(1)
-                FfiConverterULong.write(value.`ckptInterval`, buf)
-                FfiConverterULong.write(value.`maxCkptAge`, buf)
                 FfiConverterULong.write(value.`noteRentFee`, buf)
                 FfiConverterULong.write(value.`nfRentFee`, buf)
                 Unit
@@ -3492,6 +3715,62 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
         }
     }
 }
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFfiNoteCoord: FfiConverterRustBuffer<List<FfiNoteCoord>> {
+    override fun read(buf: ByteBuffer): List<FfiNoteCoord> {
+        val len = buf.getInt()
+        return List<FfiNoteCoord>(len) {
+            FfiConverterTypeFfiNoteCoord.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiNoteCoord>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFfiNoteCoord.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiNoteCoord>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiNoteCoord.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFfiOpenPageSpec: FfiConverterRustBuffer<List<FfiOpenPageSpec>> {
+    override fun read(buf: ByteBuffer): List<FfiOpenPageSpec> {
+        val len = buf.getInt()
+        return List<FfiOpenPageSpec>(len) {
+            FfiConverterTypeFfiOpenPageSpec.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiOpenPageSpec>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFfiOpenPageSpec.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiOpenPageSpec>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiOpenPageSpec.write(it, buf)
+        }
+    }
+}
     @Throws(AudrenFfiException::class) fun `buildDepositIx`(`params`: FfiDepositParams): FfiInstruction {
             return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
@@ -3531,7 +3810,7 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
     }
     
 
-    @Throws(AudrenFfiException::class) fun `buildInitPoolIx`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `ckptInterval`: kotlin.ULong, `maxCkptAge`: kotlin.ULong, `noteRentFee`: kotlin.ULong, `nfRentFee`: kotlin.ULong): FfiInstruction {
+    @Throws(AudrenFfiException::class) fun `buildInitPoolIx`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `rootEpochInterval`: kotlin.ULong, `noteRentFee`: kotlin.ULong, `nfRentFee`: kotlin.ULong): FfiInstruction {
             return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_build_init_pool_ix(
@@ -3540,10 +3819,25 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
         FfiConverterString.lower(`programId`),
         FfiConverterString.lower(`payer`),
         FfiConverterUInt.lower(`poolId`),
-        FfiConverterULong.lower(`ckptInterval`),
-        FfiConverterULong.lower(`maxCkptAge`),
+        FfiConverterULong.lower(`rootEpochInterval`),
         FfiConverterULong.lower(`noteRentFee`),
         FfiConverterULong.lower(`nfRentFee`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `buildInitRootHistoryIx`(`programId`: kotlin.String, `authority`: kotlin.String, `poolId`: kotlin.UInt, `rootEpochInterval`: kotlin.ULong, `activeLanes`: kotlin.UByte): FfiInstruction {
+            return FfiConverterTypeFfiInstruction.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_build_init_root_history_ix(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterString.lower(`authority`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterULong.lower(`rootEpochInterval`),
+        FfiConverterUByte.lower(`activeLanes`),_status)
 }
     )
     }
@@ -3561,22 +3855,6 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
         FfiConverterUInt.lower(`poolId`),
         FfiConverterUByte.lower(`laneId`),
         FfiConverterULong.lower(`pageSeq`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `buildPublishCheckpointIx`(`programId`: kotlin.String, `payer`: kotlin.String, `poolId`: kotlin.UInt, `slotIdx`: kotlin.UShort, `activeLanes`: kotlin.UByte): FfiInstruction {
-            return FfiConverterTypeFfiInstruction.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_build_publish_checkpoint_ix(
-    
-        
-        FfiConverterString.lower(`programId`),
-        FfiConverterString.lower(`payer`),
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterUShort.lower(`slotIdx`),
-        FfiConverterUByte.lower(`activeLanes`),_status)
 }
     )
     }
@@ -3711,6 +3989,18 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
     }
     
 
+    @Throws(AudrenFfiException::class) fun `decodeGlobalRootHistoryAccount`(`data`: kotlin.ByteArray): FfiGlobalRootHistory {
+            return FfiConverterTypeFfiGlobalRootHistory.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_decode_global_root_history_account(
+    
+        
+        FfiConverterByteArray.lower(`data`),_status)
+}
+    )
+    }
+    
+
     @Throws(AudrenFfiException::class) fun `decodeLaneHeaderAccount`(`data`: kotlin.ByteArray): FfiLaneHeader {
             return FfiConverterTypeFfiLaneHeader.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
@@ -3727,18 +4017,6 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
             return FfiConverterTypeFfiPoolState.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_decode_pool_state_account(
-    
-        
-        FfiConverterByteArray.lower(`data`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `decodeRootCheckpointAccount`(`data`: kotlin.ByteArray): FfiRootCheckpoint {
-            return FfiConverterTypeFfiRootCheckpoint.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_decode_root_checkpoint_account(
     
         
         FfiConverterByteArray.lower(`data`),_status)
@@ -3792,20 +4070,6 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
         FfiConverterString.lower(`owner`),
         FfiConverterString.lower(`tokenProgram`),
         FfiConverterString.lower(`mint`),_status)
-}
-    )
-    }
-    
-
-    @Throws(AudrenFfiException::class) fun `deriveCheckpointPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `slotIdx`: kotlin.UShort): FfiPdaResult {
-            return FfiConverterTypeFfiPdaResult.lift(
-    uniffiRustCallWithError(AudrenFfiException) { _status ->
-    UniffiLib.uniffi_audren_ffi_fn_func_derive_checkpoint_pda(
-    
-        
-        FfiConverterString.lower(`programId`),
-        FfiConverterUInt.lower(`poolId`),
-        FfiConverterUShort.lower(`slotIdx`),_status)
 }
     )
     }
@@ -3926,6 +4190,19 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
             return FfiConverterTypeFfiPdaResult.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_derive_pool_pda(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `deriveRootsPda`(`programId`: kotlin.String, `poolId`: kotlin.UInt): FfiPdaResult {
+            return FfiConverterTypeFfiPdaResult.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_derive_roots_pda(
     
         
         FfiConverterString.lower(`programId`),
@@ -4058,6 +4335,25 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
     }
     
 
+    @Throws(AudrenFfiException::class) fun `planAutoOpenPages`(`programId`: kotlin.String, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `nextLeaf`: kotlin.ULong, `nfCount`: kotlin.ULong, `numOutputs`: kotlin.UByte, `numNfs`: kotlin.UByte, `existingPages`: List<FfiOpenPageSpec>): List<FfiOpenPageSpec> {
+            return FfiConverterSequenceTypeFfiOpenPageSpec.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_plan_auto_open_pages(
+    
+        
+        FfiConverterString.lower(`programId`),
+        FfiConverterUInt.lower(`poolId`),
+        FfiConverterUByte.lower(`laneId`),
+        FfiConverterULong.lower(`nextLeaf`),
+        FfiConverterULong.lower(`nfCount`),
+        FfiConverterUByte.lower(`numOutputs`),
+        FfiConverterUByte.lower(`numNfs`),
+        FfiConverterSequenceTypeFfiOpenPageSpec.lower(`existingPages`),_status)
+}
+    )
+    }
+    
+
     @Throws(AudrenFfiException::class) fun `prepareDynamicSwapMemo`(`recipientViewPk`: kotlin.ByteArray, `ephSecret`: kotlin.ByteArray): FfiDynamicMemoPrep {
             return FfiConverterTypeFfiDynamicMemoPrep.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
@@ -4089,6 +4385,80 @@ public object FfiConverterSequenceTypeFfiAccountMeta: FfiConverterRustBuffer<Lis
         
         FfiConverterByteArray.lower(`witness4611`),
         FfiConverterByteArray.lower(`seed32`),_status)
+}
+    )
+    }
+    
+ fun `recommendedCuLimitDeposit`(`hasTransferHook`: kotlin.Boolean, `openPageCount`: kotlin.UInt, `createAtaCount`: kotlin.UInt, `createToken2022AtaCount`: kotlin.UInt, `bumps`: kotlin.ByteArray): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_recommended_cu_limit_deposit(
+    
+        
+        FfiConverterBoolean.lower(`hasTransferHook`),
+        FfiConverterUInt.lower(`openPageCount`),
+        FfiConverterUInt.lower(`createAtaCount`),
+        FfiConverterUInt.lower(`createToken2022AtaCount`),
+        FfiConverterByteArray.lower(`bumps`),_status)
+}
+    )
+    }
+    
+ fun `recommendedCuLimitExecViaEscrow`(`routerCuLimit`: kotlin.UInt, `hasToken2022Leg`: kotlin.Boolean, `openPageCount`: kotlin.UInt, `createAtaCount`: kotlin.UInt, `createToken2022AtaCount`: kotlin.UInt, `bumps`: kotlin.ByteArray): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_recommended_cu_limit_exec_via_escrow(
+    
+        
+        FfiConverterUInt.lower(`routerCuLimit`),
+        FfiConverterBoolean.lower(`hasToken2022Leg`),
+        FfiConverterUInt.lower(`openPageCount`),
+        FfiConverterUInt.lower(`createAtaCount`),
+        FfiConverterUInt.lower(`createToken2022AtaCount`),
+        FfiConverterByteArray.lower(`bumps`),_status)
+}
+    )
+    }
+    
+ fun `recommendedCuLimitOpenPage`(`openPageCount`: kotlin.UInt, `bumps`: kotlin.ByteArray): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_recommended_cu_limit_open_page(
+    
+        
+        FfiConverterUInt.lower(`openPageCount`),
+        FfiConverterByteArray.lower(`bumps`),_status)
+}
+    )
+    }
+    
+ fun `recommendedCuLimitTransact`(`isPublicWithdraw`: kotlin.Boolean, `hasTransferHook`: kotlin.Boolean, `outputMask`: kotlin.UByte, `openPageCount`: kotlin.UInt, `createAtaCount`: kotlin.UInt, `createToken2022AtaCount`: kotlin.UInt, `bumps`: kotlin.ByteArray): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_recommended_cu_limit_transact(
+    
+        
+        FfiConverterBoolean.lower(`isPublicWithdraw`),
+        FfiConverterBoolean.lower(`hasTransferHook`),
+        FfiConverterUByte.lower(`outputMask`),
+        FfiConverterUInt.lower(`openPageCount`),
+        FfiConverterUInt.lower(`createAtaCount`),
+        FfiConverterUInt.lower(`createToken2022AtaCount`),
+        FfiConverterByteArray.lower(`bumps`),_status)
+}
+    )
+    }
+    
+
+    @Throws(AudrenFfiException::class) fun `selectRootSnapshotForNotes`(`rootHistoryData`: kotlin.ByteArray, `expectedPoolId`: kotlin.UInt, `notes`: List<FfiNoteCoord>): FfiRootSnapshotChoice {
+            return FfiConverterTypeFfiRootSnapshotChoice.lift(
+    uniffiRustCallWithError(AudrenFfiException) { _status ->
+    UniffiLib.uniffi_audren_ffi_fn_func_select_root_snapshot_for_notes(
+    
+        
+        FfiConverterByteArray.lower(`rootHistoryData`),
+        FfiConverterUInt.lower(`expectedPoolId`),
+        FfiConverterSequenceTypeFfiNoteCoord.lower(`notes`),_status)
 }
     )
     }

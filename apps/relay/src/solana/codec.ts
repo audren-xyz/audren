@@ -38,8 +38,17 @@ export function base58Encode(bytes: Uint8Array): string {
   return out
 }
 
-export function base58Decode(str: string): Uint8Array {
+export const BASE58_DEFAULT_MAX_LEN = 128
+
+export function isValidBase58PubkeyLen(raw: unknown): raw is string {
+  return typeof raw === 'string' && raw.length >= 32 && raw.length <= 44
+}
+
+export function base58Decode(str: string, maxLen = BASE58_DEFAULT_MAX_LEN): Uint8Array {
   if (str.length === 0) return new Uint8Array(0)
+  if (str.length > maxLen) {
+    throw new Error(`Base58 string length ${str.length} exceeds limit ${maxLen}`)
+  }
   let zeros = 0
   while (zeros < str.length && str[zeros] === '1') zeros++
   const bytes: number[] = []
@@ -156,8 +165,9 @@ export function utf8(s: string): Uint8Array {
 }
 
 export function isValidPubkey(raw: string): boolean {
+  if (!isValidBase58PubkeyLen(raw)) return false
   try {
-    return base58Decode(raw).length === 32
+    return base58Decode(raw, 44).length === 32
   } catch {
     return false
   }

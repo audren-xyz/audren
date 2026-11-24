@@ -10,9 +10,37 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import {
   ASSET_MODE_PRIVATE,
+  ASSET_MODE_PUBLIC,
   AUDREN_PROGRAM_ID,
+  CU_LIMIT_DEPOSIT,
+  CU_LIMIT_TRANSACT_FULL_EXIT,
+  CU_LIMIT_TRANSACT_PRIVATE,
+  CU_LIMIT_TRANSACT_WITHDRAW,
   MEMO_ENTRY_WIRE_LEN,
   NUM_LANES,
+  PROTOCOL_VERSION,
+  ROOTS_MAGIC,
+  ROOT_HISTORY_LEN,
+  ROOT_RING_EPOCH,
+  ROOT_RING_SLOT,
+  RT_OFF_BUMP,
+  RT_OFF_EPOCH_COUNT,
+  RT_OFF_EPOCH_CURSOR,
+  RT_OFF_EPOCH_INTERVAL,
+  RT_OFF_EPOCH_RING,
+  RT_OFF_LATEST_LANE_COUNTS,
+  RT_OFF_LATEST_LANE_ROOTS,
+  RT_OFF_LATEST_SLOT,
+  RT_OFF_LATEST_SUPER_ROOT,
+  RT_OFF_POOL_ID,
+  RT_OFF_SLOT_COUNT,
+  RT_OFF_SLOT_CURSOR,
+  RT_OFF_SLOT_RING,
+  RT_OFF_STABLE_LANE_COUNTS,
+  RT_OFF_STABLE_LANE_ROOTS,
+  RT_OFF_STABLE_SLOT,
+  RT_OFF_STABLE_SUPER_ROOT,
+  RT_OFF_VERSION,
   VK_ID_DEFAULT,
   WSOL_MINT,
   ZERO_HASHES_4ARY,
@@ -23,9 +51,12 @@ import {
   computeMerkleRoot4Ary,
   computeNoteCommitment,
   computeSubtree256Root,
+  computeSuperRoot4Ary,
   computeTransactCtxHash,
+  decodeGlobalRootHistory,
   deriveAssetId,
   deriveKeysFromSeed,
+  deriveRootsPdaSync,
   deriveStealthOwner,
   encryptNoteMemo,
   exportFullViewingKey,
@@ -33,6 +64,9 @@ import {
   formatAudrenAddress,
   frToBeBytes,
   parseAudrenAddress,
+  recommendedDepositCuLimit,
+  recommendedTransactCuLimit,
+  selectRootSnapshotForNotes,
   tryDecryptAndVerifyMemo,
   verifySelectiveDisclosureProof,
 } from '../lib/audren-crypto'
@@ -90,7 +124,7 @@ async function main() {
   const leaves = [commitment]
   const { siblings, positions } = extractIntraSubtreeSiblings(leaves, 1, 0)
   const lane0Root = computeSubtree256Root(leaves, 1)
-  const ckptLaneRoots = Array.from({ length: NUM_LANES }, (_, i) =>
+  const laneRoots = Array.from({ length: NUM_LANES }, (_, i) =>
     i === 0 ? lane0Root : ZERO_HASHES_4ARY[18]!,
   )
   const path = buildWitnessFromFrozenSubsiblings({
@@ -98,8 +132,8 @@ async function main() {
     targetLeafIdx: 0n,
     intraSiblings: siblings,
     intraPositions: positions,
-    ckptLaneRoots,
-    ckptLaneLeafCount: 1n,
+    laneRoots,
+    laneLeafCount: 1n,
     finalizedSubtreeRoots: [],
     frontierPageLeaves: leaves,
   })
@@ -185,10 +219,57 @@ async function main() {
   )
   if (forgedAmountOk) throw new Error('SelectiveDisclosureProof failed to reject amount > u64::MAX')
 
-  // Verify v1.2.1 register, frozen Pool #0 ALTs (40 entries each), prover-worker.js, & v0 ALT compression <= 1,232 B
-  if (AUDREN.version !== '1.2.1' || AUDREN.releaseTag !== 'v1.2.1') {
-    throw new Error(`Expected AUDREN version 1.2.1 / v1.2.1, got ${AUDREN.version} / ${AUDREN.releaseTag}`)
+  // Verify v1.3.0 register, canonical rootsPda, GlobalRootHistory decoder + selector,
+  // frozen Pool #0 ALTs (40 entries each), prover-worker.js, tight CU limits, & v0 ALT compression <= 1,232 B
+  if (AUDREN.version !== '1.3.0' || AUDREN.releaseTag !== 'v1.3.0') {
+    throw new Error(`Expected AUDREN version 1.3.0 / v1.3.0, got ${AUDREN.version} / ${AUDREN.releaseTag}`)
   }
+  const derivedRoots = deriveRootsPdaSync(0, AUDREN_PROGRAM_ID)
+  if (derivedRoots.address !== AUDREN.rootsPda || derivedRoots.bump !== 254) {
+    throw new Error(
+      `rootsPda mismatch: expected ${AUDREN.rootsPda} (bump 254), got ${derivedRoots.address} (bump ${derivedRoots.bump})`,
+    )
+  }
+
+  // Synthesize canonical 10,216 B GlobalRootHistory (`AUD1RT01`) and verify decode + snapshot selection
+  const rootsBuf = new Uint8Array(ROOT_HISTORY_LEN)
+  rootsBuf.set(new TextEncoder().encode(ROOTS_MAGIC), 0)
+  rootsBuf[RT_OFF_VERSION] = PROTOCOL_VERSION
+  rootsBuf[RT_OFF_BUMP] = derivedRoots.bump
+  const dv = new DataView(rootsBuf.buffer)
+  dv.setUint16(RT_OFF_SLOT_CURSOR, 0, true)
+  dv.setUint32(RT_OFF_POOL_ID, 0, true)
+  dv.setUint16(RT_OFF_EPOCH_CURSOR, 0, true)
+  dv.setUint16(RT_OFF_SLOT_COUNT, 1, true)
+  dv.setUint16(RT_OFF_EPOCH_COUNT, 1, true)
+  dv.setBigUint64(RT_OFF_LATEST_SLOT, 100n, true)
+  dv.setBigUint64(RT_OFF_STABLE_SLOT, 64n, true)
+  dv.setBigUint64(RT_OFF_EPOCH_INTERVAL, 32n, true)
+  const superRootBytes = frToBeBytes(superRoot)
+  const emptyLaneRoots = Array.from({ length: NUM_LANES }, () => ZERO_HASHES_4ARY[18]!)
+  const emptySuperRootBytes = frToBeBytes(computeSuperRoot4Ary(emptyLaneRoots))
+  rootsBuf.set(superRootBytes, RT_OFF_LATEST_SUPER_ROOT)
+  rootsBuf.set(emptySuperRootBytes, RT_OFF_STABLE_SUPER_ROOT)
+  for (let l = 0; l < NUM_LANES; l++) {
+    rootsBuf.set(frToBeBytes(laneRoots[l]!), RT_OFF_LATEST_LANE_ROOTS + l * 32)
+    dv.setBigUint64(RT_OFF_LATEST_LANE_COUNTS + l * 8, l === 0 ? 1n : 0n, true)
+    rootsBuf.set(frToBeBytes(emptyLaneRoots[l]!), RT_OFF_STABLE_LANE_ROOTS + l * 32)
+    dv.setBigUint64(RT_OFF_STABLE_LANE_COUNTS + l * 8, 0n, true)
+  }
+  rootsBuf.set(superRootBytes, RT_OFF_SLOT_RING)
+  dv.setBigUint64(RT_OFF_SLOT_RING + 32, 100n, true)
+  rootsBuf.set(emptySuperRootBytes, RT_OFF_EPOCH_RING)
+  dv.setBigUint64(RT_OFF_EPOCH_RING + 32, 64n, true)
+  const decodedRoots = decodeGlobalRootHistory(rootsBuf)
+  const instantSnap = selectRootSnapshotForNotes(decodedRoots, [{ laneId: 0, leafIndex: 0n }])
+  if (!instantSnap || instantSnap.ringKind !== ROOT_RING_SLOT || instantSnap.ringIdx !== 0) {
+    throw new Error('selectRootSnapshotForNotes failed instant slot-ring fallback for fresh note')
+  }
+  const stableSnap = selectRootSnapshotForNotes(decodedRoots, [])
+  if (!stableSnap || stableSnap.ringKind !== ROOT_RING_EPOCH || stableSnap.ringIdx !== 0) {
+    throw new Error('selectRootSnapshotForNotes failed stable epoch-ring preference')
+  }
+
   for (const cluster of ['mainnet', 'devnet'] as const) {
     const alt = AUDREN[cluster].pool0Alt
     if (alt.entries.length !== 40 || alt.entries[0] !== AUDREN_PROGRAM_ID) {
@@ -201,8 +282,8 @@ async function main() {
     }
   }
   const workerSrc = await readFile(resolve(process.cwd(), 'public/wasm/prover-worker.js'), 'utf8')
-  if (!workerSrc.includes('?v=1.2.1') || !workerSrc.includes('WebAssembly.RuntimeError')) {
-    throw new Error('prover-worker.js missing v1.2.1 cache-buster or RuntimeError reset')
+  if (!workerSrc.includes('?v=1.3.0') || !workerSrc.includes('WebAssembly.RuntimeError')) {
+    throw new Error('prover-worker.js missing v1.3.0 cache-buster or RuntimeError reset')
   }
   const sampleMemos = new Uint8Array(MEMO_ENTRY_WIRE_LEN * 3)
   sampleMemos.set(memo, 0)
@@ -211,8 +292,9 @@ async function main() {
   const sampleIx = buildTransactInstruction({
     poolId: 0,
     vkId: VK_ID_DEFAULT,
+    rootRingKind: ROOT_RING_SLOT,
+    rootRingIdx: 0,
     outLaneId: 0,
-    ckptSlotIdx: 0,
     outSubSeq: 0n,
     outRootSeq: 0n,
     outMemoSeq: 0n,
@@ -231,12 +313,55 @@ async function main() {
     relayerFeeAmount: 0n,
     memosBytes: sampleMemos,
   })
+  if (sampleIx.accounts[2]?.pubkey !== AUDREN.rootsPda || !sampleIx.accounts[2].isWritable) {
+    throw new Error('Private Transact accounts[2] must be writable canonical rootsPda')
+  }
+  const fullExitIx = buildTransactInstruction({
+    poolId: 0,
+    vkId: VK_ID_DEFAULT,
+    rootRingKind: ROOT_RING_EPOCH,
+    rootRingIdx: 0,
+    outLaneId: 0,
+    outSubSeq: 0n,
+    outRootSeq: 0n,
+    outMemoSeq: 0n,
+    outNfSeq: 0n,
+    payer: AUDREN.mainnetRelayer,
+    proof192: proved.proof192,
+    nf0: proved.nf0,
+    nf1: proved.nf1,
+    cm0: proved.cm0,
+    cm1: proved.cm1,
+    cm2: proved.cm2,
+    outputMask: 0,
+    assetMode: ASSET_MODE_PUBLIC,
+    unwrapWsol: true,
+    publicAmountOut: amount,
+    relayerFeeAmount: 0n,
+    recipient: AUDREN.mainnetRelayer,
+    memosBytes: new Uint8Array(0),
+  })
+  if (fullExitIx.accounts[2]?.pubkey !== AUDREN.rootsPda || fullExitIx.accounts[2].isWritable) {
+    throw new Error('Full-exit Transact (outputMask=0) accounts[2] must be read-only rootsPda')
+  }
+  if (
+    recommendedDepositCuLimit() !== CU_LIMIT_DEPOSIT ||
+    recommendedTransactCuLimit({ assetMode: ASSET_MODE_PUBLIC, outputMask: 0 }) !==
+      CU_LIMIT_TRANSACT_FULL_EXIT ||
+    recommendedTransactCuLimit({ assetMode: ASSET_MODE_PUBLIC, outputMask: 1 }) !==
+      CU_LIMIT_TRANSACT_WITHDRAW ||
+    recommendedTransactCuLimit({ assetMode: ASSET_MODE_PRIVATE, outputMask: 0b111 }) !==
+      CU_LIMIT_TRANSACT_PRIVATE
+  ) {
+    throw new Error('Calibrated CU limit helpers drifted from canonical v1.3.0 budgets')
+  }
+
   const v0Wire = compileKitV0Transaction({
     feePayer: AUDREN.mainnetRelayer,
     recentBlockhash: '11111111111111111111111111111111',
     lastValidBlockHeight: 1n,
     instructions: [audrenInstructionToSolana(sampleIx)],
-    computeUnitLimit: 350_000,
+    computeUnitLimit: CU_LIMIT_TRANSACT_PRIVATE,
     lookupTables: getPool0LookupTable('mainnet'),
   })
   if (v0Wire.byteLength > 1232) {
@@ -244,7 +369,7 @@ async function main() {
   }
 
   console.log(
-    `Audren v1.2.1 full crypto + Bech32m + Pool #0 ALT (${v0Wire.byteLength} B v0) + WASM prover audit PASSED (192 B Groth16 in ${ms} ms)`,
+    `Audren v1.3.0 full crypto + GlobalRootHistory + Bech32m + Pool #0 ALT (${v0Wire.byteLength} B v0) + WASM prover audit PASSED (192 B Groth16 in ${ms} ms)`,
   )
 }
 

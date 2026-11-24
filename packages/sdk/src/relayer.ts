@@ -22,12 +22,24 @@ export interface RelayRentSchedule {
   swapBaselineLamports: string;
 }
 
+export interface RelayRootHistoryInfo {
+  rootsPda?: string;
+  latestSlot?: string | number;
+  stableSlot?: string | number;
+  stableEpochId?: string | number;
+  epochInterval?: string | number;
+  slotCount?: number;
+  epochCount?: number;
+}
+
 export interface RelayInfoResponse {
   protocolVersion: number;
   cluster: RelayCluster;
   relayerPubkey: string | null;
   relayerPubkeys?: string[];
   relayerShieldedAddress?: string | null;
+  rootsPda?: string | null;
+  rootHistory?: RelayRootHistoryInfo | null;
   balanceSol: number | null;
   rentSchedule: RelayRentSchedule | null;
   aggregators?: unknown;
@@ -45,18 +57,8 @@ export interface RelayFeeQuoteRequest {
   outputCount?: number;
   omitNf1?: boolean;
   missingAtaCount?: number;
+  extraAtaMints?: string[];
   relayerPubkey?: string;
-}
-
-export interface RelayCheckpointResponse {
-  ok: boolean;
-  cluster: RelayCluster;
-  status: 'published' | 'up_to_date' | 'cooldown';
-  signature?: string;
-  epoch?: number;
-  slotsRemaining?: number;
-  waitMs?: number;
-  [key: string]: unknown;
 }
 
 export interface RelayFeeQuoteResponse {
@@ -68,6 +70,7 @@ export interface RelayFeeQuoteResponse {
   feeSide: 'in' | 'out' | 'shielded_cm2';
   feeMint: string;
   feeTokenProgram: string | null;
+  feeDecimals?: number;
   feeRecipient: string | null;
   feeShieldedAddress: string | null;
   feeRecipientExists: boolean;
@@ -77,6 +80,48 @@ export interface RelayFeeQuoteResponse {
   estimatedRelayCostLamports: string;
   estimatedRelayCostUsd: number | null;
   reason: string;
+  [key: string]: unknown;
+}
+
+export interface RelayTransferFee {
+  bps: number;
+  maxFee: string;
+}
+
+export interface RelaySwapQuoteMintMeta {
+  mint?: string;
+  decimals?: number | null;
+  tokenProgram?: string | null;
+  hasUnsafeSelfPayExt?: boolean;
+  [key: string]: unknown;
+}
+
+export interface RelaySwapQuoteResponse {
+  ok?: boolean;
+  cluster?: RelayCluster;
+  provider?: RelayAggregatorId | string;
+  quote?: {
+    provider?: RelayAggregatorId | string;
+    inAmount?: string;
+    outAmount?: string;
+    rawQuote?: unknown;
+    [key: string]: unknown;
+  };
+  outAmount?: string;
+  candidates?: unknown[];
+  feePlan?: Record<string, unknown>;
+  relayerPubkey?: string | null;
+  escrowPda?: string;
+  shardId?: number;
+  grossInputAmount?: string;
+  netInputAmount?: string;
+  inputTransferFeeBps?: number;
+  inputTransferFee?: RelayTransferFee | null;
+  outputTransferFee?: RelayTransferFee | null;
+  mints?: {
+    input?: RelaySwapQuoteMintMeta | null;
+    output?: RelaySwapQuoteMintMeta | null;
+  };
   [key: string]: unknown;
 }
 
@@ -185,10 +230,11 @@ export class AudrenRelayClient {
     const res = await fetch(`${this.baseUrl}${path}`, init);
     const text = await res.text();
     let parsed: unknown = null;
+    let parseFailed = false;
     try {
       parsed = text ? JSON.parse(text) : null;
     } catch {
-      // fall through
+      parseFailed = true;
     }
     if (!res.ok) {
       const msg =
@@ -196,6 +242,9 @@ export class AudrenRelayClient {
           ? String((parsed as { error: unknown }).error)
           : `Relay HTTP ${res.status}`;
       throw new Error(msg);
+    }
+    if (parseFailed) {
+      throw new Error('Relay returned invalid JSON');
     }
     return parsed as T;
   }
@@ -229,6 +278,9 @@ export class AudrenRelayClient {
     if (params.missingAtaCount !== undefined) {
       query.missingAtaCount = String(params.missingAtaCount);
     }
+    if (params.extraAtaMints && params.extraAtaMints.length > 0) {
+      query.extraAtaMints = params.extraAtaMints.join(',');
+    }
     if (params.relayerPubkey) {
       query.relayerPubkey = params.relayerPubkey;
     }
@@ -236,21 +288,7 @@ export class AudrenRelayClient {
     return this.requestJson<RelayFeeQuoteResponse>(`/v1/fee-quote?${qs.toString()}`);
   }
 
-  async requestCheckpoint(params?: {
-    cluster?: RelayCluster;
-    poolId?: number;
-  }): Promise<RelayCheckpointResponse> {
-    return this.requestJson<RelayCheckpointResponse>('/v1/checkpoint', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        ...(params?.cluster ? { cluster: params.cluster } : {}),
-        ...(params?.poolId !== undefined ? { poolId: params.poolId } : {}),
-      }),
-    });
-  }
-
-  async quoteSwap(params: RelaySwapQuoteRequest): Promise<Record<string, unknown>> {
+  async quoteSwap(params: RelaySwapQuoteRequest): Promise<RelaySwapQuoteResponse> {
     const qs = new URLSearchParams({
       inputMint: params.inputMint,
       outputMint: params.outputMint,
@@ -266,7 +304,7 @@ export class AudrenRelayClient {
       ...(params.includeFee !== undefined ? { includeFee: String(params.includeFee) } : {}),
       ...(params.relayerPubkey ? { relayerPubkey: params.relayerPubkey } : {}),
     });
-    return this.requestJson<Record<string, unknown>>(`/v1/swap/quote?${qs.toString()}`);
+    return this.requestJson<RelaySwapQuoteResponse>(`/v1/swap/quote?${qs.toString()}`);
   }
 
   async buildSwapInstructions(

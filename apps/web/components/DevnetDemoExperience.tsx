@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   AlertCircle,
@@ -47,11 +47,13 @@ import {
   encryptNoteMemo,
   exportFullViewingKey,
   extractIntraSubtreeSiblings,
+  fetchGlobalRootHistory,
   frFromBeBytesStrict,
   frToBeBytes,
   fromBase64,
   fromHex,
   pickRandomLaneId,
+  recommendedTransactCuLimit,
   reconstructWitness,
   toBase64,
   toHex,
@@ -72,22 +74,34 @@ import { AUDREN, shortHash, solscanAddress, solscanTx } from '@/lib/protocol'
 type DemoMode = 'wallet' | 'sandbox'
 
 interface DevnetPoolSnapshot {
+  error?: string
   initialized?: boolean
+  paused?: boolean
   activeLanes?: number
+  rootsPda?: string
   relayerAvailable?: boolean
   relayerAddress?: string | null
   lanes?: Array<{ laneId: number; nextLeaf: string; nfCount: string } | null>
-  latestCheckpoint?: {
-    slotIndex: number
-    epochId: string
-    laneCounts: string[]
+  rootHistory?: {
+    slotCursor: number
+    epochCursor: number
+    slotCount: number
+    epochCount: number
+    latestSlot: string
+    stableSlot: string
+    epochInterval: string
+    latestSuperRoot: string
+    stableSuperRoot: string
+    latestLaneCounts: string[]
+    stableLaneCounts: string[]
   } | null
 }
 
 interface SandboxNote {
   isLiveDevnet: boolean
-  awaitingCheckpoint?: boolean
-  ckptSlotIdx?: number
+  rootRingKind?: number
+  rootRingIdx?: number
+  rootCommitment?: 'finalized' | 'confirmed'
   laneId: number
   leafIndex: bigint
   amountLamports: bigint
@@ -100,7 +114,6 @@ interface SandboxNote {
   path: MerklePath4Ary | null
   superRoot: bigint | null
   devnetSig?: string
-  checkpointSig?: string | null
 }
 
 interface SandboxProofArtifact {
@@ -129,7 +142,9 @@ function randomFr(): bigint {
   return bytes32ToFrMasked(crypto.getRandomValues(new Uint8Array(32)))
 }
 
-function createDevnetBatchFetcher(): AccountBatchFetcher {
+function createDevnetBatchFetcher(
+  commitment: 'confirmed' | 'finalized' = 'confirmed',
+): AccountBatchFetcher {
   return async (addresses: readonly string[]) => {
     const out: (Uint8Array | null)[] = new Array(addresses.length).fill(null)
     for (let off = 0; off < addresses.length; off += 100) {
@@ -137,7 +152,7 @@ function createDevnetBatchFetcher(): AccountBatchFetcher {
       const res = await fetch('/api/rpc/accounts', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cluster: 'devnet', addresses: chunk }),
+        body: JSON.stringify({ cluster: 'devnet', addresses: chunk, commitment }),
       })
       const json = (await res.json()) as { accounts?: Array<string | null>; error?: string }
       if (!res.ok || !json.accounts) {
@@ -165,13 +180,16 @@ export function DevnetDemoExperience() {
   const [verifyingReceipt, setVerifyingReceipt] = useState(false)
   const [proving, setProving] = useState(false)
   const [fundingDevnet, setFundingDevnet] = useState(false)
-  const [publishingCkpt, setPublishingCkpt] = useState(false)
   const [devnetRelayerAvailable, setDevnetRelayerAvailable] = useState(false)
   const [devnetRelayerAddress, setDevnetRelayerAddress] = useState<string | null>(null)
+  const [devnetRootHistoryMigrating, setDevnetRootHistoryMigrating] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
+  const sandboxEpochRef = useRef(0)
+
   const initSandboxKeys = useCallback(() => {
+    sandboxEpochRef.current += 1
     const seed = crypto.getRandomValues(new Uint8Array(32))
     const derived = deriveKeysFromSeed(seed)
     setKeys(derived)
@@ -180,6 +198,9 @@ export function DevnetDemoExperience() {
     setReceiptValid(null)
     setReceiptSourceNote(null)
     setReceiptTampered(false)
+    setFundingDevnet(false)
+    setProving(false)
+    setVerifyingReceipt(false)
     setErrorMsg(null)
   }, [])
 
@@ -211,46 +232,75 @@ export function DevnetDemoExperience() {
 
   useEffect(() => {
     if (mode !== 'sandbox') return
+    let active = true
     void warmBrowserWasmProver().catch(() => {})
     fetch('/api/devnet/pool')
       .then((r) => (r.ok ? r.json() : null))
       .then((d: DevnetPoolSnapshot | null) => {
+        if (!active) return
         setDevnetRelayerAvailable(Boolean(d?.relayerAvailable))
         setDevnetRelayerAddress(d?.relayerAddress ?? null)
+        setDevnetRootHistoryMigrating(Boolean(d?.initialized && !d?.rootHistory))
       })
       .catch(() => {
+        if (!active) return
         setDevnetRelayerAvailable(false)
         setDevnetRelayerAddress(null)
+        setDevnetRootHistoryMigrating(false)
       })
+    return () => {
+      active = false
+    }
   }, [mode])
 
   const syncLiveDevnetWitness = async (note: SandboxNote): Promise<SandboxNote> => {
-    const pool = (await fetch('/api/devnet/pool').then((r) => r.json())) as DevnetPoolSnapshot
-    if (pool.relayerAddress) setDevnetRelayerAddress(pool.relayerAddress)
-    const ck = pool.latestCheckpoint
-    const coveredCount = ck ? BigInt(ck.laneCounts[note.laneId] ?? '0') : 0n
-    if (!ck || note.leafIndex >= coveredCount) {
-      return { ...note, awaitingCheckpoint: true, path: null, superRoot: null }
+    const poolRes = await fetch('/api/devnet/pool').catch(() => null)
+    if (poolRes?.ok) {
+      const pool = (await poolRes.json().catch(() => null)) as DevnetPoolSnapshot | null
+      if (pool?.relayerAddress) setDevnetRelayerAddress(pool.relayerAddress)
+      if (pool?.initialized && !pool.rootHistory) {
+        setDevnetRootHistoryMigrating(true)
+        throw new Error('Pool #0 GlobalRootHistory migration in progress; retry shortly')
+      }
+      if (pool?.rootHistory) {
+        setDevnetRootHistoryMigrating(false)
+      }
     }
-    const { superRoot, path } = await reconstructWitness({
-      fetchBatch: createDevnetBatchFetcher(),
+    const fetchFinalized = createDevnetBatchFetcher('finalized')
+    const fetchConfirmed = createDevnetBatchFetcher('confirmed')
+    const { history, snapshot, commitment } = await fetchGlobalRootHistory({
       poolId: 0,
-      ckptSlotIdx: ck.slotIndex,
+      programId: AUDREN_PROGRAM_ID,
+      fetchFinalized,
+      fetchConfirmed,
+      requiredNotes: [{ laneId: note.laneId, leafIndex: note.leafIndex }],
+    })
+    const { superRoot, path, rootRingKind, rootRingIdx } = await reconstructWitness({
+      fetchBatch: commitment === 'finalized' ? fetchFinalized : fetchConfirmed,
+      poolId: 0,
       laneId: note.laneId,
       leafIdx: note.leafIndex,
+      rootHistory: history,
+      rootSnapshot: snapshot,
       viewSk: keys?.viewSk,
     })
     return {
       ...note,
-      awaitingCheckpoint: false,
-      ckptSlotIdx: ck.slotIndex,
+      rootRingKind,
+      rootRingIdx,
+      rootCommitment: commitment,
       path,
       superRoot,
     }
   }
 
   const handleShieldSandboxNote = async (broadcastDevnet: boolean) => {
-    if (!keys) return
+    if (!keys || fundingDevnet || proving || verifyingReceipt) return
+    if (broadcastDevnet && devnetRootHistoryMigrating) {
+      setErrorMsg('Pool #0 GlobalRootHistory migration in progress; retry shortly')
+      return
+    }
+    const startEpoch = sandboxEpochRef.current
     setErrorMsg(null)
     setProofArtifact(null)
     setReceiptValid(null)
@@ -286,7 +336,7 @@ export function DevnetDemoExperience() {
         )
         const lane0Root = computeSubtree256Root(leaves, 1)
         const emptyLaneRoot = ZERO_HASHES_4ARY[18]!
-        const ckptLaneRoots = Array.from({ length: NUM_LANES }, (_, i) =>
+        const laneRoots = Array.from({ length: NUM_LANES }, (_, i) =>
           i === laneId ? lane0Root : emptyLaneRoot,
         )
         const path = buildWitnessFromFrozenSubsiblings({
@@ -294,8 +344,8 @@ export function DevnetDemoExperience() {
           targetLeafIdx: leafIndex,
           intraSiblings,
           intraPositions,
-          ckptLaneRoots,
-          ckptLaneLeafCount: 1n,
+          laneRoots,
+          laneLeafCount: 1n,
           finalizedSubtreeRoots: [],
           frontierPageLeaves: leaves,
         })
@@ -320,6 +370,20 @@ export function DevnetDemoExperience() {
 
       // Live Devnet unified Deposit via faucet, then decrypt real on-chain memo & sync Merkle witness
       setFundingDevnet(true)
+      const poolRes = await fetch('/api/devnet/pool').catch(() => null)
+      if (sandboxEpochRef.current !== startEpoch) return
+      if (poolRes?.ok) {
+        const pool = (await poolRes.json().catch(() => null)) as DevnetPoolSnapshot | null
+        if (sandboxEpochRef.current !== startEpoch) return
+        if (pool?.relayerAddress) setDevnetRelayerAddress(pool.relayerAddress)
+        if (pool?.initialized && !pool.rootHistory) {
+          setDevnetRootHistoryMigrating(true)
+          throw new Error('Pool #0 GlobalRootHistory migration in progress; retry shortly')
+        }
+        if (pool?.rootHistory) {
+          setDevnetRootHistoryMigrating(false)
+        }
+      }
       const res = await fetch('/api/devnet/deposit', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -336,11 +400,13 @@ export function DevnetDemoExperience() {
         amountLamports?: string
         commitmentHex?: string
         memoB64?: string
-        checkpointSignature?: string | null
-        checkpointSlotIndex?: number | null
         error?: string
       }
+      if (sandboxEpochRef.current !== startEpoch) return
       if (!res.ok || !j.signature || !j.memoB64 || !j.commitmentHex) {
+        if (j.error?.includes('GlobalRootHistory')) {
+          setDevnetRootHistoryMigrating(true)
+        }
         throw new Error(j.error ?? `Devnet deposit HTTP ${res.status}`)
       }
 
@@ -369,46 +435,38 @@ export function DevnetDemoExperience() {
         path: null,
         superRoot: null,
         devnetSig: j.signature,
-        checkpointSig: j.checkpointSignature ?? null,
       }
       const hydrated = await syncLiveDevnetWitness(baseNote)
+      if (sandboxEpochRef.current !== startEpoch) return
       setSandboxNote(hydrated)
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err))
-    } finally {
-      setFundingDevnet(false)
-    }
-  }
-
-  const handlePublishDevnetCheckpoint = async () => {
-    if (!sandboxNote) return
-    setPublishingCkpt(true)
-    setErrorMsg(null)
-    try {
-      const res = await fetch('/api/devnet/checkpoint', { method: 'POST' })
-      const j = (await res.json()) as { signature?: string; error?: string }
-      if (!res.ok && !j.signature) {
-        const retry = await syncLiveDevnetWitness(sandboxNote)
-        if (!retry.awaitingCheckpoint) {
-          setSandboxNote(retry)
-          return
-        }
-        throw new Error(j.error ?? `Devnet checkpoint HTTP ${res.status}. Wait a few slots and retry.`)
+      if (sandboxEpochRef.current === startEpoch) {
+        setErrorMsg(err instanceof Error ? err.message : String(err))
       }
-      const hydrated = await syncLiveDevnetWitness({
-        ...sandboxNote,
-        checkpointSig: j.signature ?? sandboxNote.checkpointSig,
-      })
-      setSandboxNote(hydrated)
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err))
     } finally {
-      setPublishingCkpt(false)
+      if (broadcastDevnet && sandboxEpochRef.current === startEpoch) {
+        setFundingDevnet(false)
+      }
     }
   }
 
   const handleRunBrowserWasmProof = async (broadcastLiveTransact: boolean) => {
-    if (!keys || !sandboxNote || !sandboxNote.path || sandboxNote.superRoot === null) return
+    if (
+      !keys ||
+      !sandboxNote ||
+      !sandboxNote.path ||
+      sandboxNote.superRoot === null ||
+      fundingDevnet ||
+      proving ||
+      verifyingReceipt
+    ) {
+      return
+    }
+    if (broadcastLiveTransact && devnetRootHistoryMigrating) {
+      setErrorMsg('Pool #0 GlobalRootHistory migration in progress; retry shortly')
+      return
+    }
+    const startEpoch = sandboxEpochRef.current
     setProving(true)
     setErrorMsg(null)
     try {
@@ -425,17 +483,35 @@ export function DevnetDemoExperience() {
       let relayerPayer = devnetRelayerAddress
 
       if (broadcastLiveTransact) {
-        const pool = (await fetch('/api/devnet/pool').then((r) => r.json())) as DevnetPoolSnapshot
-        if (!pool.initialized || !pool.relayerAddress) {
-          throw new Error('Devnet sandbox relayer is unavailable on this Worker')
+        const poolRes = await fetch('/api/devnet/pool')
+        const pool = (await poolRes.json().catch(() => ({}))) as DevnetPoolSnapshot
+        if (sandboxEpochRef.current !== startEpoch) return
+        if (poolRes.ok && pool.initialized && !pool.rootHistory) {
+          setDevnetRootHistoryMigrating(true)
+          throw new Error('Pool #0 GlobalRootHistory migration in progress; retry shortly')
+        }
+        if (poolRes.ok && pool.rootHistory) {
+          setDevnetRootHistoryMigrating(false)
+        }
+        if (!poolRes.ok || !pool.initialized || !pool.relayerAddress) {
+          throw new Error(pool.error ?? 'Devnet sandbox relayer is unavailable on this Worker')
+        }
+        if (pool.paused) {
+          throw new Error('Devnet Pool #0 is currently paused; private spends are temporarily disabled')
         }
         relayerPayer = pool.relayerAddress
         setDevnetRelayerAddress(pool.relayerAddress)
-        const activeLanes = pool.activeLanes ?? 4
+        const activeLanes = pool.activeLanes ?? 0
+        if (!Number.isInteger(activeLanes) || activeLanes <= 0) {
+          throw new Error('Devnet Pool #0 has no active lanes yet')
+        }
         outLaneId = pickRandomLaneId(activeLanes)
         const outLane = pool.lanes?.[outLaneId]
-        const nextLeaf = BigInt(outLane?.nextLeaf ?? '0')
-        const nfCount = BigInt(outLane?.nfCount ?? '0')
+        if (!outLane) {
+          throw new Error(`Devnet Pool #0 lane #${outLaneId} state is unavailable; retry in a moment`)
+        }
+        const nextLeaf = BigInt(outLane.nextLeaf)
+        const nfCount = BigInt(outLane.nfCount)
         const roll = computePageRollovers({
           leafCount: nextLeaf,
           outputCount: 3,
@@ -451,6 +527,16 @@ export function DevnetDemoExperience() {
           nextMemoSeq: roll.nextMemoSeq !== undefined ? BigInt(roll.nextMemoSeq) : null,
           nextNfSeq: roll.nextNfSeq !== undefined ? BigInt(roll.nextNfSeq) : null,
         }
+      }
+
+      let activeNote = sandboxNote
+      if (activeNote.isLiveDevnet) {
+        activeNote = await syncLiveDevnetWitness(activeNote)
+        if (sandboxEpochRef.current !== startEpoch) return
+        setSandboxNote(activeNote)
+      }
+      if (!activeNote.path || activeNote.superRoot === null) {
+        throw new Error('Failed to synchronize fresh Devnet GlobalRootHistory witness before proving')
       }
 
       const mintBytes = WSOL_MINT_BYTES
@@ -485,8 +571,8 @@ export function DevnetDemoExperience() {
       })
 
       const { result, elapsedMs } = await proveJoinsplitInBrowser({
-        superRoot: sandboxNote.superRoot,
-        txAssetId: sandboxNote.assetId,
+        superRoot: activeNote.superRoot,
+        txAssetId: activeNote.assetId,
         publicAssetId: 0n,
         publicAmountOut: 0n,
         relayerFeeAmount: 0n,
@@ -496,47 +582,53 @@ export function DevnetDemoExperience() {
           {
             isDummy: false,
             spendSk: keys.spendSk,
-            tweak: sandboxNote.tweak,
-            assetId: sandboxNote.assetId,
-            amount: sandboxNote.amountLamports,
-            blinding: sandboxNote.blinding,
-            merklePath: sandboxNote.path,
+            tweak: activeNote.tweak,
+            assetId: activeNote.assetId,
+            amount: activeNote.amountLamports,
+            blinding: activeNote.blinding,
+            merklePath: activeNote.path,
           },
-          dummyInputWitness(keys.spendSk, sandboxNote.assetId, randomFr()),
+          dummyInputWitness(keys.spendSk, activeNote.assetId, randomFr()),
         ],
         outputs: [
           {
             stealthOwner: recOwner,
-            assetId: sandboxNote.assetId,
+            assetId: activeNote.assetId,
             amount: sendAmt,
             blinding: m0.blinding,
           },
           {
             stealthOwner: chOwner,
-            assetId: sandboxNote.assetId,
+            assetId: activeNote.assetId,
             amount: changeAmt,
             blinding: m1.blinding,
           },
           {
             stealthOwner: dummyOwner,
-            assetId: sandboxNote.assetId,
+            assetId: activeNote.assetId,
             amount: 0n,
             blinding: m2.blinding,
           },
         ],
       })
+      if (sandboxEpochRef.current !== startEpoch) return
 
       let transactDevnetSig: string | undefined
       let wireBytes: number | undefined
       if (broadcastLiveTransact) {
-        if (!relayerPayer || sandboxNote.ckptSlotIdx === undefined) {
-          throw new Error('Live Devnet checkpoint or relayer address is missing')
+        if (
+          !relayerPayer ||
+          activeNote.rootRingKind === undefined ||
+          activeNote.rootRingIdx === undefined
+        ) {
+          throw new Error('Live Devnet GlobalRootHistory snapshot or relayer address is missing')
         }
         const ix = buildTransactInstruction({
           poolId: 0,
           vkId: VK_ID_DEFAULT,
+          rootRingKind: activeNote.rootRingKind,
+          rootRingIdx: activeNote.rootRingIdx,
           outLaneId,
-          ckptSlotIdx: sandboxNote.ckptSlotIdx,
           outSubSeq,
           outRootSeq,
           outMemoSeq,
@@ -563,7 +655,10 @@ export function DevnetDemoExperience() {
             cluster: 'devnet',
             instructionDataB64: toBase64(ix.data),
             accounts: ix.accounts,
-            computeUnitLimit: 350_000,
+            computeUnitLimit: recommendedTransactCuLimit({
+              assetMode: ASSET_MODE_PRIVATE,
+              outputMask: 0b111,
+            }),
           }),
         })
         const subJson = (await subRes.json()) as {
@@ -571,6 +666,7 @@ export function DevnetDemoExperience() {
           wireBytes?: number
           error?: string
         }
+        if (sandboxEpochRef.current !== startEpoch) return
         if (!subRes.ok || !subJson.signature) {
           throw new Error(subJson.error ?? `Devnet relay submit HTTP ${subRes.status}`)
         }
@@ -578,6 +674,7 @@ export function DevnetDemoExperience() {
         wireBytes = subJson.wireBytes
       }
 
+      if (sandboxEpochRef.current !== startEpoch) return
       setProofArtifact({
         elapsedMs,
         proofHex: toHex(result.proof192),
@@ -592,14 +689,19 @@ export function DevnetDemoExperience() {
         wireBytes,
       })
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err))
+      if (sandboxEpochRef.current === startEpoch) {
+        setErrorMsg(err instanceof Error ? err.message : String(err))
+      }
     } finally {
-      setProving(false)
+      if (sandboxEpochRef.current === startEpoch) {
+        setProving(false)
+      }
     }
   }
 
   const handleCheckSelectiveDisclosure = async (tamper: boolean) => {
-    if (!sandboxNote) return
+    if (!sandboxNote || fundingDevnet || proving || verifyingReceipt) return
+    const startEpoch = sandboxEpochRef.current
     setReceiptTampered(tamper)
     setVerifyingReceipt(true)
     setReceiptValid(null)
@@ -619,17 +721,49 @@ export function DevnetDemoExperience() {
         const subSeq = sandboxNote.leafIndex / BigInt(SUBTREE_LEAVES)
         const offset = Number(sandboxNote.leafIndex % BigInt(SUBTREE_LEAVES))
         const pda = deriveSubtreePdaSync(0, sandboxNote.laneId, subSeq, AUDREN_PROGRAM_ID).address
-        const [raw] = await createDevnetBatchFetcher()([pda])
-        if (!raw) {
+        const rpcRes = await fetch('/api/rpc/accounts', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ cluster: 'devnet', addresses: [pda] }),
+        })
+        if (sandboxEpochRef.current !== startEpoch) return
+        const rpcJson = (await rpcRes.json().catch(() => ({}))) as {
+          accounts?: Array<string | null>
+          owners?: Array<string | null>
+          error?: string
+        }
+        if (sandboxEpochRef.current !== startEpoch) return
+        if (!rpcRes.ok || !rpcJson.accounts) {
+          throw new Error(rpcJson.error ?? `RPC SubtreePage fetch HTTP ${rpcRes.status}`)
+        }
+        const rawB64 = rpcJson.accounts[0]
+        const owner = rpcJson.owners?.[0] ?? null
+        if (!rawB64) {
           setReceiptValid(false)
-          setReceiptSourceNote(`SubtreePage ${shortHash(pda, 6, 4)} not found on Devnet`)
+          setReceiptSourceNote(`On-chain SubtreePage ${shortHash(pda, 6, 4)} not found on Devnet`)
           return
         }
-        const page = decodeSubtreePage(raw)
-        const leaf = page.leaves[offset]
+        if (owner !== AUDREN_PROGRAM_ID) {
+          setReceiptValid(false)
+          setReceiptSourceNote(
+            `Account owner mismatch on ${shortHash(pda, 6, 4)}: expected Audren program ${shortHash(AUDREN_PROGRAM_ID, 6, 4)}`,
+          )
+          return
+        }
+        const page = decodeSubtreePage(fromBase64(rawB64))
+        if (page.poolId !== 0 || page.laneId !== sandboxNote.laneId || page.pageSeq !== subSeq) {
+          setReceiptValid(false)
+          setReceiptSourceNote(
+            `SubtreePage header mismatch on ${shortHash(pda, 6, 4)} (got pool=${page.poolId}, lane=${page.laneId}, seq=${page.pageSeq.toString()})`,
+          )
+          return
+        }
+        const leaf = offset < page.count ? page.leaves[offset] : undefined
         if (!leaf) {
           setReceiptValid(false)
-          setReceiptSourceNote('Leaf index out of range on Devnet SubtreePage')
+          setReceiptSourceNote(
+            `Leaf #${sandboxNote.leafIndex.toString()} out of range on Devnet SubtreePage ${shortHash(pda, 6, 4)}`,
+          )
           return
         }
         setReceiptValid(verifySelectiveDisclosureProof(sdp, leaf))
@@ -639,10 +773,14 @@ export function DevnetDemoExperience() {
         setReceiptSourceNote('Verified against local offline SubtreePage leaf')
       }
     } catch (err) {
-      setReceiptValid(false)
-      setReceiptSourceNote(err instanceof Error ? err.message : String(err))
+      if (sandboxEpochRef.current === startEpoch) {
+        setReceiptValid(false)
+        setReceiptSourceNote(err instanceof Error ? err.message : String(err))
+      }
     } finally {
-      setVerifyingReceipt(false)
+      if (sandboxEpochRef.current === startEpoch) {
+        setVerifyingReceipt(false)
+      }
     }
   }
 
@@ -715,11 +853,30 @@ export function DevnetDemoExperience() {
                   {strangerView ? <EyeOff size={13} /> : <Eye size={13} />}
                   {strangerView ? 'Stranger view' : 'Owner view'}
                 </button>
-                <button type="button" className="lv-mini-btn" onClick={initSandboxKeys}>
+                <button
+                  type="button"
+                  className="lv-mini-btn"
+                  disabled={fundingDevnet || proving || verifyingReceipt}
+                  onClick={() => {
+                    if (fundingDevnet || proving || verifyingReceipt) return
+                    initSandboxKeys()
+                  }}
+                >
                   <RefreshCw size={12} /> New ephemeral keys
                 </button>
               </div>
             </div>
+
+            {devnetRootHistoryMigrating && (
+              <div className="lv-notice-bar is-warn" role="status">
+                <AlertCircle size={15} />
+                <span style={{ flex: 1 }}>
+                  Devnet Pool #0 GlobalRootHistory migration is in progress; live Devnet deposits and
+                  relayed spends are temporarily paused while offline WASM sandbox proving remains
+                  available.
+                </span>
+              </div>
+            )}
 
             {errorMsg && (
               <div className="lv-error-bar">
@@ -801,27 +958,20 @@ export function DevnetDemoExperience() {
                             )}
                           </p>
                         )}
-                        {(sandboxNote.devnetSig || sandboxNote.checkpointSig) && (
+                        {sandboxNote.devnetSig && (
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center' }}>
-                            {sandboxNote.devnetSig && (
-                              <a
-                                href={solscanTx(sandboxNote.devnetSig, 'devnet')}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="lv-ledger-ext mono"
-                              >
-                                Devnet Deposit {shortHash(sandboxNote.devnetSig, 8, 6)} <ArrowUpRight size={12} />
-                              </a>
-                            )}
-                            {sandboxNote.checkpointSig && (
-                              <a
-                                href={solscanTx(sandboxNote.checkpointSig, 'devnet')}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="lv-ledger-ext mono"
-                              >
-                                Checkpoint {shortHash(sandboxNote.checkpointSig, 6, 4)} <ArrowUpRight size={12} />
-                              </a>
+                            <a
+                              href={solscanTx(sandboxNote.devnetSig, 'devnet')}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="lv-ledger-ext mono"
+                            >
+                              Devnet Deposit {shortHash(sandboxNote.devnetSig, 8, 6)} <ArrowUpRight size={12} />
+                            </a>
+                            {sandboxNote.rootCommitment && (
+                              <span className="mono" style={{ fontSize: '0.75rem', opacity: 0.78 }}>
+                                GlobalRootHistory ({sandboxNote.rootCommitment}) · instant spend
+                              </span>
                             )}
                           </div>
                         )}
@@ -851,7 +1001,7 @@ export function DevnetDemoExperience() {
                       <button
                         type="button"
                         className="btn-primary lv-submit-btn"
-                        disabled={!keys || fundingDevnet}
+                        disabled={!keys || fundingDevnet || proving || verifyingReceipt}
                         onClick={() => handleShieldSandboxNote(false)}
                       >
                         <KeyRound size={15} /> Shield note locally (offline WASM)
@@ -860,7 +1010,13 @@ export function DevnetDemoExperience() {
                         <button
                           type="button"
                           className="btn-secondary lv-submit-btn"
-                          disabled={!keys || fundingDevnet}
+                          disabled={
+                            !keys ||
+                            fundingDevnet ||
+                            proving ||
+                            verifyingReceipt ||
+                            devnetRootHistoryMigrating
+                          }
                           onClick={() => handleShieldSandboxNote(true)}
                         >
                           {fundingDevnet ? <Loader2 size={15} className="spin" /> : <ArrowUpRight size={15} />}
@@ -870,31 +1026,13 @@ export function DevnetDemoExperience() {
                     </div>
                   </div>
 
-                  {sandboxNote?.isLiveDevnet && sandboxNote.awaitingCheckpoint && (
-                    <div className="lv-notice-bar is-warn">
-                      <AlertCircle size={14} />
-                      <span style={{ flex: 1 }}>
-                        Live Devnet note landed in lane #{sandboxNote.laneId} (leaf #{sandboxNote.leafIndex.toString()}). Publish a fresh Devnet checkpoint to reconstruct its real Depth-20 Merkle path.
-                      </span>
-                      <button
-                        type="button"
-                        className="lv-mini-btn"
-                        disabled={publishingCkpt}
-                        onClick={handlePublishDevnetCheckpoint}
-                      >
-                        {publishingCkpt ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />}
-                        Publish checkpoint
-                      </button>
-                    </div>
-                  )}
-
                   <div className="lv-field-block">
                     <span className="lv-label">Step 3 · Prove 192 B BN254 Groth16 in Web Worker</span>
                     <div className="lv-unlock-actions">
                       <button
                         type="button"
                         className="btn-primary lv-submit-btn"
-                        disabled={!sandboxNote || !sandboxNote.path || proving}
+                        disabled={!sandboxNote || !sandboxNote.path || fundingDevnet || proving || verifyingReceipt}
                         onClick={() => handleRunBrowserWasmProof(false)}
                       >
                         {proving ? <Loader2 size={15} className="spin" /> : <Cpu size={15} />}
@@ -902,11 +1040,17 @@ export function DevnetDemoExperience() {
                           ? 'Proving 17,861 R1CS in Web Worker…'
                           : 'Prove 192 B Groth16 Transact locally'}
                       </button>
-                      {sandboxNote?.isLiveDevnet && !sandboxNote.awaitingCheckpoint && devnetRelayerAvailable && (
+                      {sandboxNote?.isLiveDevnet && devnetRelayerAvailable && (
                         <button
                           type="button"
                           className="btn-secondary lv-submit-btn"
-                          disabled={!sandboxNote.path || proving}
+                          disabled={
+                            !sandboxNote.path ||
+                            fundingDevnet ||
+                            proving ||
+                            verifyingReceipt ||
+                            devnetRootHistoryMigrating
+                          }
                           onClick={() => handleRunBrowserWasmProof(true)}
                         >
                           {proving ? <Loader2 size={15} className="spin" /> : <ArrowUpRight size={15} />}
@@ -982,7 +1126,7 @@ export function DevnetDemoExperience() {
                       <button
                         type="button"
                         className="lv-mini-btn"
-                        disabled={!sandboxNote || verifyingReceipt}
+                        disabled={!sandboxNote || fundingDevnet || proving || verifyingReceipt}
                         onClick={() => void handleCheckSelectiveDisclosure(false)}
                       >
                         {verifyingReceipt ? <Loader2 size={13} className="spin" /> : <ShieldCheck size={13} />}
@@ -991,7 +1135,7 @@ export function DevnetDemoExperience() {
                       <button
                         type="button"
                         className="lv-mini-btn"
-                        disabled={!sandboxNote || verifyingReceipt}
+                        disabled={!sandboxNote || fundingDevnet || proving || verifyingReceipt}
                         onClick={() => void handleCheckSelectiveDisclosure(true)}
                       >
                         <ShieldAlert size={13} /> Tamper amount (+1 lamport)

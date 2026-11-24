@@ -11,7 +11,7 @@ pub mod poseidon;
 pub mod solana_export;
 
 use ark_bn254::{Bn254, Fr};
-use ark_groth16::{Groth16, Proof, ProvingKey, VerifyingKey};
+use ark_groth16::{Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
@@ -69,14 +69,66 @@ pub fn deserialize_pk_compressed(bytes: &[u8]) -> Result<ProvingKey<Bn254>, Stri
     ProvingKey::<Bn254>::deserialize_compressed(bytes).map_err(|e| e.to_string())
 }
 
+/// Zeroize a sensitive stack byte buffer with a volatile write + compiler fence so the
+/// compiler cannot elide clearing prover RNG seeds on normal or early-error returns.
+#[inline(never)]
+fn zeroize_bytes(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: `b` is a valid, aligned mutable reference to a single byte.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Verify off-chain that `circuit` satisfies all `17,861` R1CS constraints of
+/// `JoinSplit4AryCircuit` prior to invoking `Groth16::prove`.
+///
+/// Running this check before proving prevents `ark-groth16`'s debug-build
+/// `debug_assert!(cs.is_satisfied().unwrap())` panic on invalid witnesses and avoids
+/// spending ~2-3s proving unsatisfied witnesses in release/WASM builds.
+pub fn check_joinsplit_satisfied(circuit: &JoinSplit4AryCircuit) -> Result<(), String> {
+    for inp in &circuit.inputs {
+        if inp.merkle_path.positions.iter().any(|&p| p > 3) {
+            return Err("invalid 4-ary merkle position (> 3)".to_string());
+        }
+    }
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    circuit
+        .clone()
+        .generate_constraints(cs.clone())
+        .map_err(|e| format!("joinsplit constraint synthesis failed: {e}"))?;
+    let satisfied = cs
+        .is_satisfied()
+        .map_err(|e| format!("joinsplit satisfaction check failed: {e}"))?;
+    if !satisfied {
+        return Err("unsatisfied joinsplit circuit witness".to_string());
+    }
+    Ok(())
+}
+
+/// Fallibly generate a BN254 Groth16 proof for `JoinSplit4AryCircuit`, verifying R1CS
+/// constraint satisfaction BEFORE invoking `Groth16::prove` (zero debug-build panics).
+pub fn try_prove_joinsplit(
+    pk: &ProvingKey<Bn254>,
+    circuit: JoinSplit4AryCircuit,
+    mut seed: [u8; 32],
+) -> Result<Proof<Bn254>, String> {
+    if let Err(err) = check_joinsplit_satisfied(&circuit) {
+        zeroize_bytes(&mut seed);
+        return Err(err);
+    }
+    let mut rng = ChaCha20Rng::from_seed(seed);
+    zeroize_bytes(&mut seed);
+    Groth16::<Bn254>::prove(pk, circuit, &mut rng).map_err(|e| e.to_string())
+}
+
 /// Generate a BN254 Groth16 proof for `JoinSplit4AryCircuit`.
 pub fn prove_joinsplit(
     pk: &ProvingKey<Bn254>,
     circuit: JoinSplit4AryCircuit,
     seed: [u8; 32],
 ) -> Proof<Bn254> {
-    let mut rng = ChaCha20Rng::from_seed(seed);
-    Groth16::<Bn254>::prove(pk, circuit, &mut rng).expect("prove joinsplit")
+    try_prove_joinsplit(pk, circuit, seed).expect("prove joinsplit")
 }
 
 /// Verify a BN254 Groth16 proof off-chain against `VerifyingKey<Bn254>`.
@@ -233,11 +285,49 @@ pub fn decode_joinsplit_witness_bytes(buf: &[u8]) -> Result<JoinSplit4AryCircuit
     ))
 }
 
+/// Prove a decoded `JoinSplit4AryCircuit` and verify off-chain satisfaction against a
+/// precomputed `PreparedVerifyingKey<Bn254>`, returning `Err(-6)` immediately if R1CS
+/// constraints are unsatisfied (before invoking `Groth16::prove`, avoiding debug-build
+/// panics and wasted proving work) while retaining post-prove verification as defense-in-depth.
+#[allow(dead_code)]
+fn prove_and_verify_abi_output(
+    pk: &ProvingKey<Bn254>,
+    pvk: &PreparedVerifyingKey<Bn254>,
+    circuit: JoinSplit4AryCircuit,
+    mut seed: [u8; 32],
+) -> Result<[u8; PROVE_OUTPUT_BYTES], i32> {
+    if check_joinsplit_satisfied(&circuit).is_err() {
+        zeroize_bytes(&mut seed);
+        return Err(-6);
+    }
+    let pub_in = circuit.public_inputs();
+    let pub_hash = pub_in.compute_hash();
+    let mut rng = ChaCha20Rng::from_seed(seed);
+    zeroize_bytes(&mut seed);
+    let proof = Groth16::<Bn254>::prove(pk, circuit, &mut rng).map_err(|_| -4)?;
+    let verified =
+        Groth16::<Bn254>::verify_with_processed_vk(pvk, &[pub_hash], &proof).unwrap_or(false);
+    if !verified {
+        return Err(-6);
+    }
+    let wire = solana_export::proof_to_solana_compressed_192(&proof);
+    let mut out = [0u8; PROVE_OUTPUT_BYTES];
+    out[0..192].copy_from_slice(&wire);
+    out[192..224].copy_from_slice(&fr_to_be_bytes(&pub_in.nullifiers[0]));
+    out[224..256].copy_from_slice(&fr_to_be_bytes(&pub_in.nullifiers[1]));
+    out[256..288].copy_from_slice(&fr_to_be_bytes(&pub_in.out_commitments[0]));
+    out[288..320].copy_from_slice(&fr_to_be_bytes(&pub_in.out_commitments[1]));
+    out[320..352].copy_from_slice(&fr_to_be_bytes(&pub_in.out_commitments[2]));
+    out[352..384].copy_from_slice(&fr_to_be_bytes(&pub_hash));
+    Ok(out)
+}
+
 /// Real `wasm32-unknown-unknown` production prover exports for `@audren/sdk/prover`
 /// (Node.js and Browser Web Worker — zero `wasm-bindgen` glue required).
 #[cfg(target_arch = "wasm32")]
 mod wasm_exports {
     use super::*;
+    use ark_groth16::prepare_verifying_key;
     use std::cell::RefCell;
 
     fn custom_rng(_buf: &mut [u8]) -> Result<(), getrandom::Error> {
@@ -248,7 +338,8 @@ mod wasm_exports {
     getrandom::register_custom_getrandom!(custom_rng);
 
     thread_local! {
-        static CACHED_PK: RefCell<Option<ProvingKey<Bn254>>> = const { RefCell::new(None) };
+        static CACHED_PK: RefCell<Option<(ProvingKey<Bn254>, PreparedVerifyingKey<Bn254>)>> =
+            const { RefCell::new(None) };
     }
 
     #[no_mangle]
@@ -269,7 +360,8 @@ mod wasm_exports {
         let slice = std::slice::from_raw_parts(ptr, len);
         match deserialize_pk_compressed(slice) {
             Ok(pk) => {
-                CACHED_PK.with(|c| *c.borrow_mut() = Some(pk));
+                let pvk = prepare_verifying_key(&pk.vk);
+                CACHED_PK.with(|c| *c.borrow_mut() = Some((pk, pvk)));
                 0
             }
             Err(_) => -5,
@@ -278,7 +370,7 @@ mod wasm_exports {
 
     /// Prove any valid `JoinSplit4AryCircuit` encoded in the `4,611 B` binary ABI.
     /// Writes `384 B` (`proof_192 || nf0 || nf1 || cm0 || cm1 || cm2 || pub_hash`) to `out_ptr`.
-    /// Returns `0` on success or negative error code on failure.
+    /// Returns `0` on success or negative error code on failure (`-6` if circuit constraints are unsatisfied).
     #[no_mangle]
     pub unsafe extern "C" fn wasm_prove_joinsplit(
         witness_ptr: *const u8,
@@ -293,32 +385,28 @@ mod wasm_exports {
 
         let circuit = match decode_joinsplit_witness_bytes(witness) {
             Ok(c) => c,
-            Err(code) => return code,
+            Err(code) => {
+                zeroize_bytes(&mut seed);
+                return code;
+            }
         };
-        let pub_in = circuit.public_inputs();
-        let pub_hash = pub_in.compute_hash();
 
-        CACHED_PK.with(|c| {
+        let rc = CACHED_PK.with(|c| {
             let guard = c.borrow();
-            let Some(pk) = guard.as_ref() else {
+            let Some((pk, pvk)) = guard.as_ref() else {
                 return -1;
             };
-            let mut rng = ChaCha20Rng::from_seed(seed);
-            let proof = match Groth16::<Bn254>::prove(pk, circuit, &mut rng) {
-                Ok(p) => p,
-                Err(_) => return -4,
-            };
-            let wire = solana_export::proof_to_solana_compressed_192(&proof);
-            let out = std::slice::from_raw_parts_mut(out_ptr, PROVE_OUTPUT_BYTES);
-            out[0..192].copy_from_slice(&wire);
-            out[192..224].copy_from_slice(&fr_to_be_bytes(&pub_in.nullifiers[0]));
-            out[224..256].copy_from_slice(&fr_to_be_bytes(&pub_in.nullifiers[1]));
-            out[256..288].copy_from_slice(&fr_to_be_bytes(&pub_in.out_commitments[0]));
-            out[288..320].copy_from_slice(&fr_to_be_bytes(&pub_in.out_commitments[1]));
-            out[320..352].copy_from_slice(&fr_to_be_bytes(&pub_in.out_commitments[2]));
-            out[352..384].copy_from_slice(&fr_to_be_bytes(&pub_hash));
-            0
-        })
+            match prove_and_verify_abi_output(pk, pvk, circuit, seed) {
+                Ok(encoded) => {
+                    let out = std::slice::from_raw_parts_mut(out_ptr, PROVE_OUTPUT_BYTES);
+                    out.copy_from_slice(&encoded);
+                    0
+                }
+                Err(code) => code,
+            }
+        });
+        zeroize_bytes(&mut seed);
+        rc
     }
 
     /// Compute canonical Circom / Solana `sol_poseidon` BN254 x^5 hash over `arity` (1..=12)
@@ -542,5 +630,52 @@ mod tests {
         }
         a6.public_input_hash = a6.public_inputs().compute_hash();
         assert!(!is_sat(a6), "tx_asset_id == 0 must be rejected");
+    }
+
+    #[test]
+    fn wasm_abi_prove_rejects_unsatisfied_witness_with_rc_minus_6() {
+        let (pk, vk) = load_canonical_joinsplit_keys();
+        let pvk = ark_groth16::prepare_verifying_key(&vk);
+        let seed = [0x42u8; 32];
+
+        // 1. Valid witness produces 384-byte ABI output
+        let valid = JoinSplit4AryCircuit::realistic_benchmark_instance();
+        let encoded_ok = prove_and_verify_abi_output(&pk, &pvk, valid.clone(), seed)
+            .expect("valid joinsplit witness must prove and verify");
+        assert_eq!(encoded_ok.len(), PROVE_OUTPUT_BYTES);
+
+        // 2. Unsatisfied witness (inflated output amount) returns Err(-6)
+        let mut bad_amount = valid.clone();
+        bad_amount.outputs[0].amount += 1;
+        bad_amount.public_input_hash = bad_amount.public_inputs().compute_hash();
+        assert_eq!(
+            prove_and_verify_abi_output(&pk, &pvk, bad_amount, seed),
+            Err(-6),
+            "unbalanced amounts must be rejected with -6"
+        );
+
+        // 3. Unsatisfied witness (stale super_root) returns Err(-6)
+        let mut bad_root = valid.clone();
+        bad_root.super_root += Fr::from(1u64);
+        bad_root.public_input_hash = bad_root.public_inputs().compute_hash();
+        assert_eq!(
+            prove_and_verify_abi_output(&pk, &pvk, bad_root.clone(), seed),
+            Err(-6),
+            "stale super_root must be rejected with -6"
+        );
+
+        // 4. Fallible native prover helpers reject invalid witnesses without debug_assert panics
+        assert!(check_joinsplit_satisfied(&valid).is_ok());
+        assert!(check_joinsplit_satisfied(&bad_root).is_err());
+        assert!(try_prove_joinsplit(&pk, bad_root, seed).is_err());
+
+        let mut bad_pos = valid;
+        bad_pos.inputs[0].merkle_path.positions[0] = 4;
+        assert!(check_joinsplit_satisfied(&bad_pos).is_err());
+        assert_eq!(
+            prove_and_verify_abi_output(&pk, &pvk, bad_pos, seed),
+            Err(-6),
+            "invalid 4-ary position must be rejected with -6"
+        );
     }
 }

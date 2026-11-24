@@ -9,7 +9,7 @@ export const AUDREN_CODAMA_IDL = {
     "kind": "programNode",
     "name": "audren",
     "publicKey": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
-    "version": "1.2.1",
+    "version": "1.3.0",
     "origin": "shank",
     "docs": [
       "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16, 4-ary Depth-20 MASP) and Protocol-Agnostic DeFi Execution Program on Solana."
@@ -19,7 +19,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "accountNode",
         "name": "poolState",
         "docs": [
-          "Global pool configuration (128 B; read-only on all deposits, spends, checkpoints, and DeFi swaps)."
+          "Global pool configuration (128 B; read-only on all deposits, spends, and DeFi swaps)."
         ],
         "size": 128,
         "discriminators": [
@@ -104,7 +104,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "ckptInterval",
+              "name": "rootEpochInterval",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u64",
@@ -113,11 +113,13 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "maxCkptAge",
+              "name": "reserved24",
               "type": {
-                "kind": "numberTypeNode",
-                "format": "u64",
-                "endian": "le"
+                "kind": "fixedSizeTypeNode",
+                "size": 8,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
               }
             },
             {
@@ -967,11 +969,11 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "accountNode",
-        "name": "rootCheckpoint",
+        "name": "globalRootHistory",
         "docs": [
-          "Fixed-size cyclic global checkpoint ring slot (704 B, 256 slots max)."
+          "Protocol-automated dual-ring global super_root history (10,216 B <= 10 KiB CPI cap; 128-entry slot ring + 89-entry epoch ring, updated atomically inline on every note commitment)."
         ],
-        "size": 704,
+        "size": 10216,
         "discriminators": [
           {
             "kind": "constantDiscriminatorNode",
@@ -988,7 +990,7 @@ export const AUDREN_CODAMA_IDL = {
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD1CK01"
+                "data": "AUD1RT01"
               }
             }
           }
@@ -1027,7 +1029,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "slotIdx",
+              "name": "slotCursor",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u16",
@@ -1045,7 +1047,52 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "epochId",
+              "name": "epochCursor",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u16",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "slotCount",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u16",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "epochCount",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u16",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "sameSlotBumped",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u8",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "pad",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u8",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "latestSlot",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u64",
@@ -1054,7 +1101,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "publishedSlot",
+              "name": "stableEpochId",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u64",
@@ -1063,7 +1110,54 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "superRoot",
+              "name": "stableSlot",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u64",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "epochInterval",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u64",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "reserved",
+              "type": {
+                "kind": "fixedSizeTypeNode",
+                "size": 8,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "groupRoots",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "fixedSizeTypeNode",
+                  "size": 32,
+                  "type": {
+                    "kind": "bytesTypeNode"
+                  }
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 4
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "latestSuperRoot",
               "type": {
                 "kind": "fixedSizeTypeNode",
                 "size": 32,
@@ -1074,7 +1168,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "laneRoots",
+              "name": "latestLaneRoots",
               "type": {
                 "kind": "arrayTypeNode",
                 "item": {
@@ -1092,7 +1186,7 @@ export const AUDREN_CODAMA_IDL = {
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "laneCounts",
+              "name": "latestLaneCounts",
               "type": {
                 "kind": "arrayTypeNode",
                 "item": {
@@ -1105,6 +1199,81 @@ export const AUDREN_CODAMA_IDL = {
                   "value": 16
                 }
               }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "stableSuperRoot",
+              "type": {
+                "kind": "fixedSizeTypeNode",
+                "size": 32,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "stableLaneRoots",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "fixedSizeTypeNode",
+                  "size": 32,
+                  "type": {
+                    "kind": "bytesTypeNode"
+                  }
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 16
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "stableLaneCounts",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "numberTypeNode",
+                  "format": "u64",
+                  "endian": "le"
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 16
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "slotRing",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "definedTypeLinkNode",
+                  "name": "rootEntry"
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 128
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "epochRing",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "definedTypeLinkNode",
+                  "name": "rootEntry"
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 89
+                }
+              }
             }
           ]
         }
@@ -1115,7 +1284,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "initPool",
         "docs": [
-          "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0)."
+          "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0) and empty GlobalRootHistory (10,216 B) atomically."
         ],
         "discriminators": [
           {
@@ -1158,6 +1327,16 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionAccountNode",
+            "name": "roots",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "GlobalRootHistory PDA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
             "name": "systemProgram",
             "isWritable": false,
             "isSigner": false,
@@ -1193,16 +1372,7 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "ckptInterval",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u64",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "maxCkptAge",
+            "name": "rootEpochInterval",
             "type": {
               "kind": "numberTypeNode",
               "format": "u64",
@@ -1526,7 +1696,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "deposit",
         "docs": [
-          "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA."
+          "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA, updating GlobalRootHistory atomically inline."
         ],
         "discriminators": [
           {
@@ -1565,6 +1735,16 @@ export const AUDREN_CODAMA_IDL = {
             "isOptional": false,
             "docs": [
               "PoolState PDA (read-only)."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "roots",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "GlobalRootHistory PDA (updated atomically on deposit)."
             ]
           },
           {
@@ -1789,9 +1969,9 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "instructionNode",
-        "name": "publishCheckpoint",
+        "name": "initRootHistory",
         "docs": [
-          "Permissionless, pause-exempt global super_root checkpoint publisher over active_lanes read-only lanes."
+          "Authority-gated one-shot initializer creating GlobalRootHistory (10,216 B) from existing active lanes (passed as trailing read-only accounts) and updating PoolState.root_epoch_interval."
         ],
         "discriminators": [
           {
@@ -1814,32 +1994,32 @@ export const AUDREN_CODAMA_IDL = {
         "accounts": [
           {
             "kind": "instructionAccountNode",
-            "name": "payer",
+            "name": "authority",
             "isWritable": true,
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Permissionless cranker."
+              "Pool authority signer and rent payer."
             ]
           },
           {
             "kind": "instructionAccountNode",
             "name": "poolState",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "PoolState PDA (read-only)."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "checkpoint",
             "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Cyclic RootCheckpoint(slot_idx) PDA."
+              "PoolState PDA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "roots",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "GlobalRootHistory PDA."
             ]
           },
           {
@@ -1876,6 +2056,15 @@ export const AUDREN_CODAMA_IDL = {
               "format": "u32",
               "endian": "le"
             }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "rootEpochInterval",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            }
           }
         ]
       },
@@ -1883,7 +2072,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "transact",
         "docs": [
-          "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit)."
+          "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit) with GlobalRootHistory verification and inline root update."
         ],
         "discriminators": [
           {
@@ -1926,12 +2115,12 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionAccountNode",
-            "name": "checkpoint",
-            "isWritable": false,
+            "name": "roots",
+            "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Referenced RootCheckpoint PDA."
+              "GlobalRootHistory PDA (writable when output_mask != 0; may be read-only on full exits with output_mask == 0)."
             ]
           },
           {
@@ -2102,6 +2291,30 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
+            "name": "rootRingKind",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "0=slot ring (0..128), 1=epoch ring (0..89)."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "rootRingIdx",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "Entry index inside the selected GlobalRootHistory ring."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
             "name": "proof192",
             "type": {
               "kind": "fixedSizeTypeNode",
@@ -2197,7 +2410,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "execViaEscrow",
         "docs": [
-          "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, and XOR-masked 72 B dynamic output memo."
+          "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, XOR-masked 72 B dynamic output memo, and inline GlobalRootHistory update."
         ],
         "discriminators": [
           {
@@ -2240,12 +2453,12 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionAccountNode",
-            "name": "checkpoint",
-            "isWritable": false,
+            "name": "roots",
+            "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Referenced RootCheckpoint PDA."
+              "GlobalRootHistory PDA (verified and updated atomically after output append)."
             ]
           },
           {
@@ -2433,6 +2646,30 @@ export const AUDREN_CODAMA_IDL = {
           },
           {
             "kind": "instructionArgumentNode",
+            "name": "rootRingKind",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "0=slot ring (0..128), 1=epoch ring (0..89)."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "rootRingIdx",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "Entry index inside the selected GlobalRootHistory ring."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
             "name": "proof192",
             "type": {
               "kind": "fixedSizeTypeNode",
@@ -2581,7 +2818,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "setPaused",
         "docs": [
-          "Authority-only emergency pause toggle (full withdrawals, PublishCheckpoint, and OpenPage remain permanently open)."
+          "Authority-only emergency pause toggle (full withdrawals and OpenPage remain permanently open)."
         ],
         "discriminators": [
           {
@@ -2662,7 +2899,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "updatePool",
         "docs": [
-          "Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."
+          "Update pool governance parameters (note_rent_fee, nf_rent_fee; root_epoch_interval is immutable after InitPool / InitRootHistory) or execute two-step authority transfer / renounce (renounce requires !paused)."
         ],
         "discriminators": [
           {
@@ -2747,13 +2984,46 @@ export const AUDREN_CODAMA_IDL = {
               "kind": "bytesTypeNode"
             },
             "docs": [
-              "UpdateParams: ckpt_interval(8, immutable \u2014 must equal PoolState.ckpt_interval)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."
+              "UpdateParams: note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."
             ]
           }
         ]
       }
     ],
-    "definedTypes": [],
+    "definedTypes": [
+      {
+        "kind": "definedTypeNode",
+        "name": "rootEntry",
+        "docs": [
+          "Single ring entry inside GlobalRootHistory (40 B: super_root[32] || slot[8])."
+        ],
+        "type": {
+          "kind": "structTypeNode",
+          "fields": [
+            {
+              "kind": "structFieldTypeNode",
+              "name": "superRoot",
+              "type": {
+                "kind": "fixedSizeTypeNode",
+                "size": 32,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "slot",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u64",
+                "endian": "le"
+              }
+            }
+          ]
+        }
+      }
+    ],
     "pdas": [
       {
         "kind": "pdaNode",
@@ -3111,16 +3381,16 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "pdaNode",
-        "name": "rootCheckpoint",
+        "name": "globalRootHistory",
         "docs": [
-          "Cyclic 256-slot global super_root checkpoint ring PDA (704 B)."
+          "Protocol-automated dual-ring global super_root history PDA (10,216 B)."
         ],
         "seeds": [
           {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 11,
+              "size": 12,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3128,7 +3398,7 @@ export const AUDREN_CODAMA_IDL = {
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_ckpt"
+              "data": "audren_roots"
             }
           },
           {
@@ -3137,15 +3407,6 @@ export const AUDREN_CODAMA_IDL = {
             "type": {
               "kind": "numberTypeNode",
               "format": "u32",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "variablePdaSeedNode",
-            "name": "slotIdx",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u16",
               "endian": "le"
             }
           }
@@ -3348,29 +3609,29 @@ export const AUDREN_CODAMA_IDL = {
       },
       {
         "kind": "errorNode",
-        "name": "checkpointTooSoon",
+        "name": "invalidRootRing",
         "code": 6007,
-        "message": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots.",
+        "message": "Root ring selector must be 0 (slot ring) or 1 (epoch ring).",
         "docs": [
-          "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots."
+          "Root ring selector must be 0 (slot ring) or 1 (epoch ring)."
         ]
       },
       {
         "kind": "errorNode",
-        "name": "checkpointExpired",
+        "name": "rootIndexOutOfBounds",
         "code": 6008,
-        "message": "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots.",
+        "message": "Referenced GlobalRootHistory ring index is out of bounds or unpopulated.",
         "docs": [
-          "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots."
+          "Referenced GlobalRootHistory ring index is out of bounds or unpopulated."
         ]
       },
       {
         "kind": "errorNode",
-        "name": "checkpointMismatch",
+        "name": "rootHistoryMismatch",
         "code": 6009,
-        "message": "Referenced RootCheckpoint account is uninitialized or belongs to another pool.",
+        "message": "Referenced GlobalRootHistory account is uninitialized, corrupted, or belongs to another pool.",
         "docs": [
-          "Referenced RootCheckpoint account is uninitialized or belongs to another pool."
+          "Referenced GlobalRootHistory account is uninitialized, corrupted, or belongs to another pool."
         ]
       },
       {
@@ -3530,9 +3791,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "poolPaused",
         "code": 6027,
-        "message": "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open).",
+        "message": "Pool is paused by authority (full exits and OpenPage remain open).",
         "docs": [
-          "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open)."
+          "Pool is paused by authority (full exits and OpenPage remain open)."
         ]
       },
       {
@@ -3557,9 +3818,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "invalidTargetProgram",
         "code": 6030,
-        "message": "Target program must be executable and cannot be Audren, System, Token, or ATA.",
+        "message": "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry.",
         "docs": [
-          "Target program must be executable and cannot be Audren, System, Token, or ATA."
+          "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry."
         ]
       },
       {
@@ -3589,7 +3850,7 @@ export const AUDREN_ANCHOR_IDL = {
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "1.2.1",
+    "version": "1.3.0",
     "spec": "0.1.0",
     "description": "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
@@ -3598,7 +3859,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "init_pool",
       "docs": [
-        "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0)."
+        "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0) and empty GlobalRootHistory (10,216 B) atomically."
       ],
       "discriminator": [
         0
@@ -3615,6 +3876,11 @@ export const AUDREN_ANCHOR_IDL = {
           "signer": false
         },
         {
+          "name": "roots",
+          "writable": true,
+          "signer": false
+        },
+        {
           "name": "system_program",
           "writable": false,
           "signer": false
@@ -3626,11 +3892,7 @@ export const AUDREN_ANCHOR_IDL = {
           "type": "u32"
         },
         {
-          "name": "ckpt_interval",
-          "type": "u64"
-        },
-        {
-          "name": "max_ckpt_age",
+          "name": "root_epoch_interval",
           "type": "u64"
         },
         {
@@ -3771,7 +4033,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "deposit",
       "docs": [
-        "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA."
+        "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA, updating GlobalRootHistory atomically inline."
       ],
       "discriminator": [
         3
@@ -3785,6 +4047,11 @@ export const AUDREN_ANCHOR_IDL = {
         {
           "name": "pool_state",
           "writable": false,
+          "signer": false
+        },
+        {
+          "name": "roots",
+          "writable": true,
           "signer": false
         },
         {
@@ -3902,26 +4169,26 @@ export const AUDREN_ANCHOR_IDL = {
       ]
     },
     {
-      "name": "publish_checkpoint",
+      "name": "init_root_history",
       "docs": [
-        "Permissionless, pause-exempt global super_root checkpoint publisher over active_lanes read-only lanes."
+        "Authority-gated one-shot initializer creating GlobalRootHistory (10,216 B) from existing active lanes (passed as trailing read-only accounts) and updating PoolState.root_epoch_interval."
       ],
       "discriminator": [
         4
       ],
       "accounts": [
         {
-          "name": "payer",
+          "name": "authority",
           "writable": true,
           "signer": true
         },
         {
           "name": "pool_state",
-          "writable": false,
+          "writable": true,
           "signer": false
         },
         {
-          "name": "checkpoint",
+          "name": "roots",
           "writable": true,
           "signer": false
         },
@@ -3935,13 +4202,17 @@ export const AUDREN_ANCHOR_IDL = {
         {
           "name": "pool_id",
           "type": "u32"
+        },
+        {
+          "name": "root_epoch_interval",
+          "type": "u64"
         }
       ]
     },
     {
       "name": "transact",
       "docs": [
-        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit)."
+        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit) with GlobalRootHistory verification and inline root update."
       ],
       "discriminator": [
         5
@@ -3958,8 +4229,8 @@ export const AUDREN_ANCHOR_IDL = {
           "signer": false
         },
         {
-          "name": "checkpoint",
-          "writable": false,
+          "name": "roots",
+          "writable": true,
           "signer": false
         },
         {
@@ -4034,6 +4305,14 @@ export const AUDREN_ANCHOR_IDL = {
           "type": "u8"
         },
         {
+          "name": "root_ring_kind",
+          "type": "u8"
+        },
+        {
+          "name": "root_ring_idx",
+          "type": "u8"
+        },
+        {
           "name": "proof192",
           "type": {
             "array": [
@@ -4104,7 +4383,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "exec_via_escrow",
       "docs": [
-        "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, and XOR-masked 72 B dynamic output memo."
+        "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, XOR-masked 72 B dynamic output memo, and inline GlobalRootHistory update."
       ],
       "discriminator": [
         6
@@ -4121,8 +4400,8 @@ export const AUDREN_ANCHOR_IDL = {
           "signer": false
         },
         {
-          "name": "checkpoint",
-          "writable": false,
+          "name": "roots",
+          "writable": true,
           "signer": false
         },
         {
@@ -4204,6 +4483,14 @@ export const AUDREN_ANCHOR_IDL = {
         },
         {
           "name": "flags",
+          "type": "u8"
+        },
+        {
+          "name": "root_ring_kind",
+          "type": "u8"
+        },
+        {
+          "name": "root_ring_idx",
           "type": "u8"
         },
         {
@@ -4317,7 +4604,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "set_paused",
       "docs": [
-        "Authority-only emergency pause toggle (full withdrawals, PublishCheckpoint, and OpenPage remain permanently open)."
+        "Authority-only emergency pause toggle (full withdrawals and OpenPage remain permanently open)."
       ],
       "discriminator": [
         7
@@ -4348,7 +4635,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "update_pool",
       "docs": [
-        "Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."
+        "Update pool governance parameters (note_rent_fee, nf_rent_fee; root_epoch_interval is immutable after InitPool / InitRootHistory) or execute two-step authority transfer / renounce (renounce requires !paused)."
       ],
       "discriminator": [
         8
@@ -4474,14 +4761,14 @@ export const AUDREN_ANCHOR_IDL = {
       ]
     },
     {
-      "name": "RootCheckpoint",
+      "name": "GlobalRootHistory",
       "discriminator": [
         65,
         85,
         68,
         49,
-        67,
-        75,
+        82,
+        84,
         48,
         49
       ]
@@ -4489,9 +4776,33 @@ export const AUDREN_ANCHOR_IDL = {
   ],
   "types": [
     {
+      "name": "RootEntry",
+      "docs": [
+        "Single ring entry inside GlobalRootHistory (40 B: super_root[32] || slot[8])."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "super_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "PoolState",
       "docs": [
-        "Global pool configuration (128 B; read-only on all deposits, spends, checkpoints, and DeFi swaps)."
+        "Global pool configuration (128 B; read-only on all deposits, spends, and DeFi swaps)."
       ],
       "type": {
         "kind": "struct",
@@ -4526,12 +4837,17 @@ export const AUDREN_ANCHOR_IDL = {
             "type": "u32"
           },
           {
-            "name": "ckpt_interval",
+            "name": "root_epoch_interval",
             "type": "u64"
           },
           {
-            "name": "max_ckpt_age",
-            "type": "u64"
+            "name": "reserved24",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
           },
           {
             "name": "authority",
@@ -4992,9 +5308,9 @@ export const AUDREN_ANCHOR_IDL = {
       }
     },
     {
-      "name": "RootCheckpoint",
+      "name": "GlobalRootHistory",
       "docs": [
-        "Fixed-size cyclic global checkpoint ring slot (704 B, 256 slots max)."
+        "Protocol-automated dual-ring global super_root history (10,216 B <= 10 KiB CPI cap; 128-entry slot ring + 89-entry epoch ring, updated atomically inline on every note commitment)."
       ],
       "type": {
         "kind": "struct",
@@ -5017,7 +5333,7 @@ export const AUDREN_ANCHOR_IDL = {
             "type": "u8"
           },
           {
-            "name": "slot_idx",
+            "name": "slot_cursor",
             "type": "u16"
           },
           {
@@ -5025,15 +5341,66 @@ export const AUDREN_ANCHOR_IDL = {
             "type": "u32"
           },
           {
-            "name": "epoch_id",
+            "name": "epoch_cursor",
+            "type": "u16"
+          },
+          {
+            "name": "slot_count",
+            "type": "u16"
+          },
+          {
+            "name": "epoch_count",
+            "type": "u16"
+          },
+          {
+            "name": "same_slot_bumped",
+            "type": "u8"
+          },
+          {
+            "name": "pad",
+            "type": "u8"
+          },
+          {
+            "name": "latest_slot",
             "type": "u64"
           },
           {
-            "name": "published_slot",
+            "name": "stable_epoch_id",
             "type": "u64"
           },
           {
-            "name": "super_root",
+            "name": "stable_slot",
+            "type": "u64"
+          },
+          {
+            "name": "epoch_interval",
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "group_roots",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                4
+              ]
+            }
+          },
+          {
+            "name": "latest_super_root",
             "type": {
               "array": [
                 "u8",
@@ -5042,7 +5409,7 @@ export const AUDREN_ANCHOR_IDL = {
             }
           },
           {
-            "name": "lane_roots",
+            "name": "latest_lane_roots",
             "type": {
               "array": [
                 {
@@ -5056,11 +5423,69 @@ export const AUDREN_ANCHOR_IDL = {
             }
           },
           {
-            "name": "lane_counts",
+            "name": "latest_lane_counts",
             "type": {
               "array": [
                 "u64",
                 16
+              ]
+            }
+          },
+          {
+            "name": "stable_super_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "stable_lane_roots",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                16
+              ]
+            }
+          },
+          {
+            "name": "stable_lane_counts",
+            "type": {
+              "array": [
+                "u64",
+                16
+              ]
+            }
+          },
+          {
+            "name": "slot_ring",
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "RootEntry"
+                  }
+                },
+                128
+              ]
+            }
+          },
+          {
+            "name": "epoch_ring",
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "RootEntry"
+                  }
+                },
+                89
               ]
             }
           }
@@ -5106,18 +5531,18 @@ export const AUDREN_ANCHOR_IDL = {
     },
     {
       "code": 6007,
-      "name": "CheckpointTooSoon",
-      "msg": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots."
+      "name": "InvalidRootRing",
+      "msg": "Root ring selector must be 0 (slot ring) or 1 (epoch ring)."
     },
     {
       "code": 6008,
-      "name": "CheckpointExpired",
-      "msg": "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots."
+      "name": "RootIndexOutOfBounds",
+      "msg": "Referenced GlobalRootHistory ring index is out of bounds or unpopulated."
     },
     {
       "code": 6009,
-      "name": "CheckpointMismatch",
-      "msg": "Referenced RootCheckpoint account is uninitialized or belongs to another pool."
+      "name": "RootHistoryMismatch",
+      "msg": "Referenced GlobalRootHistory account is uninitialized, corrupted, or belongs to another pool."
     },
     {
       "code": 6010,
@@ -5207,7 +5632,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6027,
       "name": "PoolPaused",
-      "msg": "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open)."
+      "msg": "Pool is paused by authority (full exits and OpenPage remain open)."
     },
     {
       "code": 6028,
@@ -5222,7 +5647,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6030,
       "name": "InvalidTargetProgram",
-      "msg": "Target program must be executable and cannot be Audren, System, Token, or ATA."
+      "msg": "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry."
     },
     {
       "code": 6031,

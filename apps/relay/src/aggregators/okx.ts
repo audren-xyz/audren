@@ -6,10 +6,11 @@ import type {
   NormalizedSwapInstructions,
   RouteLegSummary,
 } from '../types'
-import type {
-  AdapterQuoteRequest,
-  AdapterSwapInstructionsRequest,
-  AggregatorAdapter,
+import {
+  computeAggregatorExecCuLimit,
+  type AdapterQuoteRequest,
+  type AdapterSwapInstructionsRequest,
+  type AggregatorAdapter,
 } from './types'
 
 /**
@@ -225,8 +226,10 @@ export const okxAdapter: AggregatorAdapter = {
     return {
       provider: 'okx',
       swapInstruction: swapIx,
-      addressLookupTableAddresses: raw.addressLookupTableAccount ?? [],
-      computeUnitLimit: 1_200_000,
+      addressLookupTableAddresses: Array.isArray(raw.addressLookupTableAccount)
+        ? raw.addressLookupTableAccount
+        : [],
+      computeUnitLimit: computeAggregatorExecCuLimit({ forceMultiHopHeadroom: true }),
       feeAccount: req.feeOwnerWallet ?? req.feeAccountAta ?? null,
     }
   },

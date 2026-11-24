@@ -1,21 +1,28 @@
 #!/usr/bin/env node
 /**
- * Live Cluster Pool #0 Initializer & Full Empirical On-Chain Audren v1 E2E Suite.
+ * Live Cluster Pool #0 Initializer, v1.3.0 `GlobalRootHistory` Migrator & Full Empirical On-Chain E2E Suite.
  *
  * Uses `@audren/sdk` + `@audren/sdk/prover` (WASM) over real Solana Transaction v1 (`0x81`)
  * against Devnet or Mainnet:
- *   1. Idempotent `InitPool` (Tag 0, Pool #0, ckpt_interval=8, max_ckpt_age=1800) + `InitLane` (Tag 1, 0..=3)
+ *   1. Idempotent `InitPool` (Tag 0, Pool #0, `root_epoch_interval=32`, atomically initializes
+ *      `GlobalRootHistory` PDA `249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7`) + `InitLane`
+ *      (Tag 1, 0..=3) + idempotent `InitRootHistory` (Tag 4, one-shot upgrade via `--init-root-history`)
  *      + idempotent canonical `vault_auth(0)` WSOL ATA creation (`CreateIdempotent`)
  *   2. Live `UpdatePool` (Tag 8) parameter check (when running as pool authority)
  *   3. Live unified `Deposit` (Tag 3, `DEPOSIT_FLAG_NATIVE_SOL` via atomic `SyncNative` WSOL)
- *      + optional SPL / Token-2022 `Deposit` when `--spl-mint` / `AUDREN_E2E_SPL_MINT` is provided
- *   4. Live `PublishCheckpoint` (Tag 4)
- *   5. Zero-indexer ordinary-RPC `CompactWalletStore` sync + `SubtreePage` & `14 B` `paymentId` verification
- *   6. Live `Transact` Private Transfer (Tag 5, `ASSET_MODE_PRIVATE`, 192 B BN254 Groth16 proved in WASM)
- *   7. Live `PublishCheckpoint` (Tag 4) + `CompactWalletStore` resync (`NullifierPage` spend detection)
- *   8. Live `Transact` Public Withdraw with `WITHDRAW_FLAG_UNWRAP_WSOL` (Tag 5, `ASSET_MODE_PUBLIC`,
+ *      + inline zero-crank auto-`OpenPage` pre-instructions + optional SPL / Token-2022 `Deposit`
+ *   4. Zero-indexer ordinary-RPC `CompactWalletStore` sync + immediate `GlobalRootHistory` fetch
+ *      (`finalized`-first + `confirmed`-fallback, verifying instant spendability with zero crank tx)
+ *   5. Live `Transact` Private Transfer (Tag 5, `ASSET_MODE_PRIVATE`, 192 B BN254 Groth16 in WASM,
+ *      dual-ring `(rootRingKind, rootRingIdx)` + inline root history update + calibrated tight CU)
+ *   6. Immediate `CompactWalletStore` resync (`NullifierPage` spend detection + recipient discovery)
+ *   7. Live `Transact` Public Withdraw Full Exit with `WITHDRAW_FLAG_UNWRAP_WSOL` (Tag 5,
+ *      `ASSET_MODE_PUBLIC`, `outputMask=0` with read-only `GlobalRootHistory` at account `[2]`,
  *      atomic 1-shot `audren_unwrap` PDA returning Native SOL to payer)
- *   9. Optional Mainnet `ExecViaEscrow` Jupiter Swap (Tag 6, when `--with-swap` / `AUDREN_E2E_SWAP=1`)
+ *   8. Optional Mainnet `ExecViaEscrow` Jupiter Swap (Tag 6, when `--with-swap` / `AUDREN_E2E_SWAP=1`)
+ *   9. Optional frozen `v1.3.0` Pool #0 ALT creation (`--create-pool0-alt`: 73 entries = 40 base +
+ *      `GlobalRootHistory` + 16 escrow WSOL ATAs + 16 escrow USDC ATAs, extended in batches of `<= 25`
+ *      and permanently frozen)
  *
  * Reads `DEVNET_RPC_URL` / `MAINNET_RPC_URL` and `AUDREN_KEYPAIR_PATH` from environment
  * (or gitignored `.credentials/operator.env` / `.credentials/funder.json`). Never logs secrets.
@@ -29,59 +36,66 @@ import { ed25519 } from '../packages/sdk/node_modules/@noble/curves/ed25519.js';
 import {
   ASSET_MODE_PRIVATE,
   ASSET_MODE_PUBLIC,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   AUDREN_PROGRAM_ID,
-  CHECKPOINT_RING_SLOTS,
   CLASSIC_TOKEN_PROGRAM_ID,
+  CU_LIMIT_INIT_LANE,
+  CU_LIMIT_INIT_POOL,
+  CU_LIMIT_INIT_ROOT_HISTORY,
+  CU_LIMIT_OPEN_PAGE,
   CompactWalletStore,
   DEFAULT_INITIAL_LANES,
+  DEFAULT_ROOT_EPOCH_INTERVAL,
   JUPITER_CPI_EXCLUDED_DEXES,
-  MEMO_NOTES_PER_PAGE,
-  NF_PER_PAGE,
-  OPEN_PAGE_KIND_MEMO,
-  OPEN_PAGE_KIND_NULLIFIER,
-  OPEN_PAGE_KIND_SUBROOT,
-  OPEN_PAGE_KIND_SUBTREE,
-  SUBROOTS_PER_PAGE,
-  SUBTREE_LEAVES,
+  NUM_ESCROW_SHARDS,
+  ROOT_RING_EPOCH,
+  ROOT_RING_SLOT,
+  SYSTEM_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   WSOL_MINT,
   base58Decode,
   base58Encode,
+  buildAutoOpenPageInstructions,
   buildCreateAtaIdempotentInstruction,
   buildDepositInstruction,
   buildExecViaEscrowInstruction,
   buildInitLaneInstruction,
   buildInitPoolInstruction,
-  buildOpenPageInstruction,
-  buildPublishCheckpointInstruction,
+  buildInitRootHistoryInstruction,
   buildTransactInstruction,
   buildUpdatePoolInstruction,
   bytes32ToFrMasked,
   compileV1Message,
   computeExecCtxHash,
+  computePageRollovers,
   computeTransactCtxHash,
+  decodeGlobalRootHistory,
   decodeLaneHeader,
   decodePoolState,
-  decodeRootCheckpoint,
   deriveAssetId,
   deriveAssociatedTokenAddressSync,
-  deriveCheckpointPdaSync,
   deriveEscrowPdaSync,
   deriveKeysFromSeed,
   deriveLanePdaSync,
-  deriveMemoPdaSync,
-  deriveNfPagePdaSync,
+  deriveLaneRentVaultPdaSync,
   derivePoolPdaSync,
+  deriveRootsPdaSync,
   deriveStealthOwner,
   deriveSubrootPdaSync,
-  deriveSubtreePdaSync,
   deriveVaultAuthPdaSync,
   encryptNoteMemo,
   exportFullViewingKey,
+  fetchGlobalRootHistory,
+  findProgramAddressSync,
   frFromBeBytesStrict,
   frToBeBytes,
+  planAutoOpenPages,
   prepareDynamicSwapMemo,
+  recommendedDepositCuLimit,
+  recommendedExecViaEscrowCuLimit,
+  recommendedTransactCuLimit,
   reconstructWitness,
+  selectRootSnapshotForNotes,
   serializeV1Transaction,
   syncCompactStoreWithRpc,
 } from '../packages/sdk/dist/index.js';
@@ -95,6 +109,11 @@ const fromBase64 = (s) => new Uint8Array(Buffer.from(s, 'base64'));
 const toBase64 = (b) => Buffer.from(b).toString('base64');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const DEVNET_USDC_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+const COMPUTE_BUDGET_PROGRAM_ID = 'ComputeBudget111111111111111111111111111111';
+const ADDRESS_LOOKUP_TABLE_PROGRAM_ID = 'AddressLookupTab1e1111111111111111111111111';
+const ALT_EXTEND_BATCH_SIZE = 25;
+const ALT_META_SIZE = 56;
 
 function loadOperatorEnv() {
   const envPath = path.join(ROOT, '.credentials', 'operator.env');
@@ -123,13 +142,22 @@ function argValue(flag) {
 const CLUSTER = argValue('--cluster') ?? 'devnet';
 if (CLUSTER !== 'devnet' && CLUSTER !== 'mainnet') {
   throw new Error(
-    'Usage: node scripts/live-cluster-e2e.mjs --cluster <devnet|mainnet> [--init-only] [--with-swap] [--spl-mint <mint>] [--spl-amount <u64>]',
+    'Usage: node scripts/live-cluster-e2e.mjs --cluster <devnet|mainnet> [--init-root-history] [--create-pool0-alt] [--root-epoch-interval <u64>] [--init-only] [--with-swap] [--spl-mint <mint>] [--spl-amount <u64>]',
   );
 }
+const INIT_ROOT_HISTORY = process.argv.includes('--init-root-history');
+const CREATE_POOL0_ALT = process.argv.includes('--create-pool0-alt');
+const ROOT_EPOCH_INTERVAL = BigInt(
+  argValue('--root-epoch-interval') || DEFAULT_ROOT_EPOCH_INTERVAL.toString(),
+);
 const INIT_ONLY = process.argv.includes('--init-only');
 const WITH_SWAP = process.argv.includes('--with-swap') || process.env.AUDREN_E2E_SWAP === '1';
 const SPL_MINT = argValue('--spl-mint') || process.env.AUDREN_E2E_SPL_MINT || null;
 const SPL_AMOUNT = BigInt(argValue('--spl-amount') || process.env.AUDREN_E2E_SPL_AMOUNT || '100000');
+const PROGRAM_ID = process.env.AUDREN_PROGRAM_ID?.trim() || AUDREN_PROGRAM_ID;
+if (base58Decode(PROGRAM_ID).byteLength !== 32) {
+  throw new Error(`Invalid AUDREN_PROGRAM_ID (expected 32-byte base58 pubkey): ${PROGRAM_ID}`);
+}
 
 const RPC_URL = CLUSTER === 'mainnet' ? process.env.MAINNET_RPC_URL : process.env.DEVNET_RPC_URL;
 if (!RPC_URL) throw new Error(`Missing ${CLUSTER.toUpperCase()}_RPC_URL`);
@@ -157,6 +185,12 @@ function bytesEqual(a, b) {
   return true;
 }
 
+function ringName(ringKind) {
+  if (ringKind === ROOT_RING_EPOCH) return 'EPOCH';
+  if (ringKind === ROOT_RING_SLOT) return 'SLOT';
+  return `UNKNOWN(${ringKind})`;
+}
+
 async function rpc(method, params) {
   const res = await fetch(RPC_URL, {
     method: 'POST',
@@ -168,18 +202,31 @@ async function rpc(method, params) {
   return json.result;
 }
 
-const fetchBatch = async (addresses) => {
-  const out = new Array(addresses.length).fill(null);
-  for (let off = 0; off < addresses.length; off += 100) {
-    const chunk = addresses.slice(off, off + 100);
-    const res = await rpc('getMultipleAccounts', [chunk, { encoding: 'base64', commitment: 'confirmed' }]);
-    for (let i = 0; i < chunk.length; i++) {
-      const d = res.value[i]?.data?.[0];
-      out[off + i] = d ? fromBase64(d) : null;
+function makeFetchBatch(commitment) {
+  return async (addresses, options) => {
+    const out = new Array(addresses.length).fill(null);
+    const cfg = { encoding: 'base64', commitment };
+    if (options?.dataSlice) {
+      cfg.dataSlice = {
+        offset: options.dataSlice.offset,
+        length: options.dataSlice.length,
+      };
     }
-  }
-  return out;
-};
+    for (let off = 0; off < addresses.length; off += 100) {
+      const chunk = addresses.slice(off, off + 100);
+      const res = await rpc('getMultipleAccounts', [chunk, cfg]);
+      for (let i = 0; i < chunk.length; i++) {
+        const d = res.value[i]?.data?.[0];
+        out[off + i] = d ? fromBase64(d) : null;
+      }
+    }
+    return out;
+  };
+}
+
+const fetchBatchConfirmed = makeFetchBatch('confirmed');
+const fetchBatchFinalized = makeFetchBatch('finalized');
+const fetchBatch = fetchBatchConfirmed;
 
 function toV1Ix(ix) {
   return {
@@ -195,7 +242,7 @@ function toV1Ix(ix) {
 
 async function sendV1(
   ixs,
-  computeUnitLimit = 300_000,
+  computeUnitLimit = 235_000,
   priorityFeeLamports = 25_000n,
   preflightCommitment = 'confirmed',
 ) {
@@ -245,6 +292,150 @@ async function sendV1(
   return { signature: sig, slot, cu, wireBytes: wire.byteLength };
 }
 
+/**
+ * Build the canonical 73-entry `v1.3.0` Pool #0 Address Lookup Table entries:
+ *   - 40 canonical base entries (program, pool, vault_auth, vault WSOL/USDC ATAs, core programs,
+ *     WSOL/USDC mints, lanes 0..3 + LaneRentVault 0..3 + SubtreeRootPage(0) 0..3, escrows 0..15)
+ *   - + 1 `GlobalRootHistory` PDA (`249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7`)
+ *   - + 16 canonical Pool #0 escrow WSOL ATAs (`shard 0..15`)
+ *   - + 16 canonical Pool #0 escrow USDC ATAs (`shard 0..15`)
+ */
+function buildPool0AltEntries(cluster) {
+  const poolId = 0;
+  const usdcMint = cluster === 'mainnet' ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
+  const poolPda = derivePoolPdaSync(poolId, PROGRAM_ID).address;
+  const vaultAuthPda = deriveVaultAuthPdaSync(poolId, PROGRAM_ID).address;
+  const rootsPda = deriveRootsPdaSync(poolId, PROGRAM_ID).address;
+  const vaultWsolAta = deriveAssociatedTokenAddressSync(
+    vaultAuthPda,
+    WSOL_MINT,
+    CLASSIC_TOKEN_PROGRAM_ID,
+  ).address;
+  const vaultUsdcAta = deriveAssociatedTokenAddressSync(
+    vaultAuthPda,
+    usdcMint,
+    CLASSIC_TOKEN_PROGRAM_ID,
+  ).address;
+
+  const entries = [
+    PROGRAM_ID,
+    poolPda,
+    vaultAuthPda,
+    vaultWsolAta,
+    vaultUsdcAta,
+    SYSTEM_PROGRAM_ID,
+    CLASSIC_TOKEN_PROGRAM_ID,
+    TOKEN_2022_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID,
+    WSOL_MINT,
+    usdcMint,
+  ];
+  for (let lane = 0; lane < DEFAULT_INITIAL_LANES; lane++) {
+    entries.push(deriveLanePdaSync(poolId, lane, PROGRAM_ID).address);
+    entries.push(deriveLaneRentVaultPdaSync(poolId, lane, PROGRAM_ID).address);
+    entries.push(deriveSubrootPdaSync(poolId, lane, 0n, PROGRAM_ID).address);
+  }
+  const escrowPdas = [];
+  for (let shard = 0; shard < NUM_ESCROW_SHARDS; shard++) {
+    const escrow = deriveEscrowPdaSync(poolId, shard, PROGRAM_ID).address;
+    escrowPdas.push(escrow);
+    entries.push(escrow);
+  }
+  entries.push(rootsPda);
+  for (const escrow of escrowPdas) {
+    entries.push(
+      deriveAssociatedTokenAddressSync(escrow, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID).address,
+    );
+  }
+  for (const escrow of escrowPdas) {
+    entries.push(
+      deriveAssociatedTokenAddressSync(escrow, usdcMint, CLASSIC_TOKEN_PROGRAM_ID).address,
+    );
+  }
+  if (entries.length !== 73 || new Set(entries).size !== 73) {
+    throw new Error(
+      `Expected 73 unique v1.3.0 Pool #0 ALT entries, got ${entries.length} (${new Set(entries).size} unique)`,
+    );
+  }
+  return entries;
+}
+
+function deriveLookupTablePda(authorityStr, recentSlot) {
+  const slotLe = new Uint8Array(8);
+  new DataView(slotLe.buffer).setBigUint64(0, recentSlot, true);
+  const { address, bump } = findProgramAddressSync(
+    [base58Decode(authorityStr), slotLe],
+    ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+  );
+  return { address, bump };
+}
+
+function buildCreateLookupTableIx(authorityStr, payerStrArg, recentSlot) {
+  const { address: lookupTableAddress, bump } = deriveLookupTablePda(authorityStr, recentSlot);
+  const data = new Uint8Array(13);
+  const dv = new DataView(data.buffer);
+  dv.setUint32(0, 0, true); // ProgramInstruction::CreateLookupTable
+  dv.setBigUint64(4, recentSlot, true);
+  data[12] = bump;
+  return {
+    lookupTableAddress,
+    bump,
+    ix: {
+      programId: ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+      accounts: [
+        { pubkey: lookupTableAddress, isSigner: false, isWritable: true },
+        { pubkey: authorityStr, isSigner: true, isWritable: false },
+        { pubkey: payerStrArg, isSigner: true, isWritable: true },
+        { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data,
+    },
+  };
+}
+
+function buildExtendLookupTableIx(lookupTableAddress, authorityStr, payerStrArg, addresses) {
+  if (addresses.length === 0 || addresses.length > ALT_EXTEND_BATCH_SIZE) {
+    throw new Error(
+      `ALT extend batch size must be in 1..=${ALT_EXTEND_BATCH_SIZE}, got ${addresses.length}`,
+    );
+  }
+  const data = new Uint8Array(4 + 8 + addresses.length * 32);
+  const dv = new DataView(data.buffer);
+  dv.setUint32(0, 2, true); // ProgramInstruction::ExtendLookupTable
+  dv.setBigUint64(4, BigInt(addresses.length), true);
+  for (let i = 0; i < addresses.length; i++) {
+    const pk = base58Decode(addresses[i]);
+    if (pk.byteLength !== 32) {
+      throw new Error(`Invalid 32-byte ALT entry at index ${i}: ${addresses[i]}`);
+    }
+    data.set(pk, 12 + i * 32);
+  }
+  return {
+    programId: ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+    accounts: [
+      { pubkey: lookupTableAddress, isSigner: false, isWritable: true },
+      { pubkey: authorityStr, isSigner: true, isWritable: false },
+      { pubkey: payerStrArg, isSigner: true, isWritable: true },
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data,
+  };
+}
+
+function buildFreezeLookupTableIx(lookupTableAddress, authorityStr) {
+  const data = new Uint8Array(4);
+  new DataView(data.buffer).setUint32(0, 1, true); // ProgramInstruction::FreezeLookupTable
+  return {
+    programId: ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+    accounts: [
+      { pubkey: lookupTableAddress, isSigner: false, isWritable: true },
+      { pubkey: authorityStr, isSigner: true, isWritable: false },
+    ],
+    data,
+  };
+}
+
 async function ensureAtaExists(owner, mint, tokenProgram = CLASSIC_TOKEN_PROGRAM_ID) {
   const ata = deriveAssociatedTokenAddressSync(owner, mint, tokenProgram).address;
   const [raw] = await fetchBatch([ata]);
@@ -256,105 +447,109 @@ async function ensureAtaExists(owner, mint, tokenProgram = CLASSIC_TOKEN_PROGRAM
     mint,
     tokenProgram,
   });
-  const res = await sendV1([ix], 80_000);
+  const res = await sendV1([ix], 45_000);
   return { ata, created: true, tx: res };
 }
 
-async function publishFreshCheckpoint(poolId, pool) {
-  for (let attempt = 0; attempt < 25; attempt++) {
-    const curSlot = await rpc('getSlot', [{ commitment: 'processed' }]);
-    const rem = BigInt(curSlot) % pool.ckptInterval;
-    if (pool.ckptInterval <= 16n && rem >= pool.ckptInterval - 3n) {
-      await sleep(Number(pool.ckptInterval - rem) * 420 + 150);
-      continue;
-    }
-    const epoch = BigInt(curSlot) / pool.ckptInterval;
-    const slotIdx = Number(epoch % BigInt(CHECKPOINT_RING_SLOTS));
-    const ckptPda = deriveCheckpointPdaSync(poolId, slotIdx, AUDREN_PROGRAM_ID).address;
-    const [existingRaw] = await fetchBatch([ckptPda]);
-    if (existingRaw) {
-      const existing = decodeRootCheckpoint(existingRaw);
-      const curSlotBig = BigInt(curSlot);
-      if (existing.epochId >= epoch || curSlotBig <= existing.publishedSlot + pool.maxCkptAge) {
-        const nextEpochSlot = (epoch + 1n) * pool.ckptInterval;
-        const waitSlots = Number(nextEpochSlot - curSlotBig) + 1;
-        await sleep(Math.max(800, waitSlots * 420));
-        continue;
-      }
-    }
-    try {
-      const ix = buildPublishCheckpointInstruction({
-        payer: payerStr,
-        poolId,
-        slotIdx,
-        activeLanes: pool.activeLanes,
-      });
-      // Match the `processed` slot used to derive `slotIdx` so preflight never lags across an 8-slot boundary.
-      const res = await sendV1([ix], 120_000, 50_000n, 'processed');
-      return { ...res, slotIdx, epoch };
-    } catch (err) {
-      if (
-        String(err).includes('Custom') ||
-        String(err).includes('InvalidPda') ||
-        String(err).includes('CheckpointTooSoon') ||
-        String(err).includes('custom program error')
-      ) {
-        await sleep(700);
-        continue;
-      }
-      throw err;
-    }
+async function ensureGlobalRootHistory(poolId, pool, rootEpochInterval) {
+  const rootsPda = deriveRootsPdaSync(poolId, PROGRAM_ID).address;
+  const [rootsRaw] = await fetchBatch([rootsPda]);
+  if (rootsRaw) {
+    const history = decodeGlobalRootHistory(rootsRaw);
+    return { rootsPda, created: false, history };
   }
-  throw new Error('Failed to publish fresh RootCheckpoint after retries');
+  if (pool.authority !== payerStr) {
+    throw new Error(
+      `GlobalRootHistory missing at ${rootsPda} and signer ${payerStr} != pool authority ${pool.authority}`,
+    );
+  }
+  const ix = buildInitRootHistoryInstruction({
+    programId: PROGRAM_ID,
+    authority: payerStr,
+    poolId,
+    rootEpochInterval,
+    activeLanes: pool.activeLanes,
+  });
+  const tx = await sendV1([ix], CU_LIMIT_INIT_ROOT_HISTORY);
+  const [afterRaw] = await fetchBatch([rootsPda]);
+  if (!afterRaw) {
+    throw new Error(`GlobalRootHistory still missing at ${rootsPda} after InitRootHistory ${tx.signature}`);
+  }
+  return { rootsPda, created: true, tx, history: decodeGlobalRootHistory(afterRaw) };
 }
 
-async function ensurePages(poolId, laneId, nextLeaf, nfCount, notesToAppend = 1, nfsToAppend = 0) {
-  const subSeq = nextLeaf / BigInt(SUBTREE_LEAVES);
-  const rootSeq = subSeq / BigInt(SUBROOTS_PER_PAGE);
-  const memoSeq = nextLeaf / BigInt(MEMO_NOTES_PER_PAGE);
-  const nfSeq = nfCount / BigInt(NF_PER_PAGE);
-  const lastLeaf = nextLeaf + BigInt(Math.max(0, notesToAppend - 1));
-  const lastSubSeq = lastLeaf / BigInt(SUBTREE_LEAVES);
-  const lastMemoSeq = lastLeaf / BigInt(MEMO_NOTES_PER_PAGE);
-  const lastNfSeq = (nfCount + BigInt(Math.max(0, nfsToAppend - 1))) / BigInt(NF_PER_PAGE);
-  const needNextSub = lastSubSeq > subSeq;
-  const needNextMemo = lastMemoSeq > memoSeq;
-  const needNextNf = lastNfSeq > nfSeq;
-
-  const queries = [
-    deriveSubtreePdaSync(poolId, laneId, subSeq, AUDREN_PROGRAM_ID).address,
-    deriveSubrootPdaSync(poolId, laneId, rootSeq, AUDREN_PROGRAM_ID).address,
-    deriveMemoPdaSync(poolId, laneId, memoSeq, AUDREN_PROGRAM_ID).address,
-    deriveNfPagePdaSync(poolId, laneId, nfSeq, AUDREN_PROGRAM_ID).address,
-  ];
-  if (needNextSub) queries.push(deriveSubtreePdaSync(poolId, laneId, subSeq + 1n, AUDREN_PROGRAM_ID).address);
-  if (needNextMemo) queries.push(deriveMemoPdaSync(poolId, laneId, memoSeq + 1n, AUDREN_PROGRAM_ID).address);
-  if (needNextNf) queries.push(deriveNfPagePdaSync(poolId, laneId, nfSeq + 1n, AUDREN_PROGRAM_ID).address);
-  const raws = await fetchBatch(queries);
-  const ixs = [];
-  if (!raws[0]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_SUBTREE, poolId, laneId, pageSeq: subSeq }));
-  if (!raws[1]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_SUBROOT, poolId, laneId, pageSeq: rootSeq }));
-  if (!raws[2]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_MEMO, poolId, laneId, pageSeq: memoSeq }));
-  if (!raws[3]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_NULLIFIER, poolId, laneId, pageSeq: nfSeq }));
-  let idx = 4;
-  if (needNextSub) {
-    if (!raws[idx++]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_SUBTREE, poolId, laneId, pageSeq: subSeq + 1n }));
+/**
+ * Plan rollover page sequences and zero-crank idempotent Auto-`OpenPage` pre-instructions
+ * (`planAutoOpenPages` / `buildAutoOpenPageInstructions`) so rollover boundaries and `>= 90%`
+ * lookahead pages open inline in the same Transaction v1 (`0x81`).
+ */
+async function planLanePages(poolId, laneId, nextLeaf, nfCount, numOutputs, numNfs) {
+  const roll = computePageRollovers({
+    leafCount: nextLeaf,
+    outputCount: numOutputs,
+    nfCount,
+    spentNullifiers: numNfs,
+  });
+  const candidates = planAutoOpenPages({
+    programId: PROGRAM_ID,
+    poolId,
+    laneId,
+    nextLeaf,
+    nfCount,
+    numOutputs,
+    numNfs,
+  });
+  const existingPages = new Set();
+  if (candidates.length > 0) {
+    const raws = await fetchBatch(candidates.map((c) => c.pda));
+    for (let i = 0; i < candidates.length; i++) {
+      if (raws[i]) existingPages.add(candidates[i].pda);
+    }
   }
-  if (needNextMemo) {
-    if (!raws[idx++]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_MEMO, poolId, laneId, pageSeq: memoSeq + 1n }));
-  }
-  if (needNextNf) {
-    if (!raws[idx++]) ixs.push(buildOpenPageInstruction({ payer: payerStr, pageKind: OPEN_PAGE_KIND_NULLIFIER, poolId, laneId, pageSeq: nfSeq + 1n }));
-  }
-  if (ixs.length > 0) await sendV1(ixs, 250_000);
+  const autoOpenIxs = buildAutoOpenPageInstructions({
+    programId: PROGRAM_ID,
+    payer: payerStr,
+    poolId,
+    laneId,
+    nextLeaf,
+    nfCount,
+    numOutputs,
+    numNfs,
+    existingPages,
+  });
   return {
-    subSeq,
-    rootSeq,
-    memoSeq,
-    nfSeq,
-    nextSubSeq: needNextSub ? subSeq + 1n : undefined,
-    nextMemoSeq: needNextMemo ? memoSeq + 1n : undefined,
-    nextNfSeq: needNextNf ? nfSeq + 1n : undefined,
+    subSeq: BigInt(roll.outSubSeq),
+    rootSeq: BigInt(roll.outRootSeq),
+    memoSeq: BigInt(roll.outMemoSeq),
+    nfSeq: BigInt(roll.nfPageSeq),
+    nextSubSeq: roll.nextSubSeq !== undefined ? BigInt(roll.nextSubSeq) : null,
+    nextMemoSeq: roll.nextMemoSeq !== undefined ? BigInt(roll.nextMemoSeq) : null,
+    nextNfSeq: roll.nextNfSeq !== undefined ? BigInt(roll.nextNfSeq) : null,
+    autoOpenIxs,
+  };
+}
+
+/**
+ * Fetch `GlobalRootHistory` (`finalized`-first + `confirmed`-fallback) and pick the optimal
+ * dual-ring `(rootRingKind, rootRingIdx)` snapshot via `selectRootSnapshotForNotes` with zero
+ * checkpoint transactions.
+ */
+async function fetchAndSelectRootSnapshot(poolId, requiredNotes) {
+  const fetched = await fetchGlobalRootHistory({
+    programId: PROGRAM_ID,
+    poolId,
+    fetchFinalized: fetchBatchFinalized,
+    fetchConfirmed: fetchBatchConfirmed,
+    requiredNotes,
+  });
+  const selected = selectRootSnapshotForNotes(fetched.history, requiredNotes);
+  if (!selected) {
+    throw new Error('selectRootSnapshotForNotes returned null after fetchGlobalRootHistory');
+  }
+  return {
+    history: fetched.history,
+    snapshot: selected,
+    commitment: fetched.commitment,
   };
 }
 
@@ -399,8 +594,9 @@ async function fetchJupiterSwapRoute({ inputMint, outputMint, amount, slippageBp
 
 async function main() {
   const poolId = 0;
-  const poolPda = derivePoolPdaSync(poolId, AUDREN_PROGRAM_ID).address;
-  const vaultAuthPda = deriveVaultAuthPdaSync(poolId, AUDREN_PROGRAM_ID).address;
+  const poolPda = derivePoolPdaSync(poolId, PROGRAM_ID).address;
+  const rootsPda = deriveRootsPdaSync(poolId, PROGRAM_ID).address;
+  const vaultAuthPda = deriveVaultAuthPdaSync(poolId, PROGRAM_ID).address;
   const vaultWsolAta = deriveAssociatedTokenAddressSync(
     vaultAuthPda,
     WSOL_MINT,
@@ -408,30 +604,164 @@ async function main() {
   ).address;
   const bal = await rpc('getBalance', [payerStr, { commitment: 'confirmed' }]);
 
-  console.log(`\n=== Audren v1 Live Empirical E2E (${CLUSTER.toUpperCase()}) ===`);
-  console.log(`Program ID     : ${AUDREN_PROGRAM_ID}`);
+  console.log(`\n=== Audren v1.3.0 Live Empirical E2E (${CLUSTER.toUpperCase()}) ===`);
+  console.log(`Program ID     : ${PROGRAM_ID}`);
   console.log(`Pool #0 PDA    : ${poolPda}`);
+  console.log(`Roots PDA      : ${rootsPda}`);
   console.log(`Vault Auth PDA : ${vaultAuthPda}`);
   console.log(`Vault WSOL ATA : ${vaultWsolAta}`);
   console.log(`Authority      : ${payerStr} (${(bal.value / 1e9).toFixed(4)} SOL)`);
 
-  const results = { cluster: CLUSTER, poolPda, vaultAuthPda, vaultWsolAta, txs: {} };
+  const results = {
+    cluster: CLUSTER,
+    programId: PROGRAM_ID,
+    poolPda,
+    rootsPda,
+    vaultAuthPda,
+    vaultWsolAta,
+    txs: {},
+  };
 
-  // 1. Idempotent InitPool (Tag 0) + InitLane 0..3 (Tag 1) + canonical vault_auth(0) WSOL ATA
+  // Dedicated v1.3.0 Pool #0 frozen ALT creator: `--create-pool0-alt`
+  if (CREATE_POOL0_ALT) {
+    const entries = buildPool0AltEntries(CLUSTER);
+    const recentSlot = BigInt(await rpc('getSlot', [{ commitment: 'finalized' }]));
+    const { lookupTableAddress, ix: createIx } = buildCreateLookupTableIx(
+      payerStr,
+      payerStr,
+      recentSlot,
+    );
+    console.log(
+      `\n[CreatePool0ALT] Creating frozen v1.3.0 Pool #0 ALT on ${CLUSTER.toUpperCase()} (${entries.length} entries, recentSlot=${recentSlot})...`,
+    );
+    console.log(`  Derived ALT address : ${lookupTableAddress}`);
+
+    const createTx = await sendV1([createIx], 60_000);
+    console.log(
+      `  CreateLookupTable confirmed: sig=${createTx.signature} slot=${createTx.slot} cu=${createTx.cu} wire=${createTx.wireBytes}B`,
+    );
+
+    const extendTxs = [];
+    for (let off = 0; off < entries.length; off += ALT_EXTEND_BATCH_SIZE) {
+      const batch = entries.slice(off, off + ALT_EXTEND_BATCH_SIZE);
+      const extendIx = buildExtendLookupTableIx(lookupTableAddress, payerStr, payerStr, batch);
+      const extTx = await sendV1([extendIx], 60_000);
+      console.log(
+        `  ExtendLookupTable [${off}..${off + batch.length - 1}] (${batch.length} entries) confirmed: sig=${extTx.signature} slot=${extTx.slot} cu=${extTx.cu}`,
+      );
+      extendTxs.push(extTx);
+    }
+
+    const freezeIx = buildFreezeLookupTableIx(lookupTableAddress, payerStr);
+    const freezeTx = await sendV1([freezeIx], 30_000);
+    console.log(
+      `  FreezeLookupTable confirmed: sig=${freezeTx.signature} slot=${freezeTx.slot} cu=${freezeTx.cu}`,
+    );
+
+    // Round-trip verify on-chain ALT account layout (56 B meta, frozen authority tag == 0, all 73 entries),
+    // retrying briefly on 1-slot RPC replica lag after permanent freeze.
+    const expectedLen = ALT_META_SIZE + entries.length * 32;
+    let altRaw = null;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      const [fetched] = await fetchBatch([lookupTableAddress]);
+      if (fetched && fetched.byteLength === expectedLen && fetched[21] === 0) {
+        altRaw = fetched;
+        break;
+      }
+      altRaw = fetched ?? null;
+      if (attempt < 6) {
+        await new Promise((r) => setTimeout(r, 1_200));
+      }
+    }
+    if (!altRaw || altRaw.byteLength !== expectedLen) {
+      throw new Error(
+        `ALT round-trip verification failed: expected ${expectedLen} B at ${lookupTableAddress}, got ${altRaw?.byteLength ?? 0} B`,
+      );
+    }
+    const typeDisc = new DataView(altRaw.buffer, altRaw.byteOffset, altRaw.byteLength).getUint32(
+      0,
+      true,
+    );
+    if (typeDisc !== 1 || altRaw[21] !== 0) {
+      throw new Error(
+        `ALT round-trip verification failed: expected frozen LookupTable (type=1, authorityTag=0), got type=${typeDisc} authorityTag=${altRaw[21]}`,
+      );
+    }
+    for (let i = 0; i < entries.length; i++) {
+      const onChainAddr = base58Encode(
+        altRaw.subarray(ALT_META_SIZE + i * 32, ALT_META_SIZE + (i + 1) * 32),
+      );
+      if (onChainAddr !== entries[i]) {
+        throw new Error(
+          `ALT entry[${i}] mismatch: on-chain ${onChainAddr} != expected ${entries[i]}`,
+        );
+      }
+    }
+    console.log(
+      `  Verified on-chain frozen ALT ${lookupTableAddress} (${entries.length} entries, ${altRaw.byteLength} B, immutable authority=None).`,
+    );
+
+    const altSummary = {
+      cluster: CLUSTER,
+      programId: PROGRAM_ID,
+      address: lookupTableAddress,
+      frozen: true,
+      entryCount: entries.length,
+      entries,
+      txs: {
+        create: createTx,
+        extend: extendTxs,
+        freeze: freezeTx,
+      },
+    };
+    console.log('\n=== POOL #0 ALT PROTOCOL.TS JSON ===');
+    console.log(JSON.stringify({ address: lookupTableAddress, entries }, null, 2));
+    console.log('\n=== CREATE POOL #0 ALT SUMMARY JSON ===');
+    console.log(JSON.stringify(altSummary, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
+    return;
+  }
+
+  // Dedicated one-shot migration path: `--init-root-history`
+  if (INIT_ROOT_HISTORY) {
+    const [poolRaw] = await fetchBatch([poolPda]);
+    if (!poolRaw) {
+      throw new Error(`Pool #0 does not exist at ${poolPda}; run --init-only first.`);
+    }
+    const pool = decodePoolState(poolRaw);
+    console.log(
+      `\n[InitRootHistory] Pool #0 active_lanes=${pool.activeLanes}, authority=${pool.authority}, target root_epoch_interval=${ROOT_EPOCH_INTERVAL}`,
+    );
+    const rootInit = await ensureGlobalRootHistory(poolId, pool, ROOT_EPOCH_INTERVAL);
+    if (rootInit.created) {
+      console.log(
+        `  InitRootHistory (Tag 4) confirmed: sig=${rootInit.tx.signature} slot=${rootInit.tx.slot} cu=${rootInit.tx.cu} wire=${rootInit.tx.wireBytes}B`,
+      );
+      results.txs.initRootHistory = rootInit.tx;
+    } else {
+      console.log(
+        `  GlobalRootHistory already initialized: latestSlot=${rootInit.history.latestSlot}, stableEpochId=${rootInit.history.stableEpochId}, epochInterval=${rootInit.history.epochInterval}`,
+      );
+    }
+    console.log('\n=== INIT ROOT HISTORY SUMMARY JSON ===');
+    console.log(JSON.stringify(results, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
+    return;
+  }
+
+  // 1. Idempotent InitPool (Tag 0) + InitLane 0..3 (Tag 1) + InitRootHistory (Tag 4) + canonical WSOL ATA
   let [poolRaw] = await fetchBatch([poolPda]);
   if (!poolRaw) {
     console.log(
-      '\n[1] Initializing Pool #0 (ckpt_interval=8, max_ckpt_age=1800, note_rent_fee=1_000_000, nf_rent_fee=120_000)...',
+      `\n[1] Initializing Pool #0 (root_epoch_interval=${ROOT_EPOCH_INTERVAL}, note_rent_fee=1_000_000, nf_rent_fee=120_000)...`,
     );
     const initPoolIx = buildInitPoolInstruction({
+      programId: PROGRAM_ID,
       payer: payerStr,
       poolId,
-      ckptInterval: 8n,
-      maxCkptAge: 1800n,
+      rootEpochInterval: ROOT_EPOCH_INTERVAL,
       noteRentFee: 1_000_000n,
       nfRentFee: 120_000n,
     });
-    const res = await sendV1([initPoolIx], 120_000);
+    const res = await sendV1([initPoolIx], CU_LIMIT_INIT_POOL);
     console.log(`  InitPool confirmed: sig=${res.signature} slot=${res.slot} cu=${res.cu} wire=${res.wireBytes}B`);
     results.txs.initPool = res;
     [poolRaw] = await fetchBatch([poolPda]);
@@ -441,14 +771,18 @@ async function main() {
   let pool = decodePoolState(poolRaw);
   console.log(
     `  Pool state: version=${pool.version}, active_lanes=${pool.activeLanes}, paused=${pool.paused}, ` +
-      `ckpt_interval=${pool.ckptInterval}, max_ckpt_age=${pool.maxCkptAge}, ` +
-      `note_rent_fee=${pool.noteRentFee}, nf_rent_fee=${pool.nfRentFee}`,
+      `root_epoch_interval=${pool.rootEpochInterval}, note_rent_fee=${pool.noteRentFee}, nf_rent_fee=${pool.nfRentFee}`,
   );
 
   for (let lane = pool.activeLanes; lane < DEFAULT_INITIAL_LANES; lane++) {
     console.log(`  Initializing Lane #${lane}...`);
-    const laneIx = buildInitLaneInstruction({ authority: payerStr, poolId, laneId: lane });
-    const res = await sendV1([laneIx], 250_000);
+    const laneIx = buildInitLaneInstruction({
+      programId: PROGRAM_ID,
+      authority: payerStr,
+      poolId,
+      laneId: lane,
+    });
+    const res = await sendV1([laneIx], CU_LIMIT_INIT_LANE);
     console.log(`    InitLane #${lane} confirmed: sig=${res.signature} slot=${res.slot} cu=${res.cu}`);
     results.txs[`initLane${lane}`] = res;
   }
@@ -456,6 +790,18 @@ async function main() {
   pool = decodePoolState(poolRaw);
   if (pool.activeLanes < DEFAULT_INITIAL_LANES) {
     throw new Error(`Expected ${DEFAULT_INITIAL_LANES} active lanes, got ${pool.activeLanes}`);
+  }
+
+  const rootInit = await ensureGlobalRootHistory(poolId, pool, ROOT_EPOCH_INTERVAL);
+  if (rootInit.created) {
+    console.log(
+      `  InitRootHistory (Tag 4) confirmed: sig=${rootInit.tx.signature} slot=${rootInit.tx.slot} cu=${rootInit.tx.cu}`,
+    );
+    results.txs.initRootHistory = rootInit.tx;
+  } else {
+    console.log(
+      `  GlobalRootHistory ready: slotCount=${rootInit.history.slotCount} epochCount=${rootInit.history.epochCount} epochInterval=${rootInit.history.epochInterval}`,
+    );
   }
 
   const wsolAtaRes = await ensureAtaExists(vaultAuthPda, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID);
@@ -469,29 +815,24 @@ async function main() {
   }
 
   // Optional UpdatePool (Tag 8) no-op params verification if signer is pool authority
-  // (`ckpt_interval` is immutable after InitPool and MUST remain equal to `pool.ckptInterval`).
   if (pool.authority === payerStr && !INIT_ONLY) {
     console.log('\n[1b] Verifying UpdatePool (Tag 8, params no-op)...');
     const updIx = buildUpdatePoolInstruction({
+      programId: PROGRAM_ID,
       signer: payerStr,
       poolId,
       action: {
         kind: 'params',
-        ckptInterval: pool.ckptInterval,
-        maxCkptAge: pool.maxCkptAge,
         noteRentFee: pool.noteRentFee,
         nfRentFee: pool.nfRentFee,
       },
     });
-    const updRes = await sendV1([updIx], 80_000);
+    const updRes = await sendV1([updIx], CU_LIMIT_OPEN_PAGE);
     console.log(`  UpdatePool confirmed: sig=${updRes.signature} slot=${updRes.slot} cu=${updRes.cu}`);
     results.txs.updatePool = updRes;
   }
 
   if (INIT_ONLY) {
-    const ck = await publishFreshCheckpoint(poolId, pool);
-    console.log(`  Initial PublishCheckpoint (Tag 4): sig=${ck.signature} slot=${ck.slot} cu=${ck.cu}`);
-    results.txs.initialCheckpoint = ck;
     console.log('\n=== INIT SUMMARY JSON ===');
     console.log(JSON.stringify(results, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
     return;
@@ -508,11 +849,11 @@ async function main() {
   console.log(`  Bob   aud1 address: ${bob.address}`);
   const depositAmount = 5_000_000n; // 0.005 SOL
 
-  // 2. Unified Deposit (Tag 3, DEPOSIT_FLAG_NATIVE_SOL) into Lane 0
+  // 2. Unified Deposit (Tag 3, DEPOSIT_FLAG_NATIVE_SOL) into Lane 0 with inline auto-OpenPage
   const depositLane = 0;
-  const [lane0Raw] = await fetchBatch([deriveLanePdaSync(poolId, depositLane, AUDREN_PROGRAM_ID).address]);
+  const [lane0Raw] = await fetchBatch([deriveLanePdaSync(poolId, depositLane, PROGRAM_ID).address]);
   const lane0 = decodeLaneHeader(lane0Raw);
-  const depPages = await ensurePages(poolId, depositLane, lane0.nextLeaf, lane0.nfCount);
+  const depPages = await planLanePages(poolId, depositLane, lane0.nextLeaf, lane0.nfCount, 1, 0);
   const depPaymentId = new Uint8Array(randomBytes(14));
   const depMemo = encryptNoteMemo(
     alice.viewPk,
@@ -523,6 +864,7 @@ async function main() {
   );
   const depOwner = deriveStealthOwner(alice.spendPk, depMemo.tweak);
   const depIx = buildDepositInstruction({
+    programId: PROGRAM_ID,
     depositor: payerStr,
     poolId,
     laneId: depositLane,
@@ -531,17 +873,22 @@ async function main() {
     memoPageSeq: depPages.memoSeq,
     nativeSol: true,
     rollover: {
-      nextSubSeq: depPages.nextSubSeq ?? null,
-      nextMemoSeq: depPages.nextMemoSeq ?? null,
+      nextSubSeq: depPages.nextSubSeq,
+      nextMemoSeq: depPages.nextMemoSeq,
     },
     amount: depositAmount,
     stealthOwner: depOwner,
     blinding: depMemo.blinding,
     memo: depMemo.memo,
   });
-  console.log('\n[2] Executing live Deposit (0.005 Native SOL -> SyncNative WSOL, Tag 3)...');
-  const depRes = await sendV1([depIx], 180_000);
-  console.log(`  Deposit (Native SOL) confirmed: sig=${depRes.signature} slot=${depRes.slot} cu=${depRes.cu} wire=${depRes.wireBytes}B`);
+  const depCu = recommendedDepositCuLimit({ openPageCount: depPages.autoOpenIxs.length });
+  console.log(
+    `\n[2] Executing live Deposit (0.005 Native SOL -> SyncNative WSOL, Tag 3, autoOpen=${depPages.autoOpenIxs.length}, cuLimit=${depCu})...`,
+  );
+  const depRes = await sendV1([...depPages.autoOpenIxs, depIx], depCu);
+  console.log(
+    `  Deposit (Native SOL) confirmed: sig=${depRes.signature} slot=${depRes.slot} cu=${depRes.cu} wire=${depRes.wireBytes}B`,
+  );
   results.txs.depositNativeSol = depRes;
 
   // 2b. Optional SPL / Token-2022 Deposit (Tag 3) when configured
@@ -555,9 +902,9 @@ async function main() {
         : CLASSIC_TOKEN_PROGRAM_ID;
     await ensureAtaExists(vaultAuthPda, SPL_MINT, tokenProgram);
     const depositorAta = deriveAssociatedTokenAddressSync(payerStr, SPL_MINT, tokenProgram).address;
-    const [lane0NowRaw] = await fetchBatch([deriveLanePdaSync(poolId, depositLane, AUDREN_PROGRAM_ID).address]);
+    const [lane0NowRaw] = await fetchBatch([deriveLanePdaSync(poolId, depositLane, PROGRAM_ID).address]);
     const lane0Now = decodeLaneHeader(lane0NowRaw);
-    const splPages = await ensurePages(poolId, depositLane, lane0Now.nextLeaf, lane0Now.nfCount);
+    const splPages = await planLanePages(poolId, depositLane, lane0Now.nextLeaf, lane0Now.nfCount, 1, 0);
     const splMemo = encryptNoteMemo(
       bob.viewPk,
       new Uint8Array(randomBytes(32)),
@@ -566,6 +913,7 @@ async function main() {
     );
     const splOwner = deriveStealthOwner(bob.spendPk, splMemo.tweak);
     const splDepIx = buildDepositInstruction({
+      programId: PROGRAM_ID,
       depositor: payerStr,
       poolId,
       laneId: depositLane,
@@ -577,29 +925,30 @@ async function main() {
       sourceAccount: depositorAta,
       tokenProgram,
       rollover: {
-        nextSubSeq: splPages.nextSubSeq ?? null,
-        nextMemoSeq: splPages.nextMemoSeq ?? null,
+        nextSubSeq: splPages.nextSubSeq,
+        nextMemoSeq: splPages.nextMemoSeq,
       },
       amount: SPL_AMOUNT,
       stealthOwner: splOwner,
       blinding: splMemo.blinding,
       memo: splMemo.memo,
     });
-    const splDepRes = await sendV1([splDepIx], 200_000);
-    console.log(`  Deposit (SPL/T22) confirmed: sig=${splDepRes.signature} slot=${splDepRes.slot} cu=${splDepRes.cu}`);
+    const splDepCu = recommendedDepositCuLimit({
+      hasTransferHook: tokenProgram === TOKEN_2022_PROGRAM_ID,
+      openPageCount: splPages.autoOpenIxs.length,
+    });
+    const splDepRes = await sendV1([...splPages.autoOpenIxs, splDepIx], splDepCu);
+    console.log(
+      `  Deposit (SPL/T22) confirmed: sig=${splDepRes.signature} slot=${splDepRes.slot} cu=${splDepRes.cu} cuLimit=${splDepCu}`,
+    );
     results.txs.depositSpl = splDepRes;
   }
 
-  // 3. PublishCheckpoint (Tag 4)
-  console.log('\n[3] Publishing fresh RootCheckpoint (Tag 4)...');
-  const ck1 = await publishFreshCheckpoint(poolId, pool);
-  console.log(`  PublishCheckpoint confirmed: sig=${ck1.signature} slot=${ck1.slot} cu=${ck1.cu} slotIdx=${ck1.slotIdx}`);
-  results.txs.checkpoint1 = ck1;
-
-  // 4. Zero-indexer ordinary-RPC CompactWalletStore sync
-  console.log('\n[4] Syncing Alice CompactWalletStore via ordinary Solana RPC getMultipleAccounts...');
+  // 3. Zero-indexer ordinary-RPC CompactWalletStore sync + immediate GlobalRootHistory fetch (zero crank!)
+  console.log('\n[3] Syncing Alice CompactWalletStore & fetching GlobalRootHistory (instant spendability, 0 crank tx)...');
   const aliceStore = new CompactWalletStore(poolId);
   await syncCompactStoreWithRpc({
+    programId: PROGRAM_ID,
     fetchBatch,
     store: aliceStore,
     fvk: exportFullViewingKey(alice),
@@ -612,24 +961,32 @@ async function main() {
   if (!bytesEqual(note0.paymentId, depPaymentId)) {
     throw new Error('Decrypted note0 paymentId mismatch');
   }
+  const root1 = await fetchAndSelectRootSnapshot(poolId, [
+    { laneId: note0.laneId, leafIndex: note0.leafIndex },
+  ]);
   console.log(
-    `  Discovered Alice note: lane=${note0.laneId} leaf=${note0.leafIndex} amount=${note0.amount} (SubtreePage + 14 B paymentId verified)`,
+    `  Discovered Alice note: lane=${note0.laneId} leaf=${note0.leafIndex} amount=${note0.amount} (14 B paymentId verified)`,
+  );
+  console.log(
+    `  Selected GlobalRootHistory snapshot: commitment=${root1.commitment} ring=${ringName(root1.snapshot.ringKind)} idx=${root1.snapshot.ringIdx} slot=${root1.snapshot.slot}`,
   );
 
-  // 5. Transact Private Transfer (Tag 5, ASSET_MODE_PRIVATE, 192 B BN254 Groth16)
-  console.log('\n[5] Reconstructing witness & proving Transact Private Transfer (Tag 5, 192 B Groth16 in WASM)...');
+  // 4. Transact Private Transfer (Tag 5, ASSET_MODE_PRIVATE, 192 B BN254 Groth16)
+  console.log('\n[4] Reconstructing witness & proving Transact Private Transfer (Tag 5, 192 B Groth16 in WASM)...');
   const w1 = await reconstructWitness({
+    programId: PROGRAM_ID,
     fetchBatch,
     poolId,
-    ckptSlotIdx: ck1.slotIdx,
+    rootHistory: root1.history,
+    rootSnapshot: root1.snapshot,
     laneId: note0.laneId,
     leafIdx: note0.leafIndex,
     viewSk: alice.viewSk,
   });
   const transferLane = 1;
-  const [lane1Raw] = await fetchBatch([deriveLanePdaSync(poolId, transferLane, AUDREN_PROGRAM_ID).address]);
+  const [lane1Raw] = await fetchBatch([deriveLanePdaSync(poolId, transferLane, PROGRAM_ID).address]);
   const lane1 = decodeLaneHeader(lane1Raw);
-  const trPages = await ensurePages(poolId, transferLane, lane1.nextLeaf, lane1.nfCount, 2, 1);
+  const trPages = await planLanePages(poolId, transferLane, lane1.nextLeaf, lane1.nfCount, 2, 1);
 
   const sendAmt = 2_000_000n;
   const changeAmt = depositAmount - sendAmt; // 3_000_000n
@@ -650,6 +1007,7 @@ async function main() {
   trMemos.set(mCh.memo, mBob.memo.byteLength);
 
   const trCtx = computeTransactCtxHash({
+    programId: PROGRAM_ID,
     poolId,
     outLaneId: transferLane,
     outputMask: 0b011,
@@ -693,18 +1051,20 @@ async function main() {
   console.log(`  WASM Groth16 proof generated in ${Math.round(performance.now() - t0)} ms (${trProof.proof192.byteLength} B)`);
 
   const trIx = buildTransactInstruction({
+    programId: PROGRAM_ID,
     payer: payerStr,
     poolId,
-    ckptSlotIdx: ck1.slotIdx,
+    rootRingKind: w1.rootRingKind,
+    rootRingIdx: w1.rootRingIdx,
     outLaneId: transferLane,
     outSubSeq: trPages.subSeq,
     outRootSeq: trPages.rootSeq,
     outMemoSeq: trPages.memoSeq,
     outNfSeq: trPages.nfSeq,
     rollover: {
-      nextSubSeq: trPages.nextSubSeq ?? null,
-      nextMemoSeq: trPages.nextMemoSeq ?? null,
-      nextNfSeq: trPages.nextNfSeq ?? null,
+      nextSubSeq: trPages.nextSubSeq,
+      nextMemoSeq: trPages.nextMemoSeq,
+      nextNfSeq: trPages.nextNfSeq,
     },
     outputMask: 0b011,
     assetMode: ASSET_MODE_PRIVATE,
@@ -718,23 +1078,39 @@ async function main() {
     relayerFeeAmount: 0n,
     memosBytes: trMemos,
   });
-  const trRes = await sendV1([trIx], 260_000);
-  console.log(`  Transact Private Transfer confirmed: sig=${trRes.signature} slot=${trRes.slot} cu=${trRes.cu} wire=${trRes.wireBytes}B`);
+  if (!trIx.accounts[2].isWritable) {
+    throw new Error('Expected writable GlobalRootHistory on outputMask != 0 Transact');
+  }
+  const trCu = recommendedTransactCuLimit({
+    assetMode: ASSET_MODE_PRIVATE,
+    outputMask: 0b011,
+    openPageCount: trPages.autoOpenIxs.length,
+  });
+  const trRes = await sendV1([...trPages.autoOpenIxs, trIx], trCu);
+  console.log(
+    `  Transact Private Transfer confirmed: sig=${trRes.signature} slot=${trRes.slot} cu=${trRes.cu} cuLimit=${trCu} wire=${trRes.wireBytes}B`,
+  );
   results.txs.transfer = trRes;
 
-  // 6. PublishCheckpoint #2 (Tag 4) + resync Alice & Bob CompactWalletStore
-  console.log('\n[6] Publishing RootCheckpoint #2 (Tag 4) & verifying NullifierPage spend detection...');
-  const ck2 = await publishFreshCheckpoint(poolId, pool);
-  console.log(`  PublishCheckpoint #2 confirmed: sig=${ck2.signature} slot=${ck2.slot} cu=${ck2.cu} slotIdx=${ck2.slotIdx}`);
-  results.txs.checkpoint2 = ck2;
-
-  await syncCompactStoreWithRpc({ fetchBatch, store: aliceStore, fvk: exportFullViewingKey(alice) });
+  // 5. Immediate resync of Alice & Bob CompactWalletStore (zero crank!)
+  console.log('\n[5] Immediately resyncing Alice & Bob CompactWalletStore (verifying NullifierPage spend & instant root update)...');
+  await syncCompactStoreWithRpc({
+    programId: PROGRAM_ID,
+    fetchBatch,
+    store: aliceStore,
+    fvk: exportFullViewingKey(alice),
+  });
   const aliceUnspent2 = aliceStore.unspentNotes();
   if (aliceUnspent2.length !== 1 || aliceUnspent2[0].amount !== changeAmt) {
     throw new Error(`Expected Alice to have 1 unspent change note (${changeAmt}), got ${aliceUnspent2.length}`);
   }
   const bobStore = new CompactWalletStore(poolId);
-  await syncCompactStoreWithRpc({ fetchBatch, store: bobStore, fvk: exportFullViewingKey(bob) });
+  await syncCompactStoreWithRpc({
+    programId: PROGRAM_ID,
+    fetchBatch,
+    store: bobStore,
+    fvk: exportFullViewingKey(bob),
+  });
   const bobWsolNotes = bobStore.unspentNotes().filter((n) => bytesEqual(n.mint, wsolMintBytes));
   if (bobWsolNotes.length !== 1 || bobWsolNotes[0].amount !== sendAmt) {
     throw new Error(`Expected Bob to receive 1 WSOL note (${sendAmt}), got ${bobWsolNotes.length}`);
@@ -746,23 +1122,34 @@ async function main() {
     `  CompactWalletStore verified: Alice spent note0 & holds ${changeAmt} change; Bob discovered ${sendAmt} shielded note + paymentId!`,
   );
 
-  // 7. Transact Public Withdraw with WITHDRAW_FLAG_UNWRAP_WSOL (Tag 5, ASSET_MODE_PUBLIC)
-  console.log('\n[7] Proving & executing live Transact Withdraw + WITHDRAW_FLAG_UNWRAP_WSOL (Tag 5, ASSET_MODE_PUBLIC)...');
+  // 6. Transact Public Withdraw Full Exit with WITHDRAW_FLAG_UNWRAP_WSOL (Tag 5, outputMask=0, read-only roots)
+  console.log(
+    '\n[6] Proving & executing live Transact Full-Exit Withdraw + WITHDRAW_FLAG_UNWRAP_WSOL (Tag 5, read-only roots)...',
+  );
   const noteChange = aliceUnspent2[0];
+  const root2 = await fetchAndSelectRootSnapshot(poolId, [
+    { laneId: noteChange.laneId, leafIndex: noteChange.leafIndex },
+  ]);
+  console.log(
+    `  Selected GlobalRootHistory snapshot: commitment=${root2.commitment} ring=${ringName(root2.snapshot.ringKind)} idx=${root2.snapshot.ringIdx} slot=${root2.snapshot.slot}`,
+  );
   const w2 = await reconstructWitness({
+    programId: PROGRAM_ID,
     fetchBatch,
     poolId,
-    ckptSlotIdx: ck2.slotIdx,
+    rootHistory: root2.history,
+    rootSnapshot: root2.snapshot,
     laneId: noteChange.laneId,
     leafIdx: noteChange.leafIndex,
     viewSk: alice.viewSk,
   });
   const withdrawLane = 2;
-  const [lane2Raw] = await fetchBatch([deriveLanePdaSync(poolId, withdrawLane, AUDREN_PROGRAM_ID).address]);
+  const [lane2Raw] = await fetchBatch([deriveLanePdaSync(poolId, withdrawLane, PROGRAM_ID).address]);
   const lane2 = decodeLaneHeader(lane2Raw);
-  const wdPages = await ensurePages(poolId, withdrawLane, lane2.nextLeaf, lane2.nfCount, 0, 1);
+  const wdPages = await planLanePages(poolId, withdrawLane, lane2.nextLeaf, lane2.nfCount, 0, 1);
 
   const wdCtx = computeTransactCtxHash({
+    programId: PROGRAM_ID,
     poolId,
     outLaneId: withdrawLane,
     outputMask: 0,
@@ -805,18 +1192,20 @@ async function main() {
   console.log(`  WASM Groth16 withdraw proof generated in ${Math.round(performance.now() - t1)} ms`);
 
   const wdIx = buildTransactInstruction({
+    programId: PROGRAM_ID,
     payer: payerStr,
     poolId,
-    ckptSlotIdx: ck2.slotIdx,
+    rootRingKind: w2.rootRingKind,
+    rootRingIdx: w2.rootRingIdx,
     outLaneId: withdrawLane,
     outSubSeq: wdPages.subSeq,
     outRootSeq: wdPages.rootSeq,
     outMemoSeq: wdPages.memoSeq,
     outNfSeq: wdPages.nfSeq,
     rollover: {
-      nextSubSeq: wdPages.nextSubSeq ?? null,
-      nextMemoSeq: wdPages.nextMemoSeq ?? null,
-      nextNfSeq: wdPages.nextNfSeq ?? null,
+      nextSubSeq: wdPages.nextSubSeq,
+      nextMemoSeq: wdPages.nextMemoSeq,
+      nextNfSeq: wdPages.nextNfSeq,
     },
     outputMask: 0,
     assetMode: ASSET_MODE_PUBLIC,
@@ -833,34 +1222,49 @@ async function main() {
     recipient: payerStr,
     memosBytes: new Uint8Array(0),
   });
-  const wdRes = await sendV1([wdIx], 280_000);
-  console.log(`  Transact Withdraw (Unwrap WSOL -> Native SOL) confirmed: sig=${wdRes.signature} slot=${wdRes.slot} cu=${wdRes.cu} wire=${wdRes.wireBytes}B`);
+  if (wdIx.accounts[2].isWritable) {
+    throw new Error('Expected read-only GlobalRootHistory on outputMask === 0 full-exit Transact');
+  }
+  const wdCu = recommendedTransactCuLimit({
+    assetMode: ASSET_MODE_PUBLIC,
+    outputMask: 0,
+    openPageCount: wdPages.autoOpenIxs.length,
+  });
+  const wdRes = await sendV1([...wdPages.autoOpenIxs, wdIx], wdCu);
+  console.log(
+    `  Transact Withdraw (Unwrap WSOL -> Native SOL) confirmed: sig=${wdRes.signature} slot=${wdRes.slot} cu=${wdRes.cu} cuLimit=${wdCu} wire=${wdRes.wireBytes}B`,
+  );
   results.txs.withdrawUnwrapSol = wdRes;
 
-  // 8. Optional ExecViaEscrow (Tag 6) Jupiter Swap on Mainnet
+  // 7. Optional ExecViaEscrow (Tag 6) Jupiter Swap on Mainnet
   if (WITH_SWAP && CLUSTER === 'mainnet') {
     const swapOutMint = process.env.AUDREN_E2E_SWAP_OUT_MINT || MAINNET_USDC_MINT;
     const escrowShard = 0;
     const swapLane = 3;
-    const escrowPda = deriveEscrowPdaSync(poolId, escrowShard, AUDREN_PROGRAM_ID).address;
-    console.log(`\n[8] Executing live ExecViaEscrow Jupiter Swap (Tag 6, WSOL -> ${swapOutMint}, shard=${escrowShard})...`);
+    const escrowPda = deriveEscrowPdaSync(poolId, escrowShard, PROGRAM_ID).address;
+    console.log(`\n[7] Executing live ExecViaEscrow Jupiter Swap (Tag 6, WSOL -> ${swapOutMint}, shard=${escrowShard})...`);
 
     await ensureAtaExists(vaultAuthPda, swapOutMint, CLASSIC_TOKEN_PROGRAM_ID);
     const { ata: escrowInAta } = await ensureAtaExists(escrowPda, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID);
     const { ata: escrowOutAta } = await ensureAtaExists(escrowPda, swapOutMint, CLASSIC_TOKEN_PROGRAM_ID);
 
     const bobNote = bobWsolNotes[0];
+    const root3 = await fetchAndSelectRootSnapshot(poolId, [
+      { laneId: bobNote.laneId, leafIndex: bobNote.leafIndex },
+    ]);
     const w3 = await reconstructWitness({
+      programId: PROGRAM_ID,
       fetchBatch,
       poolId,
-      ckptSlotIdx: ck2.slotIdx,
+      rootHistory: root3.history,
+      rootSnapshot: root3.snapshot,
       laneId: bobNote.laneId,
       leafIdx: bobNote.leafIndex,
       viewSk: bob.viewSk,
     });
-    const [lane3Raw] = await fetchBatch([deriveLanePdaSync(poolId, swapLane, AUDREN_PROGRAM_ID).address]);
+    const [lane3Raw] = await fetchBatch([deriveLanePdaSync(poolId, swapLane, PROGRAM_ID).address]);
     const lane3 = decodeLaneHeader(lane3Raw);
-    const swPages = await ensurePages(poolId, swapLane, lane3.nextLeaf, lane3.nfCount, 1, 1);
+    const swPages = await planLanePages(poolId, swapLane, lane3.nextLeaf, lane3.nfCount, 1, 1);
 
     const { quote, swap } = await fetchJupiterSwapRoute({
       inputMint: WSOL_MINT,
@@ -879,6 +1283,7 @@ async function main() {
     const routerAccounts = swap.swapInstruction.accounts;
 
     const execCtx = computeExecCtxHash({
+      programId: PROGRAM_ID,
       poolId,
       outLaneId: swapLane,
       escrowShard,
@@ -931,9 +1336,11 @@ async function main() {
     console.log(`  WASM Groth16 swap proof generated in ${Math.round(performance.now() - t2)} ms`);
 
     const execIx = buildExecViaEscrowInstruction({
+      programId: PROGRAM_ID,
       payer: payerStr,
       poolId,
-      ckptSlotIdx: ck2.slotIdx,
+      rootRingKind: w3.rootRingKind,
+      rootRingIdx: w3.rootRingIdx,
       outLaneId: swapLane,
       outSubSeq: swPages.subSeq,
       outRootSeq: swPages.rootSeq,
@@ -946,9 +1353,9 @@ async function main() {
       outLeg: { mint: swapOutMint, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID },
       relayerFeeAmount: 0n,
       rollover: {
-        nextSubSeq: swPages.nextSubSeq ?? null,
-        nextMemoSeq: swPages.nextMemoSeq ?? null,
-        nextNfSeq: swPages.nextNfSeq ?? null,
+        nextSubSeq: swPages.nextSubSeq,
+        nextMemoSeq: swPages.nextMemoSeq,
+        nextNfSeq: swPages.nextNfSeq,
       },
       proof192: swProof.proof192,
       nf0: swProof.nf0,
@@ -967,22 +1374,35 @@ async function main() {
       routerAccounts,
       changeMemos: new Uint8Array(0),
     });
-    const swRes = await sendV1([execIx], 900_000);
-    console.log(`  ExecViaEscrow Jupiter Swap confirmed: sig=${swRes.signature} slot=${swRes.slot} cu=${swRes.cu} wire=${swRes.wireBytes}B`);
+    const swCu = recommendedExecViaEscrowCuLimit({
+      routerCuLimit: 600_000,
+      openPageCount: swPages.autoOpenIxs.length,
+    });
+    const swRes = await sendV1([...swPages.autoOpenIxs, execIx], swCu);
+    console.log(
+      `  ExecViaEscrow Jupiter Swap confirmed: sig=${swRes.signature} slot=${swRes.slot} cu=${swRes.cu} cuLimit=${swCu} wire=${swRes.wireBytes}B`,
+    );
     results.txs.execViaEscrowSwap = swRes;
 
-    const ck3 = await publishFreshCheckpoint(poolId, pool);
-    results.txs.checkpoint3 = ck3;
-    await syncCompactStoreWithRpc({ fetchBatch, store: bobStore, fvk: exportFullViewingKey(bob) });
+    // Immediate post-swap resync + root history verification (zero crank!)
+    await syncCompactStoreWithRpc({
+      programId: PROGRAM_ID,
+      fetchBatch,
+      store: bobStore,
+      fvk: exportFullViewingKey(bob),
+    });
     const bobOutNotes = bobStore.unspentNotes().filter((n) => bytesEqual(n.mint, outMintBytes));
     if (bobOutNotes.length !== 1 || bobOutNotes[0].amount < minAmountOut) {
       throw new Error(`Expected Bob to discover swapped output note >= ${minAmountOut}, found ${bobOutNotes.length}`);
     }
+    const root4 = await fetchAndSelectRootSnapshot(poolId, [
+      { laneId: bobOutNotes[0].laneId, leafIndex: bobOutNotes[0].leafIndex },
+    ]);
     console.log(
-      `  CompactWalletStore verified: Bob discovered dynamic AUD1DYN1 output note (${bobOutNotes[0].amount} base units of ${swapOutMint})!`,
+      `  CompactWalletStore verified: Bob discovered dynamic AUD1DYN1 output note (${bobOutNotes[0].amount} base units of ${swapOutMint}), immediately spendable via ${ringName(root4.snapshot.ringKind)}[${root4.snapshot.ringIdx}]!`,
     );
   } else if (WITH_SWAP) {
-    console.log('\n[8] Skipping --with-swap (Jupiter live swap requires --cluster mainnet).');
+    console.log('\n[7] Skipping --with-swap (Jupiter live swap requires --cluster mainnet).');
   }
 
   console.log('\n=== SUMMARY JSON ===');

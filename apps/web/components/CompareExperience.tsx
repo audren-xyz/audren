@@ -117,7 +117,7 @@ const MODE_META: Record<
   swap: {
     label: 'Shielded DeFi',
     headline: 'Composing with public Solana DeFi vs. app-specific private DeFi',
-    note: 'Two architectural paths exist for shielded DeFi on Solana. Solana Privacy Rings lets apps pair an app-specific ZK proof with the pool proof via CPI, which can keep swap amounts and prices private and can share liquidity; Helius lists Jupiter, DFlow, and Titan integrations as in progress. Audren takes the protocol-agnostic path: atomic ExecViaEscrow (Tag 6) reaches existing aggregator liquidity today (Jupiter, DFlow, and OKX on the hosted relay; Titan on self-hosted relays) in one transaction (~158k CU of Audren overhead plus the route), keeping the external DeFi pair and amount public while hiding which pool note funded it (plus deterministic Bᵢ session wallets for stateful borrowing or perps).',
+    note: 'Two architectural paths exist for shielded DeFi on Solana. Solana Privacy Rings lets apps pair an app-specific ZK proof with the pool proof via CPI, which can keep swap amounts and prices private and can share liquidity; Helius lists Jupiter, DFlow, and Titan integrations as in progress. Audren takes the protocol-agnostic path: atomic ExecViaEscrow (Tag 6) reaches existing aggregator liquidity today (Jupiter, DFlow, and OKX on the hosted relay; Titan on self-hosted relays) in one transaction (~165k–238k CU base / 285k budget plus the route), keeping the external DeFi pair and amount public while hiding which pool note funded it (plus deterministic Bᵢ session wallets for stateful borrowing or perps).',
     col5Header: 'Liquidity & execution',
     rows: [
       {
@@ -159,7 +159,7 @@ const MODE_META: Record<
         senderRecipient: { text: 'Pool proof hides the funding note · shared escrow signs (or Bᵢ session) · fresh stealth note', state: 'partial' },
         token: { text: 'Public external DeFi mints', state: 'public' },
         amount: { text: 'Public external DeFi amounts (optional hidden change)', state: 'public' },
-        assets: 'Aggregator liquidity today (Jupiter, DFlow, OKX on the hosted relay) in 1 tx (~158k CU + route) + stateful Bᵢ sessions',
+        assets: 'Aggregator liquidity today (Jupiter, DFlow, OKX on the hosted relay) in 1 tx (~165k–238k CU base + route) + stateful Bᵢ sessions',
       },
     ],
   },
@@ -192,8 +192,8 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
         text: 'Apps on Solana Privacy Rings can combine private transfers with other programs via CPI and keep swap amounts private with their own proofs; Jupiter, DFlow, and Titan integrations are announced. Audren’s atomic ExecViaEscrow routes through existing aggregator liquidity today while keeping the external DeFi leg public.',
       },
       {
-        label: 'Rent, fan-in & exits',
-        text: 'Solana Privacy Rings charges a default 5,000-lamport fee per state tree updated, supports high-fan-in merges, and its pause_tree halts withdrawals. Audren pays permanent nullifier and page rent (~0.0007–0.0036 SOL/tx at current rent) with 2-in/3-out spends (up to 4 parallel 2 → 1 merges per Solana Transaction v1); new notes become spendable after the next checkpoint (8-slot epochs), and full exits stay available during pause.',
+        label: 'Rent, fan-in & instant spendability',
+        text: 'Solana Privacy Rings charges a default 5,000-lamport fee per state tree updated, supports high-fan-in merges, and its pause_tree halts withdrawals. Audren pays permanent nullifier and page rent (~0.0007–0.0036 SOL/tx at current rent) with 2-in/3-out spends (up to 4 parallel 2 → 1 merges per Solana Transaction v1 across distinct lanes), updates GlobalRootHistory inline for instant spendability on confirmation (~400ms today; ~150ms under Alpenglow) with zero cranks (auto-prepended OpenPage), and keeps full exits available during pause.',
       },
       {
         label: 'Review & maturity',
@@ -219,7 +219,7 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
       },
       {
         label: 'DeFi execution',
-        text: 'Privacy Cash withdraws to an ephemeral wallet, trades on Jupiter, and reshields across multiple transactions. Audren settles aggregator swaps atomically in one transaction via ExecViaEscrow (~158k CU of Audren overhead plus the route), plus deterministic Bᵢ session wallets for stateful protocols.',
+        text: 'Privacy Cash withdraws to an ephemeral wallet, trades on Jupiter, and reshields across multiple transactions. Audren settles aggregator swaps atomically in one transaction via ExecViaEscrow (~165k–238k CU base / 285k budget plus the route), plus deterministic Bᵢ session wallets for stateful protocols.',
       },
       {
         label: 'Sync & local state',
@@ -614,7 +614,7 @@ export function CompareExperience() {
                 <p className={styles.cellLead}>
                   Send uniformly padded private transfers, batch up to 4 parallel 2 → 1 private{' '}
                   <code>Transact</code> merges per Solana Transaction v1, swap through aggregator
-                  routes via atomic <code>ExecViaEscrow</code> (~158k CU + route), fund deterministic session
+                  routes via atomic <code>ExecViaEscrow</code> (~165k–238k CU base + route), fund deterministic session
                   wallets, or exit 100% (including atomic WSOL unwrap) even during{' '}
                   <code>SetPaused</code>.
                 </p>
@@ -623,9 +623,9 @@ export function CompareExperience() {
                 <span className={styles.cellIndex}>Openness</span>
                 <h3>Open integration</h3>
                 <p className={styles.cellLead}>
-                  Integrate the Apache-2.0 source, run a compatible client, or host your own relay
-                  (including on-demand <code>POST /v1/checkpoint</code>) without an Audren
-                  account. Hosted services apply their own policies.
+                  Integrate the Apache-2.0 source, run a compatible client, or host your own
+                  zero-crank relay without an Audren account. Hosted services apply their own
+                  policies.
                 </p>
               </div>
               <div className={styles.ledgerCell}>

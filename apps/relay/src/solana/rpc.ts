@@ -7,10 +7,12 @@ import {
   TOKEN_2022_PROGRAM_ID_STR,
   base58Encode,
   fromBase64,
+  isValidPubkey,
   readSplTokenAccountAmount,
   toBase64,
 } from './codec'
 import {
+  CLASSIC_SPL_ATA_LEN,
   MEMO_NOTES_PER_PAGE,
   MEMO_PAGE_LEN,
   NF_PAGE_LEN,
@@ -19,15 +21,25 @@ import {
   SUBROOT_PAGE_LEN,
   SUBTREE_LEAVES,
   SUBTREE_PAGE_LEN,
+  TOKEN_2022_BASE_ATA_LEN,
+  computeToken2022AtaByteLen,
   decodePoolState,
   derivePoolPda,
   deterministicNoteRentFee,
+  hasToken2022TransferFeeConfigExt,
   parseMintSafetyInfo,
   type MintSafetyInfo,
 } from './audren'
 import type { Cluster } from '../types'
 
-export { parseMintSafetyInfo, type MintSafetyInfo }
+export {
+  CLASSIC_SPL_ATA_LEN,
+  TOKEN_2022_BASE_ATA_LEN,
+  computeToken2022AtaByteLen,
+  hasToken2022TransferFeeConfigExt,
+  parseMintSafetyInfo,
+  type MintSafetyInfo,
+}
 
 // ============================================================================
 // Solana JSON-RPC Client
@@ -44,9 +56,27 @@ export async function rpcCall<T>(rpcUrl: string, method: string, params: unknown
   if (!res.ok) {
     throw new Error(`Solana RPC HTTP ${res.status}`)
   }
-  const body = (await res.json()) as { result?: T; error?: { message?: string; code?: number } }
+  const body = (await res.json()) as {
+    result?: T
+    error?: { message?: string; code?: number; data?: unknown }
+  }
   if (body.error) {
-    throw new Error(body.error.message ?? `Solana RPC error ${body.error.code ?? ''}`)
+    const baseMsg = body.error.message ?? `Solana RPC error ${body.error.code ?? ''}`.trim()
+    let dataSuffix = ''
+    if (body.error.data !== undefined && body.error.data !== null) {
+      try {
+        const serialized =
+          typeof body.error.data === 'string'
+            ? body.error.data
+            : JSON.stringify(body.error.data)
+        if (serialized && serialized.length > 0 && serialized !== '{}') {
+          dataSuffix = ` (${serialized.slice(0, 240)})`
+        }
+      } catch {
+        // Ignore unserializable error data
+      }
+    }
+    throw new Error(`${baseMsg}${dataSuffix}`)
   }
   return body.result as T
 }
@@ -142,9 +172,9 @@ export interface OnChainMintMeta {
   decimals: number
   isValidMint: boolean
   /**
-   * True when the mint is excluded from relayer self-pay fee credit (Pausable, mutable
-   * TransferFeeConfig authority, untrusted FreezeAuthority, PermanentDelegate,
-   * NonTransferable, active TransferHook, or TransferFeeConfig > 500 bps).
+   * True when the mint is excluded from relayer self-pay fee credit (Pausable, DefaultAccountState=Frozen,
+   * mutable TransferFeeConfig authority, untrusted FreezeAuthority, PermanentDelegate,
+   * NonTransferable, active TransferHook, ScaledUiAmount, or TransferFeeConfig > 500 bps).
    */
   hasUnsafeSelfPayExt: boolean
   safety?: MintSafetyInfo
@@ -160,6 +190,7 @@ export interface SwapInputTransferFeePlan {
   netInputAmount: string
   inputTransferFeeBps: number
   inputTransferFeeAmount: string
+  inputTransferFee: { bps: number; maxFee: string } | null
 }
 
 interface CachedMintEntry {
@@ -170,6 +201,30 @@ interface CachedMintEntry {
 
 const MINT_META_CACHE = new Map<string, CachedMintEntry>()
 const MINT_META_T22_TTL_MS = 60_000
+export const MINT_META_CACHE_MAX_ENTRIES = 512
+
+function setBoundedMintMetaCache(key: string, entry: CachedMintEntry, now: number): void {
+  if (MINT_META_CACHE.has(key)) {
+    MINT_META_CACHE.delete(key)
+  }
+  if (MINT_META_CACHE.size >= MINT_META_CACHE_MAX_ENTRIES) {
+    for (const [k, v] of MINT_META_CACHE) {
+      if (now - v.fetchedAt >= MINT_META_T22_TTL_MS) {
+        MINT_META_CACHE.delete(k)
+      }
+    }
+  }
+  while (MINT_META_CACHE.size >= MINT_META_CACHE_MAX_ENTRIES) {
+    const oldestKey = MINT_META_CACHE.keys().next().value
+    if (oldestKey === undefined) break
+    MINT_META_CACHE.delete(oldestKey)
+  }
+  MINT_META_CACHE.set(key, entry)
+}
+
+export function getMintMetaCacheSize(): number {
+  return MINT_META_CACHE.size
+}
 
 const EPOCH_CACHE = new Map<string, { epoch: bigint; fetchedAt: number }>()
 const EPOCH_CACHE_TTL_MS = 60_000
@@ -207,6 +262,7 @@ export function computeSwapInputTransferFee(params: {
       netInputAmount: grossAmount.toString(),
       inputTransferFeeBps: 0,
       inputTransferFeeAmount: '0',
+      inputTransferFee: null,
     }
   }
   const activeFee = parseToken2022TransferFeeConfig(mintData, currentEpoch)
@@ -216,6 +272,7 @@ export function computeSwapInputTransferFee(params: {
       netInputAmount: grossAmount.toString(),
       inputTransferFeeBps: 0,
       inputTransferFeeAmount: '0',
+      inputTransferFee: null,
     }
   }
   const net = computeToken2022NetAmount(grossAmount, activeFee)
@@ -225,21 +282,31 @@ export function computeSwapInputTransferFee(params: {
     netInputAmount: net.toString(),
     inputTransferFeeBps: Number(activeFee.bps),
     inputTransferFeeAmount: deducted.toString(),
+    inputTransferFee: {
+      bps: Number(activeFee.bps),
+      maxFee: activeFee.maxFee.toString(),
+    },
   }
 }
 
 /**
- * Apply a conservative `2x` active Token-2022 `TransferFeeConfig` haircut when valuing
- * non-WSOL Token-2022 relayer fee receipts at submit time (accounting for both receipt
- * and subsequent liquidation/swap hops). Classic SPL mints pass through unchanged.
+ * Apply an active Token-2022 `TransferFeeConfig` haircut when valuing non-WSOL Token-2022
+ * relayer fee receipts at submit time:
+ *   - `hops = 2` (default, Mode 1 shielded `cm2`): gross pre-receipt note amount pays both
+ *     receipt (withdrawal) and liquidation/swap transfer hops.
+ *   - `hops = 1` (Mode 2 / Mode 3 simulated ATA delta): `simulatedFeeUnits = post - pre` is
+ *     already net of `1x` on-chain receipt fee, so only `1x` liquidation hop remains.
+ * Classic SPL mints pass through unchanged.
  */
 export function applyToken2022FeeHaircut(params: {
   tokenProgram: string
   mintData: Uint8Array | null | undefined
   currentEpoch: bigint | number
   grossAmount: bigint
+  /** Number of Token-2022 transfer hops to deduct (`2` default for Mode 1, `1` for Mode 2/3). */
+  hops?: 1 | 2
 }): { netAmount: bigint; activeTransferFeeBps: number; haircutAmount: bigint } {
-  const { tokenProgram, mintData, currentEpoch, grossAmount } = params
+  const { tokenProgram, mintData, currentEpoch, grossAmount, hops = 2 } = params
   if (
     tokenProgram !== TOKEN_2022_PROGRAM_ID_STR ||
     !mintData ||
@@ -254,8 +321,8 @@ export function applyToken2022FeeHaircut(params: {
   }
   const afterOne = computeToken2022NetAmount(grossAmount, activeFee)
   const singleFee = grossAmount > afterOne ? grossAmount - afterOne : 0n
-  const doubleFee = singleFee * 2n
-  const netAmount = grossAmount > doubleFee ? grossAmount - doubleFee : 0n
+  const totalFee = hops === 1 ? singleFee : singleFee * 2n
+  const netAmount = grossAmount > totalFee ? grossAmount - totalFee : 0n
   return {
     netAmount,
     activeTransferFeeBps: Number(activeFee.bps),
@@ -279,6 +346,7 @@ export async function resolveSwapInputTransferFee(
       netInputAmount: grossAmount.toString(),
       inputTransferFeeBps: 0,
       inputTransferFeeAmount: '0',
+      inputTransferFee: null,
     }
   }
   const currentEpoch = await fetchCurrentEpoch(rpcUrl)
@@ -298,12 +366,16 @@ export async function fetchMintMetasWithData(
   const out: Record<string, OnChainMintMetaWithData> = {}
   const missing: string[] = []
   for (const m of mints) {
-    const cached = MINT_META_CACHE.get(`${rpcUrl}:${m}`)
+    const cacheKey = `${rpcUrl}:${m}`
+    const cached = MINT_META_CACHE.get(cacheKey)
     const fresh = cached && now - cached.fetchedAt < MINT_META_T22_TTL_MS
     if (fresh) {
       out[m] = { meta: cached.meta, rawBytes: cached.rawBytes }
-    } else if (!missing.includes(m)) {
-      missing.push(m)
+    } else {
+      if (cached) MINT_META_CACHE.delete(cacheKey)
+      if (!missing.includes(m)) {
+        missing.push(m)
+      }
     }
   }
 
@@ -337,6 +409,8 @@ export async function fetchMintMetasWithData(
             hasPausableExt: false,
             hasMutableTransferFeeAuthority: false,
             hasUnsafeToken2022Ext: true,
+            hasTransferFeeConfigExt: false,
+            ataByteLen: isT22 ? TOKEN_2022_BASE_ATA_LEN : CLASSIC_SPL_ATA_LEN,
             reason: 'Invalid or uninitialized mint account',
           }
       const hasUnsafeSelfPayExt = !safety.safeForSelfPay
@@ -350,7 +424,7 @@ export async function fetchMintMetasWithData(
       }
       const rawBytes = isValidMint ? bytes : null
       if (isValidMint) {
-        MINT_META_CACHE.set(`${rpcUrl}:${mint}`, { meta, rawBytes, fetchedAt: now })
+        setBoundedMintMetaCache(`${rpcUrl}:${mint}`, { meta, rawBytes, fetchedAt: now }, now)
       }
       out[mint] = { meta, rawBytes }
     })
@@ -376,6 +450,8 @@ export async function fetchMintMetas(
 
 export interface LiveRentSchedule {
   nullifierRentLamports: bigint
+  /** Minimum rent-exempt reserve for 16-byte `LaneRentVault` sentinel PDA (`SENTINEL_LEN = 16`). */
+  laneRentVaultReserveLamports?: bigint
   nfPageRentPerNfLamports: bigint
   pageRentPerNoteLamports: bigint
   ataRentLamports: bigint
@@ -399,7 +475,12 @@ export function getCachedLiveRentSchedule(rpcUrl: string): LiveRentSchedule | nu
   return Date.now() - cached.fetchedAt < RENT_CACHE_TTL_MS ? cached : null
 }
 
+export function clearLiveRentScheduleCache(): void {
+  RENT_CACHE.clear()
+}
+
 const NULLIFIER_ACCOUNT_LEN = 0 // On-chain claim_nullifier creates a 0-byte sentinel PDA
+const SENTINEL_LEN = 16 // On-chain LaneRentVault 16-byte sentinel account reserve
 const SPL_TOKEN_ACCOUNT_LEN = 165
 
 export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSchedule> {
@@ -410,39 +491,45 @@ export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSch
   }
 
   const poolPdaB58 = base58Encode(derivePoolPda(0).address)
-  const [nullifierRent, subRent, srRent, memoRent, nfRent, ataRent, poolAcc] = await Promise.all([
-    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [NULLIFIER_ACCOUNT_LEN]),
-    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBTREE_PAGE_LEN]),
-    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBROOT_PAGE_LEN]),
-    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [MEMO_PAGE_LEN]),
-    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [NF_PAGE_LEN]),
-    rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SPL_TOKEN_ACCOUNT_LEN]),
-    fetchAccountBytes(rpcUrl, poolPdaB58).catch(() => null),
-  ])
+  const [nullifierRent, sentinelRent, subRent, srRent, memoRent, nfRent, ataRent, poolAcc] =
+    await Promise.all([
+      rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [NULLIFIER_ACCOUNT_LEN]),
+      rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SENTINEL_LEN]),
+      rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBTREE_PAGE_LEN]),
+      rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SUBROOT_PAGE_LEN]),
+      rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [MEMO_PAGE_LEN]),
+      rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [NF_PAGE_LEN]),
+      rpcCall<number>(rpcUrl, 'getMinimumBalanceForRentExemption', [SPL_TOKEN_ACCOUNT_LEN]),
+      fetchAccountBytes(rpcUrl, poolPdaB58).catch(() => null),
+    ])
 
-  const nullifierLamports = BigInt(nullifierRent)
+  const clampMin1 = (x: bigint) => (x > 0n ? x : 1n)
+  const nullifierLamports = clampMin1(BigInt(nullifierRent))
+  const sentinelLamports = clampMin1(BigInt(sentinelRent))
   const ataLamports = BigInt(ataRent)
   const divCeil = (a: bigint, b: bigint) => (a + b - 1n) / b
-  const subRentBig = BigInt(subRent)
-  const srRentBig = BigInt(srRent)
-  const memoRentBig = BigInt(memoRent)
+  const subRentBig = clampMin1(BigInt(subRent))
+  const srRentBig = clampMin1(BigInt(srRent))
+  const memoRentBig = clampMin1(BigInt(memoRent))
+  const nfRentBig = clampMin1(BigInt(nfRent))
   const livePerNote =
     divCeil(subRentBig, BigInt(SUBTREE_LEAVES)) +
     divCeil(srRentBig, BigInt(SUBTREE_LEAVES * SUBROOTS_PER_PAGE)) +
     divCeil(memoRentBig, BigInt(MEMO_NOTES_PER_PAGE))
-  const livePerNf = divCeil(BigInt(nfRent), BigInt(NF_PER_PAGE))
+  const livePerNf = divCeil(nfRentBig, BigInt(NF_PER_PAGE))
   const decodedPool = poolAcc ? decodePoolState(poolAcc.bytes) : null
-  const poolConfigured = decodedPool ? decodedPool.noteRentFee : livePerNote
-  const pageRentPerNoteLamports =
-    poolConfigured > 0n
-      ? deterministicNoteRentFee(poolConfigured, subRentBig, srRentBig, memoRentBig)
-      : livePerNote
+  const pageRentPerNoteLamports = decodedPool
+    ? decodedPool.noteRentFee > 0n
+      ? deterministicNoteRentFee(decodedPool.noteRentFee, subRentBig, srRentBig, memoRentBig)
+      : 0n
+    : livePerNote
   const poolNfFee = decodedPool ? decodedPool.nfRentFee : livePerNf
   const nfPageRentPerNfLamports = poolNfFee < livePerNf ? poolNfFee : livePerNf
   const baseTxFeeLamports = 5_000n
 
   const schedule: LiveRentSchedule = {
     nullifierRentLamports: nullifierLamports,
+    laneRentVaultReserveLamports: sentinelLamports,
     nfPageRentPerNfLamports,
     pageRentPerNoteLamports,
     ataRentLamports: ataLamports,
@@ -450,7 +537,7 @@ export async function fetchLiveRentSchedule(rpcUrl: string): Promise<LiveRentSch
     subtreePageRentLamports: subRentBig,
     subrootPageRentLamports: srRentBig,
     memoPageRentLamports: memoRentBig,
-    nfPageRentLamports: BigInt(nfRent),
+    nfPageRentLamports: nfRentBig,
     swapBaselineLamports:
       2n * (nullifierLamports + nfPageRentPerNfLamports) +
       2n * pageRentPerNoteLamports +
@@ -512,19 +599,45 @@ export async function fetchAllOwnedTokenAccounts(
   return out
 }
 
+export const ADDRESS_LOOKUP_TABLE_PROGRAM_ID_STR = 'AddressLookupTab1e1111111111111111111111111'
+export const MAX_ALT_RESOLVE_COUNT = 8
+export const ALT_HEADER_LEN = 56
+export const ALT_MAX_ADDRESSES = 256
+export const ALT_MAX_DATA_LEN = ALT_HEADER_LEN + ALT_MAX_ADDRESSES * 32
+
 export async function resolveLookupTables(
   rpcUrl: string | null,
   altAddresses: string[],
 ): Promise<Record<string, string[]>> {
   const lookupTables: Record<string, string[]> = {}
-  const capped = altAddresses.slice(0, 8)
-  if (!rpcUrl || capped.length === 0) return lookupTables
-  const infos = await fetchMultipleAccounts(rpcUrl, capped)
-  capped.forEach((altAddr, idx) => {
+  if (!rpcUrl || !Array.isArray(altAddresses) || altAddresses.length === 0) return lookupTables
+  const validCapped: string[] = []
+  const seen = new Set<string>()
+  for (const raw of altAddresses) {
+    if (typeof raw !== 'string') continue
+    const addr = raw.trim()
+    if (!isValidPubkey(addr) || seen.has(addr)) continue
+    seen.add(addr)
+    validCapped.push(addr)
+    if (validCapped.length >= MAX_ALT_RESOLVE_COUNT) break
+  }
+  if (validCapped.length === 0) return lookupTables
+  const infos = await fetchMultipleAccounts(rpcUrl, validCapped, {
+    dataSlice: { offset: 0, length: ALT_MAX_DATA_LEN + 1 },
+  })
+  validCapped.forEach((altAddr, idx) => {
     const info = infos[idx]
-    if (!info || info.bytes.length < 56) return
+    if (
+      !info ||
+      info.owner !== ADDRESS_LOOKUP_TABLE_PROGRAM_ID_STR ||
+      info.bytes.length < ALT_HEADER_LEN ||
+      info.bytes.length > ALT_MAX_DATA_LEN ||
+      (info.bytes.length - ALT_HEADER_LEN) % 32 !== 0
+    ) {
+      return
+    }
     const addrs: string[] = []
-    for (let off = 56; off + 32 <= info.bytes.length; off += 32) {
+    for (let off = ALT_HEADER_LEN; off + 32 <= info.bytes.length; off += 32) {
       addrs.push(base58Encode(info.bytes.subarray(off, off + 32)))
     }
     if (addrs.length > 0) lookupTables[altAddr] = addrs
@@ -595,6 +708,20 @@ export async function simulateV1Transaction(
   }
 }
 
+export class TransactionFailedOnChainError extends Error {
+  readonly signature: string
+  readonly err: unknown
+  readonly slot: number
+
+  constructor(signature: string, err: unknown, slot: number) {
+    super(`Transaction failed on-chain: ${JSON.stringify(err)}`)
+    this.name = 'TransactionFailedOnChainError'
+    this.signature = signature
+    this.err = err
+    this.slot = slot
+  }
+}
+
 export async function waitForConfirmation(rpcUrl: string, signature: string): Promise<{ slot: number }> {
   for (let attempt = 0; attempt < 36; attempt++) {
     const res = await rpcCall<{
@@ -607,8 +734,8 @@ export async function waitForConfirmation(rpcUrl: string, signature: string): Pr
 
     const status = res.value[0]
     if (status) {
-      if (status.err) {
-        throw new Error(`Transaction failed on-chain: ${JSON.stringify(status.err)}`)
+      if (status.err !== null && status.err !== undefined) {
+        throw new TransactionFailedOnChainError(signature, status.err, status.slot)
       }
       if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
         return { slot: status.slot }

@@ -127,7 +127,7 @@ def main() -> None:
         "subtreeRootPage": core["lengths"]["SUBROOT_PAGE_LEN"],
         "memoPage": core["lengths"]["MEMO_PAGE_LEN"],
         "nullifierPage": core["lengths"]["NF_PAGE_LEN"],
-        "rootCheckpoint": core["lengths"]["CKPT_LEN"],
+        "globalRootHistory": core["lengths"]["ROOT_HISTORY_LEN"],
     }
     actual_account_names = {acc["name"] for acc in prog["accounts"]}
     assert actual_account_names == set(expected_sizes.keys()), (
@@ -288,7 +288,7 @@ def main() -> None:
         "SUBROOT_PAGE_LEN",
         "MEMO_PAGE_LEN",
         "NF_PAGE_LEN",
-        "CKPT_LEN",
+        "ROOT_HISTORY_LEN",
     ):
         m = re.search(rf"export const {len_key} = ([0-9_]+);", sdk_consts)
         assert m and int(m.group(1).replace("_", "")) == core["lengths"][len_key], (
@@ -328,14 +328,16 @@ def main() -> None:
 
     def eval_int_expr(expr: str) -> int:
         expr = expr.split("//", 1)[0].strip().replace("_", "")
+        if expr.endswith("n"):
+            expr = expr[:-1]
         if "<<" in expr:
             lhs, rhs = expr.split("<<", 1)
-            return int(lhs.strip(), 0) << int(rhs.strip(), 0)
+            return int(lhs.strip().rstrip("n"), 0) << int(rhs.strip().rstrip("n"), 0)
         return int(expr, 0)
 
     def parse_const_val(src: str, sym: str, lang: str) -> int:
         pat = (
-            rf"pub const {sym}:\s*(?:u8|usize)\s*=\s*([^;]+);"
+            rf"pub const {sym}:\s*(?:u8|u32|u64|usize)\s*=\s*([^;]+);"
             if lang == "rust"
             else rf"export const {sym}\s*=\s*([^;\n]+)"
         )
@@ -361,12 +363,60 @@ def main() -> None:
         "MEMO_VERSION_V1",
         "MEMO_PAYMENT_ID_LEN",
         "MEMO_CT_LEN",
+        "SLOT_RING_LEN",
+        "EPOCH_RING_LEN",
+        "ROOT_ENTRY_LEN",
+        "DEFAULT_ROOT_EPOCH_INTERVAL",
+        "MAX_ROOT_EPOCH_INTERVAL",
+        "ROOT_RING_SLOT",
+        "ROOT_RING_EPOCH",
+        "CU_LIMIT_INIT_POOL",
+        "CU_LIMIT_INIT_LANE",
+        "CU_LIMIT_INIT_ROOT_HISTORY",
+        "CU_LIMIT_OPEN_PAGE",
+        "CU_LIMIT_DEPOSIT",
+        "CU_LIMIT_DEPOSIT_HOOK",
+        "CU_LIMIT_TRANSACT_PRIVATE",
+        "CU_LIMIT_TRANSACT_FULL_EXIT",
+        "CU_LIMIT_TRANSACT_WITHDRAW",
+        "CU_LIMIT_TRANSACT_WITHDRAW_HOOK",
+        "CU_LIMIT_EXEC_VIA_ESCROW_BASE",
+        "PL_OFF_ROOT_EPOCH_INTERVAL",
+        "PL_OFF_RESERVED_24",
         "PL_OFF_VAULT_AUTH_BUMP",
         "PL_OFF_PENDING_AUTHORITY",
+        "RT_OFF_MAGIC",
+        "RT_OFF_VERSION",
+        "RT_OFF_BUMP",
+        "RT_OFF_SLOT_CURSOR",
+        "RT_OFF_POOL_ID",
+        "RT_OFF_EPOCH_CURSOR",
+        "RT_OFF_SLOT_COUNT",
+        "RT_OFF_EPOCH_COUNT",
+        "RT_OFF_SAME_SLOT_BUMPED",
+        "RT_OFF_LATEST_SLOT",
+        "RT_OFF_STABLE_EPOCH_ID",
+        "RT_OFF_STABLE_SLOT",
+        "RT_OFF_EPOCH_INTERVAL",
+        "RT_OFF_GROUP_ROOTS",
+        "RT_OFF_LATEST_SUPER_ROOT",
+        "RT_OFF_LATEST_LANE_ROOTS",
+        "RT_OFF_LATEST_LANE_COUNTS",
+        "RT_OFF_STABLE_SUPER_ROOT",
+        "RT_OFF_STABLE_LANE_ROOTS",
+        "RT_OFF_STABLE_LANE_COUNTS",
+        "RT_OFF_SLOT_RING",
+        "RT_OFF_EPOCH_RING",
     ):
         rv = parse_const_val(core_ix_src, sym, "rust")
         sv = parse_const_val(sdk_consts, sym, "ts")
         assert rv == sv, f"Wire constant {sym} drifted: rust={rv}, sdk={sv}"
+    for dynamic_sym in sorted(
+        set(re.findall(r"pub const ((?:CU_LIMIT|RT_OFF)_[A-Z0-9_]+):", core_ix_src))
+    ):
+        rv = parse_const_val(core_ix_src, dynamic_sym, "rust")
+        sv = parse_const_val(sdk_consts, dynamic_sym, "ts")
+        assert rv == sv, f"Dynamic wire constant {dynamic_sym} drifted: rust={rv}, sdk={sv}"
     assert core["lengths"]["MEMO_PAGE_LEN"] == 10_240, (
         f"Expected MEMO_PAGE_LEN == 10240, got {core['lengths']['MEMO_PAGE_LEN']}"
     )
@@ -440,6 +490,16 @@ def main() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", proto_verified_commit), "Invalid verifiedCommit in protocol.ts"
     assert proto_pk_sha == pk_sha256, "apps/web/lib/protocol.ts pkCompressedSha256 drifted"
 
+    deployed_tag_m = re.search(r"\bdeployedReleaseTag:\s*['\"]([^'\"]+)['\"]", web_proto)
+    deployed_tag = deployed_tag_m.group(1) if deployed_tag_m else f"v{prog_version}"
+    assert re.fullmatch(r"v\d+\.\d+\.\d+", deployed_tag), (
+        f"Invalid deployedReleaseTag in apps/web/lib/protocol.ts: {deployed_tag}"
+    )
+    if deployed_tag_m:
+        assert parse_ts_const_str(web_proto, "deployedReleaseUrl").endswith(
+            f"/releases/tag/{deployed_tag}"
+        ), "apps/web/lib/protocol.ts deployedReleaseUrl does not match deployedReleaseTag"
+
     deployments_md = (ROOT / "docs" / "DEPLOYMENTS.md").read_text()
     for must_have in (
         CANONICAL_PROGRAM_ID,
@@ -455,6 +515,8 @@ def main() -> None:
         sh_img,
         builder_ver,
         tools_ver,
+        f"(`audren` {deployed_tag})",
+        f"/releases/tag/{deployed_tag}",
     ):
         assert must_have in deployments_md, f"docs/DEPLOYMENTS.md missing canonical identifier: {must_have}"
 

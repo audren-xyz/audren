@@ -1,8 +1,5 @@
 import type { FullViewingKey } from '@audren/sdk'
-import {
-  DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS,
-  DEFAULT_SELF_PAY_FEE_MINTS,
-} from '../env'
+import { DEFAULT_SELF_PAY_FEE_MINTS } from '../env'
 import {
   ASSET_MODE_PRIVATE,
   ASSET_MODE_PUBLIC,
@@ -10,9 +7,11 @@ import {
   AUDREN_PROGRAM_ID_STR,
   TAG_DEPOSIT,
   TAG_EXEC_VIA_ESCROW,
+  TAG_INIT_ROOT_HISTORY,
   TAG_TRANSACT,
   VK_ID_DEFAULT,
   derivePoolPda,
+  deriveRootsPda,
   deriveVaultAuthPda,
   extractNullifierPdas,
   parseExecEscrowMeta,
@@ -34,6 +33,7 @@ import {
   bytesEqual,
   deriveAta,
   fromBase64,
+  isValidBase58PubkeyLen,
 } from '../solana/codec'
 import type {
   AudrenOpKind,
@@ -82,8 +82,6 @@ export interface ValidatedAudrenInstruction {
 export interface FirewallOptions {
   /** Full configured relayer fee-payer pool for this cluster (accepts any member for feeRecipient / setupAtas). */
   relayerPoolPubkeys?: readonly Uint8Array[]
-  /** Audited DEX aggregator router program allowlist (defaults to `DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS`). */
-  auditedSwapRouterPrograms?: ReadonlySet<string>
   /** Vetted liquid fee-mint allowlist (defaults to `DEFAULT_SELF_PAY_FEE_MINTS`). */
   selfPayFeeMints?: ReadonlySet<string>
   /** Defer expensive X25519 + ChaCha20 + Poseidon `cm2` verification until after `guard.begin()`. */
@@ -114,11 +112,9 @@ export interface FirewallVerdict {
   shieldedCm2Fee: ShieldedCm2Fee | null
   /** Mode 1 (Single or Batch Private Transfer): all verified shielded `cm2` fee notes across the submission. */
   shieldedCm2Fees: ShieldedCm2Fee[]
-  /** Mode 2/3 SPL/Token-2022 fee ATA watched during `simulateV1Transaction`. */
+  /** Mode 2/3 protocol-enforced SPL/Token-2022 fee ATA watched during `simulateV1Transaction`. */
   watchedRelayerFeeAta: string | null
   watchedRelayerFeeMint: string | null
-  /** True ONLY when `ExecViaEscrow` (`relayerFee === 0`) matched an allowlisted audited router + writable relayer ATA. */
-  isZeroFeeAuditedRouterSwap: boolean
   /** Mode 2 `WITHDRAW_FLAG_UNWRAP_WSOL` native SOL lamports paid directly to a configured relayer pool pubkey. */
   nativeSolFeeToRelayer: bigint
   /** Exact configured relayer pool pubkey receiving `nativeSolFeeToRelayer` (may differ from tx fee-payer in multi-payer pools). */
@@ -129,8 +125,8 @@ export const MAX_BATCH_INSTRUCTIONS = 4
 export const MAX_BATCH_OUTPUTS_PER_IX = 2
 const MAX_PRE_INSTRUCTIONS = 3
 const MAX_PRE_IX_DATA_BYTES = 512
+const MAX_PRE_IX_DATA_B64_CHARS = 700
 const MAX_PRE_IX_ACCOUNTS = 24
-const DEFAULT_AUDITED_ROUTER_SET: ReadonlySet<string> = new Set(DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS)
 const DEFAULT_SELF_PAY_MINT_SET: ReadonlySet<string> = new Set(DEFAULT_SELF_PAY_FEE_MINTS)
 
 /**
@@ -160,6 +156,7 @@ function validateSingleAudrenPayload(
   relayerPubkey: Uint8Array,
   relayerB58: string,
   pool0Pda: Uint8Array,
+  roots0Pda: Uint8Array,
   relayerFvk: FullViewingKey | null,
   requirePrivateTransact: boolean,
   maxOutputCount: number,
@@ -173,7 +170,7 @@ function validateSingleAudrenPayload(
   ) {
     throw new FirewallError(`${labelPrefix}Invalid or missing instructionDataB64`, 400)
   }
-  if (!Array.isArray(payload.accounts) || payload.accounts.length < 12 || payload.accounts.length > 62) {
+  if (!Array.isArray(payload.accounts) || payload.accounts.length < 12 || payload.accounts.length > 96) {
     throw new FirewallError(
       `${labelPrefix}Invalid Audren account count (${payload.accounts?.length ?? 0})`,
       400,
@@ -197,6 +194,12 @@ function validateSingleAudrenPayload(
       400,
     )
   }
+  if (tag === TAG_INIT_ROOT_HISTORY) {
+    throw new FirewallError(
+      `${labelPrefix}InitRootHistory (Tag 4) is not permitted on this relay. Allowed: Transact (5), ExecViaEscrow (6).`,
+      400,
+    )
+  }
   if (requirePrivateTransact) {
     if (tag !== TAG_TRANSACT) {
       throw new FirewallError(
@@ -210,7 +213,7 @@ function validateSingleAudrenPayload(
       400,
     )
   }
-  if (ixData.length < 378) {
+  if (ixData.length < 380) {
     throw new FirewallError(`${labelPrefix}Audren instruction payload too short`, 400)
   }
 
@@ -218,9 +221,12 @@ function validateSingleAudrenPayload(
     if (!a || typeof a.pubkey !== 'string') {
       throw new FirewallError(`${labelPrefix}Missing pubkey at accounts[${idx}]`, 400)
     }
+    if (!isValidBase58PubkeyLen(a.pubkey)) {
+      throw new FirewallError(`${labelPrefix}Invalid base58 pubkey at accounts[${idx}]`, 400)
+    }
     let pubkey: Uint8Array
     try {
-      pubkey = base58Decode(a.pubkey)
+      pubkey = base58Decode(a.pubkey, 44)
     } catch {
       throw new FirewallError(`${labelPrefix}Invalid base58 pubkey at accounts[${idx}]`, 400)
     }
@@ -249,6 +255,12 @@ function validateSingleAudrenPayload(
       400,
     )
   }
+  if (!bytesEqual(decodedAccounts[2]!.pubkey, roots0Pda)) {
+    throw new FirewallError(
+      `${labelPrefix}accounts[2] must be canonical Audren Pool #0 GlobalRootHistory (${base58Encode(roots0Pda)})`,
+      400,
+    )
+  }
 
   const nullifiers = extractNullifierPdas(tag, decodedAccounts)
   if (nullifiers.length === 0) {
@@ -269,6 +281,40 @@ function validateSingleAudrenPayload(
     if (transactMeta.vkId !== VK_ID_DEFAULT) {
       throw new FirewallError(
         `${labelPrefix}Unsupported vk_id ${transactMeta.vkId} in Transact (expected ${VK_ID_DEFAULT})`,
+        400,
+      )
+    }
+    if (transactMeta.outputMask === 0) {
+      if (decodedAccounts[2]!.isWritable) {
+        throw new FirewallError(
+          `${labelPrefix}Transact full exit (outputMask === 0) must mark accounts[2] (GlobalRootHistory) read-only (isWritable: false)`,
+          400,
+        )
+      }
+    } else if (!decodedAccounts[2]!.isWritable) {
+      throw new FirewallError(
+        `${labelPrefix}Transact with outputs (outputMask !== 0) must mark accounts[2] (GlobalRootHistory) writable (isWritable: true)`,
+        400,
+      )
+    }
+    for (let i = 0; i < decodedAccounts.length; i++) {
+      if (i !== 2 && bytesEqual(decodedAccounts[i]!.pubkey, roots0Pda)) {
+        throw new FirewallError(
+          `${labelPrefix}Transact cannot reference GlobalRootHistory (audren_roots) outside accounts[2] (found at accounts[${i}])`,
+          400,
+        )
+      }
+    }
+    if (
+      transactMeta.hasTrailingHookAccounts &&
+      !(
+        transactMeta.assetMode === ASSET_MODE_PUBLIC &&
+        !transactMeta.unwrapWsol &&
+        transactMeta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR
+      )
+    ) {
+      throw new FirewallError(
+        `${labelPrefix}Transact trailing accounts are only permitted for Token-2022 public withdrawals`,
         400,
       )
     }
@@ -302,6 +348,24 @@ function validateSingleAudrenPayload(
         `${labelPrefix}Unsupported vk_id ${execMeta.vkId} in ExecViaEscrow (expected ${VK_ID_DEFAULT})`,
         400,
       )
+    }
+    if (!decodedAccounts[2]!.isWritable) {
+      throw new FirewallError(
+        `${labelPrefix}ExecViaEscrow must mark accounts[2] (GlobalRootHistory) writable (isWritable: true)`,
+        400,
+      )
+    }
+    for (let i = 0; i < decodedAccounts.length; i++) {
+      if (i !== 2 && bytesEqual(decodedAccounts[i]!.pubkey, roots0Pda)) {
+        const location =
+          i >= execMeta.routerAccountsStartIdx
+            ? `router_accounts (accounts[${i}])`
+            : `accounts[${i}]`
+        throw new FirewallError(
+          `${labelPrefix}ExecViaEscrow cannot reference GlobalRootHistory (audren_roots) outside accounts[2] (found at ${location})`,
+          400,
+        )
+      }
     }
   }
 
@@ -385,12 +449,11 @@ export function validateRelaySubmission(
     addPoolPubkey(pk)
   }
 
-  const auditedSwapRouterPrograms =
-    options?.auditedSwapRouterPrograms ?? DEFAULT_AUDITED_ROUTER_SET
   const selfPayFeeMints = options?.selfPayFeeMints ?? DEFAULT_SELF_PAY_MINT_SET
   const activeFvk = options?.deferCm2Verification ? null : relayerFvk
 
   const pool0Pda = derivePoolPda(0).address
+  const roots0Pda = deriveRootsPda(0).address
   const vaultAuthPda = deriveVaultAuthPda(0).address
   const vaultAuthB58 = base58Encode(vaultAuthPda)
   const relayerPoolWsolAtas = poolPubkeys.map((pk) =>
@@ -439,6 +502,7 @@ export function validateRelaySubmission(
         relayerPubkey,
         relayerB58,
         pool0Pda,
+        roots0Pda,
         activeFvk,
         true,
         maxOutputsForBatch,
@@ -481,7 +545,6 @@ export function validateRelaySubmission(
       shieldedCm2Fees,
       watchedRelayerFeeAta: null,
       watchedRelayerFeeMint: null,
-      isZeroFeeAuditedRouterSwap: false,
       nativeSolFeeToRelayer: 0n,
       nativeSolFeeRecipient: null,
     }
@@ -496,12 +559,13 @@ export function validateRelaySubmission(
     relayerPubkey,
     relayerB58,
     pool0Pda,
+    roots0Pda,
     activeFvk,
     false,
     3,
   )
 
-  const { tag, decodedAccounts, transactMeta, execMeta } = single
+  const { tag, transactMeta, execMeta } = single
 
   // Validate strictly allowlisted zero-signer DeFi refresh cranks (`preInstructions`, Tag 6 only).
   const FORBIDDEN_PRE_IX_PROGRAMS = new Set([
@@ -544,10 +608,16 @@ export function validateRelaySubmission(
           400,
         )
       }
+      if (!isValidBase58PubkeyLen(pre.programId)) {
+        throw new FirewallError(`Invalid encoding in preInstructions[${i}]`, 400)
+      }
+      if (pre.data.length === 0 || pre.data.length > MAX_PRE_IX_DATA_B64_CHARS) {
+        throw new FirewallError(`Invalid programId or data length in preInstructions[${i}]`, 400)
+      }
       let progBytes: Uint8Array
       let dataBytes: Uint8Array
       try {
-        progBytes = base58Decode(pre.programId)
+        progBytes = base58Decode(pre.programId, 44)
         dataBytes = fromBase64(pre.data)
       } catch {
         throw new FirewallError(`Invalid encoding in preInstructions[${i}]`, 400)
@@ -562,9 +632,12 @@ export function validateRelaySubmission(
         if (!acc || typeof acc.pubkey !== 'string') {
           throw new FirewallError(`Missing pubkey at preInstructions[${i}].accounts[${j}]`, 400)
         }
+        if (!isValidBase58PubkeyLen(acc.pubkey)) {
+          throw new FirewallError(`Invalid pubkey at preInstructions[${i}].accounts[${j}]`, 400)
+        }
         let pk: Uint8Array
         try {
-          pk = base58Decode(acc.pubkey)
+          pk = base58Decode(acc.pubkey, 44)
         } catch {
           throw new FirewallError(`Invalid pubkey at preInstructions[${i}].accounts[${j}]`, 400)
         }
@@ -580,13 +653,14 @@ export function validateRelaySubmission(
         if (
           poolPubkeys.some((p) => bytesEqual(pk, p)) ||
           bytesEqual(pk, pool0Pda) ||
+          bytesEqual(pk, roots0Pda) ||
           bytesEqual(pk, vaultAuthPda) ||
           relayerPoolWsolAtas.some((ata) => bytesEqual(pk, ata)) ||
           relayerPoolExecInAtas.some((ata) => bytesEqual(pk, ata)) ||
           relayerPoolExecOutAtas.some((ata) => bytesEqual(pk, ata))
         ) {
           throw new FirewallError(
-            `preInstructions[${i}] cannot reference relayer, Audren custody, or fee accounts`,
+            `preInstructions[${i}] cannot reference relayer, Audren custody, GlobalRootHistory, or fee accounts`,
             400,
           )
         }
@@ -608,8 +682,6 @@ export function validateRelaySubmission(
       transactMeta !== null &&
       transactMeta.assetMode === ASSET_MODE_PUBLIC &&
       !transactMeta.unwrapWsol
-    const isAuditedExecRouter =
-      execMeta !== null && auditedSwapRouterPrograms.has(execMeta.targetProgramId)
 
     for (const req of body.setupAtas) {
       if (
@@ -619,13 +691,16 @@ export function validateRelaySubmission(
       ) {
         throw new FirewallError('Unsupported tokenProgram in setupAtas', 400)
       }
+      if (!isValidBase58PubkeyLen(req.owner) || !isValidBase58PubkeyLen(req.mint)) {
+        throw new FirewallError('Invalid base58 pubkey in setupAtas', 400)
+      }
       let ownerBytes: Uint8Array
       let mintBytes: Uint8Array
       let tpBytes: Uint8Array
       try {
-        ownerBytes = base58Decode(req.owner)
-        mintBytes = base58Decode(req.mint)
-        tpBytes = base58Decode(req.tokenProgram)
+        ownerBytes = base58Decode(req.owner, 44)
+        mintBytes = base58Decode(req.mint, 44)
+        tpBytes = base58Decode(req.tokenProgram, 44)
       } catch {
         throw new FirewallError('Invalid base58 pubkey in setupAtas', 400)
       }
@@ -635,6 +710,16 @@ export function validateRelaySubmission(
 
       const ata = deriveAta(ownerBytes, tpBytes, mintBytes)
       const ataB58 = base58Encode(ata)
+      if (
+        bytesEqual(ownerBytes, roots0Pda) ||
+        bytesEqual(mintBytes, roots0Pda) ||
+        bytesEqual(ata, roots0Pda)
+      ) {
+        throw new FirewallError(
+          'setupAtas cannot reference Audren GlobalRootHistory (audren_roots)',
+          400,
+        )
+      }
       if (seenSetupAtas.has(ataB58)) continue
 
       const ownerIsPoolMember = poolPubkeys.some((p) => bytesEqual(ownerBytes, p))
@@ -661,15 +746,12 @@ export function validateRelaySubmission(
         req.tokenProgram === transactMeta!.tokenProgram
       const isRelayerExecFeeAta =
         execMeta !== null &&
+        execMeta.relayerFee > 0n &&
         ownerIsPoolMember &&
         selfPayFeeMints.has(req.mint) &&
-        matchesExecMintAndProg &&
-        ((execMeta.relayerFee > 0n && ataB58 === execMeta.feeRecipient) ||
-          (execMeta.relayerFee === 0n &&
-            isAuditedExecRouter &&
-            decodedAccounts
-              .slice(execMeta.routerAccountsStartIdx)
-              .some((a) => a.isWritable && bytesEqual(a.pubkey, ata))))
+        req.mint === execMeta.feeMint &&
+        req.tokenProgram === execMeta.feeTokenProg &&
+        ataB58 === execMeta.feeRecipient
 
       if (
         !isAllowedPda &&
@@ -688,10 +770,9 @@ export function validateRelaySubmission(
     }
   }
 
-  // Verify the 3 relayer fee channels (supporting multi-payer relayer pools)
+  // Verify the 3 protocol-enforced relayer fee channels (supporting multi-payer relayer pools)
   let watchedRelayerFeeAta: string | null = null
   let watchedRelayerFeeMint: string | null = null
-  let isZeroFeeAuditedRouterSwap = false
   let nativeSolFeeToRelayer = 0n
   let nativeSolFeeRecipient: string | null = null
 
@@ -725,7 +806,9 @@ export function validateRelaySubmission(
       }
     }
   } else if (execMeta) {
-    // Mode 3: ExecViaEscrow (SPL/Token-2022 input-leg fee OR `EXEC_FLAG_FEE_ON_OUTPUT` output-leg fee)
+    // Mode 3: ExecViaEscrow (SPL/Token-2022 input-leg fee OR `EXEC_FLAG_FEE_ON_OUTPUT` output-leg fee).
+    // Strictly requires protocol-enforced on-chain `relayerFee > 0`; router-side `platformFeeBps`
+    // with `relayerFee === 0` is NOT protocol-enforced on-chain and earns zero self-pay credit.
     if (execMeta.relayerFee > 0n) {
       const feeTpBytes = base58Decode(execMeta.feeTokenProg)
       const feeMintBytes = base58Decode(execMeta.feeMint)
@@ -741,28 +824,6 @@ export function validateRelaySubmission(
       }
       watchedRelayerFeeAta = matchedFeeAta
       watchedRelayerFeeMint = execMeta.feeMint
-    } else if (auditedSwapRouterPrograms.has(execMeta.targetProgramId)) {
-      // Zero-protocol-fee (`relayerFee === 0`) platformFee swap: ONLY credit simulation ATA gains when
-      // (a) `targetProgramId` is in `AUDITED_SWAP_ROUTER_PROGRAMS` AND
-      // (b) a configured relayer's canonical ATA is explicitly marked `isWritable: true` in `router_accounts`.
-      const routerSlice = decodedAccounts.slice(execMeta.routerAccountsStartIdx)
-      const matchedOutAta = relayerPoolExecOutAtas.find((ata) =>
-        routerSlice.some((a) => a.isWritable && bytesEqual(a.pubkey, ata)),
-      )
-      if (matchedOutAta) {
-        watchedRelayerFeeAta = base58Encode(matchedOutAta)
-        watchedRelayerFeeMint = execMeta.mintOut
-        isZeroFeeAuditedRouterSwap = true
-      } else {
-        const matchedInAta = relayerPoolExecInAtas.find((ata) =>
-          routerSlice.some((a) => a.isWritable && bytesEqual(a.pubkey, ata)),
-        )
-        if (matchedInAta) {
-          watchedRelayerFeeAta = base58Encode(matchedInAta)
-          watchedRelayerFeeMint = execMeta.mintIn
-          isZeroFeeAuditedRouterSwap = true
-        }
-      }
     }
   }
 
@@ -786,7 +847,6 @@ export function validateRelaySubmission(
     shieldedCm2Fees: single.shieldedCm2Fee ? [single.shieldedCm2Fee] : [],
     watchedRelayerFeeAta,
     watchedRelayerFeeMint,
-    isZeroFeeAuditedRouterSwap,
     nativeSolFeeToRelayer,
     nativeSolFeeRecipient,
   }

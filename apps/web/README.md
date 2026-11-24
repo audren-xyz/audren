@@ -10,8 +10,8 @@ Next.js 16 static frontend and Cloudflare Worker API proxy for **Audren**, provi
 | `/how-it-works/` | `app/how-it-works/page.tsx`, `components/HowAudrenWorksVisual.tsx` | Address anatomy (`aud1…`), four detailed privacy flows (`Deposit`, `Private Transfer`, `ExecViaEscrow`, `Self-Paying Exit & Sessions`), and cryptographic checks |
 | `/compare/` | `app/compare/page.tsx` | Sourced native and protocol comparison with explicit operation-specific privacy limits |
 | `/developers/` | `app/developers/page.tsx` | Unified 4-language SDK overview (Rust, TypeScript, Swift iOS, Kotlin Android), 6 building blocks, `spec/test-vectors.json` conformance, and copyable code workbench |
-| `/demo/` | `components/LiveWalletVault.tsx`, `components/DevnetDemoExperience.tsx` | Full Mainnet & Devnet Wallet Vault (**Shield** Native SOL, Classic SPL, and Token-2022 via unified `Deposit` with `DEPOSIT_FLAG_NATIVE_SOL` / `DEPOSIT_FLAG_FEE_FROM_AMOUNT`, **Private Send** & opportunistic consolidation via `Transact`, **Shielded DeFi Swaps** via `ExecViaEscrow` with `EXEC_FLAG_FEE_ON_OUTPUT`, **Withdraw** with atomic `WITHDRAW_FLAG_UNWRAP_WSOL`, **Publish Checkpoint**, **DeFi Session `B_0, B_1…`**, **Stranger View**, **Encrypted Vault Backup Export/Restore** with `birthdaySlot`, **Mode 1 Selective Disclosure Receipts** with on-chain `SubtreePage` verification, **Mode 2 FullViewingKey**, **Bring Your Own Relayer** + **Direct Self-Pay**) plus a 4-step no-wallet **Browser WASM Groth16 Sandbox** (dedicated Web Worker `/wasm/prover-worker.js`) with live Devnet `Deposit` & `Transact` relay |
-| `/architecture/` | `app/architecture/page.tsx` | On-chain instruction register (`0x00..=0x08`), `MemoPage` SoA layout (`10,240 B`, `96` notes/page, `72 B` versioned ciphertexts / `106 B` entries), frozen `17,861`-R1CS BN254 Groth16 circuit spec, optional pluggable Privacy Relay overview, and measured sBPFv3 Compute Units |
+| `/demo/` | `components/LiveWalletVault.tsx`, `components/DevnetDemoExperience.tsx` | Full Mainnet & Devnet Wallet Vault (**Shield** Native SOL, Classic SPL, and Token-2022 via unified `Deposit` with `DEPOSIT_FLAG_NATIVE_SOL` / `DEPOSIT_FLAG_FEE_FROM_AMOUNT` and zero-crank auto-`OpenPage`, **Private Send** & opportunistic consolidation via `Transact` with inline `GlobalRootHistory` instant spendability on confirmation — `~400ms` today, `~150ms` under Alpenglow, **Shielded DeFi Swaps** via `ExecViaEscrow` with `EXEC_FLAG_FEE_ON_OUTPUT`, **Withdraw** with atomic `WITHDRAW_FLAG_UNWRAP_WSOL` and read-only `GlobalRootHistory` on full exits, **DeFi Session `B_0, B_1…`**, **Stranger View**, **Encrypted Vault Backup Export/Restore** with `birthdaySlot`, **Mode 1 Selective Disclosure Receipts** with on-chain `SubtreePage` verification, **Mode 2 FullViewingKey**, **Bring Your Own Relayer** + **Direct Self-Pay**) plus a no-wallet **Browser WASM Groth16 Sandbox** (dedicated Web Worker `/wasm/prover-worker.js`) with live Devnet `Deposit` & instant `Transact` relay |
+| `/architecture/` | `app/architecture/page.tsx` | On-chain instruction register (`0x00..=0x08`), inline dual-ring `GlobalRootHistory` (`10,216 B` `AUD1RT01`), `MemoPage` SoA layout (`10,240 B`, `96` notes/page, `72 B` versioned ciphertexts / `106 B` entries), frozen `17,861`-R1CS BN254 Groth16 circuit spec, optional zero-crank Privacy Relay overview, and measured sBPFv3 Compute Units & tight CU budgets |
 | `/faq/` | `app/faq/page.tsx` | Protocol, privacy model, relayer optionality, and Token-2022 FAQ |
 | `/privacy/`, `/terms/` | `app/privacy/page.tsx`, `app/terms/page.tsx` | Privacy notice and open-source protocol terms |
 
@@ -30,24 +30,24 @@ The homepage, FAQ, and protocol specification distinguish public entry/exit by d
     │      • Ordinary Solana Mainnet & Devnet RPC reads (`/api/pool`, `/api/rpc/accounts`, `/api/wallet/balances`, `/api/rpc/blockhash`, `/api/rpc/send`)
     │      • Dynamic token metadata & on-chain decimals (`/api/tokens/resolve`) via optional `GATEWAY`, Jupiter API (`JUPITER_API_KEY`), or direct RPC fallback
     │      • Direct Self-Pay Jupiter proxy (`/api/jupiter/quote`, `/api/jupiter/swap-instructions` with resolved ALTs) via `JUPITER_API_KEY`
-    │      • Optional no-wallet Devnet Sandbox faucet (`/api/devnet/deposit`, `/api/devnet/checkpoint`, Devnet-only `/api/relay/submit`)
+    │      • Optional no-wallet Devnet Sandbox faucet (`/api/devnet/deposit`, Devnet-only `/api/relay/submit`)
     │
-    └──► Pluggable Privacy Relayer (configurable via `NEXT_PUBLIC_AUDREN_RELAY_URL`, default `https://relay.audren.xyz`, or user-supplied HTTPS/localhost URL)
+    └──► Pluggable Zero-Crank Privacy Relayer (configurable via `NEXT_PUBLIC_AUDREN_RELAY_URL`, default `https://relay.audren.xyz`, or user-supplied HTTPS/localhost URL)
            • `/v1/info`, `/v1/fee-quote`, `/v1/swap/quote`, `/v1/swap/instructions`, `/v1/relay/submit`
-           • Signs & submits single Solana Transaction v1 (`0x81`, `4,096 B`) with 0 user wallet signers
+           • Auto-prepends idempotent `OpenPage` if needed & signs/submits single Solana Transaction v1 (`0x81`, `4,096 B`) with 0 user wallet signers
 ```
 
 ## Worker API routes (`worker/index.ts`)
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/pool?cluster=mainnet\|devnet` (alias `/api/devnet/pool`) | Live `PoolState`, `currentEpoch`, active `LaneTreeState` headers, and latest unexpired `RootCheckpoint` summaries |
-| `POST` | `/api/rpc/accounts` | Ordinary batched `getMultipleAccounts` proxy powering zero-indexer `CompactWalletStore` sync (`SubtreePage`, `SubtreeRootPage`, `MemoPage`, `NullifierPage`) |
+| `GET` | `/api/pool?cluster=mainnet\|devnet` (alias `/api/devnet/pool`) | Live `PoolState` (`rootEpochInterval`), active `LaneTreeState` headers, and live `GlobalRootHistory` (`rootsPda` dual-ring `latest` & `stable` snapshot summaries) |
+| `POST` | `/api/rpc/accounts` | Ordinary batched `getMultipleAccounts` proxy powering zero-indexer `CompactWalletStore` sync (`SubtreePage`, `SubtreeRootPage`, `MemoPage`, `NullifierPage`, `GlobalRootHistory`) |
 | `GET` | `/api/wallet/balances?cluster=...&owner=...` | Public SOL, Classic SPL, and Token-2022 balances |
 | `POST` | `/api/tokens/resolve` | Dynamic token symbol, program, and on-chain `decimals` resolution |
 | `GET` / `POST` | `/api/rpc/blockhash`, `/api/rpc/send` | Fresh blockhash and signed transaction submission + confirmation |
 | `POST` | `/api/jupiter/quote`, `/api/jupiter/swap-instructions` | Jupiter swap routing + ALT resolution used when the user chooses **Direct Self-Pay (NO RELAYER)** |
-| `POST` | `/api/devnet/deposit`, `/api/devnet/checkpoint`, `/api/relay/submit` | Free Devnet Sandbox faucet deposit, Devnet checkpoint crank, and hardened Devnet sandbox `Transact` relay (`DEVNET_DEMO_SECRET_B64`) |
+| `POST` | `/api/devnet/deposit`, `/api/relay/submit` | Free Devnet Sandbox faucet deposit (with inline `GlobalRootHistory` update) and hardened Devnet sandbox `Transact` relay (`DEVNET_DEMO_SECRET_B64`) |
 
 ## Self-hosting, secrets & deployment
 

@@ -9,8 +9,6 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   AUDREN_PROGRAM_ID,
-  CHECKPOINT_RING_SLOTS,
-  CKPT_SEED,
   CLASSIC_TOKEN_PROGRAM_ID,
   ESCROW_SEED,
   LANE_RENT_SEED,
@@ -21,6 +19,7 @@ import {
   NUM_ESCROW_SHARDS,
   NUM_LANES,
   POOL_SEED,
+  ROOTS_SEED,
   SUBROOT_SEED,
   SUBTREE_SEED,
   UNWRAP_SEED,
@@ -47,7 +46,7 @@ const ADDR_VERSION_V1 = 0x01;
 const X25519_PROBE_SCALAR = new Uint8Array(32).fill(0x09);
 
 function isAllZero32(bytes: Uint8Array): boolean {
-  if (bytes.byteLength !== 32) return true;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 32) return true;
   let acc = 0;
   for (let i = 0; i < 32; i++) acc |= bytes[i]!;
   return acc === 0;
@@ -58,7 +57,7 @@ function isAllZero32(bytes: Uint8Array): boolean {
  * points using the fixed RFC 7748 probe scalar `[0x09; 32]`).
  */
 export function isContributoryX25519Point(viewPk: Uint8Array): boolean {
-  if (viewPk.byteLength !== 32) return false;
+  if (!(viewPk instanceof Uint8Array) || viewPk.byteLength !== 32) return false;
   let shared: Uint8Array;
   try {
     shared = x25519.getSharedSecret(X25519_PROBE_SCALAR, viewPk);
@@ -90,6 +89,9 @@ export interface ParsedAudrenAddress {
 }
 
 export function base58Encode(bytes: Uint8Array): string {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new RangeError(`base58Encode input must be a Uint8Array, got ${String(bytes)}`);
+  }
   if (bytes.byteLength === 0) return '';
   let zeros = 0;
   while (zeros < bytes.byteLength && bytes[zeros] === 0) zeros++;
@@ -114,8 +116,19 @@ export function base58Encode(bytes: Uint8Array): string {
   return out;
 }
 
-export function base58Decode(input: string): Uint8Array {
+const BASE58_DEFAULT_MAX_LEN = 256;
+
+export function base58Decode(input: string, maxLen = BASE58_DEFAULT_MAX_LEN): Uint8Array {
+  if (typeof input !== 'string') {
+    throw new Error(`Base58 input must be a string, got ${typeof input}`);
+  }
+  if (!Number.isInteger(maxLen) || maxLen < 0) {
+    throw new RangeError(`Base58 maxLen must be a non-negative integer, got ${String(maxLen)}`);
+  }
   if (input.length === 0) return new Uint8Array(0);
+  if (input.length > maxLen) {
+    throw new RangeError(`Base58 input length ${input.length} exceeds limit ${maxLen}`);
+  }
   let zeros = 0;
   while (zeros < input.length && input[zeros] === '1') zeros++;
   const bytes: number[] = [0];
@@ -143,11 +156,22 @@ export function base58Decode(input: string): Uint8Array {
 }
 
 export function toPubkeyBytes(pubkey: string | Uint8Array): Uint8Array {
-  const bytes = typeof pubkey === 'string' ? base58Decode(pubkey) : pubkey;
-  if (bytes.byteLength !== 32) {
-    throw new RangeError(`Solana public key must be 32 bytes, got ${bytes.byteLength}`);
+  if (typeof pubkey === 'string') {
+    if (pubkey.length > 44) {
+      throw new RangeError(`Solana public key base58 length ${pubkey.length} exceeds 44`);
+    }
+    const bytes = base58Decode(pubkey, 44);
+    if (bytes.byteLength !== 32) {
+      throw new RangeError(`Solana public key must be 32 bytes, got ${bytes.byteLength}`);
+    }
+    return bytes;
   }
-  return bytes;
+  if (!(pubkey instanceof Uint8Array) || pubkey.byteLength !== 32) {
+    throw new RangeError(
+      `Solana public key must be a base58 string or 32-byte Uint8Array, got ${pubkey instanceof Uint8Array ? pubkey.byteLength : String(pubkey)}`,
+    );
+  }
+  return pubkey;
 }
 
 // =============================================================================
@@ -226,8 +250,13 @@ function convertBits(
  * (`hrp = "aud"`, payload `0x01 || spend_pk[32] || view_pk[32]`, 114 lowercase characters).
  */
 export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): string {
-  if (spendPk.byteLength !== 32 || viewPk.byteLength !== 32) {
-    throw new RangeError('spendPk and viewPk must each be 32 bytes');
+  if (
+    !(spendPk instanceof Uint8Array) ||
+    spendPk.byteLength !== 32 ||
+    !(viewPk instanceof Uint8Array) ||
+    viewPk.byteLength !== 32
+  ) {
+    throw new RangeError('spendPk and viewPk must each be a 32-byte Uint8Array');
   }
   if (!isCanonicalFr(spendPk)) {
     throw new Error('spendPk must be a canonical BN254 Fr scalar (< r)');
@@ -254,8 +283,10 @@ export function formatAudrenAddress(spendPk: Uint8Array, viewPk: Uint8Array): st
  * non-canonical `spendPk >= r`, and non-contributory / low-order X25519 `viewPk`.
  */
 export function parseAudrenAddress(encoded: string): ParsedAudrenAddress {
-  if (encoded.length < 8 || encoded.length > BECH32_MAX_LEN) {
-    throw new Error(`Invalid Audren Bech32m address length (${encoded.length})`);
+  if (typeof encoded !== 'string' || encoded.length < 8 || encoded.length > BECH32_MAX_LEN) {
+    throw new Error(
+      `Invalid Audren Bech32m address length (${typeof encoded === 'string' ? encoded.length : String(encoded)})`,
+    );
   }
   let hasLower = false;
   let hasUpper = false;
@@ -326,7 +357,7 @@ function modPowP(base: bigint, exp: bigint): bigint {
 }
 
 export function isOnEd25519Curve(bytes: Uint8Array): boolean {
-  if (bytes.byteLength !== 32) return false;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 32) return false;
   let y = 0n;
   for (let i = 31; i >= 0; i--) {
     const b = i === 31 ? bytes[i]! & 0x7f : bytes[i]!;
@@ -353,27 +384,43 @@ export function isOnEd25519Curve(bytes: Uint8Array): boolean {
   return false;
 }
 
-function u16le(n: number): Uint8Array {
-  const out = new Uint8Array(2);
-  new DataView(out.buffer).setUint16(0, n, true);
-  return out;
+const U32_MAX = 0xffff_ffff;
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
+
+function assertLaneId(laneId: number): void {
+  if (!Number.isInteger(laneId) || laneId < 0 || laneId >= NUM_LANES) {
+    throw new RangeError(`laneId must be 0..${NUM_LANES - 1}, got ${laneId}`);
+  }
 }
 
 function u32le(n: number): Uint8Array {
+  if (!Number.isInteger(n) || n < 0 || n > U32_MAX) {
+    throw new RangeError(`u32 value out of range (0..=${U32_MAX}), got ${n}`);
+  }
   const out = new Uint8Array(4);
   new DataView(out.buffer).setUint32(0, n, true);
   return out;
 }
 
 function u64le(n: bigint): Uint8Array {
+  if (typeof n !== 'bigint' || n < 0n || n > U64_MAX) {
+    throw new RangeError(`u64 value out of range (0..=2^64-1), got ${String(n)}`);
+  }
   const out = new Uint8Array(8);
   new DataView(out.buffer).setBigUint64(0, n, true);
   return out;
 }
 
+const MAX_SEED_LEN = 32;
+
 function sha256ConcatSync(parts: readonly Uint8Array[]): Uint8Array {
   let total = 0;
-  for (const p of parts) total += p.byteLength;
+  for (const p of parts) {
+    if (!(p instanceof Uint8Array)) {
+      throw new RangeError(`Expected Uint8Array seed part, got ${String(p)}`);
+    }
+    total += p.byteLength;
+  }
   const buf = new Uint8Array(total);
   let off = 0;
   for (const p of parts) {
@@ -388,8 +435,22 @@ export function findProgramAddressSync(
   seeds: readonly Uint8Array[],
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
+  if (!Array.isArray(seeds)) {
+    throw new RangeError('seeds must be an array of Uint8Arrays');
+  }
   if (seeds.length >= 16) {
     throw new RangeError(`Solana PDA supports at most 15 caller seeds, got ${seeds.length}`);
+  }
+  for (let i = 0; i < seeds.length; i++) {
+    const s = seeds[i];
+    if (!(s instanceof Uint8Array)) {
+      throw new RangeError(`PDA seed[${i}] must be a Uint8Array, got ${String(s)}`);
+    }
+    if (s.byteLength > MAX_SEED_LEN) {
+      throw new RangeError(
+        `PDA seed[${i}] length ${s.byteLength} exceeds Solana MAX_SEED_LEN (${MAX_SEED_LEN})`,
+      );
+    }
   }
   const programBytes = toPubkeyBytes(programId);
   const bumpBuf = new Uint8Array(1);
@@ -447,9 +508,7 @@ export function deriveLanePdaSync(
   laneId: number,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
-  if (!Number.isInteger(laneId) || laneId < 0 || laneId >= NUM_LANES) {
-    throw new RangeError(`laneId must be 0..${NUM_LANES - 1}, got ${laneId}`);
-  }
+  assertLaneId(laneId);
   return findProgramAddressSync(
     [utf8Encoder.encode(LANE_SEED), u32le(poolId), new Uint8Array([laneId])],
     programId,
@@ -469,9 +528,7 @@ export function deriveLaneRentVaultPdaSync(
   laneId: number,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
-  if (!Number.isInteger(laneId) || laneId < 0 || laneId >= NUM_LANES) {
-    throw new RangeError(`laneId must be 0..${NUM_LANES - 1}, got ${laneId}`);
-  }
+  assertLaneId(laneId);
   return findProgramAddressSync(
     [utf8Encoder.encode(LANE_RENT_SEED), u32le(poolId), new Uint8Array([laneId])],
     programId,
@@ -492,6 +549,7 @@ export function deriveSubtreePdaSync(
   pageSeq: bigint,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
+  assertLaneId(laneId);
   return findProgramAddressSync(
     [utf8Encoder.encode(SUBTREE_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(pageSeq)],
     programId,
@@ -513,6 +571,7 @@ export function deriveSubrootPdaSync(
   rootPageSeq: bigint,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
+  assertLaneId(laneId);
   return findProgramAddressSync(
     [utf8Encoder.encode(SUBROOT_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(rootPageSeq)],
     programId,
@@ -534,6 +593,7 @@ export function deriveMemoPdaSync(
   pageSeq: bigint,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
+  assertLaneId(laneId);
   return findProgramAddressSync(
     [utf8Encoder.encode(MEMO_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(pageSeq)],
     programId,
@@ -555,6 +615,7 @@ export function deriveNfPagePdaSync(
   pageSeq: bigint,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
+  assertLaneId(laneId);
   return findProgramAddressSync(
     [utf8Encoder.encode(NF_PAGE_SEED), u32le(poolId), new Uint8Array([laneId]), u64le(pageSeq)],
     programId,
@@ -570,26 +631,18 @@ export async function deriveNfPagePda(
   return deriveNfPagePdaSync(poolId, laneId, pageSeq, programId);
 }
 
-export function deriveCheckpointPdaSync(
-  poolId: number,
-  slotIdx: number,
+export function deriveRootsPdaSync(
+  poolId = 0,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
-  if (!Number.isInteger(slotIdx) || slotIdx < 0 || slotIdx >= CHECKPOINT_RING_SLOTS) {
-    throw new RangeError(`slotIdx must be 0..${CHECKPOINT_RING_SLOTS - 1}, got ${slotIdx}`);
-  }
-  return findProgramAddressSync(
-    [utf8Encoder.encode(CKPT_SEED), u32le(poolId), u16le(slotIdx)],
-    programId,
-  );
+  return findProgramAddressSync([utf8Encoder.encode(ROOTS_SEED), u32le(poolId)], programId);
 }
 
-export async function deriveCheckpointPda(
-  poolId: number,
-  slotIdx: number,
+export async function deriveRootsPda(
+  poolId = 0,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): Promise<DerivedPda> {
-  return deriveCheckpointPdaSync(poolId, slotIdx, programId);
+  return deriveRootsPdaSync(poolId, programId);
 }
 
 export function deriveNullifierPdaSync(
@@ -597,8 +650,10 @@ export function deriveNullifierPdaSync(
   nullifier: Uint8Array,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
-  if (nullifier.byteLength !== 32) {
-    throw new RangeError(`nullifier must be 32 bytes, got ${nullifier.byteLength}`);
+  if (!(nullifier instanceof Uint8Array) || nullifier.byteLength !== 32) {
+    throw new RangeError(
+      `nullifier must be a 32-byte Uint8Array, got ${nullifier instanceof Uint8Array ? nullifier.byteLength : String(nullifier)}`,
+    );
   }
   return findProgramAddressSync(
     [utf8Encoder.encode(NULLIFIER_SEED), u32le(poolId), nullifier],
@@ -641,8 +696,10 @@ export function deriveUnwrapPdaSync(
   nf0: Uint8Array,
   programId: string | Uint8Array = AUDREN_PROGRAM_ID,
 ): DerivedPda {
-  if (nf0.byteLength !== 32) {
-    throw new RangeError(`nf0 must be 32 bytes, got ${nf0.byteLength}`);
+  if (!(nf0 instanceof Uint8Array) || nf0.byteLength !== 32) {
+    throw new RangeError(
+      `nf0 must be a 32-byte Uint8Array, got ${nf0 instanceof Uint8Array ? nf0.byteLength : String(nf0)}`,
+    );
   }
   return findProgramAddressSync(
     [utf8Encoder.encode(UNWRAP_SEED), u32le(poolId), nf0],

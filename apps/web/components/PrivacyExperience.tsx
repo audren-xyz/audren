@@ -71,7 +71,7 @@ export function PrivacyExperience() {
                 <ul className={styles.dashList}>
                   <li>A deposit from a public wallet exposes its funding account, token, amount, and output record.</li>
                   <li>A withdrawal exposes its destination, token, and amount; <code>ExecViaEscrow</code> exposes the target DeFi program, mints, routed amounts, and output record; any stateful borrow or perp position opened by a deterministic session wallet (<code>Bᵢ</code>) remains public on that Solana protocol.</li>
-                  <li>Private transfer proofs hide the spent input note and keep the token and amount inside commitments under a fresh recipient key, while checkpoint roots, output lanes, nullifiers, timing, and the fee payer remain public. If you pay fees yourself, your wallet is that fee payer.</li>
+                  <li>Private transfer proofs hide the spent input note and keep the token and amount inside commitments under a fresh recipient key, while GlobalRootHistory ring indices, output lanes, nullifiers, timing, and the fee payer remain public. If you pay fees yourself, your wallet is that fee payer.</li>
                   <li>Concealing input selection does not guarantee that public information or external observations cannot connect transactions.</li>
                 </ul>
                 <div className={styles.cellFoot}>

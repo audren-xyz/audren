@@ -66,7 +66,6 @@ class ConformanceTest {
         val poolId = p.getLong("pool_id").toUInt()
         val laneId = p.getInt("lane_id").toUByte()
         val pageSeq = p.getLong("page_seq").toULong()
-        val slotIdx = p.getInt("slot_idx").toUShort()
         val shardId = p.getInt("shard_id").toUByte()
         val nf = hexToBytes(p.getString("nullifier_hex"))
 
@@ -78,7 +77,9 @@ class ConformanceTest {
         assertEquals(p.getJSONObject("subroot").getString("address"), deriveSubrootPda(pid, poolId, laneId, pageSeq).address)
         assertEquals(p.getJSONObject("memo").getString("address"), deriveMemoPda(pid, poolId, laneId, pageSeq).address)
         assertEquals(p.getJSONObject("nf_page").getString("address"), deriveNfPagePda(pid, poolId, laneId, pageSeq).address)
-        assertEquals(p.getJSONObject("checkpoint").getString("address"), deriveCheckpointPda(pid, poolId, slotIdx).address)
+        val rootsPda = deriveRootsPda(pid, poolId)
+        assertEquals(p.getJSONObject("roots").getString("address"), rootsPda.address)
+        assertEquals(p.getJSONObject("roots").getInt("bump").toUByte(), rootsPda.bump)
         assertEquals(p.getJSONObject("nullifier").getString("address"), deriveNullifierPda(pid, poolId, nf).address)
         assertEquals(p.getJSONObject("escrow").getString("address"), deriveEscrowPda(pid, poolId, shardId).address)
         assertEquals(p.getJSONObject("unwrap").getString("address"), deriveUnwrapPda(pid, poolId, nf).address)
@@ -148,13 +149,28 @@ class ConformanceTest {
 
         val psVec = v.getJSONObject("pool_state")
         val ps = decodePoolStateAccount(hexToBytes(psVec.getString("raw_hex")))
-        assertEquals(4u.toUByte(), ps.activeLanes)
-        assertEquals(8uL, ps.ckptInterval)
+        assertEquals(psVec.getInt("active_lanes").toUByte(), ps.activeLanes)
+        assertEquals(psVec.getLong("root_epoch_interval").toULong(), ps.rootEpochInterval)
         assertEquals(psVec.getString("pending_authority_b58"), ps.pendingAuthorityB58)
 
-        val ck = decodeRootCheckpointAccount(hexToBytes(v.getString("checkpoint_raw_hex")))
-        assertEquals(13u.toUShort(), ck.slotIdx)
-        assertEquals(6uL, ck.laneCounts[2])
+        val rhVec = v.getJSONObject("root_history")
+        val rhRaw = hexToBytes(rhVec.getString("raw_hex"))
+        assertEquals(rhVec.getInt("account_len"), rhRaw.size)
+        val rh = decodeGlobalRootHistoryAccount(rhRaw)
+        assertEquals(rhVec.getLong("pool_id").toUInt(), rh.poolId)
+        assertEquals(rhVec.getInt("bump").toUByte(), rh.bump)
+        assertEquals(rhVec.getInt("slot_cursor").toUShort(), rh.slotCursor)
+        assertEquals(rhVec.getInt("epoch_cursor").toUShort(), rh.epochCursor)
+        assertEquals(rhVec.getInt("slot_count").toUShort(), rh.slotCount)
+        assertEquals(rhVec.getInt("epoch_count").toUShort(), rh.epochCount)
+        assertEquals(rhVec.getLong("latest_slot").toULong(), rh.latestSlot)
+        assertEquals(rhVec.getLong("stable_epoch_id").toULong(), rh.stableEpochId)
+        assertEquals(rhVec.getLong("stable_slot").toULong(), rh.stableSlot)
+        assertEquals(rhVec.getLong("epoch_interval").toULong(), rh.epochInterval)
+        assertEquals(rhVec.getString("latest_super_root_hex"), bytesToHex(rh.latestSuperRoot))
+        assertEquals(rhVec.getString("stable_super_root_hex"), bytesToHex(rh.stableSuperRoot))
+        assertEquals(rhVec.getLong("lane2_leaf_count").toULong(), rh.latestLaneCounts[2])
+        assertEquals(rhVec.getLong("lane2_leaf_count").toULong(), rh.stableLaneCounts[2])
         assertEquals("https://relay.audren.xyz", defaultRelayUrl())
         assertTrue(jupiterCpiExcludedDexes().isNotEmpty())
 
@@ -250,10 +266,14 @@ class ConformanceTest {
         assertEquals(g16.getString("public_input_hash_hex"), bytesToHex(proved.publicInputHash))
         assertEquals(g16.getString("proof_192_hex"), bytesToHex(proved.proof192))
 
-        // 6. v1.2.1 UniFFI zero-panic & extraWritablePubkeys & strict address/bounds checks
+        // 6. UniFFI zero-panic & extraWritablePubkeys & strict address/bounds checks
         assertFailsWith<AudrenFfiException> { decodeAudrenAddress(" " + alice.address) }
         assertFailsWith<AudrenFfiException> { buildOpenPageIx(pid, s0.pubkeyB58, 4u, 0u, 0u, 0uL) }
         assertFailsWith<AudrenFfiException> { deriveLanePda(pid, 0u, 16u) }
+        assertFailsWith<AudrenFfiException> { buildInitRootHistoryIx(pid, s0.pubkeyB58, 0u, 0uL, 4u) }
+        val initRhIx = buildInitRootHistoryIx(pid, s0.pubkeyB58, 0u, 32uL, 4u)
+        assertEquals(rhVec.getInt("tag_init_root_history").toByte(), initRhIx.data[0])
+        assertEquals(8, initRhIx.accounts.size)
         assertFailsWith<AudrenFfiException> {
             buildTransactIx(
                 FfiTransactParams(
@@ -261,7 +281,8 @@ class ConformanceTest {
                     payer = s0.pubkeyB58,
                     poolId = 0u,
                     vkId = 0u,
-                    ckptSlotIdx = 13u,
+                    rootRingKind = 0u,
+                    rootRingIdx = 0u,
                     outLaneId = 2u,
                     outSubSeq = 0uL,
                     outRootSeq = 0uL,
@@ -346,5 +367,114 @@ class ConformanceTest {
             )
         )
         assertEquals(bytesToHex(hExplicit), bytesToHex(hPromoted))
+
+        // 7. v1.3.0 Auto-OpenPage custom programId, Token-2022 ATA CU limits, and zero-rent parity
+        val plannedDefault = planAutoOpenPages(
+            programId = pid,
+            poolId = 0u,
+            laneId = 0u,
+            nextLeaf = 86uL,
+            nfCount = 540uL,
+            numOutputs = 1u,
+            numNfs = 1u,
+            existingPages = emptyList()
+        )
+        assertEquals(2, plannedDefault.size)
+        assertEquals(2u.toUByte(), plannedDefault[0].pageKind)
+        assertEquals(deriveMemoPda(pid, 0u, 0u, 1uL).address, plannedDefault[0].pdaB58)
+        assertEquals(3u.toUByte(), plannedDefault[1].pageKind)
+        assertEquals(deriveNfPagePda(pid, 0u, 0u, 1uL).address, plannedDefault[1].pdaB58)
+
+        val customPid = s0.pubkeyB58
+        val plannedCustom = planAutoOpenPages(
+            programId = customPid,
+            poolId = 0u,
+            laneId = 0u,
+            nextLeaf = 86uL,
+            nfCount = 540uL,
+            numOutputs = 1u,
+            numNfs = 1u,
+            existingPages = emptyList()
+        )
+        assertEquals(2, plannedCustom.size)
+        assertEquals(deriveMemoPda(customPid, 0u, 0u, 1uL).address, plannedCustom[0].pdaB58)
+        assertTrue(plannedCustom[0].pdaB58 != plannedDefault[0].pdaB58)
+        val filteredCustom = planAutoOpenPages(
+            programId = customPid,
+            poolId = 0u,
+            laneId = 0u,
+            nextLeaf = 86uL,
+            nfCount = 540uL,
+            numOutputs = 1u,
+            numNfs = 1u,
+            existingPages = listOf(plannedCustom[0])
+        )
+        assertEquals(1, filteredCustom.size)
+        assertEquals(plannedCustom[1].pdaB58, filteredCustom[0].pdaB58)
+        val filteredCustomCoord = planAutoOpenPages(
+            programId = customPid,
+            poolId = 0u,
+            laneId = 0u,
+            nextLeaf = 86uL,
+            nfCount = 540uL,
+            numOutputs = 1u,
+            numNfs = 1u,
+            existingPages = listOf(FfiOpenPageSpec(pageKind = 2u, pageSeq = 1uL, pdaB58 = ""))
+        )
+        assertEquals(1, filteredCustomCoord.size)
+        assertEquals(plannedCustom[1].pdaB58, filteredCustomCoord[0].pdaB58)
+        assertFailsWith<AudrenFfiException> {
+            planAutoOpenPages("not-valid-pid!!!", 0u, 0u, 86uL, 0uL, 1u, 0u, emptyList())
+        }
+
+        assertEquals(87_500u, recommendedCuLimitOpenPage(2u, byteArrayOf(250.toByte())))
+        assertEquals(
+            (140_000 + 40_000 + 30_000 + 2 * 45_000 + 7_500).toUInt(),
+            recommendedCuLimitDeposit(
+                hasTransferHook = true,
+                openPageCount = 1u,
+                createAtaCount = 1u,
+                createToken2022AtaCount = 2u,
+                bumps = byteArrayOf(253.toByte(), 252.toByte())
+            )
+        )
+        assertEquals(
+            (295_000 + 40_000 + 30_000 + 2 * 45_000 + 1_500).toUInt(),
+            recommendedCuLimitTransact(
+                isPublicWithdraw = true,
+                hasTransferHook = true,
+                outputMask = 0b001u,
+                openPageCount = 1u,
+                createAtaCount = 1u,
+                createToken2022AtaCount = 2u,
+                bumps = byteArrayOf(254.toByte())
+            )
+        )
+        assertEquals(
+            (285_000 + 25_000 + 300_000 + 40_000 + 30_000 + 2 * 45_000 + 22_500).toUInt(),
+            recommendedCuLimitExecViaEscrow(
+                routerCuLimit = 300_000u,
+                hasToken2022Leg = true,
+                openPageCount = 1u,
+                createAtaCount = 1u,
+                createToken2022AtaCount = 2u,
+                bumps = byteArrayOf(240.toByte(), 255.toByte())
+            )
+        )
+        assertEquals(
+            1_400_000u,
+            recommendedCuLimitExecViaEscrow(
+                routerCuLimit = 1_300_000u,
+                hasToken2022Leg = true,
+                openPageCount = 2u,
+                createAtaCount = 1u,
+                createToken2022AtaCount = 2u,
+                bumps = byteArrayOf(0, 0)
+            )
+        )
+
+        assertEquals(3uL, deterministicNoteRentFeeFfi(10_000_000uL, 0uL, 0uL, 0uL))
+        assertEquals(2uL, deterministicNoteRentFeeFfi(2uL, 0uL, 0uL, 0uL))
+        assertEquals(0uL, deterministicNoteRentFeeFfi(0uL, 0uL, 0uL, 0uL))
     }
 }

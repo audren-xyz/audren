@@ -10,7 +10,7 @@ const CANONICAL_PK_SHA256 =
   '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4'
 const WITNESS_TOTAL_BYTES = 4611
 const PROVE_OUTPUT_BYTES = 384
-const DEFAULT_WASM_URL = '/wasm/audren_circuits.wasm?v=1.2.1'
+const DEFAULT_WASM_URL = '/wasm/audren_circuits.wasm?v=1.3.0'
 const DEFAULT_PK_URL = '/wasm/audren_joinsplit.pk?v=2b22603e'
 
 let readyPromise = null
@@ -82,6 +82,21 @@ function ensureReady(wasmUrl, pkUrl) {
   return readyPromise
 }
 
+function scrubBytes(val) {
+  if (!val) return
+  try {
+    if (val instanceof Uint8Array) {
+      if (val.byteLength > 0) val.fill(0)
+    } else if (val instanceof ArrayBuffer) {
+      if (val.byteLength > 0) new Uint8Array(val).fill(0)
+    } else if (ArrayBuffer.isView(val) && val.byteLength > 0) {
+      new Uint8Array(val.buffer, val.byteOffset, val.byteLength).fill(0)
+    }
+  } catch {
+    // Ignore detached or non-writable buffer views
+  }
+}
+
 globalThis.addEventListener('message', async (event) => {
   const data = event.data || {}
   const id = data.id
@@ -93,66 +108,82 @@ globalThis.addEventListener('message', async (event) => {
     }
 
     if (data.type === 'prove') {
-      const exports = await ensureReady(data.wasmUrl, data.pkUrl)
-      const witnessBytes =
-        data.witnessBytes instanceof Uint8Array
-          ? data.witnessBytes
-          : new Uint8Array(data.witnessBytes)
-      if (witnessBytes.byteLength !== WITNESS_TOTAL_BYTES) {
-        throw new RangeError(
-          `Expected ${WITNESS_TOTAL_BYTES}-byte witness, got ${witnessBytes.byteLength}`,
-        )
-      }
-      const seed =
-        data.seed32 && data.seed32.byteLength === 32
-          ? new Uint8Array(data.seed32)
-          : globalThis.crypto.getRandomValues(new Uint8Array(32))
-
-      const t0 = globalThis.performance.now()
+      let exports = null
+      let witnessBytes = null
+      let seed = null
       let wPtr = 0
       let sPtr = 0
       let oPtr = 0
       let raw
+      let elapsedMs = 0
       try {
+        exports = await ensureReady(data.wasmUrl, data.pkUrl)
+        witnessBytes =
+          data.witnessBytes instanceof Uint8Array
+            ? data.witnessBytes
+            : new Uint8Array(data.witnessBytes)
+        if (witnessBytes.byteLength !== WITNESS_TOTAL_BYTES) {
+          throw new RangeError(
+            `Expected ${WITNESS_TOTAL_BYTES}-byte witness, got ${witnessBytes.byteLength}`,
+          )
+        }
+        if (data.seed32 instanceof Uint8Array && data.seed32.byteLength === 32) {
+          seed = data.seed32
+        } else if (data.seed32 && data.seed32.byteLength === 32) {
+          seed = new Uint8Array(data.seed32)
+        } else {
+          seed = globalThis.crypto.getRandomValues(new Uint8Array(32))
+        }
+
+        const t0 = globalThis.performance.now()
         wPtr = exports.wasm_alloc(WITNESS_TOTAL_BYTES)
         sPtr = exports.wasm_alloc(32)
         oPtr = exports.wasm_alloc(PROVE_OUTPUT_BYTES)
         new Uint8Array(exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).set(witnessBytes)
         new Uint8Array(exports.memory.buffer, sPtr, 32).set(seed)
         const rc = exports.wasm_prove_joinsplit(wPtr, WITNESS_TOTAL_BYTES, sPtr, oPtr)
+        if (rc === -6) {
+          throw new Error('Groth16 witness failed off-chain R1CS verification (rc=-6)')
+        }
         if (rc !== 0) {
           throw new Error(`wasm_prove_joinsplit failed with code ${rc}`)
         }
         raw = new Uint8Array(exports.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).slice()
+        elapsedMs = Math.round(globalThis.performance.now() - t0)
       } catch (proveErr) {
         if (proveErr instanceof WebAssembly.RuntimeError) {
           readyPromise = null
         }
         throw proveErr
       } finally {
-        if (oPtr) {
+        if (exports && oPtr) {
           try {
             exports.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES)
           } catch {
             // Ignore deallocation failure if WASM instance trapped
           }
         }
-        if (sPtr) {
+        if (exports && sPtr) {
           try {
+            new Uint8Array(exports.memory.buffer, sPtr, 32).fill(0)
             exports.wasm_dealloc(sPtr, 32)
           } catch {
             // Ignore deallocation failure if WASM instance trapped
           }
         }
-        if (wPtr) {
+        if (exports && wPtr) {
           try {
+            new Uint8Array(exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).fill(0)
             exports.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES)
           } catch {
             // Ignore deallocation failure if WASM instance trapped
           }
         }
+        scrubBytes(seed)
+        scrubBytes(data.seed32)
+        scrubBytes(witnessBytes)
+        scrubBytes(data.witnessBytes)
       }
-      const elapsedMs = Math.round(globalThis.performance.now() - t0)
       const result = {
         proof192: raw.slice(0, 192),
         nf0: raw.slice(192, 224),

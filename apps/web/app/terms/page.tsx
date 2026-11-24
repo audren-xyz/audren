@@ -59,7 +59,7 @@ export default function TermsPage() {
               </p>
               <ul className={styles.dashList}>
                 <li>During pre-audit releases, the program&rsquo;s upgrade authority can replace the program code, including its custody logic. Verify the deployed hash below before use.</li>
-                <li>The pool authority cannot spend notes, but it can pause deposits and private spends (full exits stay open) and change checkpoint timing within fixed bounds. Because every spend needs a recent checkpoint, extreme settings could delay exits.</li>
+                <li>The pool authority cannot spend notes, but it can pause deposits and private spends (full exits stay open with read-only GlobalRootHistory) and adjust rent-fee caps within fixed bounds. Because GlobalRootHistory updates inline with zero idle wall-clock expiry and immutable root_epoch_interval, no authority can delay or block full exits.</li>
                 <li>Both authorities are currently one operator key (<code style={{ wordBreak: 'break-all' }}>{AUDREN.operatorAuthority}</code>), not a multisig.</li>
                 <li>Token issuers keep their own controls: a freeze authority, permanent delegate, pausable mint, or upgradable transfer hook applies to the shared vault account for that token and so to every Audren holder of it.</li>
                 <li>Users and institutions are solely responsible for safeguarding master seeds, viewing keys, and auditor keys.</li>
@@ -134,6 +134,15 @@ export default function TermsPage() {
                     <td><code>{AUDREN.pool0Pda}</code></td>
                     <td>
                       <a href={solscanAddress(AUDREN.pool0Pda)} target="_blank" rel="noreferrer" className={styles.textLink}>
+                        Solscan <ArrowUpRight size={12} />
+                      </a>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><span className={styles.tableLead}>GlobalRootHistory PDA (Pool #0, AUD1RT01, 10,216 B)</span></td>
+                    <td><code>{AUDREN.rootsPda}</code></td>
+                    <td>
+                      <a href={solscanAddress(AUDREN.rootsPda)} target="_blank" rel="noreferrer" className={styles.textLink}>
                         Solscan <ArrowUpRight size={12} />
                       </a>
                     </td>

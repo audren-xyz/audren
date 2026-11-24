@@ -10,8 +10,9 @@ All addresses below are public on-chain Solana accounts. No private keys or RPC 
 | **ProgramData Account** | `Gj4hW4KuMTNR9YTPmixRPsNcMNwRvYTXdksxLgoGRiVM` |
 | **Protocol Version** | `PROTOCOL_VERSION = 1` (`audren_*` 12-PDA architecture, unified SOL=WSOL, `96` memos/page `10,240 B` `MemoPage`) |
 | **Pool #0 PDA (`audren_pool`)** | `5Bvt5f5QMfsVb9TyX8bzkRMvAX6JSWwRtnymGveF9U3G` |
+| **GlobalRootHistory PDA (`audren_roots`, v1.3.0)** | `249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7` (bump `254`, `10,216 B` `AUD1RT01` dual-ring root history) |
 | **Upgrade & Pool #0 Authority** | `3WzAUVNX5tm9gJWS2Y2Vg3wMnAtTm23fFX2jHaYy67bV` (one operator key, not a multisig) |
-| **Deployed vs. source** | Mainnet runs v1.2.0 (commit `b60ec02`). Source `1.2.1` changes, including immutable `ckpt_interval` in `UpdatePool`, are not yet deployed. |
+| **Deployed vs. source** | Mainnet currently runs v1.2.0 (commit `b60ec02`). Source `v1.3.0` (`156,832 B` sBPFv3 ELF, SHA-256 `811f011247b85465abc72083cd47bfdeef629335ffdba48edc6968c6042a027d`) adds inline dual-ring `GlobalRootHistory` (`249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7`), one-shot `InitRootHistory` (`Tag 4`), zero-crank auto-`OpenPage`, and calibrated tight CU limits (activated atomically during upgrade via `./scripts/upgrade-program.sh <devnet|mainnet>`). |
 | **Vault Authority PDA (`audren_vault_auth`)** | `3aMtBvVMatfBvoBWQaTxCPwQ2SWyW5ejceVgLFTtk2WF` |
 | **Canonical Pool #0 ALT (Mainnet)** | `Db1aWwM1Tat54Pm3fHdAwYxL6jDWWJzfe3MUR28M3nZ6` (`40` entries, frozen) |
 | **Canonical Pool #0 ALT (Devnet)** | `A5FrkN6y3AcMh6fdyp489gTUhPFvVuhmyHTLN3H8esBe` (`40` entries, frozen) |
@@ -58,13 +59,14 @@ python3 idl/generate-idl.py && python3 idl/verify-idl.py
 # 2. Build deterministic Linux/Docker sBPFv3 artifact (`program/target/deploy/audren.so`)
 ./scripts/upgrade-program.sh build-verifiable
 
-# 3. Upgrade Devnet (deploys ELF + syncs & verifies `security` and `idl` metadata)
+# 3. Upgrade Devnet (deploys ELF + auto-runs [1c] Pool #0 InitRootHistory + syncs & verifies `security` and `idl` metadata)
 ./scripts/upgrade-program.sh devnet
 
-# 4. Upgrade Mainnet from a clean, pushed commit (with frozen BGM17 ceremony VK and Docker build)
+# 4. Upgrade Mainnet from a clean, pushed commit (deploys Docker ELF + auto-runs [1c] Pool #0 InitRootHistory + metadata + OtterSec verify + GitHub Release)
 ./scripts/upgrade-program.sh mainnet
 
-# 5. Audit live cluster compliance
+# 5. Update `apps/web/lib/protocol.ts` & `docs/DEPLOYMENTS.md` with the new commit / ELF SHA-256 / release tag,
+#    verify cross-repo parity (`python3 idl/verify-idl.py`), deploy `apps/web`, then audit live Mainnet compliance:
 ./scripts/upgrade-program.sh check mainnet
 ```
 

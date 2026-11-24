@@ -5,6 +5,7 @@
 //! sBPFv3 binaries inside LiteSVM (`agave-feature-set 4.3.0`) over real Solana Transaction v1
 //! (`0x81`, `4,096 B`) wire messages.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use agave_feature_set::FeatureSet;
@@ -22,32 +23,42 @@ use audren_client::{
             OPEN_PAGE_KIND_SUBTREE, VK_ID_DEFAULT,
         },
         layout::{
-            read_32, read_u16, read_u64, LaneTreeHeader, PoolState, LN_OFF_NEXT_LEAF, MEMO_CT_LEN,
-            MEMO_NOTES_PER_PAGE, MEMO_PAGE_LEN, MM_OFF_CIPHERTEXTS, MM_OFF_COUNT,
-            MM_OFF_EPHEMERAL_PKS, MM_OFF_VIEW_TAGS, PL_OFF_PENDING_AUTHORITY, SB_OFF_LEAVES,
-            SUBROOT_PAGE_LEN, SUBTREE_LEAVES, SUBTREE_PAGE_LEN,
+            read_32, read_u16, read_u64, GlobalRootHistory, LaneTreeHeader, PoolState,
+            LN_OFF_NEXT_LEAF, MEMO_CT_LEN, MEMO_NOTES_PER_PAGE, MEMO_PAGE_LEN, MM_OFF_CIPHERTEXTS,
+            MM_OFF_COUNT, MM_OFF_EPHEMERAL_PKS, MM_OFF_VIEW_TAGS, PL_OFF_PENDING_AUTHORITY,
+            PL_OFF_RESERVED_24, ROOT_HISTORY_LEN, SB_OFF_LEAVES, SUBROOT_PAGE_LEN, SUBTREE_LEAVES,
+            SUBTREE_PAGE_LEN,
         },
-        ASSOCIATED_TOKEN_PROGRAM_ID, AUDREN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID, NUM_LANES,
-        PROTOCOL_VERSION, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, WSOL_MINT,
+        ASSOCIATED_TOKEN_PROGRAM_ID, AUDREN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID, CU_LIMIT_DEPOSIT,
+        CU_LIMIT_DEPOSIT_HOOK, CU_LIMIT_EXEC_VIA_ESCROW_BASE, CU_LIMIT_INIT_LANE,
+        CU_LIMIT_INIT_POOL, CU_LIMIT_INIT_ROOT_HISTORY, CU_LIMIT_OPEN_PAGE,
+        CU_LIMIT_TRANSACT_FULL_EXIT, CU_LIMIT_TRANSACT_PRIVATE, CU_LIMIT_TRANSACT_WITHDRAW,
+        CU_LIMIT_TRANSACT_WITHDRAW_HOOK,
+        DEFAULT_ROOT_EPOCH_INTERVAL, EPOCH_RING_LEN, NUM_LANES, PROTOCOL_VERSION, ROOT_RING_EPOCH,
+        ROOT_RING_SLOT, SLOT_RING_LEN, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, WSOL_MINT,
     },
     instructions::{
-        build_deposit, build_exec_via_escrow, build_init_lane, build_init_pool, build_open_page,
-        build_publish_checkpoint, build_set_paused, build_transact, build_update_pool,
-        compute_exec_ctx_hash, compute_page_rollovers, compute_transact_ctx_hash,
-        deterministic_note_rent_fee, AudrenAccountMeta, AudrenInstruction, UpdatePoolAction,
+        build_auto_open_page_ixs, build_deposit, build_exec_via_escrow, build_init_lane,
+        build_init_pool, build_init_root_history, build_open_page, build_set_paused,
+        build_transact, build_update_pool, build_update_pool_params, compute_exec_ctx_hash,
+        compute_page_rollovers, compute_transact_ctx_hash, deterministic_note_rent_fee,
+        plan_auto_open_pages, recommended_cu_limit_deposit, recommended_cu_limit_exec_via_escrow,
+        recommended_cu_limit_init_lane, recommended_cu_limit_init_pool,
+        recommended_cu_limit_init_root_history, recommended_cu_limit_open_page,
+        recommended_cu_limit_transact, AudrenAccountMeta, AudrenInstruction, UpdatePoolAction,
     },
     keys::{
         check_memo_view_tag, encrypt_note_memo, encrypt_note_memo_with_payment_id,
         prepare_dynamic_swap_memo, try_decrypt_and_verify_memo_entry, AudrenAddress, AudrenKeys,
     },
     pda::{
-        derive_ata, derive_checkpoint_pda, derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda,
-        derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda,
+        derive_ata, derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda, derive_memo_pda,
+        derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda, derive_roots_pda,
         derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda,
     },
     prover::{asset_id_bytes_for_mint, asset_id_for_mint, AudrenProver},
     router::prepare_escrow_accounts_for_audren,
-    scanner::{decode_root_checkpoint, reconstruct_witness_with},
+    scanner::{decode_global_root_history, reconstruct_witness_for_notes, reconstruct_witness_with},
     store::CompactWalletStore,
 };
 use litesvm::{types::TransactionResult, LiteSVM};
@@ -74,8 +85,7 @@ use spl_token_2022_interface::{
 };
 
 const POOL_ID: u32 = 0;
-const CKPT_INTERVAL: u64 = 8;
-const MAX_CKPT_AGE: u64 = 1_536;
+const ROOT_EPOCH_INTERVAL: u64 = DEFAULT_ROOT_EPOCH_INTERVAL;
 const DEFAULT_LOADED_ACCOUNTS_DATA_SIZE: u32 = 64 * 1024 * 1024;
 
 fn spl_token_id() -> Address {
@@ -431,7 +441,7 @@ fn dex_swap_spl_to_spl_data(
     d
 }
 
-/// Bootstrap Pool #0 + `initial_lanes` active lanes + canonical WSOL `vault_ata`.
+/// Bootstrap Pool #0 (with `GlobalRootHistory`) + `initial_lanes` active lanes + canonical WSOL `vault_ata`.
 fn bootstrap_pool(
     svm: &mut LiteSVM,
     program_id: Address,
@@ -447,8 +457,7 @@ fn bootstrap_pool(
                 program_id,
                 payer.pubkey(),
                 POOL_ID,
-                CKPT_INTERVAL,
-                MAX_CKPT_AGE,
+                ROOT_EPOCH_INTERVAL,
                 2_000_000,
                 500_000,
             ))],
@@ -497,8 +506,7 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
                 program_id,
                 payer.pubkey(),
                 POOL_ID,
-                CKPT_INTERVAL,
-                MAX_CKPT_AGE,
+                ROOT_EPOCH_INTERVAL,
                 2_000_000,
                 500_000,
             ))],
@@ -637,54 +645,15 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
     }
     assert_eq!(token_balance(&svm, &vault_wsol), 100_000_000);
 
-    // Wrong lane count in PublishCheckpoint rejected (6000)
-    expect_err_code(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                13,
-                3,
-            ))],
-            200_000,
-        ),
-        6000,
-        "wrong lane count checkpoint",
-    );
-
-    let cu_ckpt_4 = expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                13,
-                4,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint 4-lane",
-    );
-    let ckpt4 = decode_root_checkpoint(
-        &svm.get_account(&derive_checkpoint_pda(&program_id, POOL_ID, 13).0)
-            .unwrap()
-            .data,
-    )
-    .unwrap();
-    assert_eq!(ckpt4.version, PROTOCOL_VERSION);
+    let (roots_pda, _) = derive_roots_pda(&program_id, POOL_ID);
+    let roots4 = decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    assert_eq!(roots4.version, PROTOCOL_VERSION);
     let zeros = zero_hashes_4ary();
     for l in 4..NUM_LANES {
-        assert_eq!(ckpt4.lane_roots[l], fr_to_be_bytes(&zeros[18]));
+        assert_eq!(roots4.latest_lane_roots[l], fr_to_be_bytes(&zeros[18]));
     }
 
-    // Expand 4 -> 8 -> 16 and verify bit-for-bit super_root continuity!
+    // Expand 4 -> 8 -> 16 and verify bit-for-bit super_root continuity with zero external crank!
     for l in 4..8u8 {
         expect_ok(
             send_v1(
@@ -697,30 +666,8 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
             "InitLane 4..8",
         );
     }
-    svm.warp_to_slot(112); // epoch 14
-    let cu_ckpt_8 = expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                14,
-                8,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint 8-lane",
-    );
-    let ckpt8 = decode_root_checkpoint(
-        &svm.get_account(&derive_checkpoint_pda(&program_id, POOL_ID, 14).0)
-            .unwrap()
-            .data,
-    )
-    .unwrap();
-    assert_eq!(ckpt4.super_root, ckpt8.super_root);
+    let roots8 = decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    assert_eq!(roots4.latest_super_root, roots8.latest_super_root);
 
     for l in 8..16u8 {
         expect_ok(
@@ -734,33 +681,157 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
             "InitLane 8..16",
         );
     }
-    svm.warp_to_slot(120); // epoch 15
-    let cu_ckpt_16 = expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                15,
-                16,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint 16-lane",
-    );
-    let ckpt16 = decode_root_checkpoint(
-        &svm.get_account(&derive_checkpoint_pda(&program_id, POOL_ID, 15).0)
-            .unwrap()
-            .data,
-    )
-    .unwrap();
-    assert_eq!(ckpt8.super_root, ckpt16.super_root);
+    let roots16 = decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    assert_eq!(roots8.latest_super_root, roots16.latest_super_root);
+
+    // Immediately deposit into newly expanded Lane 4 & Lane 15 and verify instant spendability!
+    for expanded_lane in [4u8, 15u8] {
+        let (tw_e, bl_e, memo_e) =
+            encrypt_note_memo(&alice.view_pk, [0x40 + expanded_lane; 32], 10_000_000, &WSOL_MINT)
+                .unwrap();
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    wsol_mint_id(),
+                    payer.pubkey(),
+                    vault_wsol,
+                    spl_token_id(),
+                    expanded_lane,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    true,
+                    false,
+                    10_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw_e),
+                    bl_e,
+                    &memo_e,
+                    &[],
+                ))],
+                200_000,
+            ),
+            "deposit into expanded lane 4/15",
+        );
+        let (path_e, rk_e, ri_e, sr_e) = reconstruct_witness_with(
+            |a| svm.get_account(a).map(|x| x.data),
+            &program_id,
+            POOL_ID,
+            expanded_lane,
+            0,
+            alice.view_sk,
+        )
+        .unwrap();
+        let (tw_eo, bl_eo, memo_eo) =
+            encrypt_note_memo(&alice.view_pk, [0x50 + expanded_lane; 32], 10_000_000, &WSOL_MINT)
+                .unwrap();
+        let ctx_e = compute_transact_ctx_hash(
+            &program_id,
+            POOL_ID,
+            VK_ID_DEFAULT,
+            expanded_lane,
+            0b001,
+            ASSET_MODE_PRIVATE,
+            false,
+            None,
+            None,
+            &[0u8; 32],
+            0,
+            0,
+            &memo_eo,
+        );
+        let b_e = prover.build_and_prove(
+            sr_e,
+            asset_wsol,
+            Fr::from(0u64),
+            0,
+            0,
+            ctx_e,
+            true,
+            [
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: tw_e,
+                    asset_id: asset_wsol,
+                    amount: 10_000_000,
+                    blinding: bl_e,
+                    is_dummy: false,
+                    merkle_path: path_e,
+                },
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: Fr::from(0u64),
+                    asset_id: asset_wsol,
+                    amount: 0,
+                    blinding: Fr::from(888u64),
+                    is_dummy: true,
+                    merkle_path: MerklePath4Ary::default(),
+                },
+            ],
+            [
+                JoinSplitOutputWitness {
+                    stealth_owner: derive_stealth_owner(alice.spend_pk, tw_eo),
+                    asset_id: asset_wsol,
+                    amount: 10_000_000,
+                    blinding: bl_eo,
+                },
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+            ],
+            [0x5A + expanded_lane; 32],
+        );
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_transact(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    VK_ID_DEFAULT,
+                    rk_e,
+                    ri_e,
+                    expanded_lane,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0b001,
+                    ASSET_MODE_PRIVATE,
+                    false,
+                    None,
+                    (None, None, None),
+                    &b_e.proof_192,
+                    &b_e.nf0,
+                    &b_e.nf1,
+                    &b_e.cm0,
+                    &b_e.cm1,
+                    &b_e.cm2,
+                    0,
+                    0,
+                    payer.pubkey(),
+                    payer.pubkey(),
+                    &memo_eo,
+                    &[],
+                ))],
+                300_000,
+            ),
+            "instant spend on expanded lane 4/15",
+        );
+    }
+    let roots_after_exp =
+        decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
 
     // Sync CompactWalletStore via sequential page ingestion, persist to JSON, reload, and spend
-    // a 4-lane note under ckpt16 into newly activated lane 14!
+    // a 4-lane note under GlobalRootHistory into newly activated lane 14!
     let mut store = CompactWalletStore::new(POOL_ID, 0);
     for l in 0..4u8 {
         let sub_data = svm
@@ -796,7 +867,9 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
     // Persist CompactWalletStore to JSON & reload -> reconstruct offline witness -> spend into lane 14!
     let persisted = store.to_json_bytes().unwrap();
     let reloaded = CompactWalletStore::from_json_bytes(&persisted).unwrap();
-    let (super_root, path0) = reloaded.build_witness_for_note(&note0, &ckpt16).unwrap();
+    let (choice0, super_root, path0) = reloaded
+        .build_witness_from_root_history(&note0, &roots_after_exp)
+        .unwrap();
 
     let (tw_o, bl_o, memo_o) =
         encrypt_note_memo(&alice.view_pk, [0x71; 32], 25_000_000, &WSOL_MINT).unwrap();
@@ -856,6 +929,9 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
         [0x55; 32],
     );
 
+    // Advance 1 slot so `slot_ring[choice0.ring_idx]` stays preserved across the spend,
+    // letting the exact replay below reach the NullifierPDA double-spend guard (`Custom(6012)`)!
+    svm.warp_to_slot(105);
     let spend_cu = expect_ok(
         send_v1(
             &mut svm,
@@ -866,7 +942,8 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
                 payer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                15,
+                choice0.ring_kind,
+                choice0.ring_idx,
                 14,
                 0,
                 0,
@@ -906,7 +983,8 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
                 payer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                15,
+                choice0.ring_kind,
+                choice0.ring_idx,
                 14,
                 0,
                 0,
@@ -957,7 +1035,7 @@ fn test_dynamic_lanes_expansion_and_compact_wallet_store() {
     assert!(store2.notes[0].spent, "FVK must mark spent note via NullifierPage");
     assert_eq!(store2.balances().get(&WSOL_MINT), Some(&100_000_000));
     println!(
-        "  [TEST 1 PASSED] Ckpt 4/8/16={cu_ckpt_4}/{cu_ckpt_8}/{cu_ckpt_16} CU | Spend={spend_cu} CU"
+        "  [TEST 1 PASSED] 4->8->16 expansion (Lane 4 & 15 instant spend) | Cross-lane Spend={spend_cu} CU"
     );
 }
 
@@ -1092,31 +1170,15 @@ fn test_zero_dust_sweep_wsol_unwrap_and_pause_escape() {
         "deposit 2 WSOL",
     );
 
-    expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                13,
-                4,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint",
-    );
-
-    // Relayed partial WSOL unwrap: 0.9 SOL -> fresh 0-lamport session0, 0.01 SOL -> relayer, 1.09 WSOL change -> alice
-    let (_, sr, path_w) = reconstruct_witness_with(
+    // Relayed partial WSOL unwrap (instant spend, zero external checkpoint!):
+    // 0.9 SOL -> fresh 0-lamport session0, 0.01 SOL -> relayer, 1.09 WSOL change -> alice
+    let (path_w, rk_w, ri_w, sr) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         1,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let (tw_chg, bl_chg, memo_chg) =
@@ -1177,6 +1239,45 @@ fn test_zero_dust_sweep_wsol_unwrap_and_pause_escape() {
         [0x61; 32],
     );
 
+    // Verify output_mask != 0 MUST reject READ-ONLY roots_acc (Custom 6002)!
+    let mut bad_ro_ix = to_svm_ix(&build_transact(
+        program_id,
+        relayer.pubkey(),
+        POOL_ID,
+        VK_ID_DEFAULT,
+        rk_w,
+        ri_w,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0b001,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+        (None, None, None),
+        &b_uw.proof_192,
+        &b_uw.nf0,
+        &b_uw.nf1,
+        &b_uw.cm0,
+        &b_uw.cm1,
+        &b_uw.cm2,
+        900_000_000,
+        10_000_000,
+        session_addr,
+        relayer.pubkey(),
+        &memo_chg,
+        &[],
+    ));
+    assert!(bad_ro_ix.accounts[2].is_writable);
+    bad_ro_ix.accounts[2].is_writable = false;
+    expect_err_code(
+        send_v1(&mut svm, &relayer, &[], &[bad_ro_ix], 300_000),
+        6002,
+        "output_mask != 0 with read-only roots_acc MUST be rejected",
+    );
+
     let cu_uw = expect_ok(
         send_v1(
             &mut svm,
@@ -1187,7 +1288,8 @@ fn test_zero_dust_sweep_wsol_unwrap_and_pause_escape() {
                 relayer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_w,
+                ri_w,
                 1,
                 0,
                 0,
@@ -1224,7 +1326,8 @@ fn test_zero_dust_sweep_wsol_unwrap_and_pause_escape() {
         "ephemeral audren_unwrap PDA must be destroyed"
     );
 
-    // Pause pool: partial WSOL unwrap blocked (6027), FULL WSOL unwrap exit bypasses pause!
+    // Pause pool + warp +500_000 idle slots with ZERO crank:
+    // FULL WSOL unwrap exit (output_mask == 0) with READ-ONLY roots_acc bypasses pause AND idle expiry!
     expect_ok(
         send_v1(
             &mut svm,
@@ -1235,31 +1338,15 @@ fn test_zero_dust_sweep_wsol_unwrap_and_pause_escape() {
         ),
         "SetPaused(true)",
     );
-    svm.warp_to_slot(112); // epoch 14 — PublishCheckpoint is pause-exempt!
-    expect_ok(
-        send_v1(
-            &mut svm,
-            &relayer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                relayer.pubkey(),
-                POOL_ID,
-                14,
-                4,
-            ))],
-            200_000,
-        ),
-        "pause-exempt PublishCheckpoint",
-    );
+    svm.warp_to_slot(500_104); // +500_000 idle slots! Zero checkpoint crank!
 
-    let (_, sr2, path_chg) = reconstruct_witness_with(
+    let (path_chg, rk_chg, ri_chg, sr2) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        14,
         1,
         1,
+        alice.view_sk,
     )
     .unwrap();
     let ctx_full = compute_transact_ctx_hash(
@@ -1312,43 +1399,43 @@ fn test_zero_dust_sweep_wsol_unwrap_and_pause_escape() {
         ],
         [0x62; 32],
     );
+    let full_exit_ix = to_svm_ix(&build_transact(
+        program_id,
+        relayer.pubkey(),
+        POOL_ID,
+        VK_ID_DEFAULT,
+        rk_chg,
+        ri_chg,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+        (None, None, None),
+        &b_full.proof_192,
+        &b_full.nf0,
+        &b_full.nf1,
+        &b_full.cm0,
+        &b_full.cm1,
+        &b_full.cm2,
+        1_080_000_000,
+        10_000_000,
+        session_addr,
+        relayer.pubkey(),
+        &[],
+        &[],
+    ));
+    assert!(
+        !full_exit_ix.accounts[2].is_writable,
+        "full exit (output_mask == 0) MUST mark GlobalRootHistory READ-ONLY"
+    );
     let cu_full = expect_ok(
-        send_v1(
-            &mut svm,
-            &relayer,
-            &[],
-            &[to_svm_ix(&build_transact(
-                program_id,
-                relayer.pubkey(),
-                POOL_ID,
-                VK_ID_DEFAULT,
-                14,
-                1,
-                0,
-                0,
-                0,
-                0,
-                0,
-                ASSET_MODE_PUBLIC,
-                true,
-                Some((wsol_mint_id(), vault_wsol, spl_token_id())),
-                (None, None, None),
-                &b_full.proof_192,
-                &b_full.nf0,
-                &b_full.nf1,
-                &b_full.cm0,
-                &b_full.cm1,
-                &b_full.cm2,
-                1_080_000_000,
-                10_000_000,
-                session_addr,
-                relayer.pubkey(),
-                &[],
-                &[],
-            ))],
-            300_000,
-        ),
-        "pause-exempt FULL WSOL unwrap exit",
+        send_v1(&mut svm, &relayer, &[], &[full_exit_ix], 300_000),
+        "pause-exempt FULL WSOL unwrap exit after +500_000 idle slots (read-only roots_acc)",
     );
     assert_eq!(svm.get_account(&session_addr).unwrap().lamports, 1_980_000_000);
     assert_eq!(token_balance(&svm, &vault_wsol), net_sweep);
@@ -1411,6 +1498,7 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
     mint_to(&mut svm, &payer, token_2022_id(), hook_mint, payer_hk, 50_000_000);
     let (tw_hk, bl_hk, memo_hk) =
         encrypt_note_memo(&alice.view_pk, [0x31; 32], 20_000_000, &hook_mint.to_bytes()).unwrap();
+    let (roots_pda, _) = derive_roots_pda(&program_id, POOL_ID);
     let cu_hk_dep = expect_ok(
         send_v1(
             &mut svm,
@@ -1439,12 +1527,14 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
                 &[
                     AudrenAccountMeta::readonly(extra_meta_pda, false),
                     AudrenAccountMeta::writable(hook_state_pda, false),
+                    // Pass roots_pda in trailing accounts to prove TransferHook CPI filters it out!
+                    AudrenAccountMeta::writable(roots_pda, false),
                     AudrenAccountMeta::readonly(hook_id, false),
                 ],
             ))],
             250_000,
         ),
-        "Deposit active TransferHook",
+        "Deposit active TransferHook (filtering roots_acc)",
     );
     assert_eq!(token_balance(&svm, &vault_hk), 20_000_000);
 
@@ -1544,31 +1634,15 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
         ),
         "deposit 100M USDC",
     );
-    expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                13,
-                4,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint",
-    );
-
-    // 3. Adversarial CPI check: Mode 1 escrow Assign hijack MUST be blocked with Custom(6031)!
-    let (_, sr_u, path_u) = reconstruct_witness_with(
+    // 3. Adversarial CPI check: Mode 1 escrow Assign hijack MUST be blocked with Custom(6031),
+    //    AND passing GlobalRootHistory (`roots_pda`) inside `router_accounts` MUST be blocked with Custom(6021)!
+    let (path_u, rk_u, ri_u, sr_u) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         2,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let asset_wsol = asset_id_for_mint(None);
@@ -1633,7 +1707,7 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
                 amount: 100_000_000,
                 blinding: bl_u,
                 is_dummy: false,
-                merkle_path: path_u,
+                merkle_path: path_u.clone(),
             },
             JoinSplitInputWitness {
                 spend_sk: alice.spend_sk,
@@ -1667,7 +1741,8 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
                 relayer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_u,
+                ri_u,
                 3,
                 0,
                 0,
@@ -1705,16 +1780,144 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
         "Mode 1 escrow Assign hijack blocked",
     );
 
+    // 3b. Adversarial CPI check: passing GlobalRootHistory (`roots_pda`) in `router_accounts` MUST fail with Custom(6021)!
+    let roots_in_router_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_t22, false),
+        AudrenAccountMeta::writable(esc0_t22, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(t22_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(token_2022_id(), false),
+        AudrenAccountMeta::writable(roots_pda, false),
+    ];
+    let honest_u2t_data = dex_swap_spl_to_spl_data(0, 50_000_000, 50_000_000, 6, 6);
+    let ctx_roots_atk = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_t22),
+        1,
+        &router_id,
+        &roots_in_router_accs,
+        &[],
+        &ost,
+        &obl,
+        &dhead,
+        &dmask,
+        &honest_u2t_data,
+        &[],
+    );
+    let b_roots_atk = prover.build_and_prove(
+        sr_u,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_roots_atk,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x71; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_u,
+                ri_u,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (t22_mint, vault_t22, esc0_t22, token_2022_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_roots_atk.proof_192,
+                &b_roots_atk.nf0,
+                &b_roots_atk.nf1,
+                &b_roots_atk.cm0,
+                &b_roots_atk.cm1,
+                &b_roots_atk.cm2,
+                50_000_000,
+                1,
+                &ost,
+                &obl,
+                &dhead,
+                &dmask,
+                router_id,
+                &honest_u2t_data,
+                roots_in_router_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6021,
+        "ExecViaEscrow passing GlobalRootHistory in router_accounts blocked (6021)",
+    );
+
     // 4. Positive EXEC_FLAG_FEE_ON_OUTPUT: WSOL (100M) -> Token-2022 2.5% TransferFee
     //    Router sends 100M gross -> escrow gets 97.5M -> relayer fee 5M (relayer nets 4,875,000) ->
     //    remaining 92.5M swept -> vault nets 90,187,500 committed & FVK recovered!
-    let (_, sr_s, path_s) = reconstruct_witness_with(
+    let (path_s, rk_s, ri_s, sr_s) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         1,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let (dtw2, dbl2, dhead2, dmask2) = prepare_dynamic_swap_memo(&alice.view_pk, [0x49; 32]).unwrap();
@@ -1833,7 +2036,8 @@ fn test_t22_hook_exec_firewall_and_fee_on_output() {
                 relayer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_s,
+                ri_s,
                 3,
                 0,
                 0,
@@ -2013,7 +2217,7 @@ fn test_regression_a_non_canonical_ata_rejected_across_all_instructions() {
         "Deposit(SPL) non-canonical vault ATA rejected",
     );
 
-    // Legitimately deposit USDC into canonical vault ATA & publish checkpoint
+    // Legitimately deposit USDC into canonical vault ATA (immediately reflected in GlobalRootHistory!)
     expect_ok(
         send_v1(
             &mut svm,
@@ -2045,31 +2249,15 @@ fn test_regression_a_non_canonical_ata_rejected_across_all_instructions() {
         ),
         "canonical Deposit(SPL)",
     );
-    expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                13,
-                4,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint",
-    );
 
     // 3. Transact (ASSET_MODE_PUBLIC) with non-canonical vault USDC account -> MUST fail with 6020!
-    let (_, sr, path) = reconstruct_witness_with(
+    let (path, rk_a, ri_a, sr) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         0,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let asset_usdc = asset_id_for_mint(Some(&usdc_mint));
@@ -2133,7 +2321,8 @@ fn test_regression_a_non_canonical_ata_rejected_across_all_instructions() {
                 payer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_a,
+                ri_a,
                 1,
                 0,
                 0,
@@ -2201,7 +2390,8 @@ fn test_regression_a_non_canonical_ata_rejected_across_all_instructions() {
                     payer.pubkey(),
                     POOL_ID,
                     VK_ID_DEFAULT,
-                    13,
+                    rk_a,
+                    ri_a,
                     1,
                     0,
                     0,
@@ -2271,8 +2461,9 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
 
         // Even at `exemption_threshold == 0.0`, NO pre-airdrop is required: `create_pda_safe` and
         // `ix_open_page` enforce a `>= 1` lamport floor so Solana never reaps PoolState, LaneRentVault,
-        // pages, RootCheckpoint, or NullifierPDA!
+        // pages, GlobalRootHistory, or NullifierPDA!
         let (pool_pda, _) = derive_pool_pda(&program_id, POOL_ID);
+        let (roots_pda, _) = derive_roots_pda(&program_id, POOL_ID);
         let (lane_rent_pda, _) = derive_lane_rent_pda(&program_id, POOL_ID, 0);
         let (memo1_pda, _) = derive_memo_pda(&program_id, POOL_ID, 0, 1);
 
@@ -2282,6 +2473,10 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
         assert_eq!(
             pool_lamports, expected_pool_actual,
             "PoolState lamports mismatch at exemption_threshold={threshold}"
+        );
+        assert!(
+            svm.get_account(&roots_pda).unwrap().lamports >= 1,
+            "GlobalRootHistory must survive at >= 1 lamport at exemption_threshold={threshold}"
         );
 
         let alice = AudrenKeys::from_seed(&[0xC1u8; 32]);
@@ -2318,6 +2513,15 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
             ),
             "Deposit under custom Rent sysvar",
         );
+        if exp_pool_rent == 0 {
+            // `collect_lane_rent_fee` clamps `min_vault` and every `page_rent` with `.max(1)`
+            // so `target_balance = 5`, `live_per_note = 3`, raising `LaneRentVault` from 1 -> 4 lamports!
+            assert_eq!(
+                svm.get_account(&lane_rent_pda).unwrap().lamports,
+                4,
+                "zero-rent collect_lane_rent_fee must fund LaneRentVault (1 -> 4 lamports)"
+            );
+        }
 
         expect_ok(
             send_v1(
@@ -2346,33 +2550,24 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
             svm.get_account(&lane_rent_pda).unwrap().lamports >= 1,
             "LaneRentVault sentinel must never be drained to 0 lamports"
         );
+        if exp_pool_rent == 0 {
+            assert_eq!(
+                svm.get_account(&lane_rent_pda).unwrap().lamports,
+                3,
+                "zero-rent OpenPage(MEMO, 1) must be 100% subsidized by LaneRentVault (4 -> 3 lamports)"
+            );
+        }
 
         // Zero-rent NullifierPDA anti-reaping check: spend the note via Transact, verify NullifierPDA
         // survives with `lamports == 1`, and verify double-spend replay is rejected with Custom(6012)!
         if exp_pool_rent == 0 {
-            expect_ok(
-                send_v1(
-                    &mut svm,
-                    &payer,
-                    &[],
-                    &[to_svm_ix(&build_publish_checkpoint(
-                        program_id,
-                        payer.pubkey(),
-                        POOL_ID,
-                        13,
-                        1,
-                    ))],
-                    200_000,
-                ),
-                "PublishCheckpoint under zero-rent sysvar",
-            );
-            let (_, sr, path) = reconstruct_witness_with(
+            let (path, rk_z, ri_z, sr) = reconstruct_witness_with(
                 |a| svm.get_account(a).map(|x| x.data),
                 &program_id,
                 POOL_ID,
-                13,
                 0,
                 0,
+                alice.view_sk,
             )
             .unwrap();
             let asset_wsol = asset_id_for_mint(None);
@@ -2438,7 +2633,8 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
                 payer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_z,
+                ri_z,
                 0,
                 0,
                 0,
@@ -2477,9 +2673,104 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
                 6012,
                 "NullifierPDA replay on zero-rent cluster MUST fail (not reaped)",
             );
+
+            // Zero-rent `DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT` parity:
+            // `deterministic_note_rent_fee` clamps `sub_rent`, `sr_rent`, and `memo_rent` with
+            // `.max(1)`, deducting exact `1 + 1 + 1 = 3` lamports (matching `collect_lane_rent_fee`).
+            let zero_rent_fee = deterministic_note_rent_fee(
+                2_000_000,
+                svm.minimum_balance_for_rent_exemption(SUBTREE_PAGE_LEN),
+                svm.minimum_balance_for_rent_exemption(SUBROOT_PAGE_LEN),
+                svm.minimum_balance_for_rent_exemption(MEMO_PAGE_LEN),
+            );
+            assert_eq!(
+                zero_rent_fee, 3,
+                "deterministic_note_rent_fee must equal 1+1+1=3 on a zero-rent cluster"
+            );
+            let sweeper = Keypair::new();
+            let sweep_start = 10_000_000u64;
+            svm.airdrop(&sweeper.pubkey(), sweep_start).unwrap();
+            let pre_vault_bal = token_balance(&svm, &vault_wsol);
+            let pre_lane_rent_lamports = svm.get_account(&lane_rent_pda).unwrap().lamports;
+            let gross_sweep = sweep_start - 5_000;
+            let net_sweep = gross_sweep - zero_rent_fee;
+            let (tw_z, bl_z, memo_z) =
+                encrypt_note_memo(&alice.view_pk, [0xC5; 32], net_sweep, &WSOL_MINT).unwrap();
+            expect_ok(
+                send_v1(
+                    &mut svm,
+                    &sweeper,
+                    &[],
+                    &[to_svm_ix(&build_deposit(
+                        program_id,
+                        sweeper.pubkey(),
+                        POOL_ID,
+                        wsol_mint_id(),
+                        sweeper.pubkey(),
+                        vault_wsol,
+                        spl_token_id(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        None,
+                        None,
+                        true,
+                        true,
+                        gross_sweep,
+                        derive_stealth_owner(alice.spend_pk, tw_z),
+                        bl_z,
+                        &memo_z,
+                        &[],
+                    ))],
+                    200_000,
+                ),
+                "Deposit(NATIVE_SOL | FEE_FROM_AMOUNT) under zero-rent sysvar",
+            );
+            assert_eq!(
+                svm.get_account(&sweeper.pubkey()).map(|a| a.lamports).unwrap_or(0),
+                0,
+                "zero-rent fee_from_amount sweep must leave sweeper at exact 0 lamports"
+            );
+            assert_eq!(
+                svm.get_account(&lane_rent_pda).unwrap().lamports - pre_lane_rent_lamports,
+                3,
+                "zero-rent Deposit(FEE_FROM_AMOUNT) must deduct exact 3 lamports into LaneRentVault"
+            );
+            assert_eq!(
+                token_balance(&svm, &vault_wsol) - pre_vault_bal,
+                net_sweep,
+                "zero-rent Deposit(FEE_FROM_AMOUNT) must wrap exact gross_sweep - 3 lamports"
+            );
+            let mut z_store = CompactWalletStore::new(POOL_ID, 0);
+            let sub0_z = svm
+                .get_account(&derive_subtree_pda(&program_id, POOL_ID, 0, 0).0)
+                .unwrap()
+                .data;
+            let memo0_z = svm
+                .get_account(&derive_memo_pda(&program_id, POOL_ID, 0, 0).0)
+                .unwrap()
+                .data;
+            let z_found = z_store
+                .ingest_lane_pages(
+                    &alice.full_viewing_key(),
+                    0,
+                    &[(0, &sub0_z)],
+                    &[(0, &memo0_z)],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                z_found, 3,
+                "expected 3 notes on lane 0 (initial deposit + transact output + zero-rent sweep)"
+            );
+            assert_eq!(
+                z_store.notes[2].amount, net_sweep,
+                "committed leaf & decrypted memo must match exact gross_sweep - 3 lamports"
+            );
         }
     }
-    println!("  [REGRESSION (b) PASSED] SysvarRent 0.5/0.25/0.0 & zero-rent >=1 lamport NullifierPDA floor verified");
+    println!("  [REGRESSION (b) PASSED] SysvarRent 0.5/0.25/0.0, zero-rent >=1 lamport NullifierPDA floor & 3-lamport FEE_FROM_AMOUNT parity verified");
 }
 
 // ----------------------------------------------------------------------------
@@ -2657,7 +2948,7 @@ fn test_regression_d_update_pool_governance_and_renounce_while_paused_blocked() 
     bootstrap_pool(&mut svm, program_id, &auth1, 2);
     let (pool_pda, _) = derive_pool_pda(&program_id, POOL_ID);
 
-    // 1. UpdateParams: non-authority rejected (6028); invalid params rejected (6000); valid succeeds!
+    // 1. UpdateParams: non-authority rejected (6028); valid succeeds while keeping root_epoch_interval immutable!
     expect_err_code(
         send_v1(
             &mut svm,
@@ -2668,8 +2959,6 @@ fn test_regression_d_update_pool_governance_and_renounce_while_paused_blocked() 
                 rando.pubkey(),
                 POOL_ID,
                 UpdatePoolAction::UpdateParams {
-                    ckpt_interval: 16,
-                    max_ckpt_age: 2_000,
                     note_rent_fee: 1_000_000,
                     nf_rent_fee: 250_000,
                 },
@@ -2679,72 +2968,24 @@ fn test_regression_d_update_pool_governance_and_renounce_while_paused_blocked() 
         6028,
         "non-authority UpdateParams",
     );
-    expect_err_code(
-        send_v1(
-            &mut svm,
-            &auth1,
-            &[],
-            &[to_svm_ix(&build_update_pool(
-                program_id,
-                auth1.pubkey(),
-                POOL_ID,
-                UpdatePoolAction::UpdateParams {
-                    ckpt_interval: 8,
-                    max_ckpt_age: 255 * 8, // must be strictly < 255 * ckpt_interval
-                    note_rent_fee: 1_000_000,
-                    nf_rent_fee: 250_000,
-                },
-            ))],
-            100_000,
-        ),
-        6000,
-        "ring-deadlock UpdateParams rejected",
-    );
-    // Mutating immutable `ckpt_interval` (8 -> 16) MUST be rejected with Custom(6000)!
-    expect_err_code(
-        send_v1(
-            &mut svm,
-            &auth1,
-            &[],
-            &[to_svm_ix(&build_update_pool(
-                program_id,
-                auth1.pubkey(),
-                POOL_ID,
-                UpdatePoolAction::UpdateParams {
-                    ckpt_interval: 16,
-                    max_ckpt_age: 2_048,
-                    note_rent_fee: 1_111_111,
-                    nf_rent_fee: 222_222,
-                },
-            ))],
-            100_000,
-        ),
-        6000,
-        "mutating immutable ckpt_interval rejected",
-    );
     expect_ok(
         send_v1(
             &mut svm,
             &auth1,
             &[],
-            &[to_svm_ix(&build_update_pool(
+            &[to_svm_ix(&build_update_pool_params(
                 program_id,
                 auth1.pubkey(),
                 POOL_ID,
-                UpdatePoolAction::UpdateParams {
-                    ckpt_interval: CKPT_INTERVAL,
-                    max_ckpt_age: 1_600,
-                    note_rent_fee: 1_111_111,
-                    nf_rent_fee: 222_222,
-                },
+                1_111_111,
+                222_222,
             ))],
             100_000,
         ),
-        "valid UpdateParams keeping immutable ckpt_interval",
+        "valid UpdateParams keeping immutable root_epoch_interval",
     );
     let ps = PoolState::decode(&svm.get_account(&pool_pda).unwrap().data).unwrap();
-    assert_eq!(ps.ckpt_interval, CKPT_INTERVAL);
-    assert_eq!(ps.max_ckpt_age, 1_600);
+    assert_eq!(ps.root_epoch_interval, ROOT_EPOCH_INTERVAL);
     assert_eq!(ps.note_rent_fee, 1_111_111);
     assert_eq!(ps.nf_rent_fee, 222_222);
 
@@ -2911,8 +3152,6 @@ fn test_regression_d_update_pool_governance_and_renounce_while_paused_blocked() 
                 auth2.pubkey(),
                 POOL_ID,
                 UpdatePoolAction::UpdateParams {
-                    ckpt_interval: 8,
-                    max_ckpt_age: 1_536,
                     note_rent_fee: 0,
                     nf_rent_fee: 0,
                 },
@@ -2962,7 +3201,7 @@ fn test_regression_d_update_pool_governance_and_renounce_while_paused_blocked() 
         6028,
         "AcceptAuthority on renounced pool with synthetic pending_authority MUST be rejected",
     );
-    println!("  [REGRESSION (d) PASSED] UpdatePool params, ckpt_interval immutability, 2-step authority transfer, renounce-while-paused, and renounced AcceptAuthority guards verified");
+    println!("  [REGRESSION (d) PASSED] UpdatePool params, root_epoch_interval immutability, 2-step authority transfer, renounce-while-paused, and renounced AcceptAuthority guards verified");
 }
 
 // ----------------------------------------------------------------------------
@@ -3088,34 +3327,18 @@ fn test_regression_e_f_low_order_x25519_bech32m_and_96_note_memo_rollover() {
     assert_eq!(read_u16(&svm.get_account(&memo0_pda).unwrap().data, MM_OFF_COUNT), 95);
     assert_eq!(read_u16(&svm.get_account(&memo1_pda).unwrap().data, MM_OFF_COUNT), 0);
 
-    // Publish checkpoint and execute a 2-output private Transact crossing leaf 95 -> leaf 96!
-    expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                13,
-                1,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint at leaf 95",
-    );
+    // Execute a 2-output private Transact crossing leaf 95 -> leaf 96 immediately (zero checkpoint)!
     let plan = compute_page_rollovers(95, 2, 0, 1);
     assert_eq!(plan.out_memo_seq, 0);
     assert_eq!(plan.next_memo_seq, Some(1));
 
-    let (_, sr, path0) = reconstruct_witness_with(
+    let (path0, rk_m, ri_m, sr) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         0,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let asset_wsol = asset_id_for_mint(None);
@@ -3196,7 +3419,8 @@ fn test_regression_e_f_low_order_x25519_bech32m_and_96_note_memo_rollover() {
                 payer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_m,
+                ri_m,
                 0,
                 plan.out_sub_seq,
                 plan.out_root_seq,
@@ -3478,32 +3702,15 @@ fn test_regression_g_v121_security_hardening() {
     );
     assert_eq!(token_balance(&svm, &vault_t22), 39_000_000);
 
-    expect_ok(
-        send_v1(
-            &mut svm,
-            &payer,
-            &[],
-            &[to_svm_ix(&build_publish_checkpoint(
-                program_id,
-                payer.pubkey(),
-                POOL_ID,
-                13,
-                4,
-            ))],
-            200_000,
-        ),
-        "PublishCheckpoint slot 13",
-    );
-
     // Execute economy-mode (`omit_nf1 = true` => `nf1_acc = SYSTEM_PROGRAM_ID`) Transact withdraw
-    // on the TransferHook mint referencing SYSTEM_PROGRAM_ID!
-    let (_, sr, path_hk) = reconstruct_witness_with(
+    // on the TransferHook mint referencing SYSTEM_PROGRAM_ID (instant via GlobalRootHistory)!
+    let (path_hk, rk_hk, ri_hk, sr) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         0,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let asset_hk = asset_id_for_mint(Some(&hook_mint));
@@ -3575,7 +3782,8 @@ fn test_regression_g_v121_security_hardening() {
                 relayer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_hk,
+                ri_hk,
                 0,
                 0,
                 0,
@@ -3612,15 +3820,124 @@ fn test_regression_g_v121_security_hardening() {
         "hook must execute on both recipient and relayer_fee transfers"
     );
 
-    // --- (g2) Aliasing checks: recipient / relayer_fee_recipient aliasing nf0, nf1, vault_ata,
-    //          or non-canonical vault_auth-owned token account MUST be rejected with Custom(6002)! ---
-    let (_, _, path_sol) = reconstruct_witness_with(
+    // Full-exit (`output_mask == 0`) TransferHook withdraw where unused page slots `[7..=9]`
+    // (`subtree_acc`, `subroot_acc`, `memo_acc`) are passed as dummy `SYSTEM_PROGRAM_ID`:
+    // gating those entries in `blocked` on `num_outputs > 0` preserves `SYSTEM_PROGRAM_ID`
+    // for the TransferHook CPI instead of falsely stripping it!
+    let (path_hk_fe, rk_hk_fe, ri_hk_fe, sr_hk_fe) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
+        0,
+        1,
+        alice.view_sk,
+    )
+    .unwrap();
+    let ctx_hk_fe = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        0,
+        0,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some(&recip_hk),
+        None,
+        &fr_to_be_bytes(&asset_hk),
+        18_000_000,
+        0,
+        &[],
+    );
+    let b_hk_fe = prover.build_and_prove(
+        sr_hk_fe,
+        asset_hk,
+        asset_hk,
+        18_000_000,
+        0,
+        ctx_hk_fe,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_chg,
+                asset_id: asset_hk,
+                amount: 18_000_000,
+                blinding: bl_chg,
+                is_dummy: false,
+                merkle_path: path_hk_fe,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_hk,
+                amount: 0,
+                blinding: Fr::from(8u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness::dummy(asset_hk, Fr::from(4u64)),
+            JoinSplitOutputWitness::dummy(asset_hk, Fr::from(5u64)),
+            JoinSplitOutputWitness::dummy(asset_hk, Fr::from(6u64)),
+        ],
+        [0xF8; 32],
+    );
+    let mut fe_hk_ix = to_svm_ix(&build_transact(
+        program_id,
+        relayer.pubkey(),
+        POOL_ID,
+        VK_ID_DEFAULT,
+        rk_hk_fe,
+        ri_hk_fe,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some((hook_mint, vault_hk, token_2022_id())),
+        (None, None, None),
+        &b_hk_fe.proof_192,
+        &b_hk_fe.nf0,
+        &b_hk_fe.nf1,
+        &b_hk_fe.cm0,
+        &b_hk_fe.cm1,
+        &b_hk_fe.cm2,
+        18_000_000,
+        0,
+        recip_hk,
+        relayer_hk,
+        &[],
+        &hook_metas,
+    ));
+    // Place dummy `SYSTEM_PROGRAM_ID` in unused output page slots (7=subtree, 8=subroot, 9=memo)
+    fe_hk_ix.accounts[7] = AccountMeta::new_readonly(sys_program_id(), false);
+    fe_hk_ix.accounts[8] = AccountMeta::new_readonly(sys_program_id(), false);
+    fe_hk_ix.accounts[9] = AccountMeta::new_readonly(sys_program_id(), false);
+    expect_ok(
+        send_v1(&mut svm, &relayer, &[], &[fe_hk_ix], 400_000),
+        "Full-exit TransferHook withdraw with dummy SYSTEM_PROGRAM_ID page slots",
+    );
+    assert_eq!(token_balance(&svm, &vault_hk), 0);
+    assert_eq!(token_balance(&svm, &recip_hk), 38_000_000);
+    assert_eq!(
+        read_u64(&svm.get_account(&hook_state_pda).unwrap().data, 0),
+        4,
+        "hook must execute on full-exit withdraw even with dummy SYSTEM_PROGRAM_ID page slots"
+    );
+
+    // --- (g2) Aliasing checks: recipient / relayer_fee_recipient aliasing nf0, nf1, vault_ata,
+    //          or non-canonical vault_auth-owned token account MUST be rejected with Custom(6002)! ---
+    let (path_sol, rk_sol, ri_sol, sr_sol) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
         1,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let asset_wsol = asset_id_for_mint(None);
@@ -3635,7 +3952,7 @@ fn test_regression_g_v121_security_hardening() {
         merkle_path: MerklePath4Ary::default(),
     };
     let probe_circuit = audren_client::audren_circuits::joinsplit::JoinSplit4AryCircuit::new_with_options(
-        sr,
+        sr_sol,
         asset_wsol,
         asset_wsol,
         45_000_000,
@@ -3686,7 +4003,7 @@ fn test_regression_g_v121_security_hardening() {
             &[],
         );
         let b_alias = prover.build_and_prove(
-            sr,
+            sr_sol,
             asset_wsol,
             asset_wsol,
             45_000_000,
@@ -3722,7 +4039,8 @@ fn test_regression_g_v121_security_hardening() {
                     relayer.pubkey(),
                     POOL_ID,
                     VK_ID_DEFAULT,
-                    13,
+                    rk_sol,
+                    ri_sol,
                     1,
                     0,
                     0,
@@ -3754,13 +4072,13 @@ fn test_regression_g_v121_security_hardening() {
     }
 
     // SPL !unwrap_wsol aliasing checks: vault_ata & rogue vault_auth-owned token account rejected (6002)
-    let (_, _, path_u) = reconstruct_witness_with(
+    let (path_u, rk_u, ri_u, sr_u) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         2,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let asset_usdc = asset_id_for_mint(Some(&usdc_mint));
@@ -3786,7 +4104,7 @@ fn test_regression_g_v121_security_hardening() {
             &[],
         );
         let b_spl = prover.build_and_prove(
-            sr,
+            sr_u,
             asset_usdc,
             asset_usdc,
             45_000_000,
@@ -3830,7 +4148,8 @@ fn test_regression_g_v121_security_hardening() {
                     relayer.pubkey(),
                     POOL_ID,
                     VK_ID_DEFAULT,
-                    13,
+                    rk_u,
+                    ri_u,
                     2,
                     0,
                     0,
@@ -3862,13 +4181,13 @@ fn test_regression_g_v121_security_hardening() {
     }
 
     // --- (g3-b) !unwrap_wsol Token-2022 TransferFee + relayer_fee exact vault solvency delta ---
-    let (_, _, path_t22) = reconstruct_witness_with(
+    let (path_t22, rk_t22, ri_t22, sr_t22) = reconstruct_witness_with(
         |a| svm.get_account(a).map(|x| x.data),
         &program_id,
         POOL_ID,
-        13,
         3,
         0,
+        alice.view_sk,
     )
     .unwrap();
     let asset_t22 = asset_id_for_mint(Some(&t22_fee_mint));
@@ -3888,7 +4207,7 @@ fn test_regression_g_v121_security_hardening() {
         &[],
     );
     let b_t22 = prover.build_and_prove(
-        sr,
+        sr_t22,
         asset_t22,
         asset_t22,
         35_000_000,
@@ -3933,7 +4252,8 @@ fn test_regression_g_v121_security_hardening() {
                 relayer.pubkey(),
                 POOL_ID,
                 VK_ID_DEFAULT,
-                13,
+                rk_t22,
+                ri_t22,
                 3,
                 0,
                 0,
@@ -3967,4 +4287,5080 @@ fn test_regression_g_v121_security_hardening() {
     assert_eq!(token_balance(&svm, &recip_t22), 34_125_000);
     assert_eq!(token_balance(&svm, &relayer_t22), 3_900_000);
     println!("  [REGRESSION (g) PASSED] Economy TransferHook+SYSTEM_PROGRAM_ID, recipient/fee aliasing, and !unwrap_wsol solvency delta verified");
+}
+
+#[test]
+fn litesvm_r1_frozen_escrow_ata_and_confidential_transfer_ext_blocked() {
+    let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
+    let router_id = Keypair::new().pubkey();
+    let mut svm = new_svm(program_id, Some(router_id), None);
+    let prover = AudrenProver::from_canonical_pk();
+
+    let payer = Keypair::new();
+    let relayer = Keypair::new();
+    let attacker = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 20_000_000_000).unwrap();
+    svm.airdrop(&relayer.pubkey(), 5_000_000_000).unwrap();
+    svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    svm.warp_to_slot(104); // epoch 13
+    let _vault_wsol = bootstrap_pool(&mut svm, program_id, &payer, 4);
+    let alice = AudrenKeys::from_seed(&[0x59u8; 32]);
+    let (va, _) = derive_vault_auth_pda(&program_id, POOL_ID);
+    let (esc0, _) = derive_escrow_pda(&program_id, POOL_ID, 0);
+    svm.airdrop(&esc0, 2_000_000).unwrap();
+
+    // Setup honest mock DEX + input/output SPL mints
+    let usdc_mint = create_spl_mint(&mut svm, &payer, 6);
+    let out_mint = create_spl_mint(&mut svm, &payer, 6);
+    let dex_pool = dex_pool_pda(&router_id);
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[dex_init_ix(router_id, payer.pubkey(), 10_000, 10_000_000_000)],
+            200_000,
+        ),
+        "init mock router",
+    );
+
+    let vault_usdc = create_canonical_ata(&mut svm, &payer, va, usdc_mint, spl_token_id());
+    let esc0_usdc = create_canonical_ata(&mut svm, &payer, esc0, usdc_mint, spl_token_id());
+    let dex_usdc = create_canonical_ata(&mut svm, &payer, dex_pool, usdc_mint, spl_token_id());
+    let payer_usdc = create_canonical_ata(&mut svm, &payer, payer.pubkey(), usdc_mint, spl_token_id());
+    mint_to(&mut svm, &payer, spl_token_id(), usdc_mint, payer_usdc, 200_000_000);
+
+    let vault_out = create_canonical_ata(&mut svm, &payer, va, out_mint, spl_token_id());
+    let esc0_out = create_canonical_ata(&mut svm, &payer, esc0, out_mint, spl_token_id());
+    let dex_out = create_canonical_ata(&mut svm, &payer, dex_pool, out_mint, spl_token_id());
+    mint_to(&mut svm, &payer, spl_token_id(), out_mint, dex_out, 200_000_000);
+
+    // Deposit 100M USDC on lane 0 (instantly included in GlobalRootHistory)
+    let (tw_u, bl_u, memo_u) =
+        encrypt_note_memo(&alice.view_pk, [0x61; 32], 100_000_000, &usdc_mint.to_bytes()).unwrap();
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                usdc_mint,
+                payer_usdc,
+                vault_usdc,
+                spl_token_id(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+                false,
+                100_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_u),
+                bl_u,
+                &memo_u,
+                &[],
+            ))],
+            200_000,
+        ),
+        "deposit 100M USDC",
+    );
+
+    let (path_u, rk_r1, ri_r1, sr) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        0,
+        0,
+        alice.view_sk,
+    )
+    .unwrap();
+    let asset_usdc = asset_id_for_mint(Some(&usdc_mint));
+    let asset_out = asset_id_for_mint(Some(&out_mint));
+
+    // =========================================================================
+    // R1-P1: Frozen SPL Token accounts (`data[108] == 2`)
+    // =========================================================================
+    // Create a Classic SPL mint WITH a freeze_authority so we can genuinely freeze ATAs via SPL Token!
+    let freezable_mint_kp = Keypair::new();
+    let mint_rent = svm.minimum_balance_for_rent_exemption(Mint::LEN);
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[&freezable_mint_kp],
+            &[
+                sys_ix::create_account(
+                    &payer.pubkey(),
+                    &freezable_mint_kp.pubkey(),
+                    mint_rent,
+                    Mint::LEN as u64,
+                    &spl_token_id(),
+                ),
+                token_ix::initialize_mint(
+                    &spl_token_id(),
+                    &freezable_mint_kp.pubkey(),
+                    &payer.pubkey(),
+                    Some(&payer.pubkey()),
+                    6,
+                )
+                .unwrap(),
+            ],
+            200_000,
+        ),
+        "create freezable SPL mint",
+    );
+    let freezable_mint = freezable_mint_kp.pubkey();
+    let esc0_frozen = create_canonical_ata(&mut svm, &payer, esc0, freezable_mint, spl_token_id());
+    let va_frozen = create_canonical_ata(&mut svm, &payer, va, freezable_mint, spl_token_id());
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[
+                token_ix::freeze_account(
+                    &spl_token_id(),
+                    &esc0_frozen,
+                    &freezable_mint,
+                    &payer.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+                token_ix::freeze_account(
+                    &spl_token_id(),
+                    &va_frozen,
+                    &freezable_mint,
+                    &payer.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+            ],
+            200_000,
+        ),
+        "freeze esc0 and vault_auth ATAs",
+    );
+    assert_eq!(svm.get_account(&esc0_frozen).unwrap().data[108], 2);
+    assert_eq!(svm.get_account(&va_frozen).unwrap().data[108], 2);
+    let frozen_rent_before = svm.get_account(&esc0_frozen).unwrap().lamports;
+
+    // R1-P1a: Mode 7 CloseAccount rent theft on frozen unrelated `escrow`-owned ATA -> Custom(6032)!
+    let (dtw1, dbl1, dhead1, dmask1) = prepare_dynamic_swap_memo(&alice.view_pk, [0x62; 32]).unwrap();
+    let ost1 = fr_to_be_bytes(&derive_stealth_owner(alice.spend_pk, dtw1));
+    let obl1 = fr_to_be_bytes(&dbl1);
+    let close_frozen_data = dex_swap_spl_to_spl_data(7, 50_000_000, 50_000_000, 6, 6);
+    let close_frozen_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_out, false),
+        AudrenAccountMeta::writable(esc0_out, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(out_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::writable(esc0_frozen, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::writable(attacker.pubkey(), false),
+    ];
+    let ctx_p1a = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &router_id,
+        &close_frozen_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &close_frozen_data,
+        &[],
+    );
+    let b_p1a = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_p1a,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x71; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_p1a.proof_192,
+                &b_p1a.nf0,
+                &b_p1a.nf1,
+                &b_p1a.cm0,
+                &b_p1a.cm1,
+                &b_p1a.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &close_frozen_data,
+                close_frozen_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6032,
+        "R1-P1a: frozen unrelated escrow ATA passed to ExecViaEscrow CloseAccount must be rejected (6032)",
+    );
+    assert_eq!(
+        svm.get_account(&esc0_frozen).unwrap().lamports,
+        frozen_rent_before,
+        "R1-P1a: frozen escrow ATA rent must remain intact"
+    );
+
+    // R1-P1b: Frozen `vault_auth`-owned ATA passed in `router_accounts` -> Custom(6021)!
+    let honest_data = dex_swap_spl_to_spl_data(0, 50_000_000, 50_000_000, 6, 6);
+    let frozen_va_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_out, false),
+        AudrenAccountMeta::writable(esc0_out, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(out_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(va_frozen, false),
+    ];
+    let ctx_p1b = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &router_id,
+        &frozen_va_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &honest_data,
+        &[],
+    );
+    let b_p1b = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_p1b,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x72; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_p1b.proof_192,
+                &b_p1b.nf0,
+                &b_p1b.nf1,
+                &b_p1b.cm0,
+                &b_p1b.cm1,
+                &b_p1b.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &honest_data,
+                frozen_va_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6021,
+        "R1-P1b: frozen vault_auth-owned ATA in router_accounts must be rejected (6021)",
+    );
+
+    // =========================================================================
+    // R1-P2: Token-2022 `ConfidentialTransferAccount` (`TLV 5`) on escrow & vault ATAs
+    // =========================================================================
+    let ct_mint_kp = Keypair::new();
+    let ct_mint_rent = svm.minimum_balance_for_rent_exemption(Mint::LEN);
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[&ct_mint_kp],
+            &[
+                sys_ix::create_account(
+                    &payer.pubkey(),
+                    &ct_mint_kp.pubkey(),
+                    ct_mint_rent,
+                    Mint::LEN as u64,
+                    &token_2022_id(),
+                ),
+                token_ix::initialize_mint(
+                    &token_2022_id(),
+                    &ct_mint_kp.pubkey(),
+                    &payer.pubkey(),
+                    None,
+                    6,
+                )
+                .unwrap(),
+            ],
+            200_000,
+        ),
+        "create Token-2022 mint for ConfidentialTransferAccount test",
+    );
+    let ct_mint = ct_mint_kp.pubkey();
+    let payer_ct = create_canonical_ata(&mut svm, &payer, payer.pubkey(), ct_mint, token_2022_id());
+    let vault_ct = create_canonical_ata(&mut svm, &payer, va, ct_mint, token_2022_id());
+    let esc0_ct = create_canonical_ata(&mut svm, &payer, esc0, ct_mint, token_2022_id());
+    mint_to(&mut svm, &payer, token_2022_id(), ct_mint, payer_ct, 100_000_000);
+
+    let attach_ct_ext = |svm: &mut LiteSVM, addr: Address| {
+        let mut acc = svm.get_account(&addr).unwrap();
+        // Token-2022 Account base (165 B) + AccountType::Account (1 B = 2) + TLV(type=5, len=295)
+        let mut ext_data = Vec::with_capacity(166 + 4 + 295);
+        ext_data.extend_from_slice(&acc.data[..165]);
+        ext_data.push(2u8); // AccountType::Account
+        ext_data.extend_from_slice(&5u16.to_le_bytes()); // ConfidentialTransferAccount
+        ext_data.extend_from_slice(&295u16.to_le_bytes());
+        ext_data.extend_from_slice(&[0u8; 295]); // allow_non_confidential_credits = 0 at offset 262
+        acc.lamports = svm.minimum_balance_for_rent_exemption(ext_data.len());
+        acc.data = ext_data;
+        svm.set_account(addr, acc).unwrap();
+    };
+    attach_ct_ext(&mut svm, esc0_ct);
+
+    // R1-P2a: Canonical `escrow_out_ata` carrying TLV 5 (`ConfidentialTransferAccount`) -> Custom(6020)!
+    let asset_ct = asset_id_for_mint(Some(&ct_mint));
+    let ct_out_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_out, false),
+        AudrenAccountMeta::writable(esc0_ct, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(ct_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(token_2022_id(), false),
+    ];
+    let ctx_p2a = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_ct),
+        1,
+        &router_id,
+        &ct_out_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &honest_data,
+        &[],
+    );
+    let b_p2a = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_p2a,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x73; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (ct_mint, vault_ct, esc0_ct, token_2022_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_p2a.proof_192,
+                &b_p2a.nf0,
+                &b_p2a.nf1,
+                &b_p2a.cm0,
+                &b_p2a.cm1,
+                &b_p2a.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &honest_data,
+                ct_out_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6020,
+        "R1-P2a: canonical escrow_out_ata with ConfidentialTransferAccount (TLV 5) must be rejected (6020)",
+    );
+
+    // R1-P2b: Unrelated writable `escrow`-owned ATA carrying TLV 5 in `router_accounts` -> Custom(6032)!
+    let ct_router_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_out, false),
+        AudrenAccountMeta::writable(esc0_out, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(out_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::writable(esc0_ct, false),
+    ];
+    let ctx_p2b = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &router_id,
+        &ct_router_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &honest_data,
+        &[],
+    );
+    let b_p2b = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_p2b,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x74; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_p2b.proof_192,
+                &b_p2b.nf0,
+                &b_p2b.nf1,
+                &b_p2b.cm0,
+                &b_p2b.cm1,
+                &b_p2b.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &honest_data,
+                ct_router_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6032,
+        "R1-P2b: writable escrow ATA with ConfidentialTransferAccount (TLV 5) in router_accounts must be rejected (6032)",
+    );
+
+    // R1-P2c: Canonical `vault_ata` carrying TLV 5 (`ConfidentialTransferAccount`) on Deposit -> Custom(6020)!
+    attach_ct_ext(&mut svm, vault_ct);
+    let (tw_ct, bl_ct, memo_ct) =
+        encrypt_note_memo(&alice.view_pk, [0x63; 32], 10_000_000, &ct_mint.to_bytes()).unwrap();
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                ct_mint,
+                payer_ct,
+                vault_ct,
+                token_2022_id(),
+                1,
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+                false,
+                10_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_ct),
+                bl_ct,
+                &memo_ct,
+                &[],
+            ))],
+            200_000,
+        ),
+        6020,
+        "R1-P2c: Deposit into vault_ata carrying ConfidentialTransferAccount (TLV 5) must be rejected (6020)",
+    );
+
+    println!("  [REGRESSION R1-P1 & R1-P2 PASSED] Frozen escrow/vault ATAs & Token-2022 ConfidentialTransferAccount (TLV 5) blocked on-chain");
+
+    // =========================================================================
+    // R2-P1: ElGamal Registry program (`ELGAMAL_REGISTRY_PROGRAM_ID`) blocked
+    //        as `router_prog` (6030), inside `router_accounts` (6021), and as
+    //        owner of any account in `router_accounts` (6021).
+    // =========================================================================
+    let elgamal_reg_id = Address::new_from_array(audren_core::ELGAMAL_REGISTRY_PROGRAM_ID);
+    // Register an executable program account at `elgamal_reg_id` so the explicit
+    // denylist (not merely `!router_prog.executable()`) is exercised.
+    let reg_prog_acc = svm.get_account(&router_id).unwrap();
+    svm.set_account(elgamal_reg_id, reg_prog_acc).unwrap();
+
+    let elgamal_reg_pda = Keypair::new().pubkey();
+    let mut reg_pda_acc = svm.get_account(&esc0_usdc).unwrap();
+    reg_pda_acc.owner = elgamal_reg_id;
+    reg_pda_acc.data = vec![0u8; 64];
+    reg_pda_acc.executable = false;
+    svm.set_account(elgamal_reg_pda, reg_pda_acc).unwrap();
+
+    let base_honest_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_out, false),
+        AudrenAccountMeta::writable(esc0_out, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(out_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+    ];
+
+    // R2-P1a: `router_prog == ELGAMAL_REGISTRY_PROGRAM_ID` -> Custom(6030) (`InvalidTargetProgram`)
+    let ctx_r2_p1a = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &elgamal_reg_id,
+        &base_honest_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &honest_data,
+        &[],
+    );
+    let b_r2_p1a = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_r2_p1a,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x75; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_r2_p1a.proof_192,
+                &b_r2_p1a.nf0,
+                &b_r2_p1a.nf1,
+                &b_r2_p1a.cm0,
+                &b_r2_p1a.cm1,
+                &b_r2_p1a.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                elgamal_reg_id,
+                &honest_data,
+                base_honest_accs.clone(),
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6030,
+        "R2-P1a: ExecViaEscrow with ELGAMAL_REGISTRY_PROGRAM_ID as router_prog must be rejected (6030)",
+    );
+
+    // R2-P1b: `ELGAMAL_REGISTRY_PROGRAM_ID` inside `router_accounts` -> Custom(6021) (`ForbiddenRouterAccount`)
+    let mut reg_in_accs = base_honest_accs.clone();
+    reg_in_accs.push(AudrenAccountMeta::readonly(elgamal_reg_id, false));
+    let ctx_r2_p1b = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &router_id,
+        &reg_in_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &honest_data,
+        &[],
+    );
+    let b_r2_p1b = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_r2_p1b,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x76; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_r2_p1b.proof_192,
+                &b_r2_p1b.nf0,
+                &b_r2_p1b.nf1,
+                &b_r2_p1b.cm0,
+                &b_r2_p1b.cm1,
+                &b_r2_p1b.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &honest_data,
+                reg_in_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6021,
+        "R2-P1b: ELGAMAL_REGISTRY_PROGRAM_ID inside router_accounts must be rejected (6021)",
+    );
+
+    // R2-P1c: Account owned by `ELGAMAL_REGISTRY_PROGRAM_ID` inside `router_accounts` -> Custom(6021)
+    let mut reg_pda_accs = base_honest_accs;
+    reg_pda_accs.push(AudrenAccountMeta::writable(elgamal_reg_pda, false));
+    let ctx_r2_p1c = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &router_id,
+        &reg_pda_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &honest_data,
+        &[],
+    );
+    let b_r2_p1c = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_r2_p1c,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x77; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_r2_p1c.proof_192,
+                &b_r2_p1c.nf0,
+                &b_r2_p1c.nf1,
+                &b_r2_p1c.cm0,
+                &b_r2_p1c.cm1,
+                &b_r2_p1c.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &honest_data,
+                reg_pda_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6021,
+        "R2-P1c: account owned by ELGAMAL_REGISTRY_PROGRAM_ID inside router_accounts must be rejected (6021)",
+    );
+
+    println!("  [REGRESSION R2-P1 PASSED] ElGamal Registry program & owned PDAs blocked in ExecViaEscrow (6030 / 6021)");
+}
+
+// ----------------------------------------------------------------------------
+// V1.3.0 TEST A: Instant spendability, slot_ring 128-entry wrap under >130-slot
+//                deposit spam, epoch_ring survival, error codes 6007/6008, and
+//                zero wall-clock idle expiry (+500_000 idle slots)
+// ----------------------------------------------------------------------------
+#[test]
+fn test_v130_slot_ring_wrap_epoch_ring_survival_and_zero_idle_expiry() {
+    let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
+    let mut svm = new_svm(program_id, None, None);
+    let prover = AudrenProver::from_canonical_pk();
+    let payer = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 200_000_000_000).unwrap();
+    svm.warp_to_slot(100);
+    let vault_wsol = bootstrap_pool(&mut svm, program_id, &payer, 4);
+    let (roots_pda, _) = derive_roots_pda(&program_id, POOL_ID);
+    let alice = AudrenKeys::from_seed(&[0x31u8; 32]);
+    let asset_wsol = asset_id_for_mint(None);
+
+    // 1. Instant spendability after Deposit AND after Transact change in the VERY SAME slot (100)!
+    let (tw0, bl0, memo0) =
+        encrypt_note_memo(&alice.view_pk, [0x32; 32], 10_000_000, &WSOL_MINT).unwrap();
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                wsol_mint_id(),
+                payer.pubkey(),
+                vault_wsol,
+                spl_token_id(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                true,
+                false,
+                10_000_000,
+                derive_stealth_owner(alice.spend_pk, tw0),
+                bl0,
+                &memo0,
+                &[],
+            ))],
+            200_000,
+        ),
+        "instant Deposit at slot 100",
+    );
+
+    let (path0, rk0, ri0, sr0) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        0,
+        0,
+        alice.view_sk,
+    )
+    .unwrap();
+    let (tw_chg, bl_chg, memo_chg) =
+        encrypt_note_memo(&alice.view_pk, [0x33; 32], 10_000_000, &WSOL_MINT).unwrap();
+    let ctx0 = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        0,
+        0b001,
+        ASSET_MODE_PRIVATE,
+        false,
+        None,
+        None,
+        &[0u8; 32],
+        0,
+        0,
+        &memo_chg,
+    );
+    let b0 = prover.build_and_prove(
+        sr0,
+        asset_wsol,
+        Fr::from(0u64),
+        0,
+        0,
+        ctx0,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw0,
+                asset_id: asset_wsol,
+                amount: 10_000_000,
+                blinding: bl0,
+                is_dummy: false,
+                merkle_path: path0,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_wsol,
+                amount: 0,
+                blinding: Fr::from(11u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_chg),
+                asset_id: asset_wsol,
+                amount: 10_000_000,
+                blinding: bl_chg,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0x34; 32],
+    );
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk0,
+                ri0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0b001,
+                ASSET_MODE_PRIVATE,
+                false,
+                None,
+                (None, None, None),
+                &b0.proof_192,
+                &b0.nf0,
+                &b0.nf1,
+                &b0.cm0,
+                &b0.cm1,
+                &b0.cm2,
+                0,
+                0,
+                payer.pubkey(),
+                payer.pubkey(),
+                &memo_chg,
+                &[],
+            ))],
+            300_000,
+        ),
+        "instant spend of Deposit in same slot 100",
+    );
+
+    // Spend the change note IMMEDIATELY in the VERY SAME slot 100!
+    let (path_c, rk_c, ri_c, sr_c) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        0,
+        1,
+        alice.view_sk,
+    )
+    .unwrap();
+    let (tw_c2, bl_c2, memo_c2) =
+        encrypt_note_memo(&alice.view_pk, [0x35; 32], 10_000_000, &WSOL_MINT).unwrap();
+    let ctx_c = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        0,
+        0b001,
+        ASSET_MODE_PRIVATE,
+        false,
+        None,
+        None,
+        &[0u8; 32],
+        0,
+        0,
+        &memo_c2,
+    );
+    let b_c = prover.build_and_prove(
+        sr_c,
+        asset_wsol,
+        Fr::from(0u64),
+        0,
+        0,
+        ctx_c,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_chg,
+                asset_id: asset_wsol,
+                amount: 10_000_000,
+                blinding: bl_chg,
+                is_dummy: false,
+                merkle_path: path_c,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_wsol,
+                amount: 0,
+                blinding: Fr::from(12u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_c2),
+                asset_id: asset_wsol,
+                amount: 10_000_000,
+                blinding: bl_c2,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0x36; 32],
+    );
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_c,
+                ri_c,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0b001,
+                ASSET_MODE_PRIVATE,
+                false,
+                None,
+                (None, None, None),
+                &b_c.proof_192,
+                &b_c.nf0,
+                &b_c.nf1,
+                &b_c.cm0,
+                &b_c.cm1,
+                &b_c.cm2,
+                0,
+                0,
+                payer.pubkey(),
+                payer.pubkey(),
+                &memo_c2,
+                &[],
+            ))],
+            300_000,
+        ),
+        "instant spend of Transact change note in same slot 100",
+    );
+
+    // 2. slot_ring 128-entry wrapping under 135 distinct slots of deposit spam:
+    //    Deposit Note A at slot 200 (epoch 6 -> rolls epoch_ring!).
+    svm.warp_to_slot(200);
+    let leaf_a = lane_next_leaf(&svm, &program_id, 0);
+    let (tw_a, bl_a, memo_a) =
+        encrypt_note_memo(&alice.view_pk, [0x37; 32], 20_000_000, &WSOL_MINT).unwrap();
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                wsol_mint_id(),
+                payer.pubkey(),
+                vault_wsol,
+                spl_token_id(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                true,
+                false,
+                20_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_a),
+                bl_a,
+                &memo_a,
+                &[],
+            ))],
+            200_000,
+        ),
+        "deposit Note A at epoch boundary slot 200",
+    );
+    let roots_at_a = decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    let slot_idx_a = roots_at_a.slot_cursor as u8;
+    let epoch_idx_a = roots_at_a.epoch_cursor as u8;
+    assert_eq!(roots_at_a.latest_super_root, roots_at_a.stable_super_root);
+
+    let (path_a, rk_a, ri_a, sr_a) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        0,
+        leaf_a,
+        alice.view_sk,
+    )
+    .unwrap();
+    assert_eq!(rk_a, ROOT_RING_EPOCH);
+    assert_eq!(ri_a, epoch_idx_a);
+
+    // Spam 135 distinct slots across lanes 1, 2, 3 (45/lane -> zero rollover, > 128 slot_ring entries!)
+    for i in 0u64..135u64 {
+        svm.warp_to_slot(201 + i);
+        let spam_lane = 1u8 + (i % 3) as u8;
+        let mut eph = [0x66u8; 32];
+        eph[0] = (i & 0xff) as u8;
+        eph[1] = (i >> 8) as u8;
+        let (tw_s, bl_s, memo_s) =
+            encrypt_note_memo(&alice.view_pk, eph, 1_000_000, &WSOL_MINT).unwrap();
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    wsol_mint_id(),
+                    payer.pubkey(),
+                    vault_wsol,
+                    spl_token_id(),
+                    spam_lane,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    true,
+                    false,
+                    1_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw_s),
+                    bl_s,
+                    &memo_s,
+                    &[],
+                ))],
+                200_000,
+            ),
+            "spam deposit to wrap slot_ring",
+        );
+    }
+    let roots_after_spam =
+        decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    assert_eq!(roots_after_spam.slot_count as usize, SLOT_RING_LEN);
+    assert!(
+        (roots_after_spam.epoch_count as usize) < EPOCH_RING_LEN,
+        "epoch_ring must still retain Note A's epoch entry"
+    );
+    assert_ne!(
+        roots_after_spam.slot_ring[slot_idx_a as usize].super_root,
+        roots_at_a.latest_super_root,
+        "slot_ring[slot_idx_a] must have been overwritten by >128 distinct slots of spam"
+    );
+    assert_eq!(
+        roots_after_spam.epoch_ring[epoch_idx_a as usize].super_root,
+        roots_at_a.stable_super_root,
+        "epoch_ring[epoch_idx_a] must remain intact"
+    );
+
+    let (tw_ao, bl_ao, memo_ao) =
+        encrypt_note_memo(&alice.view_pk, [0x38; 32], 20_000_000, &WSOL_MINT).unwrap();
+    let ctx_a = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        0,
+        0b001,
+        ASSET_MODE_PRIVATE,
+        false,
+        None,
+        None,
+        &[0u8; 32],
+        0,
+        0,
+        &memo_ao,
+    );
+    let b_a = prover.build_and_prove(
+        sr_a,
+        asset_wsol,
+        Fr::from(0u64),
+        0,
+        0,
+        ctx_a,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_a,
+                asset_id: asset_wsol,
+                amount: 20_000_000,
+                blinding: bl_a,
+                is_dummy: false,
+                merkle_path: path_a,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_wsol,
+                amount: 0,
+                blinding: Fr::from(13u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_ao),
+                asset_id: asset_wsol,
+                amount: 20_000_000,
+                blinding: bl_ao,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0x39; 32],
+    );
+
+    // Invalid root_ring_kind (2) -> Custom(6007) InvalidRootRing!
+    let mut bad_ring_ix = to_svm_ix(&build_transact(
+        program_id,
+        payer.pubkey(),
+        POOL_ID,
+        VK_ID_DEFAULT,
+        ROOT_RING_EPOCH,
+        epoch_idx_a,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0b001,
+        ASSET_MODE_PRIVATE,
+        false,
+        None,
+        (None, None, None),
+        &b_a.proof_192,
+        &b_a.nf0,
+        &b_a.nf1,
+        &b_a.cm0,
+        &b_a.cm1,
+        &b_a.cm2,
+        0,
+        0,
+        payer.pubkey(),
+        payer.pubkey(),
+        &memo_ao,
+        &[],
+    ));
+    bad_ring_ix.data[10] = 2; // payload offset 9 -> raw ix data offset 10
+    expect_err_code(
+        send_v1(&mut svm, &payer, &[], &[bad_ring_ix], 300_000),
+        6007,
+        "InvalidRootRing (kind=2) MUST return Custom(6007)",
+    );
+
+    // Out-of-bounds epoch_ring index -> Custom(6008) RootIndexOutOfBounds!
+    let mut bad_idx_ix = to_svm_ix(&build_transact(
+        program_id,
+        payer.pubkey(),
+        POOL_ID,
+        VK_ID_DEFAULT,
+        ROOT_RING_EPOCH,
+        epoch_idx_a,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0b001,
+        ASSET_MODE_PRIVATE,
+        false,
+        None,
+        (None, None, None),
+        &b_a.proof_192,
+        &b_a.nf0,
+        &b_a.nf1,
+        &b_a.cm0,
+        &b_a.cm1,
+        &b_a.cm2,
+        0,
+        0,
+        payer.pubkey(),
+        payer.pubkey(),
+        &memo_ao,
+        &[],
+    ));
+    bad_idx_ix.data[11] = roots_after_spam.epoch_count as u8;
+    expect_err_code(
+        send_v1(&mut svm, &payer, &[], &[bad_idx_ix], 300_000),
+        6008,
+        "RootIndexOutOfBounds MUST return Custom(6008)",
+    );
+
+    // Evicted slot_ring entry -> Custom(6010) ProofVerificationFailed!
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                ROOT_RING_SLOT,
+                slot_idx_a,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0b001,
+                ASSET_MODE_PRIVATE,
+                false,
+                None,
+                (None, None, None),
+                &b_a.proof_192,
+                &b_a.nf0,
+                &b_a.nf1,
+                &b_a.cm0,
+                &b_a.cm1,
+                &b_a.cm2,
+                0,
+                0,
+                payer.pubkey(),
+                payer.pubkey(),
+                &memo_ao,
+                &[],
+            ))],
+            300_000,
+        ),
+        6010,
+        "evicted slot_ring entry MUST fail with ProofVerificationFailed (6010)",
+    );
+
+    // Preserved epoch_ring entry -> SUCCEEDS!
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                ROOT_RING_EPOCH,
+                epoch_idx_a,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0b001,
+                ASSET_MODE_PRIVATE,
+                false,
+                None,
+                (None, None, None),
+                &b_a.proof_192,
+                &b_a.nf0,
+                &b_a.nf1,
+                &b_a.cm0,
+                &b_a.cm1,
+                &b_a.cm2,
+                0,
+                0,
+                payer.pubkey(),
+                payer.pubkey(),
+                &memo_ao,
+                &[],
+            ))],
+            300_000,
+        ),
+        "epoch_ring entry survives >130 distinct slots of slot_ring spam",
+    );
+
+    // 3. Zero wall-clock idle expiry: deposit Note B (epoch_ring) and Note C (slot_ring-only),
+    //    warp +500_000 idle slots -> BOTH slot_ring and epoch_ring remain valid with zero crank!
+    svm.warp_to_slot(416); // new epoch (416 / 32 = 13)
+    let leaf_b = lane_next_leaf(&svm, &program_id, 0);
+    let (tw_b, bl_b, memo_b) =
+        encrypt_note_memo(&alice.view_pk, [0x3A; 32], 15_000_000, &WSOL_MINT).unwrap();
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                wsol_mint_id(),
+                payer.pubkey(),
+                vault_wsol,
+                spl_token_id(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                true,
+                false,
+                15_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_b),
+                bl_b,
+                &memo_b,
+                &[],
+            ))],
+            200_000,
+        ),
+        "deposit Note B (epoch_ring)",
+    );
+
+    svm.warp_to_slot(417); // same epoch 13 -> only in slot_ring!
+    let leaf_c = lane_next_leaf(&svm, &program_id, 0);
+    let (tw_c, bl_c, memo_c) =
+        encrypt_note_memo(&alice.view_pk, [0x3B; 32], 12_000_000, &WSOL_MINT).unwrap();
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                wsol_mint_id(),
+                payer.pubkey(),
+                vault_wsol,
+                spl_token_id(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                true,
+                false,
+                12_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_c),
+                bl_c,
+                &memo_c,
+                &[],
+            ))],
+            200_000,
+        ),
+        "deposit Note C (slot_ring only)",
+    );
+
+    // Warp +500_000 slots with ZERO transactions and ZERO cranks!
+    svm.warp_to_slot(500_417);
+
+    let (path_b, rk_b, ri_b, sr_b) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        0,
+        leaf_b,
+        alice.view_sk,
+    )
+    .unwrap();
+    assert_eq!(rk_b, ROOT_RING_EPOCH, "Note B should select stable epoch_ring");
+
+    let (path_cc, rk_cc, ri_cc, sr_cc) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        0,
+        leaf_c,
+        alice.view_sk,
+    )
+    .unwrap();
+    assert_eq!(rk_cc, ROOT_RING_SLOT, "Note C must fall back to latest slot_ring");
+
+    // Spend Note B (epoch_ring) & Note C (slot_ring) after +500_000 idle slots!
+    let recipient_idle = Keypair::new().pubkey();
+    for (label, rk, ri, sr, path, tw, bl, amt, seed_byte) in [
+        ("epoch_ring after +500_000 idle slots", rk_b, ri_b, sr_b, path_b, tw_b, bl_b, 15_000_000u64, 0x3Cu8),
+        ("slot_ring after +500_000 idle slots", rk_cc, ri_cc, sr_cc, path_cc, tw_c, bl_c, 12_000_000u64, 0x3Du8),
+    ] {
+        let ctx_idle = compute_transact_ctx_hash(
+            &program_id,
+            POOL_ID,
+            VK_ID_DEFAULT,
+            0,
+            0,
+            ASSET_MODE_PUBLIC,
+            true,
+            Some(&recipient_idle),
+            None,
+            &fr_to_be_bytes(&asset_wsol),
+            amt,
+            0,
+            &[],
+        );
+        let b_idle = prover.build_and_prove(
+            sr,
+            asset_wsol,
+            asset_wsol,
+            amt,
+            0,
+            ctx_idle,
+            true,
+            [
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: tw,
+                    asset_id: asset_wsol,
+                    amount: amt,
+                    blinding: bl,
+                    is_dummy: false,
+                    merkle_path: path,
+                },
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: Fr::from(0u64),
+                    asset_id: asset_wsol,
+                    amount: 0,
+                    blinding: Fr::from(14u64),
+                    is_dummy: true,
+                    merkle_path: MerklePath4Ary::default(),
+                },
+            ],
+            [
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(1u64)),
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+            ],
+            [seed_byte; 32],
+        );
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_transact(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    VK_ID_DEFAULT,
+                    rk,
+                    ri,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ASSET_MODE_PUBLIC,
+                    true,
+                    Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+                    (None, None, None),
+                    &b_idle.proof_192,
+                    &b_idle.nf0,
+                    &b_idle.nf1,
+                    &b_idle.cm0,
+                    &b_idle.cm1,
+                    &b_idle.cm2,
+                    amt,
+                    0,
+                    recipient_idle,
+                    payer.pubkey(),
+                    &[],
+                    &[],
+                ))],
+                300_000,
+            ),
+            label,
+        );
+    }
+    assert_eq!(svm.get_balance(&recipient_idle).unwrap(), 27_000_000);
+
+    // Verify `update_global_root_history` rejects any regressed Clock::slot (`now < prev_latest_slot`)
+    // with `AudrenError::RootHistoryMismatch` (`6009`).
+    let (roots_pda_reg, _) = derive_roots_pda(&program_id, POOL_ID);
+    let latest_slot_before =
+        GlobalRootHistory::decode(&svm.get_account(&roots_pda_reg).unwrap().data)
+            .unwrap()
+            .latest_slot;
+    assert!(latest_slot_before > 0);
+    let (lane3_pda, _) = derive_lane_pda(&program_id, POOL_ID, 3);
+    let lane3_hdr = LaneTreeHeader::decode(&svm.get_account(&lane3_pda).unwrap().data).unwrap();
+    let lane3_roll = compute_page_rollovers(lane3_hdr.next_leaf, 1, lane3_hdr.nf_count, 0);
+    svm.warp_to_slot(latest_slot_before - 1);
+    let (tw_reg, bl_reg, memo_reg) =
+        encrypt_note_memo(&alice.view_pk, [0x9F; 32], 1_000_000, &WSOL_MINT).unwrap();
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                wsol_mint_id(),
+                payer.pubkey(),
+                vault_wsol,
+                spl_token_id(),
+                3,
+                lane3_roll.out_sub_seq,
+                lane3_roll.out_root_seq,
+                lane3_roll.out_memo_seq,
+                lane3_roll.next_sub_seq,
+                lane3_roll.next_memo_seq,
+                true,
+                false,
+                1_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_reg),
+                bl_reg,
+                &memo_reg,
+                &[],
+            ))],
+            200_000,
+        ),
+        6009,
+        "update_global_root_history must reject clock slot regression with RootHistoryMismatch (6009)",
+    );
+
+    println!("  [V1.3.0 TEST A PASSED] Instant spend, 128-slot wrap vs epoch_ring survival, 6007/6008/6009 errors, and +500k idle slot zero-expiry verified");
+}
+
+// ----------------------------------------------------------------------------
+// V1.3.0 TEST B: Same-slot 4-instruction batched Transact merge proving against
+//                slot_ring[slot_cursor] (Challenge #3 same_slot_bumped guard) +
+//                multi-note shared witness fallback (Challenge #2)
+// ----------------------------------------------------------------------------
+#[test]
+fn test_v130_same_slot_batched_4_transacts_and_multi_note_witness() {
+    let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
+    let mut svm = new_svm(program_id, None, None);
+    let prover = AudrenProver::from_canonical_pk();
+    let payer = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 200_000_000_000).unwrap();
+    svm.warp_to_slot(1_000);
+    let vault_wsol = bootstrap_pool(&mut svm, program_id, &payer, 4);
+    let (roots_pda, _) = derive_roots_pda(&program_id, POOL_ID);
+    let alice = AudrenKeys::from_seed(&[0x44u8; 32]);
+    let asset_wsol = asset_id_for_mint(None);
+
+    // Deposit 4 notes on Lane 0 all in slot 1_001 (new slot > init slot 1_000 -> same_slot_bumped == 0)
+    svm.warp_to_slot(1_001);
+    let mut in_notes = Vec::new();
+    for i in 0u8..4u8 {
+        let (tw, bl, memo) =
+            encrypt_note_memo(&alice.view_pk, [0x45 + i; 32], 5_000_000, &WSOL_MINT).unwrap();
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    wsol_mint_id(),
+                    payer.pubkey(),
+                    vault_wsol,
+                    spl_token_id(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    true,
+                    false,
+                    5_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    bl,
+                    &memo,
+                    &[],
+                ))],
+                200_000,
+            ),
+            "deposit 4 same-slot notes",
+        );
+        in_notes.push((i as u64, tw, bl));
+    }
+
+    let roots_pre = decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    assert_eq!(roots_pre.latest_slot, 1_001);
+    assert!(!roots_pre.same_slot_bumped);
+    let pre_cursor = roots_pre.slot_cursor;
+
+    // Build 4 Transact instructions ALL proving against slot_ring[pre_cursor] in the EXACT SAME slot 1_001!
+    let (paths_4, rk_4, ri_4, sr_4) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(0, 0), (0, 1), (0, 2), (0, 3)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(rk_4, ROOT_RING_SLOT);
+    assert_eq!(ri_4, pre_cursor as u8);
+
+    let mut batch_ixs = Vec::with_capacity(4);
+    for (idx, ((_, tw, bl), path)) in in_notes.into_iter().zip(paths_4).enumerate() {
+        let (tw_o, bl_o, memo_o) =
+            encrypt_note_memo(&alice.view_pk, [0x50 + idx as u8; 32], 5_000_000, &WSOL_MINT)
+                .unwrap();
+        let ctx = compute_transact_ctx_hash(
+            &program_id,
+            POOL_ID,
+            VK_ID_DEFAULT,
+            1,
+            0b001,
+            ASSET_MODE_PRIVATE,
+            false,
+            None,
+            None,
+            &[0u8; 32],
+            0,
+            0,
+            &memo_o,
+        );
+        let b = prover.build_and_prove(
+            sr_4,
+            asset_wsol,
+            Fr::from(0u64),
+            0,
+            0,
+            ctx,
+            true,
+            [
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: tw,
+                    asset_id: asset_wsol,
+                    amount: 5_000_000,
+                    blinding: bl,
+                    is_dummy: false,
+                    merkle_path: path,
+                },
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: Fr::from(0u64),
+                    asset_id: asset_wsol,
+                    amount: 0,
+                    blinding: Fr::from(20u64 + idx as u64),
+                    is_dummy: true,
+                    merkle_path: MerklePath4Ary::default(),
+                },
+            ],
+            [
+                JoinSplitOutputWitness {
+                    stealth_owner: derive_stealth_owner(alice.spend_pk, tw_o),
+                    asset_id: asset_wsol,
+                    amount: 5_000_000,
+                    blinding: bl_o,
+                },
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+            ],
+            [0x5A + idx as u8; 32],
+        );
+        batch_ixs.push(to_svm_ix(&build_transact(
+            program_id,
+            payer.pubkey(),
+            POOL_ID,
+            VK_ID_DEFAULT,
+            rk_4,
+            ri_4,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0b001,
+            ASSET_MODE_PRIVATE,
+            false,
+            None,
+            (None, None, None),
+            &b.proof_192,
+            &b.nf0,
+            &b.nf1,
+            &b.cm0,
+            &b.cm1,
+            &b.cm2,
+            0,
+            0,
+            payer.pubkey(),
+            payer.pubkey(),
+            &memo_o,
+            &[],
+        )));
+    }
+    let batch_cu = expect_ok(
+        send_v1(&mut svm, &payer, &[], &batch_ixs, 1_400_000),
+        "4 batched same-slot Transact instructions in 1 Tx v1 (same_slot_bumped guard)",
+    );
+    let roots_post = decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    assert!(roots_post.same_slot_bumped);
+    assert_eq!(roots_post.slot_cursor, (pre_cursor + 1) % SLOT_RING_LEN as u16);
+    assert_eq!(lane_next_leaf(&svm, &program_id, 1), 4);
+
+    // Challenge #2: 2-input JoinSplit combining an older stable-epoch note (Lane 2) AND a brand-new
+    // slot-only note (Lane 3) using reconstruct_witness_for_notes!
+    svm.warp_to_slot(1_056); // new epoch 33 -> snapshots Lane 2 note into epoch_ring
+    let (tw_old, bl_old, memo_old) =
+        encrypt_note_memo(&alice.view_pk, [0x61; 32], 7_000_000, &WSOL_MINT).unwrap();
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                wsol_mint_id(),
+                payer.pubkey(),
+                vault_wsol,
+                spl_token_id(),
+                2,
+                0,
+                0,
+                0,
+                None,
+                None,
+                true,
+                false,
+                7_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_old),
+                bl_old,
+                &memo_old,
+                &[],
+            ))],
+            200_000,
+        ),
+        "deposit older note on lane 2 (stable epoch)",
+    );
+
+    svm.warp_to_slot(1_057); // same epoch 33 -> Lane 3 note is ONLY in slot_ring (latest)!
+    let (tw_new, bl_new, memo_new) =
+        encrypt_note_memo(&alice.view_pk, [0x62; 32], 8_000_000, &WSOL_MINT).unwrap();
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                wsol_mint_id(),
+                payer.pubkey(),
+                vault_wsol,
+                spl_token_id(),
+                3,
+                0,
+                0,
+                0,
+                None,
+                None,
+                true,
+                false,
+                8_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_new),
+                bl_new,
+                &memo_new,
+                &[],
+            ))],
+            200_000,
+        ),
+        "deposit newer note on lane 3 (slot_ring only)",
+    );
+
+    let (paths_2, rk_2, ri_2, sr_2) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(2, 0), (3, 0)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        rk_2, ROOT_RING_SLOT,
+        "mixed stable+latest 2-note batch MUST fall back to latest slot_ring"
+    );
+    let (tw_m, bl_m, memo_m) =
+        encrypt_note_memo(&alice.view_pk, [0x63; 32], 15_000_000, &WSOL_MINT).unwrap();
+    let ctx_m = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        2,
+        0b001,
+        ASSET_MODE_PRIVATE,
+        false,
+        None,
+        None,
+        &[0u8; 32],
+        0,
+        0,
+        &memo_m,
+    );
+    let b_m = prover.build_and_prove(
+        sr_2,
+        asset_wsol,
+        Fr::from(0u64),
+        0,
+        0,
+        ctx_m,
+        false, // 2 real inputs!
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_old,
+                asset_id: asset_wsol,
+                amount: 7_000_000,
+                blinding: bl_old,
+                is_dummy: false,
+                merkle_path: paths_2[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_new,
+                asset_id: asset_wsol,
+                amount: 8_000_000,
+                blinding: bl_new,
+                is_dummy: false,
+                merkle_path: paths_2[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_m),
+                asset_id: asset_wsol,
+                amount: 15_000_000,
+                blinding: bl_m,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0x64; 32],
+    );
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_2,
+                ri_2,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0b001,
+                ASSET_MODE_PRIVATE,
+                false,
+                None,
+                (None, None, None),
+                &b_m.proof_192,
+                &b_m.nf0,
+                &b_m.nf1,
+                &b_m.cm0,
+                &b_m.cm1,
+                &b_m.cm2,
+                0,
+                0,
+                payer.pubkey(),
+                payer.pubkey(),
+                &memo_m,
+                &[],
+            ))],
+            350_000,
+        ),
+        "2-input JoinSplit merging stable-epoch + latest-slot notes",
+    );
+    println!(
+        "  [V1.3.0 TEST B PASSED] 4-ix same-slot batch ({batch_cu} CU total) & mixed stable+latest 2-note witness verified"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// V1.3.0 TEST C: One-shot `InitRootHistory` (Tag 4) migration on a legacy
+//                populated 4-lane Pool #0 with zero lost notes
+// ----------------------------------------------------------------------------
+#[test]
+fn test_v130_init_root_history_legacy_pool_migration() {
+    let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
+    let mut svm = new_svm(program_id, None, None);
+    let prover = AudrenProver::from_canonical_pk();
+    let authority = Keypair::new();
+    let rando = Keypair::new();
+    svm.airdrop(&authority.pubkey(), 200_000_000_000).unwrap();
+    svm.airdrop(&rando.pubkey(), 50_000_000_000).unwrap();
+    svm.warp_to_slot(500);
+    let vault_wsol = bootstrap_pool(&mut svm, program_id, &authority, 4);
+
+    let alice = AudrenKeys::from_seed(&[0x71u8; 32]);
+    let asset_wsol = asset_id_for_mint(None);
+    let mut legacy_notes = Vec::new();
+    for lane in 0u8..4u8 {
+        let amt = 10_000_000 + (lane as u64) * 1_000_000;
+        let (tw, bl, memo) =
+            encrypt_note_memo(&alice.view_pk, [0x72 + lane; 32], amt, &WSOL_MINT).unwrap();
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &authority,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    authority.pubkey(),
+                    POOL_ID,
+                    wsol_mint_id(),
+                    authority.pubkey(),
+                    vault_wsol,
+                    spl_token_id(),
+                    lane,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    true,
+                    false,
+                    amt,
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    bl,
+                    &memo,
+                    &[],
+                ))],
+                200_000,
+            ),
+            "seed legacy note on lane 0..4",
+        );
+        legacy_notes.push((lane, amt, tw, bl));
+    }
+
+    // Simulate exact pre-v1.3.0 Mainnet/Devnet Pool #0 state:
+    // delete `roots_pda` and restore legacy `max_ckpt_age = 1536` bytes in `PL_OFF_RESERVED_24`!
+    let (pool_pda, _) = derive_pool_pda(&program_id, POOL_ID);
+    let (roots_pda, _) = derive_roots_pda(&program_id, POOL_ID);
+    svm.set_account(roots_pda, Account::default()).unwrap();
+    {
+        let mut p_acc = svm.get_account(&pool_pda).unwrap();
+        p_acc.data[PL_OFF_RESERVED_24..PL_OFF_RESERVED_24 + 8]
+            .copy_from_slice(&1_536u64.to_le_bytes());
+        svm.set_account(pool_pda, p_acc).unwrap();
+    }
+
+    // 1. Non-authority rejected (6028)
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &rando,
+            &[],
+            &[to_svm_ix(&build_init_root_history(
+                program_id,
+                rando.pubkey(),
+                POOL_ID,
+                32,
+                4,
+            ))],
+            100_000,
+        ),
+        6028,
+        "non-authority InitRootHistory MUST fail (6028)",
+    );
+
+    // 2. root_epoch_interval == 0 or > 256 rejected (6000)
+    for bad_interval in [0u64, 257u64] {
+        let mut bad_ix = to_svm_ix(&build_init_root_history(
+            program_id,
+            authority.pubkey(),
+            POOL_ID,
+            32,
+            4,
+        ));
+        bad_ix.data[5..13].copy_from_slice(&bad_interval.to_le_bytes());
+        expect_err_code(
+            send_v1(&mut svm, &authority, &[], &[bad_ix], 100_000),
+            6000,
+            "invalid root_epoch_interval MUST fail (6000)",
+        );
+    }
+
+    // 3. Wrong lane count rejected (6000)
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &authority,
+            &[],
+            &[to_svm_ix(&build_init_root_history(
+                program_id,
+                authority.pubkey(),
+                POOL_ID,
+                32,
+                3,
+            ))],
+            100_000,
+        ),
+        6000,
+        "wrong lane count InitRootHistory MUST fail (6000)",
+    );
+
+    // 4. Authority runs InitRootHistory(32, 4) -> SUCCEEDS!
+    let cu_migrate = expect_ok(
+        send_v1(
+            &mut svm,
+            &authority,
+            &[],
+            &[to_svm_ix(&build_init_root_history(
+                program_id,
+                authority.pubkey(),
+                POOL_ID,
+                DEFAULT_ROOT_EPOCH_INTERVAL,
+                4,
+            ))],
+            recommended_cu_limit_init_root_history(),
+        ),
+        "authority InitRootHistory migration",
+    );
+    let pool_after = svm.get_account(&pool_pda).unwrap().data;
+    assert_eq!(
+        &pool_after[PL_OFF_RESERVED_24..PL_OFF_RESERVED_24 + 8],
+        &[0u8; 8],
+        "InitRootHistory must zero legacy PL_OFF_RESERVED_24"
+    );
+    let ps_after = PoolState::decode(&pool_after).unwrap();
+    assert_eq!(ps_after.root_epoch_interval, DEFAULT_ROOT_EPOCH_INTERVAL);
+    let rh_after = decode_global_root_history(&svm.get_account(&roots_pda).unwrap().data).unwrap();
+    assert_eq!(rh_after.latest_lane_counts[0..4], [1, 1, 1, 1]);
+    assert_eq!(rh_after.stable_lane_counts[0..4], [1, 1, 1, 1]);
+
+    // 5. Second call MUST fail (strictly one-shot: roots_acc already exists -> Custom 6002)!
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &authority,
+            &[],
+            &[to_svm_ix(&build_init_root_history(
+                program_id,
+                authority.pubkey(),
+                POOL_ID,
+                DEFAULT_ROOT_EPOCH_INTERVAL,
+                4,
+            ))],
+            100_000,
+        ),
+        6002,
+        "second InitRootHistory MUST fail (one-shot)",
+    );
+
+    // 6. Immediately spend ALL 4 pre-existing legacy notes across lanes 0, 1, 2, 3!
+    let recipient = Keypair::new().pubkey();
+    let mut expected_total = 0u64;
+    for (lane, amt, tw, bl) in legacy_notes {
+        expected_total += amt;
+        let (path, rk, ri, sr) = reconstruct_witness_with(
+            |a| svm.get_account(a).map(|x| x.data),
+            &program_id,
+            POOL_ID,
+            lane,
+            0,
+            alice.view_sk,
+        )
+        .unwrap();
+        let ctx = compute_transact_ctx_hash(
+            &program_id,
+            POOL_ID,
+            VK_ID_DEFAULT,
+            lane,
+            0,
+            ASSET_MODE_PUBLIC,
+            true,
+            Some(&recipient),
+            None,
+            &fr_to_be_bytes(&asset_wsol),
+            amt,
+            0,
+            &[],
+        );
+        let b = prover.build_and_prove(
+            sr,
+            asset_wsol,
+            asset_wsol,
+            amt,
+            0,
+            ctx,
+            true,
+            [
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: tw,
+                    asset_id: asset_wsol,
+                    amount: amt,
+                    blinding: bl,
+                    is_dummy: false,
+                    merkle_path: path,
+                },
+                JoinSplitInputWitness {
+                    spend_sk: alice.spend_sk,
+                    tweak: Fr::from(0u64),
+                    asset_id: asset_wsol,
+                    amount: 0,
+                    blinding: Fr::from(30u64 + lane as u64),
+                    is_dummy: true,
+                    merkle_path: MerklePath4Ary::default(),
+                },
+            ],
+            [
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(1u64)),
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+                JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+            ],
+            [0x7A + lane; 32],
+        );
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &authority,
+                &[],
+                &[to_svm_ix(&build_transact(
+                    program_id,
+                    authority.pubkey(),
+                    POOL_ID,
+                    VK_ID_DEFAULT,
+                    rk,
+                    ri,
+                    lane,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ASSET_MODE_PUBLIC,
+                    true,
+                    Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+                    (None, None, None),
+                    &b.proof_192,
+                    &b.nf0,
+                    &b.nf1,
+                    &b.cm0,
+                    &b.cm1,
+                    &b.cm2,
+                    amt,
+                    0,
+                    recipient,
+                    authority.pubkey(),
+                    &[],
+                    &[],
+                ))],
+                300_000,
+            ),
+            "spend pre-existing legacy note after InitRootHistory migration",
+        );
+    }
+    assert_eq!(svm.get_balance(&recipient).unwrap(), expected_total);
+    println!(
+        "  [V1.3.0 TEST C PASSED] InitRootHistory ({cu_migrate} CU) migrated 4-lane legacy Pool #0; all 4 pre-existing notes spent cleanly"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// V1.3.0 TEST D: Auto-OpenPage (>= 90% lookahead & exact rollover in same Tx v1,
+//                100% LaneRentVault subsidy) + Empirical CU Measurement Table
+// ----------------------------------------------------------------------------
+#[test]
+fn test_v130_auto_open_page_lookahead_and_empirical_cu_budgets() {
+    let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
+    let router_id = Keypair::new().pubkey();
+    let hook_id = Keypair::new().pubkey();
+    let mut svm = new_svm(program_id, Some(router_id), Some(hook_id));
+    let prover = AudrenProver::from_canonical_pk();
+    let payer = Keypair::new();
+    let relayer = Keypair::new();
+    let recipient = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 200_000_000_000).unwrap();
+    svm.airdrop(&relayer.pubkey(), 50_000_000_000).unwrap();
+    svm.warp_to_slot(2_000);
+
+    // Measure InitPool, InitLane, OpenPage
+    let cu_init_pool = expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_init_pool(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                ROOT_EPOCH_INTERVAL,
+                2_000_000,
+                500_000,
+            ))],
+            600_000,
+        ),
+        "CU: InitPool",
+    );
+    let mut cu_init_lane = 0u64;
+    for l in 0u8..4u8 {
+        cu_init_lane = cu_init_lane.max(expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_init_lane(program_id, payer.pubkey(), POOL_ID, l))],
+                600_000,
+            ),
+            "CU: InitLane",
+        ));
+    }
+    let (va, _) = derive_vault_auth_pda(&program_id, POOL_ID);
+    let (esc0, _) = derive_escrow_pda(&program_id, POOL_ID, 0);
+    svm.airdrop(&esc0, 2_000_000).unwrap();
+    let vault_wsol = create_canonical_ata(&mut svm, &payer, va, wsol_mint_id(), spl_token_id());
+    let alice = AudrenKeys::from_seed(&[0x81u8; 32]);
+    let asset_wsol = asset_id_for_mint(None);
+
+    // 1. Auto-OpenPage >= 90% lookahead on Lane 0: fill 86 leaves (memo_rem = 96 - 86 = 10 <= 10!)
+    let mut cu_deposit_sol = 0u64;
+    let mut lane0_note0 = None;
+    let mut lane0_note1 = None;
+    for i in 0u64..86u64 {
+        let mut eph = [0x82u8; 32];
+        eph[0] = (i & 0xff) as u8;
+        let (tw, bl, memo) =
+            encrypt_note_memo(&alice.view_pk, eph, 2_000_000, &WSOL_MINT).unwrap();
+        if i == 0 {
+            lane0_note0 = Some((tw, bl));
+        } else if i == 1 {
+            lane0_note1 = Some((tw, bl));
+        }
+        let cu = expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    wsol_mint_id(),
+                    payer.pubkey(),
+                    vault_wsol,
+                    spl_token_id(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    true,
+                    false,
+                    2_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    bl,
+                    &memo,
+                    &[],
+                ))],
+                600_000,
+            ),
+            "fill Lane 0 to 86 leaves",
+        );
+        cu_deposit_sol = cu_deposit_sol.max(cu);
+    }
+
+    let memo1_pda = derive_memo_pda(&program_id, POOL_ID, 0, 1).0;
+    assert!(svm.get_account(&memo1_pda).is_none());
+    let mut existing_pages = BTreeSet::new();
+    for pda in [
+        derive_subtree_pda(&program_id, POOL_ID, 0, 0).0,
+        audren_client::pda::derive_subroot_pda(&program_id, POOL_ID, 0, 0).0,
+        derive_memo_pda(&program_id, POOL_ID, 0, 0).0,
+        derive_nf_page_pda(&program_id, POOL_ID, 0, 0).0,
+    ] {
+        if svm.get_account(&pda).is_some_and(|a| !a.data.is_empty()) {
+            existing_pages.insert(pda);
+        }
+    }
+    let specs =
+        plan_auto_open_pages(&program_id, POOL_ID, 0, 86, 0, 1, 0, &existing_pages).unwrap();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].page_kind, OPEN_PAGE_KIND_MEMO);
+    assert_eq!(specs[0].page_seq, 1);
+
+    // Prepend Auto-OpenPage(MEMO, 1) in the SAME Tx v1 as Deposit #86!
+    // Verify LaneRentVault subsidizes 100% of MemoPage 1 rent!
+    let lane0_rent_pda = derive_lane_rent_pda(&program_id, POOL_ID, 0).0;
+    let rent_vault_before = svm.get_account(&lane0_rent_pda).unwrap().lamports;
+    let memo_rent_needed = svm.minimum_balance_for_rent_exemption(MEMO_PAGE_LEN);
+    assert!(
+        rent_vault_before > memo_rent_needed,
+        "LaneRentVault must have accumulated enough fees by leaf 86 to 100% subsidize MemoPage 1"
+    );
+    let payer_before = svm.get_balance(&payer.pubkey()).unwrap();
+    let auto_ixs =
+        build_auto_open_page_ixs(program_id, payer.pubkey(), POOL_ID, 0, 86, 0, 1, 0, &existing_pages)
+            .unwrap();
+    let (tw86, bl86, memo86) =
+        encrypt_note_memo(&alice.view_pk, [0x86; 32], 2_000_000, &WSOL_MINT).unwrap();
+    let mut tx_ixs: Vec<Instruction> = auto_ixs.iter().map(to_svm_ix).collect();
+    tx_ixs.push(to_svm_ix(&build_deposit(
+        program_id,
+        payer.pubkey(),
+        POOL_ID,
+        wsol_mint_id(),
+        payer.pubkey(),
+        vault_wsol,
+        spl_token_id(),
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        true,
+        false,
+        2_000_000,
+        derive_stealth_owner(alice.spend_pk, tw86),
+        bl86,
+        &memo86,
+        &[],
+    )));
+    let cu_auto_dep = expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &tx_ixs,
+            recommended_cu_limit_deposit(false, auto_ixs.len()),
+        ),
+        "Auto-OpenPage(MEMO, 1) + Deposit #86 in 1 Tx v1",
+    );
+    assert!(svm.get_account(&memo1_pda).is_some());
+    let payer_after = svm.get_balance(&payer.pubkey()).unwrap();
+    let payer_delta = payer_before - payer_after;
+    assert!(
+        payer_delta < 2_000_000 + 2_000_000 + 10_000,
+        "payer must NOT pay MemoPage 1 rent ({memo_rent_needed}); actual delta={payer_delta}"
+    );
+    // Standalone OpenPage CU measurement (creating MemoPage 1 on Lane 1)
+    assert_eq!(CU_LIMIT_OPEN_PAGE, 40_000);
+    assert_eq!(CU_LIMIT_TRANSACT_FULL_EXIT, 165_000);
+    let cu_open_page = expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_open_page(
+                program_id,
+                payer.pubkey(),
+                OPEN_PAGE_KIND_MEMO,
+                POOL_ID,
+                1,
+                1,
+            ))],
+            CU_LIMIT_OPEN_PAGE,
+        ),
+        "CU: OpenPage(MEMO, 1)",
+    );
+
+    // 2. Measure Classic SPL Deposit, Token-2022 TransferFee+TransferHook Deposit,
+    //    Transact Private 2in/3out, Transact Withdraw SPL, Transact Withdraw WSOL Unwrap,
+    //    Transact Full Exit (read-only roots), Transact Withdraw T22 Hook, and ExecViaEscrow!
+    let usdc_mint = create_spl_mint(&mut svm, &payer, 6);
+    let vault_usdc = create_canonical_ata(&mut svm, &payer, va, usdc_mint, spl_token_id());
+    let payer_usdc = create_canonical_ata(&mut svm, &payer, payer.pubkey(), usdc_mint, spl_token_id());
+    let recip_usdc = create_canonical_ata(&mut svm, &payer, recipient.pubkey(), usdc_mint, spl_token_id());
+    let relayer_usdc = create_canonical_ata(&mut svm, &payer, relayer.pubkey(), usdc_mint, spl_token_id());
+    mint_to(&mut svm, &payer, spl_token_id(), usdc_mint, payer_usdc, 200_000_000);
+
+    let (tw_u, bl_u, memo_u) =
+        encrypt_note_memo(&alice.view_pk, [0x91; 32], 50_000_000, &usdc_mint.to_bytes()).unwrap();
+    let cu_deposit_spl = expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                usdc_mint,
+                payer_usdc,
+                vault_usdc,
+                spl_token_id(),
+                1,
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+                false,
+                50_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_u),
+                bl_u,
+                &memo_u,
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: Deposit SPL",
+    );
+
+    // Token-2022 TransferFee + TransferHook combined mint!
+    let t22_fh_kp = Keypair::new();
+    let fh_space = ExtensionType::try_calculate_account_len::<Mint>(&[
+        ExtensionType::TransferFeeConfig,
+        ExtensionType::TransferHook,
+    ])
+    .unwrap();
+    let fh_rent = svm.minimum_balance_for_rent_exemption(fh_space);
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[&t22_fh_kp],
+            &[
+                sys_ix::create_account(
+                    &payer.pubkey(),
+                    &t22_fh_kp.pubkey(),
+                    fh_rent,
+                    fh_space as u64,
+                    &token_2022_id(),
+                ),
+                transfer_fee_ix::initialize_transfer_fee_config(
+                    &token_2022_id(),
+                    &t22_fh_kp.pubkey(),
+                    Some(&payer.pubkey()),
+                    Some(&payer.pubkey()),
+                    250,
+                    50_000_000,
+                )
+                .unwrap(),
+                transfer_hook_ix::initialize(
+                    &token_2022_id(),
+                    &t22_fh_kp.pubkey(),
+                    Some(payer.pubkey()),
+                    Some(hook_id),
+                )
+                .unwrap(),
+                token_ix::initialize_mint(
+                    &token_2022_id(),
+                    &t22_fh_kp.pubkey(),
+                    &payer.pubkey(),
+                    None,
+                    6,
+                )
+                .unwrap(),
+            ],
+            300_000,
+        ),
+        "create T22 TransferFee+TransferHook mint",
+    );
+    let fh_mint = t22_fh_kp.pubkey();
+    let fh_extra = Address::find_program_address(&[b"extra-account-metas", fh_mint.as_ref()], &hook_id).0;
+    let fh_state = Address::find_program_address(&[b"hook_state", fh_mint.as_ref()], &hook_id).0;
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[Instruction {
+                program_id: hook_id,
+                accounts: vec![
+                    AccountMeta::new(payer.pubkey(), true),
+                    AccountMeta::new_readonly(fh_mint, false),
+                    AccountMeta::new(fh_extra, false),
+                    AccountMeta::new(fh_state, false),
+                    AccountMeta::new_readonly(sys_program_id(), false),
+                ],
+                data: vec![0u8],
+            }],
+            200_000,
+        ),
+        "init T22 Fee+Hook extra metas",
+    );
+    let payer_fh = create_canonical_ata(&mut svm, &payer, payer.pubkey(), fh_mint, token_2022_id());
+    let vault_fh = create_canonical_ata(&mut svm, &payer, va, fh_mint, token_2022_id());
+    let recip_fh = create_canonical_ata(&mut svm, &payer, recipient.pubkey(), fh_mint, token_2022_id());
+    let relayer_fh = create_canonical_ata(&mut svm, &payer, relayer.pubkey(), fh_mint, token_2022_id());
+    mint_to(&mut svm, &payer, token_2022_id(), fh_mint, payer_fh, 100_000_000);
+    let fh_metas = vec![
+        AudrenAccountMeta::readonly(fh_extra, false),
+        AudrenAccountMeta::writable(fh_state, false),
+        AudrenAccountMeta::readonly(hook_id, false),
+    ];
+    let (tw_fh, bl_fh, memo_fh) =
+        encrypt_note_memo(&alice.view_pk, [0x92; 32], 39_000_000, &fh_mint.to_bytes()).unwrap();
+    let cu_deposit_t22_fh = expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_deposit(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                fh_mint,
+                payer_fh,
+                vault_fh,
+                token_2022_id(),
+                2,
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+                false,
+                40_000_000,
+                derive_stealth_owner(alice.spend_pk, tw_fh),
+                bl_fh,
+                &memo_fh,
+                &fh_metas,
+            ))],
+            600_000,
+        ),
+        "CU: Deposit T22 Fee+Hook",
+    );
+
+    // Transact Private 2in/3out (worst-case 2 nullifiers + 3 outputs!)
+    let (tw0, bl0) = lane0_note0.unwrap();
+    let (tw1, bl1) = lane0_note1.unwrap();
+    let (paths_2in, rk_p, ri_p, sr_p) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(0, 0), (0, 1)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let (tw_o0, bl_o0, memo_o0) =
+        encrypt_note_memo(&alice.view_pk, [0xA1; 32], 1_500_000, &WSOL_MINT).unwrap();
+    let (tw_o1, bl_o1, memo_o1) =
+        encrypt_note_memo(&alice.view_pk, [0xA2; 32], 1_500_000, &WSOL_MINT).unwrap();
+    let (tw_o2, bl_o2, memo_o2) =
+        encrypt_note_memo(&alice.view_pk, [0xA3; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let mut memos_3 = Vec::with_capacity(318);
+    memos_3.extend_from_slice(&memo_o0);
+    memos_3.extend_from_slice(&memo_o1);
+    memos_3.extend_from_slice(&memo_o2);
+    let ctx_2in3out = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0b111,
+        ASSET_MODE_PRIVATE,
+        false,
+        None,
+        None,
+        &[0u8; 32],
+        0,
+        0,
+        &memos_3,
+    );
+    let b_2in3out = prover.build_and_prove(
+        sr_p,
+        asset_wsol,
+        Fr::from(0u64),
+        0,
+        0,
+        ctx_2in3out,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw0,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl0,
+                is_dummy: false,
+                merkle_path: paths_2in[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw1,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl1,
+                is_dummy: false,
+                merkle_path: paths_2in[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_o0),
+                asset_id: asset_wsol,
+                amount: 1_500_000,
+                blinding: bl_o0,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_o1),
+                asset_id: asset_wsol,
+                amount: 1_500_000,
+                blinding: bl_o1,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_o2),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_o2,
+            },
+        ],
+        [0xA4; 32],
+    );
+    let cu_transact_2in3out = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_p,
+                ri_p,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0b111,
+                ASSET_MODE_PRIVATE,
+                false,
+                None,
+                (None, None, None),
+                &b_2in3out.proof_192,
+                &b_2in3out.nf0,
+                &b_2in3out.nf1,
+                &b_2in3out.cm0,
+                &b_2in3out.cm1,
+                &b_2in3out.cm2,
+                0,
+                0,
+                relayer.pubkey(),
+                relayer.pubkey(),
+                &memos_3,
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: Transact Private 2in/3out",
+    );
+
+    // Transact Withdraw SPL (partial 1in/1out + relayer fee)
+    let (path_u, rk_u, ri_u, sr_u) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        1,
+        0,
+        alice.view_sk,
+    )
+    .unwrap();
+    let asset_usdc = asset_id_for_mint(Some(&usdc_mint));
+    let (tw_uc, bl_uc, memo_uc) =
+        encrypt_note_memo(&alice.view_pk, [0xA5; 32], 20_000_000, &usdc_mint.to_bytes()).unwrap();
+    let ctx_wd_spl = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0b001,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some(&recip_usdc),
+        Some(&relayer_usdc),
+        &fr_to_be_bytes(&asset_usdc),
+        28_000_000,
+        2_000_000,
+        &memo_uc,
+    );
+    let b_wd_spl = prover.build_and_prove(
+        sr_u,
+        asset_usdc,
+        asset_usdc,
+        28_000_000,
+        2_000_000,
+        ctx_wd_spl,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(41u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_uc),
+                asset_id: asset_usdc,
+                amount: 20_000_000,
+                blinding: bl_uc,
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0xA6; 32],
+    );
+    let cu_transact_wd_spl = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_u,
+                ri_u,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0b001,
+                ASSET_MODE_PUBLIC,
+                false,
+                Some((usdc_mint, vault_usdc, spl_token_id())),
+                (None, None, None),
+                &b_wd_spl.proof_192,
+                &b_wd_spl.nf0,
+                &b_wd_spl.nf1,
+                &b_wd_spl.cm0,
+                &b_wd_spl.cm1,
+                &b_wd_spl.cm2,
+                28_000_000,
+                2_000_000,
+                recip_usdc,
+                relayer_usdc,
+                &memo_uc,
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: Transact Withdraw SPL",
+    );
+
+    // Transact Withdraw WSOL Unwrap (partial 1in/1out + relayer fee)
+    let (path_uw, rk_uw, ri_uw, sr_uw) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        3,
+        0,
+        alice.view_sk,
+    )
+    .unwrap();
+    let (tw_uwc, bl_uwc, memo_uwc) =
+        encrypt_note_memo(&alice.view_pk, [0xA7; 32], 500_000, &WSOL_MINT).unwrap();
+    let ctx_wd_uw = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0b001,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some(&recipient.pubkey()),
+        Some(&relayer.pubkey()),
+        &fr_to_be_bytes(&asset_wsol),
+        900_000,
+        100_000,
+        &memo_uwc,
+    );
+    let b_wd_uw = prover.build_and_prove(
+        sr_uw,
+        asset_wsol,
+        asset_wsol,
+        900_000,
+        100_000,
+        ctx_wd_uw,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_o0,
+                asset_id: asset_wsol,
+                amount: 1_500_000,
+                blinding: bl_o0,
+                is_dummy: false,
+                merkle_path: path_uw,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_wsol,
+                amount: 0,
+                blinding: Fr::from(42u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_uwc),
+                asset_id: asset_wsol,
+                amount: 500_000,
+                blinding: bl_uwc,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0xA8; 32],
+    );
+    let cu_transact_wd_unwrap = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_uw,
+                ri_uw,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0b001,
+                ASSET_MODE_PUBLIC,
+                true,
+                Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+                (None, None, None),
+                &b_wd_uw.proof_192,
+                &b_wd_uw.nf0,
+                &b_wd_uw.nf1,
+                &b_wd_uw.cm0,
+                &b_wd_uw.cm1,
+                &b_wd_uw.cm2,
+                900_000,
+                100_000,
+                recipient.pubkey(),
+                relayer.pubkey(),
+                &memo_uwc,
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: Transact Withdraw WSOL Unwrap",
+    );
+
+    // Transact Full Exit (output_mask == 0, READ-ONLY roots_acc)
+    let (path_fe, rk_fe, ri_fe, sr_fe) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        3,
+        1,
+        alice.view_sk,
+    )
+    .unwrap();
+    let ctx_fe = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some(&recipient.pubkey()),
+        Some(&relayer.pubkey()),
+        &fr_to_be_bytes(&asset_wsol),
+        1_400_000,
+        100_000,
+        &[],
+    );
+    let b_fe = prover.build_and_prove(
+        sr_fe,
+        asset_wsol,
+        asset_wsol,
+        1_400_000,
+        100_000,
+        ctx_fe,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_o1,
+                asset_id: asset_wsol,
+                amount: 1_500_000,
+                blinding: bl_o1,
+                is_dummy: false,
+                merkle_path: path_fe,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_wsol,
+                amount: 0,
+                blinding: Fr::from(43u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(1u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0xA9; 32],
+    );
+    let cu_transact_full_exit = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_fe,
+                ri_fe,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ASSET_MODE_PUBLIC,
+                true,
+                Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+                (None, None, None),
+                &b_fe.proof_192,
+                &b_fe.nf0,
+                &b_fe.nf1,
+                &b_fe.cm0,
+                &b_fe.cm1,
+                &b_fe.cm2,
+                1_400_000,
+                100_000,
+                recipient.pubkey(),
+                relayer.pubkey(),
+                &[],
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: Transact Full Exit read-only roots",
+    );
+
+    // Transact Withdraw T22 TransferFee + TransferHook
+    let (path_fh, rk_fh, ri_fh, sr_fh) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        2,
+        0,
+        alice.view_sk,
+    )
+    .unwrap();
+    let asset_fh = asset_id_for_mint(Some(&fh_mint));
+    let ctx_fh = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        2,
+        0,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some(&recip_fh),
+        Some(&relayer_fh),
+        &fr_to_be_bytes(&asset_fh),
+        35_000_000,
+        4_000_000,
+        &[],
+    );
+    let b_fh = prover.build_and_prove(
+        sr_fh,
+        asset_fh,
+        asset_fh,
+        35_000_000,
+        4_000_000,
+        ctx_fh,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_fh,
+                asset_id: asset_fh,
+                amount: 39_000_000,
+                blinding: bl_fh,
+                is_dummy: false,
+                merkle_path: path_fh,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_fh,
+                amount: 0,
+                blinding: Fr::from(44u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness::dummy(asset_fh, Fr::from(1u64)),
+            JoinSplitOutputWitness::dummy(asset_fh, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_fh, Fr::from(3u64)),
+        ],
+        [0xAA; 32],
+    );
+    let cu_transact_wd_hook = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_fh,
+                ri_fh,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ASSET_MODE_PUBLIC,
+                false,
+                Some((fh_mint, vault_fh, token_2022_id())),
+                (None, None, None),
+                &b_fh.proof_192,
+                &b_fh.nf0,
+                &b_fh.nf1,
+                &b_fh.cm0,
+                &b_fh.cm1,
+                &b_fh.cm2,
+                35_000_000,
+                4_000_000,
+                recip_fh,
+                relayer_fh,
+                &[],
+                &fh_metas,
+            ))],
+            600_000,
+        ),
+        "CU: Transact Withdraw T22 Hook",
+    );
+
+    // ExecViaEscrow (WSOL -> SPL USDC via mock router)
+    let dex_pool = dex_pool_pda(&router_id);
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[dex_init_ix(router_id, payer.pubkey(), 10_000, 10_000_000_000)],
+            200_000,
+        ),
+        "init mock router for CU bench",
+    );
+    let esc0_wsol = create_canonical_ata(&mut svm, &payer, esc0, wsol_mint_id(), spl_token_id());
+    let dex_wsol = create_canonical_ata(&mut svm, &payer, dex_pool, wsol_mint_id(), spl_token_id());
+    let esc0_usdc = create_canonical_ata(&mut svm, &payer, esc0, usdc_mint, spl_token_id());
+    let dex_usdc = create_canonical_ata(&mut svm, &payer, dex_pool, usdc_mint, spl_token_id());
+    mint_to(&mut svm, &payer, spl_token_id(), usdc_mint, dex_usdc, 50_000_000);
+
+    let (path_ex, rk_ex, ri_ex, sr_ex) = reconstruct_witness_with(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        3,
+        2,
+        alice.view_sk,
+    )
+    .unwrap();
+    let (dtw, dbl, dhead, dmask) = prepare_dynamic_swap_memo(&alice.view_pk, [0xAB; 32]).unwrap();
+    let ost = fr_to_be_bytes(&derive_stealth_owner(alice.spend_pk, dtw));
+    let obl = fr_to_be_bytes(&dbl);
+    let swap_data = dex_swap_spl_to_spl_data(0, 1_000_000, 1_000_000, 9, 6);
+    let swap_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_wsol, false),
+        AudrenAccountMeta::writable(dex_wsol, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::readonly(wsol_mint_id(), false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+    ];
+    let ctx_ex = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0,
+        0,
+        false,
+        &asset_id_bytes_for_mint(None),
+        1_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_usdc),
+        1_000_000,
+        &router_id,
+        &swap_accs,
+        &[],
+        &ost,
+        &obl,
+        &dhead,
+        &dmask,
+        &swap_data,
+        &[],
+    );
+    let b_ex = prover.build_and_prove(
+        sr_ex,
+        asset_wsol,
+        asset_wsol,
+        1_000_000,
+        0,
+        ctx_ex,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_o2,
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_o2,
+                is_dummy: false,
+                merkle_path: path_ex,
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_wsol,
+                amount: 0,
+                blinding: Fr::from(45u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(1u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0xAC; 32],
+    );
+    let cu_exec = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_ex,
+                ri_ex,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (wsol_mint_id(), vault_wsol, esc0_wsol, spl_token_id()),
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_ex.proof_192,
+                &b_ex.nf0,
+                &b_ex.nf1,
+                &b_ex.cm0,
+                &b_ex.cm1,
+                &b_ex.cm2,
+                1_000_000,
+                1_000_000,
+                &ost,
+                &obl,
+                &dhead,
+                &dmask,
+                router_id,
+                &swap_data,
+                swap_accs,
+                &[],
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: ExecViaEscrow",
+    );
+
+    // Also measure worst-case 256-leaf SubtreePage seal boundary Deposit (leaf 255 -> 256)
+    // and worst-case 2in/2out Withdraw WSOL Unwrap + 2in/2out Withdraw SPL + 2in/2out T22 Hook!
+    for (kind, seq) in [
+        (OPEN_PAGE_KIND_MEMO, 2u64),
+        (OPEN_PAGE_KIND_SUBTREE, 1u64),
+    ] {
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_open_page(
+                    program_id,
+                    payer.pubkey(),
+                    kind,
+                    POOL_ID,
+                    0,
+                    seq,
+                ))],
+                100_000,
+            ),
+            "pre-open page for 256-leaf seal CU measurement",
+        );
+    }
+    let mut lane0_note_a = None;
+    let mut lane0_note_b = None;
+    let mut lane0_note_c = None;
+    let mut lane0_note_d = None;
+    let mut lane0_note_e = None;
+    let mut lane0_note_f = None;
+    let mut lane0_note_g = None;
+    let mut lane0_note_h = None;
+    let mut lane0_note_i = None;
+    let mut lane0_note_j = None;
+    let mut cu_deposit_sol_seal_256 = 0u64;
+    for i in 87u64..256u64 {
+        let mut eph = [0xD0u8; 32];
+        eph[0] = (i & 0xff) as u8;
+        eph[1] = (i >> 8) as u8;
+        let (tw, bl, memo) =
+            encrypt_note_memo(&alice.view_pk, eph, 2_000_000, &WSOL_MINT).unwrap();
+        match i {
+            100 => lane0_note_a = Some((i, tw, bl)),
+            101 => lane0_note_b = Some((i, tw, bl)),
+            102 => lane0_note_c = Some((i, tw, bl)),
+            103 => lane0_note_d = Some((i, tw, bl)),
+            104 => lane0_note_e = Some((i, tw, bl)),
+            105 => lane0_note_f = Some((i, tw, bl)),
+            106 => lane0_note_g = Some((i, tw, bl)),
+            107 => lane0_note_h = Some((i, tw, bl)),
+            108 => lane0_note_i = Some((i, tw, bl)),
+            109 => lane0_note_j = Some((i, tw, bl)),
+            _ => {}
+        }
+        let sub_seq = i / (SUBTREE_LEAVES as u64);
+        let memo_seq = i / (MEMO_NOTES_PER_PAGE as u64);
+        let cu = expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    wsol_mint_id(),
+                    payer.pubkey(),
+                    vault_wsol,
+                    spl_token_id(),
+                    0,
+                    sub_seq,
+                    0,
+                    memo_seq,
+                    None,
+                    None,
+                    true,
+                    false,
+                    2_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    bl,
+                    &memo,
+                    &[],
+                ))],
+                600_000,
+            ),
+            "fill Lane 0 to 256-leaf seal boundary",
+        );
+        if i == 255 {
+            cu_deposit_sol_seal_256 = cu;
+        }
+    }
+
+    // Worst-case Transact Withdraw WSOL Unwrap (2in/2out + relayer fee)
+    let ((la_idx, tw_la, bl_la), (lb_idx, tw_lb, bl_lb)) =
+        (lane0_note_a.unwrap(), lane0_note_b.unwrap());
+    let (paths_uw2, rk_uw2, ri_uw2, sr_uw2) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(0, la_idx), (0, lb_idx)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let (tw_u2a, bl_u2a, memo_u2a) =
+        encrypt_note_memo(&alice.view_pk, [0xD1; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let (tw_u2b, bl_u2b, memo_u2b) =
+        encrypt_note_memo(&alice.view_pk, [0xD2; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let mut memos_u2 = Vec::with_capacity(212);
+    memos_u2.extend_from_slice(&memo_u2a);
+    memos_u2.extend_from_slice(&memo_u2b);
+    let ctx_uw2 = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0b011,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some(&recipient.pubkey()),
+        Some(&relayer.pubkey()),
+        &fr_to_be_bytes(&asset_wsol),
+        1_800_000,
+        200_000,
+        &memos_u2,
+    );
+    let b_uw2 = prover.build_and_prove(
+        sr_uw2,
+        asset_wsol,
+        asset_wsol,
+        1_800_000,
+        200_000,
+        ctx_uw2,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_la,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_la,
+                is_dummy: false,
+                merkle_path: paths_uw2[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_lb,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_lb,
+                is_dummy: false,
+                merkle_path: paths_uw2[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_u2a),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_u2a,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_u2b),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_u2b,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0xD3; 32],
+    );
+    let cu_transact_wd_unwrap_2in2out = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_uw2,
+                ri_uw2,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0b011,
+                ASSET_MODE_PUBLIC,
+                true,
+                Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+                (None, None, None),
+                &b_uw2.proof_192,
+                &b_uw2.nf0,
+                &b_uw2.nf1,
+                &b_uw2.cm0,
+                &b_uw2.cm1,
+                &b_uw2.cm2,
+                1_800_000,
+                200_000,
+                recipient.pubkey(),
+                relayer.pubkey(),
+                &memos_u2,
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: Transact Withdraw WSOL Unwrap 2in/2out",
+    );
+
+    // Worst-case Transact Withdraw WSOL Unwrap (2in/3out, output_mask = 0b111, DISTINCT fee_recipient != payer)
+    let fee_treasury = Keypair::new();
+    svm.airdrop(&fee_treasury.pubkey(), 1_000_000).unwrap();
+    let recip_bal_before_3o = svm.get_balance(&recipient.pubkey()).unwrap();
+    let fee_bal_before_3o = svm.get_balance(&fee_treasury.pubkey()).unwrap();
+    let ((lc_idx, tw_lc, bl_lc), (ld_idx, tw_ld, bl_ld)) =
+        (lane0_note_c.unwrap(), lane0_note_d.unwrap());
+    let (paths_uw3, rk_uw3, ri_uw3, sr_uw3) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(0, lc_idx), (0, ld_idx)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let (tw_u3a, bl_u3a, memo_u3a) =
+        encrypt_note_memo(&alice.view_pk, [0xE1; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let (tw_u3b, bl_u3b, memo_u3b) =
+        encrypt_note_memo(&alice.view_pk, [0xE2; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let (tw_u3c, bl_u3c, memo_u3c) =
+        encrypt_note_memo(&alice.view_pk, [0xE3; 32], 800_000, &WSOL_MINT).unwrap();
+    let mut memos_u3 = Vec::with_capacity(318);
+    memos_u3.extend_from_slice(&memo_u3a);
+    memos_u3.extend_from_slice(&memo_u3b);
+    memos_u3.extend_from_slice(&memo_u3c);
+    let ctx_uw3 = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0b111,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some(&recipient.pubkey()),
+        Some(&fee_treasury.pubkey()),
+        &fr_to_be_bytes(&asset_wsol),
+        1_000_000,
+        200_000,
+        &memos_u3,
+    );
+    let b_uw3 = prover.build_and_prove(
+        sr_uw3,
+        asset_wsol,
+        asset_wsol,
+        1_000_000,
+        200_000,
+        ctx_uw3,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_lc,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_lc,
+                is_dummy: false,
+                merkle_path: paths_uw3[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_ld,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_ld,
+                is_dummy: false,
+                merkle_path: paths_uw3[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_u3a),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_u3a,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_u3b),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_u3b,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_u3c),
+                asset_id: asset_wsol,
+                amount: 800_000,
+                blinding: bl_u3c,
+            },
+        ],
+        [0xE4; 32],
+    );
+    let cu_transact_wd_unwrap_2in3out_fee = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_uw3,
+                ri_uw3,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0b111,
+                ASSET_MODE_PUBLIC,
+                true,
+                Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+                (None, None, None),
+                &b_uw3.proof_192,
+                &b_uw3.nf0,
+                &b_uw3.nf1,
+                &b_uw3.cm0,
+                &b_uw3.cm1,
+                &b_uw3.cm2,
+                1_000_000,
+                200_000,
+                recipient.pubkey(),
+                fee_treasury.pubkey(),
+                &memos_u3,
+                &[],
+            ))],
+            600_000,
+        ),
+        "CU: Transact Withdraw WSOL Unwrap 2in/3out + distinct fee_recipient",
+    );
+    assert_eq!(
+        svm.get_balance(&recipient.pubkey()).unwrap(),
+        recip_bal_before_3o + 1_000_000
+    );
+    assert_eq!(
+        svm.get_balance(&fee_treasury.pubkey()).unwrap(),
+        fee_bal_before_3o + 200_000
+    );
+
+    // Worst-case Transact Full Exit WSOL Unwrap (2in/0out, READ-ONLY roots, DISTINCT fee_recipient != payer)
+    let recip_bal_before_fe2 = svm.get_balance(&recipient.pubkey()).unwrap();
+    let fee_bal_before_fe2 = svm.get_balance(&fee_treasury.pubkey()).unwrap();
+    let ((li_idx, tw_li, bl_li), (lj_idx, tw_lj, bl_lj)) =
+        (lane0_note_i.unwrap(), lane0_note_j.unwrap());
+    let (paths_fe_wsol2, rk_few2, ri_few2, sr_few2) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(0, li_idx), (0, lj_idx)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let ctx_few2 = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some(&recipient.pubkey()),
+        Some(&fee_treasury.pubkey()),
+        &fr_to_be_bytes(&asset_wsol),
+        3_800_000,
+        200_000,
+        &[],
+    );
+    let b_few2 = prover.build_and_prove(
+        sr_few2,
+        asset_wsol,
+        asset_wsol,
+        3_800_000,
+        200_000,
+        ctx_few2,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_li,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_li,
+                is_dummy: false,
+                merkle_path: paths_fe_wsol2[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_lj,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_lj,
+                is_dummy: false,
+                merkle_path: paths_fe_wsol2[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(1u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0xF5; 32],
+    );
+    let fe_wsol2_ix = to_svm_ix(&build_transact(
+        program_id,
+        relayer.pubkey(),
+        POOL_ID,
+        VK_ID_DEFAULT,
+        rk_few2,
+        ri_few2,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        ASSET_MODE_PUBLIC,
+        true,
+        Some((wsol_mint_id(), vault_wsol, spl_token_id())),
+        (None, None, None),
+        &b_few2.proof_192,
+        &b_few2.nf0,
+        &b_few2.nf1,
+        &b_few2.cm0,
+        &b_few2.cm1,
+        &b_few2.cm2,
+        3_800_000,
+        200_000,
+        recipient.pubkey(),
+        fee_treasury.pubkey(),
+        &[],
+        &[],
+    ));
+    assert!(
+        !fe_wsol2_ix.accounts[2].is_writable,
+        "2in/0out WSOL full exit must mark GlobalRootHistory READ-ONLY"
+    );
+    let cu_transact_full_exit_wsol_2in_fee = expect_ok(
+        send_v1(&mut svm, &relayer, &[], &[fe_wsol2_ix], CU_LIMIT_TRANSACT_FULL_EXIT),
+        "CU: Transact Full Exit WSOL 2in/0out + distinct fee_recipient",
+    );
+    assert_eq!(
+        svm.get_balance(&recipient.pubkey()).unwrap(),
+        recip_bal_before_fe2 + 3_800_000
+    );
+    assert_eq!(
+        svm.get_balance(&fee_treasury.pubkey()).unwrap(),
+        fee_bal_before_fe2 + 200_000
+    );
+
+    // Worst-case Transact Full Exit non-hook Token-2022 TransferFee (2in/0out, READ-ONLY roots, relayer fee > 0)
+    let t22_fee_mint = create_t22_fee_mint(&mut svm, &payer, 6, 250, 5_000_000);
+    let vault_t22f = create_canonical_ata(&mut svm, &payer, va, t22_fee_mint, token_2022_id());
+    let payer_t22f =
+        create_canonical_ata(&mut svm, &payer, payer.pubkey(), t22_fee_mint, token_2022_id());
+    let recip_t22f =
+        create_canonical_ata(&mut svm, &payer, recipient.pubkey(), t22_fee_mint, token_2022_id());
+    let relayer_t22f =
+        create_canonical_ata(&mut svm, &payer, relayer.pubkey(), t22_fee_mint, token_2022_id());
+    mint_to(&mut svm, &payer, token_2022_id(), t22_fee_mint, payer_t22f, 40_000_000);
+    let asset_t22f = asset_id_for_mint(Some(&t22_fee_mint));
+    let t22f_idx0 = lane_next_leaf(&svm, &program_id, 1);
+    let (tw_tf0, bl_tf0, memo_tf0) =
+        encrypt_note_memo(&alice.view_pk, [0xF6; 32], 19_500_000, &t22_fee_mint.to_bytes()).unwrap();
+    let (tw_tf1, bl_tf1, memo_tf1) =
+        encrypt_note_memo(&alice.view_pk, [0xF7; 32], 19_500_000, &t22_fee_mint.to_bytes()).unwrap();
+    for (tw, bl, memo) in [(tw_tf0, bl_tf0, &memo_tf0), (tw_tf1, bl_tf1, &memo_tf1)] {
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    t22_fee_mint,
+                    payer_t22f,
+                    vault_t22f,
+                    token_2022_id(),
+                    1,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    false,
+                    false,
+                    20_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    bl,
+                    memo,
+                    &[],
+                ))],
+                600_000,
+            ),
+            "deposit non-hook T22 TransferFee notes for 2in/0out full exit",
+        );
+    }
+    let (paths_t22f, rk_t22f, ri_t22f, sr_t22f) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(1, t22f_idx0), (1, t22f_idx0 + 1)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let ctx_t22f = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some(&recip_t22f),
+        Some(&relayer_t22f),
+        &fr_to_be_bytes(&asset_t22f),
+        35_000_000,
+        4_000_000,
+        &[],
+    );
+    let b_t22f = prover.build_and_prove(
+        sr_t22f,
+        asset_t22f,
+        asset_t22f,
+        35_000_000,
+        4_000_000,
+        ctx_t22f,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_tf0,
+                asset_id: asset_t22f,
+                amount: 19_500_000,
+                blinding: bl_tf0,
+                is_dummy: false,
+                merkle_path: paths_t22f[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_tf1,
+                asset_id: asset_t22f,
+                amount: 19_500_000,
+                blinding: bl_tf1,
+                is_dummy: false,
+                merkle_path: paths_t22f[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness::dummy(asset_t22f, Fr::from(1u64)),
+            JoinSplitOutputWitness::dummy(asset_t22f, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_t22f, Fr::from(3u64)),
+        ],
+        [0xF8; 32],
+    );
+    let fe_t22f_ix = to_svm_ix(&build_transact(
+        program_id,
+        relayer.pubkey(),
+        POOL_ID,
+        VK_ID_DEFAULT,
+        rk_t22f,
+        ri_t22f,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some((t22_fee_mint, vault_t22f, token_2022_id())),
+        (None, None, None),
+        &b_t22f.proof_192,
+        &b_t22f.nf0,
+        &b_t22f.nf1,
+        &b_t22f.cm0,
+        &b_t22f.cm1,
+        &b_t22f.cm2,
+        35_000_000,
+        4_000_000,
+        recip_t22f,
+        relayer_t22f,
+        &[],
+        &[],
+    ));
+    assert!(
+        !fe_t22f_ix.accounts[2].is_writable,
+        "2in/0out non-hook T22 full exit must mark GlobalRootHistory READ-ONLY"
+    );
+    let cu_transact_full_exit_t22_fee_2in = expect_ok(
+        send_v1(&mut svm, &relayer, &[], &[fe_t22f_ix], CU_LIMIT_TRANSACT_FULL_EXIT),
+        "CU: Transact Full Exit non-hook T22 TransferFee 2in/0out",
+    );
+    assert_eq!(token_balance(&svm, &recip_t22f), 34_125_000);
+    assert_eq!(token_balance(&svm, &relayer_t22f), 3_900_000);
+    assert_eq!(token_balance(&svm, &vault_t22f), 0);
+
+    // Worst-case Transact Withdraw T22 Fee+Hook (2in/2out + relayer fee)
+    let (tw_fh2a, bl_fh2a, memo_fh2a) =
+        encrypt_note_memo(&alice.view_pk, [0xD4; 32], 19_500_000, &fh_mint.to_bytes()).unwrap();
+    let (tw_fh2b, bl_fh2b, memo_fh2b) =
+        encrypt_note_memo(&alice.view_pk, [0xD5; 32], 19_500_000, &fh_mint.to_bytes()).unwrap();
+    for (tw, bl, memo) in [(tw_fh2a, bl_fh2a, &memo_fh2a), (tw_fh2b, bl_fh2b, &memo_fh2b)] {
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    fh_mint,
+                    payer_fh,
+                    vault_fh,
+                    token_2022_id(),
+                    2,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    false,
+                    false,
+                    20_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    bl,
+                    memo,
+                    &fh_metas,
+                ))],
+                600_000,
+            ),
+            "deposit T22 Fee+Hook notes for 2in/2out withdraw",
+        );
+    }
+    let (paths_fh2, rk_fh2, ri_fh2, sr_fh2) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(2, 1), (2, 2)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let (tw_fho0, bl_fho0, memo_fho0) =
+        encrypt_note_memo(&alice.view_pk, [0xD6; 32], 5_000_000, &fh_mint.to_bytes()).unwrap();
+    let (tw_fho1, bl_fho1, memo_fho1) =
+        encrypt_note_memo(&alice.view_pk, [0xD7; 32], 5_000_000, &fh_mint.to_bytes()).unwrap();
+    let mut memos_fh2 = Vec::with_capacity(212);
+    memos_fh2.extend_from_slice(&memo_fho0);
+    memos_fh2.extend_from_slice(&memo_fho1);
+    let ctx_fh2 = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        2,
+        0b011,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some(&recip_fh),
+        Some(&relayer_fh),
+        &fr_to_be_bytes(&asset_fh),
+        27_000_000,
+        2_000_000,
+        &memos_fh2,
+    );
+    let b_fh2 = prover.build_and_prove(
+        sr_fh2,
+        asset_fh,
+        asset_fh,
+        27_000_000,
+        2_000_000,
+        ctx_fh2,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_fh2a,
+                asset_id: asset_fh,
+                amount: 19_500_000,
+                blinding: bl_fh2a,
+                is_dummy: false,
+                merkle_path: paths_fh2[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_fh2b,
+                asset_id: asset_fh,
+                amount: 19_500_000,
+                blinding: bl_fh2b,
+                is_dummy: false,
+                merkle_path: paths_fh2[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_fho0),
+                asset_id: asset_fh,
+                amount: 5_000_000,
+                blinding: bl_fho0,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_fho1),
+                asset_id: asset_fh,
+                amount: 5_000_000,
+                blinding: bl_fho1,
+            },
+            JoinSplitOutputWitness::dummy(asset_fh, Fr::from(3u64)),
+        ],
+        [0xD8; 32],
+    );
+    let cu_transact_wd_hook_2in2out = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_fh2,
+                ri_fh2,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0b011,
+                ASSET_MODE_PUBLIC,
+                false,
+                Some((fh_mint, vault_fh, token_2022_id())),
+                (None, None, None),
+                &b_fh2.proof_192,
+                &b_fh2.nf0,
+                &b_fh2.nf1,
+                &b_fh2.cm0,
+                &b_fh2.cm1,
+                &b_fh2.cm2,
+                27_000_000,
+                2_000_000,
+                recip_fh,
+                relayer_fh,
+                &memos_fh2,
+                &fh_metas,
+            ))],
+            600_000,
+        ),
+        "CU: Transact Withdraw T22 Hook 2in/2out",
+    );
+
+    // Worst-case Transact Withdraw T22 Fee+Hook (2in/3out, output_mask = 0b111 + relayer fee)
+    mint_to(&mut svm, &payer, token_2022_id(), fh_mint, payer_fh, 40_000_000);
+    let fh3_idx0 = lane_next_leaf(&svm, &program_id, 2);
+    let (tw_fh3a, bl_fh3a, memo_fh3a) =
+        encrypt_note_memo(&alice.view_pk, [0xE5; 32], 19_500_000, &fh_mint.to_bytes()).unwrap();
+    let (tw_fh3b, bl_fh3b, memo_fh3b) =
+        encrypt_note_memo(&alice.view_pk, [0xE6; 32], 19_500_000, &fh_mint.to_bytes()).unwrap();
+    for (tw, bl, memo) in [(tw_fh3a, bl_fh3a, &memo_fh3a), (tw_fh3b, bl_fh3b, &memo_fh3b)] {
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_deposit(
+                    program_id,
+                    payer.pubkey(),
+                    POOL_ID,
+                    fh_mint,
+                    payer_fh,
+                    vault_fh,
+                    token_2022_id(),
+                    2,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    false,
+                    false,
+                    20_000_000,
+                    derive_stealth_owner(alice.spend_pk, tw),
+                    bl,
+                    memo,
+                    &fh_metas,
+                ))],
+                600_000,
+            ),
+            "deposit T22 Fee+Hook notes for 2in/3out withdraw",
+        );
+    }
+    let (paths_fh3, rk_fh3, ri_fh3, sr_fh3) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(2, fh3_idx0), (2, fh3_idx0 + 1)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let (tw_fh3o0, bl_fh3o0, memo_fh3o0) =
+        encrypt_note_memo(&alice.view_pk, [0xE7; 32], 5_000_000, &fh_mint.to_bytes()).unwrap();
+    let (tw_fh3o1, bl_fh3o1, memo_fh3o1) =
+        encrypt_note_memo(&alice.view_pk, [0xE8; 32], 5_000_000, &fh_mint.to_bytes()).unwrap();
+    let (tw_fh3o2, bl_fh3o2, memo_fh3o2) =
+        encrypt_note_memo(&alice.view_pk, [0xE9; 32], 5_000_000, &fh_mint.to_bytes()).unwrap();
+    let mut memos_fh3 = Vec::with_capacity(318);
+    memos_fh3.extend_from_slice(&memo_fh3o0);
+    memos_fh3.extend_from_slice(&memo_fh3o1);
+    memos_fh3.extend_from_slice(&memo_fh3o2);
+    let ctx_fh3 = compute_transact_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        2,
+        0b111,
+        ASSET_MODE_PUBLIC,
+        false,
+        Some(&recip_fh),
+        Some(&relayer_fh),
+        &fr_to_be_bytes(&asset_fh),
+        22_000_000,
+        2_000_000,
+        &memos_fh3,
+    );
+    let b_fh3 = prover.build_and_prove(
+        sr_fh3,
+        asset_fh,
+        asset_fh,
+        22_000_000,
+        2_000_000,
+        ctx_fh3,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_fh3a,
+                asset_id: asset_fh,
+                amount: 19_500_000,
+                blinding: bl_fh3a,
+                is_dummy: false,
+                merkle_path: paths_fh3[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_fh3b,
+                asset_id: asset_fh,
+                amount: 19_500_000,
+                blinding: bl_fh3b,
+                is_dummy: false,
+                merkle_path: paths_fh3[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_fh3o0),
+                asset_id: asset_fh,
+                amount: 5_000_000,
+                blinding: bl_fh3o0,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_fh3o1),
+                asset_id: asset_fh,
+                amount: 5_000_000,
+                blinding: bl_fh3o1,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_fh3o2),
+                asset_id: asset_fh,
+                amount: 5_000_000,
+                blinding: bl_fh3o2,
+            },
+        ],
+        [0xEA; 32],
+    );
+    let cu_transact_wd_hook_2in3out = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_transact(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_fh3,
+                ri_fh3,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0b111,
+                ASSET_MODE_PUBLIC,
+                false,
+                Some((fh_mint, vault_fh, token_2022_id())),
+                (None, None, None),
+                &b_fh3.proof_192,
+                &b_fh3.nf0,
+                &b_fh3.nf1,
+                &b_fh3.cm0,
+                &b_fh3.cm1,
+                &b_fh3.cm2,
+                22_000_000,
+                2_000_000,
+                recip_fh,
+                relayer_fh,
+                &memos_fh3,
+                &fh_metas,
+            ))],
+            600_000,
+        ),
+        "CU: Transact Withdraw T22 Hook 2in/3out",
+    );
+
+    // Worst-case ExecViaEscrow: 2in / change_mask = 0b11 (2 change + 1 dynamic out) / relayer_fee > 0
+    let ((le_idx, tw_le, bl_le), (lf_idx, tw_lf, bl_lf)) =
+        (lane0_note_e.unwrap(), lane0_note_f.unwrap());
+    let (paths_ex2, rk_ex2, ri_ex2, sr_ex2) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(0, le_idx), (0, lf_idx)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let (tw_ec0, bl_ec0, memo_ec0) =
+        encrypt_note_memo(&alice.view_pk, [0xEB; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let (tw_ec1, bl_ec1, memo_ec1) =
+        encrypt_note_memo(&alice.view_pk, [0xEC; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let mut chg_memos_2 = Vec::with_capacity(212);
+    chg_memos_2.extend_from_slice(&memo_ec0);
+    chg_memos_2.extend_from_slice(&memo_ec1);
+    let (dtw_ex2, dbl_ex2, dhead_ex2, dmask_ex2) =
+        prepare_dynamic_swap_memo(&alice.view_pk, [0xED; 32]).unwrap();
+    let ost_ex2 = fr_to_be_bytes(&derive_stealth_owner(alice.spend_pk, dtw_ex2));
+    let obl_ex2 = fr_to_be_bytes(&dbl_ex2);
+    let swap_data_ex2 = dex_swap_spl_to_spl_data(0, 2_000_000, 2_000_000, 9, 6);
+    let swap_accs_ex2 = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_wsol, false),
+        AudrenAccountMeta::writable(dex_wsol, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::readonly(wsol_mint_id(), false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+    ];
+    let ctx_ex2 = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0,
+        0b11,
+        true,
+        &asset_id_bytes_for_mint(None),
+        2_000_000,
+        200_000,
+        Some(&relayer_usdc),
+        &fr_to_be_bytes(&asset_usdc),
+        1_800_000,
+        &router_id,
+        &swap_accs_ex2,
+        &[],
+        &ost_ex2,
+        &obl_ex2,
+        &dhead_ex2,
+        &dmask_ex2,
+        &swap_data_ex2,
+        &chg_memos_2,
+    );
+    let b_ex2 = prover.build_and_prove(
+        sr_ex2,
+        asset_wsol,
+        asset_wsol,
+        2_000_000,
+        0,
+        ctx_ex2,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_le,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_le,
+                is_dummy: false,
+                merkle_path: paths_ex2[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_lf,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_lf,
+                is_dummy: false,
+                merkle_path: paths_ex2[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_ec0),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_ec0,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_ec1),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_ec1,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0xEE; 32],
+    );
+    let relayer_usdc_before_ex2 = token_balance(&svm, &relayer_usdc);
+    let vault_usdc_before_ex2 = token_balance(&svm, &vault_usdc);
+    let cu_exec_2in_2chg_fee = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_ex2,
+                ri_ex2,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0b11,
+                true,
+                (wsol_mint_id(), vault_wsol, esc0_wsol, spl_token_id()),
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                200_000,
+                Some(relayer_usdc),
+                (None, None, None),
+                &b_ex2.proof_192,
+                &b_ex2.nf0,
+                &b_ex2.nf1,
+                &b_ex2.cm0,
+                &b_ex2.cm1,
+                &b_ex2.cm2,
+                2_000_000,
+                1_800_000,
+                &ost_ex2,
+                &obl_ex2,
+                &dhead_ex2,
+                &dmask_ex2,
+                router_id,
+                &swap_data_ex2,
+                swap_accs_ex2.clone(),
+                &[],
+                &chg_memos_2,
+            ))],
+            600_000,
+        ),
+        "CU: ExecViaEscrow 2in/2chg + relayer_fee (10 router accs)",
+    );
+    assert_eq!(token_balance(&svm, &relayer_usdc), relayer_usdc_before_ex2 + 200_000);
+    assert_eq!(token_balance(&svm, &vault_usdc), vault_usdc_before_ex2 + 1_800_000);
+
+    // Worst-case ExecViaEscrow with 30 router accounts (10 mock router + 20 extra readonly route accounts)
+    let ((lg_idx, tw_lg, bl_lg), (lh_idx, tw_lh, bl_lh)) =
+        (lane0_note_g.unwrap(), lane0_note_h.unwrap());
+    let (paths_ex3, rk_ex3, ri_ex3, sr_ex3) = reconstruct_witness_for_notes(
+        |a| svm.get_account(a).map(|x| x.data),
+        &program_id,
+        POOL_ID,
+        &[(0, lg_idx), (0, lh_idx)],
+        audren_client::scanner::WitnessOptions {
+            privacy_mode: audren_client::scanner::SyncPrivacyMode::Strict,
+            view_sk: Some(alice.view_sk),
+            decoy_epoch_bucket: None,
+        },
+    )
+    .unwrap();
+    let (tw_ec2, bl_ec2, memo_ec2) =
+        encrypt_note_memo(&alice.view_pk, [0xF1; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let (tw_ec3, bl_ec3, memo_ec3) =
+        encrypt_note_memo(&alice.view_pk, [0xF2; 32], 1_000_000, &WSOL_MINT).unwrap();
+    let mut chg_memos_3 = Vec::with_capacity(212);
+    chg_memos_3.extend_from_slice(&memo_ec2);
+    chg_memos_3.extend_from_slice(&memo_ec3);
+    let (dtw_ex3, dbl_ex3, dhead_ex3, dmask_ex3) =
+        prepare_dynamic_swap_memo(&alice.view_pk, [0xF3; 32]).unwrap();
+    let ost_ex3 = fr_to_be_bytes(&derive_stealth_owner(alice.spend_pk, dtw_ex3));
+    let obl_ex3 = fr_to_be_bytes(&dbl_ex3);
+    let mut swap_accs_ex3 = swap_accs_ex2;
+    for _ in 0..20 {
+        swap_accs_ex3.push(AudrenAccountMeta::readonly(Keypair::new().pubkey(), false));
+    }
+    let ctx_ex3 = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        3,
+        0,
+        0b11,
+        true,
+        &asset_id_bytes_for_mint(None),
+        2_000_000,
+        200_000,
+        Some(&relayer_usdc),
+        &fr_to_be_bytes(&asset_usdc),
+        1_800_000,
+        &router_id,
+        &swap_accs_ex3,
+        &[],
+        &ost_ex3,
+        &obl_ex3,
+        &dhead_ex3,
+        &dmask_ex3,
+        &swap_data_ex2,
+        &chg_memos_3,
+    );
+    let b_ex3 = prover.build_and_prove(
+        sr_ex3,
+        asset_wsol,
+        asset_wsol,
+        2_000_000,
+        0,
+        ctx_ex3,
+        false,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_lg,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_lg,
+                is_dummy: false,
+                merkle_path: paths_ex3[0].clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_lh,
+                asset_id: asset_wsol,
+                amount: 2_000_000,
+                blinding: bl_lh,
+                is_dummy: false,
+                merkle_path: paths_ex3[1].clone(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_ec2),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_ec2,
+            },
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, tw_ec3),
+                asset_id: asset_wsol,
+                amount: 1_000_000,
+                blinding: bl_ec3,
+            },
+            JoinSplitOutputWitness::dummy(asset_wsol, Fr::from(3u64)),
+        ],
+        [0xF4; 32],
+    );
+    let cu_exec_2in_2chg_fee_30accs = expect_ok(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_ex3,
+                ri_ex3,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0b11,
+                true,
+                (wsol_mint_id(), vault_wsol, esc0_wsol, spl_token_id()),
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                200_000,
+                Some(relayer_usdc),
+                (None, None, None),
+                &b_ex3.proof_192,
+                &b_ex3.nf0,
+                &b_ex3.nf1,
+                &b_ex3.cm0,
+                &b_ex3.cm1,
+                &b_ex3.cm2,
+                2_000_000,
+                1_800_000,
+                &ost_ex3,
+                &obl_ex3,
+                &dhead_ex3,
+                &dmask_ex3,
+                router_id,
+                &swap_data_ex2,
+                swap_accs_ex3,
+                &[],
+                &chg_memos_3,
+            ))],
+            600_000,
+        ),
+        "CU: ExecViaEscrow 2in/2chg + relayer_fee (30 router accs)",
+    );
+
+    // Also measure InitRootHistory (4 populated lanes) and worst-case InitRootHistory (16 active lanes)
+    let (roots_pda_cu, _) = derive_roots_pda(&program_id, POOL_ID);
+    svm.set_account(roots_pda_cu, Account::default()).unwrap();
+    let cu_init_root_history = expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_init_root_history(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                ROOT_EPOCH_INTERVAL,
+                4,
+            ))],
+            600_000,
+        ),
+        "CU: InitRootHistory (4 lanes)",
+    );
+
+    // Expand pool to all 16 active lanes and measure worst-case InitRootHistory (16 lanes)
+    for l in 4u8..16u8 {
+        expect_ok(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_init_lane(program_id, payer.pubkey(), POOL_ID, l))],
+                600_000,
+            ),
+            "InitLane 4..16 for InitRootHistory 16-lane CU bench",
+        );
+    }
+    svm.set_account(roots_pda_cu, Account::default()).unwrap();
+    let cu_init_root_history_16 = expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_init_root_history(
+                program_id,
+                payer.pubkey(),
+                POOL_ID,
+                ROOT_EPOCH_INTERVAL,
+                16,
+            ))],
+            600_000,
+        ),
+        "CU: InitRootHistory (16 lanes)",
+    );
+    let roots_16 =
+        GlobalRootHistory::decode(&svm.get_account(&roots_pda_cu).unwrap().data).unwrap();
+    assert_eq!(roots_16.latest_lane_counts[0], 256);
+
+    let _ = (
+        GlobalRootHistory::decode,
+        ROOT_HISTORY_LEN,
+        recommended_cu_limit_init_pool,
+        recommended_cu_limit_init_lane,
+        recommended_cu_limit_open_page,
+        recommended_cu_limit_transact,
+        recommended_cu_limit_exec_via_escrow,
+    );
+
+    let rows: [(&str, u64, u32); 21] = [
+        ("InitPool", cu_init_pool, CU_LIMIT_INIT_POOL),
+        ("InitLane", cu_init_lane, CU_LIMIT_INIT_LANE),
+        ("InitRootHistory (4 lanes)", cu_init_root_history, CU_LIMIT_INIT_ROOT_HISTORY),
+        ("InitRootHistory (16 lanes)", cu_init_root_history_16, CU_LIMIT_INIT_ROOT_HISTORY),
+        ("OpenPage (MEMO)", cu_open_page, CU_LIMIT_OPEN_PAGE),
+        ("Deposit (Native SOL)", cu_deposit_sol, CU_LIMIT_DEPOSIT),
+        ("Deposit (SOL 256-leaf seal)", cu_deposit_sol_seal_256, CU_LIMIT_DEPOSIT),
+        ("Auto-OpenPage + Deposit", cu_auto_dep, recommended_cu_limit_deposit(false, 1)),
+        ("Deposit (Classic SPL)", cu_deposit_spl, CU_LIMIT_DEPOSIT),
+        ("Deposit (T22 Fee+Hook)", cu_deposit_t22_fh, CU_LIMIT_DEPOSIT_HOOK),
+        ("Transact (Private 2in/3out)", cu_transact_2in3out, CU_LIMIT_TRANSACT_PRIVATE),
+        ("Transact (Withdraw SPL 1in/1o)", cu_transact_wd_spl, CU_LIMIT_TRANSACT_WITHDRAW),
+        ("Transact (Withdraw WSOL 1in/1o)", cu_transact_wd_unwrap, CU_LIMIT_TRANSACT_WITHDRAW),
+        ("Transact (Withdraw WSOL 2in/2o)", cu_transact_wd_unwrap_2in2out, CU_LIMIT_TRANSACT_WITHDRAW),
+        ("Transact (Withdraw WSOL 2in/3o+f)", cu_transact_wd_unwrap_2in3out_fee, CU_LIMIT_TRANSACT_WITHDRAW),
+        ("Transact (Full Exit 1in/0o RO)", cu_transact_full_exit, CU_LIMIT_TRANSACT_FULL_EXIT),
+        ("Transact (Full Exit WSOL 2in+f)", cu_transact_full_exit_wsol_2in_fee, CU_LIMIT_TRANSACT_FULL_EXIT),
+        ("Transact (Full Exit T22Fee 2in)", cu_transact_full_exit_t22_fee_2in, CU_LIMIT_TRANSACT_FULL_EXIT),
+        ("Transact (Withdraw T22 1in/0o)", cu_transact_wd_hook, CU_LIMIT_TRANSACT_WITHDRAW_HOOK),
+        ("Transact (Withdraw T22 2in/2o)", cu_transact_wd_hook_2in2out, CU_LIMIT_TRANSACT_WITHDRAW_HOOK),
+        ("Transact (Withdraw T22 2in/3o)", cu_transact_wd_hook_2in3out, CU_LIMIT_TRANSACT_WITHDRAW_HOOK),
+    ];
+    println!("\n  === EMPIRICAL LITESVM CU MEASUREMENT TABLE ===");
+    let mut over_budget = Vec::new();
+    for (name, measured, budget) in rows {
+        let status = if measured <= budget as u64 { "OK" } else { "OVER BUDGET!" };
+        println!("  | {name:<34} | measured={measured:>7} | budget={budget:>7} | {status}");
+        if measured > budget as u64 {
+            over_budget.push((name, measured, budget));
+        }
+    }
+    for (name, measured) in [
+        ("ExecViaEscrow (1in/0chg/0fee)", cu_exec),
+        ("ExecViaEscrow (2in/2chg+fee,10a)", cu_exec_2in_2chg_fee),
+        ("ExecViaEscrow (2in/2chg+fee,30a)", cu_exec_2in_2chg_fee_30accs),
+    ] {
+        let status = if measured <= CU_LIMIT_EXEC_VIA_ESCROW_BASE as u64 {
+            "OK (incl. mock router CPI)"
+        } else {
+            "OVER BASE!"
+        };
+        println!(
+            "  | {name:<34} | measured={measured:>7} | base  ={:>7} | {status}",
+            CU_LIMIT_EXEC_VIA_ESCROW_BASE
+        );
+        if measured > CU_LIMIT_EXEC_VIA_ESCROW_BASE as u64 {
+            over_budget.push((name, measured, CU_LIMIT_EXEC_VIA_ESCROW_BASE));
+        }
+    }
+    println!("  ================================================\n");
+    assert!(
+        over_budget.is_empty(),
+        "Some instructions exceeded tight CU_LIMIT_* budgets: {over_budget:?}"
+    );
+    println!("  [V1.3.0 TEST D PASSED] Auto-OpenPage >=90% lookahead (100% subsidized) & all CU limits verified");
 }

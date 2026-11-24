@@ -5,7 +5,13 @@
  *   BASE_URL=https://audren.xyz pnpm --dir apps/web e2e:api
  */
 
-import { AUDREN_PROGRAM_ID, PROTOCOL_VERSION, derivePoolPdaSync, deriveVaultAuthPdaSync } from '../lib/audren-crypto'
+import {
+  AUDREN_PROGRAM_ID,
+  PROTOCOL_VERSION,
+  derivePoolPdaSync,
+  deriveRootsPdaSync,
+  deriveVaultAuthPdaSync,
+} from '../lib/audren-crypto'
 import { AUDREN } from '../lib/protocol'
 
 const BASE_URL = (process.env.BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/+$/, '')
@@ -21,27 +27,36 @@ async function assertOkJson(path: string, init?: RequestInit): Promise<Record<st
 
 async function main() {
   const expectedPool0 = derivePoolPdaSync(0, AUDREN_PROGRAM_ID).address
+  const expectedRoots = deriveRootsPdaSync(0, AUDREN_PROGRAM_ID).address
   const expectedVaultAuth = deriveVaultAuthPdaSync(0, AUDREN_PROGRAM_ID).address
-  if (expectedPool0 !== AUDREN.pool0Pda || expectedVaultAuth !== AUDREN.vaultAuthPda) {
+  if (
+    expectedPool0 !== AUDREN.pool0Pda ||
+    expectedRoots !== AUDREN.rootsPda ||
+    expectedVaultAuth !== AUDREN.vaultAuthPda
+  ) {
     throw new Error('AUDREN protocol register PDAs drifted from canonical v1 PDA derivation')
   }
   if ('solVaultPda' in AUDREN) {
     throw new Error('AUDREN protocol register must not contain removed solVaultPda')
   }
   if (
-    AUDREN.version !== '1.2.1' ||
+    AUDREN.version !== '1.3.0' ||
     AUDREN.mainnet.pool0Alt.entries.length !== 40 ||
     AUDREN.devnet.pool0Alt.entries.length !== 40
   ) {
-    throw new Error('AUDREN protocol register missing v1.2.1 version or 40-entry frozen Pool #0 ALTs')
+    throw new Error('AUDREN protocol register missing v1.3.0 version or 40-entry frozen Pool #0 ALTs')
   }
 
   const pool = await assertOkJson('/api/pool?cluster=devnet&poolId=0')
   if (
     pool.programId !== AUDREN_PROGRAM_ID ||
     pool.poolPda !== expectedPool0 ||
+    pool.rootsPda !== expectedRoots ||
     pool.vaultAuthPda !== expectedVaultAuth ||
-    'solVaultPda' in pool
+    'solVaultPda' in pool ||
+    'ckptInterval' in pool ||
+    'maxCkptAge' in pool ||
+    'latestCheckpoint' in pool
   ) {
     throw new Error(`Pool mismatch: ${JSON.stringify(pool)}`)
   }

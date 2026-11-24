@@ -7,15 +7,19 @@
  *   3. Multi-aggregator `/v1/swap/quote` & `/v1/swap/instructions` (`jupiter`, `auto`, etc.)
  *   4. Zero-trust Firewall rejections:
  *        - Tag 3 (`Deposit`) rejected with 400
+ *        - Tag 4 (`InitRootHistory`) rejected with 400
  *        - Extra non-relayer signer rejected with 400
  *        - Wrong payer (not relayer) rejected with 400
  *        - Disallowed preInstruction program rejected with 400
+ *        - Removed `/v1/checkpoint` route returns 404
  */
 
 import {
   ASSET_MODE_PRIVATE,
   CLASSIC_TOKEN_PROGRAM_ID,
+  ROOT_RING_EPOCH,
   TAG_DEPOSIT,
+  TAG_INIT_ROOT_HISTORY,
   WSOL_MINT,
   base58Decode,
   base58Encode,
@@ -23,6 +27,7 @@ import {
   buildTransactInstruction,
   deriveAssociatedTokenAddressSync,
   deriveEscrowPdaSync,
+  deriveRootsPdaSync,
   deriveVaultAuthPdaSync,
 } from '@audren/sdk'
 import { USDC_MAINNET_MINT_STR, toBase64 } from '../src/solana/codec'
@@ -54,15 +59,28 @@ async function main() {
   const health = await fetchJson(`${RELAY_BASE}/health`)
   assert(health.status === 200 && health.body.ok === true, `/health failed: ${JSON.stringify(health.body)}`)
 
+  const expectedRootsPda = deriveRootsPdaSync(0).address
   const infoMainnet = await fetchJson(`${RELAY_BASE}/v1/info?cluster=mainnet`)
   assert(
     infoMainnet.status === 200 && infoMainnet.body.ok === true,
     `/v1/info?cluster=mainnet failed: ${JSON.stringify(infoMainnet.body)}`,
   )
+  assert(
+    infoMainnet.body.rootsPda === expectedRootsPda,
+    `Expected /v1/info rootsPda=${expectedRootsPda}, got ${String(infoMainnet.body.rootsPda)}`,
+  )
+  assert(
+    infoMainnet.body.version === '1.3.0',
+    `Expected /v1/info version=1.3.0, got ${String(infoMainnet.body.version)}`,
+  )
+  assert(
+    !('checkpointSupport' in infoMainnet.body),
+    '/v1/info must not expose removed checkpointSupport field',
+  )
   const relayerPubkey = String(infoMainnet.body.relayerPubkey)
   assert(base58Decode(relayerPubkey).length === 32, 'invalid mainnet relayerPubkey')
   console.log(
-    `  [1/5] Mainnet /v1/info OK — relayer=${relayerPubkey} balance=${infoMainnet.body.balanceSol} SOL`,
+    `  [1/5] Mainnet /v1/info OK — v${String(infoMainnet.body.version)} rootsPda=${expectedRootsPda} relayer=${relayerPubkey} balance=${infoMainnet.body.balanceSol} SOL`,
   )
 
   const infoDevnet = await fetchJson(`${RELAY_BASE}/v1/info?cluster=devnet`)
@@ -120,7 +138,8 @@ async function main() {
   const validTxIx = buildTransactInstruction({
     payer: devnetRelayer,
     poolId: 0,
-    ckptSlotIdx: 0,
+    rootRingKind: ROOT_RING_EPOCH,
+    rootRingIdx: 0,
     outLaneId: 0,
     outSubSeq: 0n,
     outRootSeq: 0n,
@@ -156,6 +175,25 @@ async function main() {
       badTag.body.code === 'FIREWALL_REJECTED' &&
       String(badTag.body.error ?? '').includes('Deposit'),
     `Expected Tag 3 Deposit FIREWALL_REJECTED (400), got ${badTag.status}: ${JSON.stringify(badTag.body)}`,
+  )
+
+  // 4a-ii. Tag 4 (InitRootHistory) rejected on tag check
+  const initRootsPayload = new Uint8Array(validTxIx.data)
+  initRootsPayload[0] = TAG_INIT_ROOT_HISTORY
+  const badInitRoots = await fetchJson(`${RELAY_BASE}/v1/relay/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      cluster: 'devnet',
+      instructionDataB64: toBase64(initRootsPayload),
+      accounts: validTxIx.accounts,
+    }),
+  })
+  assert(
+    badInitRoots.status === 400 &&
+      badInitRoots.body.code === 'FIREWALL_REJECTED' &&
+      String(badInitRoots.body.error ?? '').includes('InitRootHistory'),
+    `Expected Tag 4 InitRootHistory FIREWALL_REJECTED (400), got ${badInitRoots.status}: ${JSON.stringify(badInitRoots.body)}`,
   )
 
   // 4b. Extra non-relayer signer rejected on signer check
@@ -194,7 +232,7 @@ async function main() {
   assert(
     wrongPayer.status === 400 &&
       wrongPayer.body.code === 'FIREWALL_REJECTED' &&
-      String(wrongPayer.body.error ?? '').includes('accounts[0] must be relayer'),
+      /accounts\[0\] must be (?:a configured )?relayer/.test(String(wrongPayer.body.error ?? '')),
     `Expected wrong payer FIREWALL_REJECTED (400), got ${wrongPayer.status}: ${JSON.stringify(wrongPayer.body)}`,
   )
 
@@ -204,7 +242,8 @@ async function main() {
   const validExecIx = buildExecViaEscrowInstruction({
     payer: devnetRelayer,
     poolId: 0,
-    ckptSlotIdx: 0,
+    rootRingKind: ROOT_RING_EPOCH,
+    rootRingIdx: 0,
     outLaneId: 0,
     outSubSeq: 0n,
     outRootSeq: 0n,
@@ -266,8 +305,19 @@ async function main() {
     `Expected disallowed preInstruction FIREWALL_REJECTED (400), got ${badPreIx.status}: ${JSON.stringify(badPreIx.body)}`,
   )
 
+  // 4e. Legacy /v1/checkpoint endpoint is removed (404)
+  const removedCkpt = await fetchJson(`${RELAY_BASE}/v1/checkpoint`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cluster: 'devnet' }),
+  })
+  assert(
+    removedCkpt.status === 404,
+    `Expected removed /v1/checkpoint to return 404, got ${removedCkpt.status}`,
+  )
+
   console.log(
-    `  [5/5] Zero-trust Firewall rejections OK (Tag 3, extra signer, wrong payer, disallowed preInstruction)`,
+    `  [5/5] Zero-trust Firewall rejections OK (Tag 3, Tag 4, extra signer, wrong payer, disallowed preInstruction, removed /v1/checkpoint 404)`,
   )
   console.log(`\nALL RELAY EMPIRICAL E2E CHECKS PASSED (${RELAY_BASE})\n`)
 }

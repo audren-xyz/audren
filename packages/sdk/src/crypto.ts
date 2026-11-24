@@ -38,6 +38,7 @@ import {
 const utf8Encoder = new TextEncoder();
 const DYN_MAGIC_BYTES = utf8Encoder.encode(DYN_MEMO_MAGIC);
 const DYN_MASK_LABEL_BYTES = utf8Encoder.encode(KDF_DOMAIN_DYN_MASK);
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
 // =============================================================================
 // RFC 8439 ChaCha20-Poly1305 AEAD (zero extra dependencies)
@@ -168,6 +169,22 @@ export function chacha20Poly1305Encrypt(
   plaintext: Uint8Array,
   aad: Uint8Array = new Uint8Array(0),
 ): Uint8Array {
+  if (!(key instanceof Uint8Array) || key.byteLength !== 32) {
+    throw new RangeError(
+      `ChaCha20-Poly1305 key must be 32-byte Uint8Array, got ${key instanceof Uint8Array ? key.byteLength : String(key)}`,
+    );
+  }
+  if (!(nonce instanceof Uint8Array) || nonce.byteLength !== 12) {
+    throw new RangeError(
+      `ChaCha20-Poly1305 nonce must be 12-byte Uint8Array, got ${nonce instanceof Uint8Array ? nonce.byteLength : String(nonce)}`,
+    );
+  }
+  if (!(plaintext instanceof Uint8Array)) {
+    throw new RangeError('ChaCha20-Poly1305 plaintext must be a Uint8Array');
+  }
+  if (!(aad instanceof Uint8Array)) {
+    throw new RangeError('ChaCha20-Poly1305 aad must be a Uint8Array');
+  }
   const otk = chacha20Block(key, 0, nonce).subarray(0, 32);
   const ct = chacha20Xor(key, 1, nonce, plaintext);
   const tag = poly1305Mac(buildPoly1305Input(aad, ct), otk);
@@ -183,7 +200,23 @@ export function chacha20Poly1305Decrypt(
   ciphertextWithTag: Uint8Array,
   aad: Uint8Array = new Uint8Array(0),
 ): Uint8Array | null {
-  if (ciphertextWithTag.byteLength < 16) return null;
+  if (!(key instanceof Uint8Array) || key.byteLength !== 32) {
+    throw new RangeError(
+      `ChaCha20-Poly1305 key must be 32-byte Uint8Array, got ${key instanceof Uint8Array ? key.byteLength : String(key)}`,
+    );
+  }
+  if (!(nonce instanceof Uint8Array) || nonce.byteLength !== 12) {
+    throw new RangeError(
+      `ChaCha20-Poly1305 nonce must be 12-byte Uint8Array, got ${nonce instanceof Uint8Array ? nonce.byteLength : String(nonce)}`,
+    );
+  }
+  if (
+    !(ciphertextWithTag instanceof Uint8Array) ||
+    ciphertextWithTag.byteLength < 16 ||
+    !(aad instanceof Uint8Array)
+  ) {
+    return null;
+  }
   const ctLen = ciphertextWithTag.byteLength - 16;
   const ct = ciphertextWithTag.subarray(0, ctLen);
   const tag = ciphertextWithTag.subarray(ctLen);
@@ -216,13 +249,21 @@ export interface MemoVerificationFvk {
 }
 
 function isAllZero32(bytes: Uint8Array): boolean {
-  if (bytes.byteLength !== 32) return true;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 32) return true;
   let acc = 0;
   for (let i = 0; i < 32; i++) acc |= bytes[i]!;
   return acc === 0;
 }
 
 function computeContributorySharedSecret(secret32: Uint8Array, public32: Uint8Array): Uint8Array | null {
+  if (
+    !(secret32 instanceof Uint8Array) ||
+    secret32.byteLength !== 32 ||
+    !(public32 instanceof Uint8Array) ||
+    public32.byteLength !== 32
+  ) {
+    return null;
+  }
   let shared: Uint8Array;
   try {
     shared = x25519.getSharedSecret(secret32, public32);
@@ -236,6 +277,9 @@ function computeContributorySharedSecret(secret32: Uint8Array, public32: Uint8Ar
 }
 
 function sha256Labeled(label: string, data: Uint8Array): Uint8Array {
+  if (!(data instanceof Uint8Array)) {
+    throw new RangeError(`sha256Labeled data must be a Uint8Array, got ${String(data)}`);
+  }
   const lb = utf8Encoder.encode(label);
   const buf = new Uint8Array(lb.byteLength + data.byteLength);
   buf.set(lb, 0);
@@ -244,6 +288,9 @@ function sha256Labeled(label: string, data: Uint8Array): Uint8Array {
 }
 
 function deriveDynMask72(shared: Uint8Array): Uint8Array {
+  if (!(shared instanceof Uint8Array) || shared.byteLength !== 32) {
+    throw new RangeError('shared secret must be a 32-byte Uint8Array');
+  }
   const buf = new Uint8Array(DYN_MASK_LABEL_BYTES.byteLength + 32 + 1);
   buf.set(DYN_MASK_LABEL_BYTES, 0);
   buf.set(shared, DYN_MASK_LABEL_BYTES.byteLength);
@@ -292,11 +339,26 @@ export function encryptNoteMemo(
   mint32: Uint8Array,
   paymentId?: Uint8Array,
 ): { tweak: bigint; blinding: bigint; memo: Uint8Array } {
-  if (recipientViewPk.byteLength !== 32 || ephSecret32.byteLength !== 32 || mint32.byteLength !== 32) {
-    throw new RangeError('recipientViewPk, ephSecret32, and mint32 must be 32 bytes');
+  if (
+    !(recipientViewPk instanceof Uint8Array) ||
+    recipientViewPk.byteLength !== 32 ||
+    !(ephSecret32 instanceof Uint8Array) ||
+    ephSecret32.byteLength !== 32 ||
+    !(mint32 instanceof Uint8Array) ||
+    mint32.byteLength !== 32
+  ) {
+    throw new RangeError('recipientViewPk, ephSecret32, and mint32 must be 32-byte Uint8Arrays');
   }
-  if (paymentId !== undefined && paymentId.byteLength !== MEMO_PAYMENT_ID_LEN) {
-    throw new RangeError(`paymentId must be ${MEMO_PAYMENT_ID_LEN} bytes, got ${paymentId.byteLength}`);
+  if (typeof amount !== 'bigint' || amount < 0n || amount > U64_MAX) {
+    throw new RangeError(`amount must be a u64 bigint in 0..=2^64-1, got ${String(amount)}`);
+  }
+  if (
+    paymentId !== undefined &&
+    (!(paymentId instanceof Uint8Array) || paymentId.byteLength !== MEMO_PAYMENT_ID_LEN)
+  ) {
+    throw new RangeError(
+      `paymentId must be a ${MEMO_PAYMENT_ID_LEN}-byte Uint8Array, got ${paymentId instanceof Uint8Array ? paymentId.byteLength : String(paymentId)}`,
+    );
   }
   const ephPub = x25519.getPublicKey(ephSecret32);
   const shared = computeContributorySharedSecret(ephSecret32, recipientViewPk);
@@ -333,8 +395,13 @@ export function prepareDynamicSwapMemo(
   recipientViewPk: Uint8Array,
   ephSecret32: Uint8Array,
 ): { tweak: bigint; blinding: bigint; dynHead34: Uint8Array; dynMask72: Uint8Array } {
-  if (recipientViewPk.byteLength !== 32 || ephSecret32.byteLength !== 32) {
-    throw new RangeError('recipientViewPk and ephSecret32 must be 32 bytes');
+  if (
+    !(recipientViewPk instanceof Uint8Array) ||
+    recipientViewPk.byteLength !== 32 ||
+    !(ephSecret32 instanceof Uint8Array) ||
+    ephSecret32.byteLength !== 32
+  ) {
+    throw new RangeError('recipientViewPk and ephSecret32 must be 32-byte Uint8Arrays');
   }
   const ephPub = x25519.getPublicKey(ephSecret32);
   const shared = computeContributorySharedSecret(ephSecret32, recipientViewPk);
@@ -363,9 +430,19 @@ export function tryDecryptAndVerifyMemoEntry(
   onchainCmBe: Uint8Array,
 ): DecryptedMemo | null {
   if (
+    !fvk ||
+    typeof fvk !== 'object' ||
+    !(fvk.viewSk instanceof Uint8Array) ||
+    fvk.viewSk.byteLength !== 32 ||
+    !(fvk.spendPk instanceof Uint8Array) ||
+    fvk.spendPk.byteLength !== 32 ||
+    !(viewTag instanceof Uint8Array) ||
     viewTag.byteLength !== 2 ||
+    !(epk instanceof Uint8Array) ||
     epk.byteLength !== 32 ||
+    !(ct72 instanceof Uint8Array) ||
     ct72.byteLength !== MEMO_CT_LEN ||
+    !(onchainCmBe instanceof Uint8Array) ||
     onchainCmBe.byteLength !== 32
   ) {
     return null;
@@ -470,7 +547,14 @@ export function checkMemoViewTag(
   viewTag: Uint8Array,
   epk: Uint8Array,
 ): boolean {
-  if (viewSk.byteLength !== 32 || viewTag.byteLength !== 2 || epk.byteLength !== 32) {
+  if (
+    !(viewSk instanceof Uint8Array) ||
+    viewSk.byteLength !== 32 ||
+    !(viewTag instanceof Uint8Array) ||
+    viewTag.byteLength !== 2 ||
+    !(epk instanceof Uint8Array) ||
+    epk.byteLength !== 32
+  ) {
     return false;
   }
   const shared = computeContributorySharedSecret(viewSk, epk);
@@ -524,7 +608,7 @@ export function tryDecryptAndVerifyMemo(
   memo: Uint8Array,
   onchainCmBe: Uint8Array,
 ): DecryptedMemo | null {
-  if (memo.byteLength !== MEMO_ENTRY_WIRE_LEN) return null;
+  if (!(memo instanceof Uint8Array) || memo.byteLength !== MEMO_ENTRY_WIRE_LEN) return null;
   return tryDecryptAndVerifyMemoEntry(
     fvk,
     memo.subarray(0, 2),

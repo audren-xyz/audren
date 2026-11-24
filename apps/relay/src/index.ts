@@ -1,3 +1,4 @@
+import { parseToken2022TransferFeeConfig } from '@audren/sdk'
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import {
@@ -5,7 +6,7 @@ import {
   listAggregators,
   quoteWithSelection,
 } from './aggregators/registry'
-import { runAutoRefill, runMaintenanceCrank } from './cron/refill'
+import { runAutoRefill } from './cron/refill'
 import {
   getRelayerFvk,
   getRelayerSecretsB64,
@@ -18,14 +19,26 @@ import {
   MAX_BATCH_INSTRUCTIONS,
   resolveShieldedCm2Fees,
   validateRelaySubmission,
+  type ValidatedAudrenInstruction,
 } from './policy/firewall'
 import { RelayGuard } from './policy/guard-do'
-import { computeNativeFeeQuote, computeSwapFeePlan, fetchMintPricesUsd } from './policy/pricing'
+import {
+  computeNativeFeeQuote,
+  computeSwapFeePlan,
+  estimateAtaRentLamports,
+  fetchMintPricesUsd,
+} from './policy/pricing'
 import {
   ASSET_MODE_PRIVATE,
   ASSET_MODE_PUBLIC,
   AUDREN_PROGRAM_ID,
   AUDREN_PROGRAM_ID_STR,
+  CU_LIMIT_EXEC_VIA_ESCROW_BASE,
+  CU_LIMIT_OPEN_PAGE,
+  CU_LIMIT_TRANSACT_FULL_EXIT,
+  CU_LIMIT_TRANSACT_PRIVATE,
+  CU_LIMIT_TRANSACT_WITHDRAW,
+  CU_LIMIT_TRANSACT_WITHDRAW_HOOK,
   NF_PER_PAGE,
   NUM_ESCROW_SHARDS,
   OPEN_PAGE_KIND_MEMO,
@@ -34,41 +47,47 @@ import {
   PROTOCOL_VERSION,
   TAG_DEPOSIT,
   TAG_EXEC_VIA_ESCROW,
-  TAG_PUBLISH_CHECKPOINT,
   TAG_TRANSACT,
+  buildOpenPageSolanaIx,
+  computeOpenPageIxCuLimit,
+  computeToken2022AtaByteLen,
   decodePoolState,
   deriveEscrowPda,
   deriveLanePda,
   deriveLaneRentVaultPda,
   derivePoolPda,
+  deriveRootsPda,
   deriveVaultAuthPda,
   deterministicNoteRentFee,
+  listProactiveLookaheadCandidates,
   listReferencedPageSlots,
   pickRandomEscrowShard,
   planBatchMissingOpenPageIxs,
   type FetchedAccountMeta,
+  type MissingPagePlanResult,
 } from './solana/audren'
 import {
-  CheckpointError,
-  publishCheckpointIfNeeded,
-  type CheckpointLockAdapter,
-} from './solana/checkpoint'
-import {
   CLASSIC_TOKEN_PROGRAM_ID_STR,
+  SOLANA_TX_V1_MAX_ACCOUNTS,
+  SOLANA_TX_V1_MAX_SIZE,
+  TOKEN_2022_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID_STR,
   WSOL_MINT_STR,
   base58Decode,
   base58Encode,
   buildAndSignV1Transaction,
   buildCreateAtaIdempotentIx,
+  bytesEqual,
   decodeRelayerSecret,
   deriveAta,
   isValidPubkey,
   readSplTokenAccountAmount,
   toBase64,
+  toHex,
   utf8,
 } from './solana/codec'
 import {
+  TransactionFailedOnChainError,
   applyToken2022FeeHaircut,
   explorerTxUrl,
   fetchBalance,
@@ -99,16 +118,395 @@ import type {
 
 export { RelayGuard }
 
+export const RELAY_VERSION = '1.3.0'
+export const DEFAULT_EXEC_ROUTER_CU_HEADROOM = 350_000
+export const CU_LIMIT_EXEC_TOKEN_2022_EXTRA = 25_000
+export const CU_LIMIT_SETUP_ATA_CLASSIC = 30_000
+export const CU_LIMIT_SETUP_ATA_TOKEN_2022 = 45_000
+export const PROACTIVE_OPEN_PAGE_WIRE_BYTES = 57
+export const MAX_RELAY_TX_CU_LIMIT = 1_400_000
+export const MAX_RELAY_PRIORITY_FEE_LAMPORTS = 50_000n
+export const MAX_UNAUDITED_ROUTER_PRIORITY_FEE_LAMPORTS = 5_000n
+
+/**
+ * Compute exact Solana Transaction v1 (`0x81`) serialized wire length and unique account count
+ * for a given fee payer and instruction list (assuming inline priorityFee + cuLimit + loadedDataSize
+ * config = 16 B, matching `buildAndSignV1Transaction` byte-for-byte).
+ */
+export function estimateV1TxWireLen(
+  feePayerPubkey: Uint8Array,
+  instructions: readonly SolanaInstruction[],
+): { wireLen: number; uniqueAccountCount: number } {
+  const uniqueAccounts = new Set<string>([toHex(feePayerPubkey)])
+  let ixBytes = 0
+  for (const ix of instructions) {
+    uniqueAccounts.add(toHex(ix.programId))
+    for (const acc of ix.accounts) {
+      uniqueAccounts.add(toHex(acc.pubkey))
+    }
+    ixBytes += 4 + ix.accounts.length + ix.data.length
+  }
+  // 1 (prefix) + 3 (header) + 4 (configMask) + 32 (blockhash) + 2 (ixCount, accCount)
+  // + 16 (priorityFee 8 + cuLimit 4 + loadedDataSize 4) + 64 (ed25519 signature) = 122 B
+  const wireLen = 122 + uniqueAccounts.size * 32 + ixBytes
+  return { wireLen, uniqueAccountCount: uniqueAccounts.size }
+}
+
+/**
+ * Calibrated tight Compute Unit budget per Audren v1.3.0 instruction
+ * (matching empirical sBPFv3 LiteSVM measurements with safe worst-case rollover headroom).
+ */
+export function computeAudrenInstructionCuLimit(
+  entry: Pick<ValidatedAudrenInstruction, 'transactMeta' | 'execMeta'>,
+): { defaultCu: number; minFloorCu: number } {
+  if (entry.transactMeta) {
+    if (entry.transactMeta.assetMode === ASSET_MODE_PRIVATE) {
+      return {
+        defaultCu: CU_LIMIT_TRANSACT_PRIVATE,
+        minFloorCu: CU_LIMIT_TRANSACT_PRIVATE,
+      }
+    }
+    const isHookOrToken2022 =
+      entry.transactMeta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR ||
+      entry.transactMeta.hasTrailingHookAccounts
+    if (isHookOrToken2022) {
+      return {
+        defaultCu: CU_LIMIT_TRANSACT_WITHDRAW_HOOK,
+        minFloorCu: CU_LIMIT_TRANSACT_WITHDRAW_HOOK,
+      }
+    }
+    if (entry.transactMeta.outputMask === 0) {
+      return {
+        defaultCu: CU_LIMIT_TRANSACT_FULL_EXIT,
+        minFloorCu: CU_LIMIT_TRANSACT_FULL_EXIT,
+      }
+    }
+    return {
+      defaultCu: CU_LIMIT_TRANSACT_WITHDRAW,
+      minFloorCu: CU_LIMIT_TRANSACT_WITHDRAW,
+    }
+  }
+  const hasToken2022Leg = Boolean(
+    entry.execMeta &&
+      (entry.execMeta.tokenProgIn === TOKEN_2022_PROGRAM_ID_STR ||
+        entry.execMeta.tokenProgOut === TOKEN_2022_PROGRAM_ID_STR),
+  )
+  const execBase =
+    CU_LIMIT_EXEC_VIA_ESCROW_BASE + (hasToken2022Leg ? CU_LIMIT_EXEC_TOKEN_2022_EXTRA : 0)
+  return {
+    defaultCu: execBase + DEFAULT_EXEC_ROUTER_CU_HEADROOM,
+    minFloorCu: execBase,
+  }
+}
+
+export type RolloverOpenPagePlanResult =
+  | {
+      ok: true
+      /** Mandatory `OpenPage` instructions for missing primary / exact boundary rollover pages. */
+      exactOpenPageIxs: SolanaInstruction[]
+      /** Optional `>= 90%` lookahead `OpenPage` instructions (strictly 0 relayer deficit). */
+      proactiveOpenPageIxs: SolanaInstruction[]
+      /** Unique lane IDs requiring mandatory exact rollover `OpenPage` locks. */
+      exactLaneIds: number[]
+      /** Optional proactive `OpenPage` instructions grouped by `laneId` for opportunistic locking. */
+      proactiveLaneMap: Map<number, SolanaInstruction[]>
+      /** Combined deduplicated instruction list (`[...exactOpenPageIxs, ...proactiveOpenPageIxs]`). */
+      openPageIxs: SolanaInstruction[]
+    }
+  | { ok: false; error: string }
+
+/**
+ * Plan idempotent `OpenPage` (`Tag 2`) pre-instructions inside the SAME Solana Transaction v1:
+ *   1. Exact primary & boundary rollover pages referenced by the submitted instruction(s)
+ *      (always prepended when missing, with full `openPageDeficitFloor` accounting).
+ *   2. Proactive `>= 90%` lane occupancy lookahead pages (`subRem <= 26`, `memoRem <= 10`,
+ *      `nfRem <= 60`, `subrootSlot >= 280`) prepended ONLY when live rent is known
+ *      (`allowProactive !== false`), the target page is uninitialized, `LaneRentVault` covers
+ *      100% of the rent (`0n` relayer deficit), and account / wire-size (`4,096 B`) / CU
+ *      (`1,400,000`) budgets permit.
+ */
+export async function planRolloverOpenPages(params: {
+  rpcUrl: string
+  payerB58: string
+  entries: Array<{
+    poolId: number
+    outLaneId: number
+    outputCount: number
+    nullifierCount: number
+    pages: ValidatedAudrenInstruction['pages']
+  }>
+  fetchedAccounts: Map<string, FetchedAccountMeta | null>
+  preAccountInfoMap: Map<string, { bytes: Uint8Array; lamports: number; owner: string } | null>
+  rentFloors: {
+    laneRentVaultReserveFloor: bigint
+    subRentFloor: bigint
+    srRentFloor: bigint
+    memoRentFloor: bigint
+    nfPageRentFloor: bigint
+  }
+  /** Optional precomputed exact rollover plan (avoids running `planBatchMissingOpenPageIxs` twice). */
+  exactPlan?: MissingPagePlanResult
+  /** When `false` (e.g., cold isolate with `rentSchedule === null`), skip proactive lookahead completely. */
+  allowProactive?: boolean
+  /** Optional ceiling on new unique accounts proactive lookahead may add (keeps Solana v1 <= 64 accounts). */
+  maxExtraAccounts?: number
+  /** Optional ceiling on proactive `OpenPage` count allowed by remaining 4,096 B v1 wire budget (`57 B`/page). */
+  maxExtraByBytes?: number
+  /** Optional ceiling on proactive `OpenPage` count allowed by remaining 1,400,000 CU budget (`40,000` CU/page). */
+  maxExtraByCu?: number
+  /** Optional exact remaining CU budget for bump-aware proactive `OpenPage` instructions. */
+  maxExtraCu?: number
+}): Promise<RolloverOpenPagePlanResult> {
+  const {
+    rpcUrl,
+    payerB58,
+    entries,
+    fetchedAccounts,
+    preAccountInfoMap,
+    rentFloors,
+    allowProactive = true,
+    maxExtraAccounts = Number.POSITIVE_INFINITY,
+    maxExtraByBytes = Number.POSITIVE_INFINITY,
+    maxExtraByCu = Number.POSITIVE_INFINITY,
+    maxExtraCu = Number.POSITIVE_INFINITY,
+  } = params
+  const exactPlan =
+    params.exactPlan ??
+    planBatchMissingOpenPageIxs({
+      payerB58,
+      entries,
+      fetchedAccounts,
+    })
+  if (!exactPlan.ok) return exactPlan
+
+  const exactOpenPageIxs: SolanaInstruction[] = [...exactPlan.openPageIxs]
+  const exactLaneIds = [...new Set(exactOpenPageIxs.map((ix) => ix.data[6]!))]
+  const proactiveOpenPageIxs: SolanaInstruction[] = []
+  const proactiveLaneMap = new Map<number, SolanaInstruction[]>()
+
+  const buildResult = (): RolloverOpenPagePlanResult => ({
+    ok: true,
+    exactOpenPageIxs,
+    proactiveOpenPageIxs,
+    exactLaneIds,
+    proactiveLaneMap,
+    openPageIxs: [...exactOpenPageIxs, ...proactiveOpenPageIxs],
+  })
+
+  const maxProactiveCount = allowProactive
+    ? Math.max(0, Math.min(maxExtraAccounts, maxExtraByBytes, maxExtraByCu))
+    : 0
+  if (maxProactiveCount <= 0) {
+    return buildResult()
+  }
+
+  const alreadyScheduledPdas = new Set<string>(
+    exactOpenPageIxs.map((ix) => base58Encode(ix.accounts[4]!.pubkey)),
+  )
+
+  const pageRentForKind = (pageKind: number): bigint =>
+    pageKind === OPEN_PAGE_KIND_SUBTREE
+      ? rentFloors.subRentFloor
+      : pageKind === OPEN_PAGE_KIND_SUBROOT
+        ? rentFloors.srRentFloor
+        : pageKind === OPEN_PAGE_KIND_MEMO
+          ? rentFloors.memoRentFloor
+          : rentFloors.nfPageRentFloor
+
+  // Compute remaining per-lane available `LaneRentVault` balance after exact rollover subsidies.
+  const laneVaultAvail = new Map<string, bigint>()
+  const getVaultAvail = (vaultPdaB58: string): bigint => {
+    const existing = laneVaultAvail.get(vaultPdaB58)
+    if (existing !== undefined) return existing
+    const vaultAcc = preAccountInfoMap.get(vaultPdaB58)
+    const rawVault = BigInt(vaultAcc?.lamports ?? 0)
+    const avail =
+      rawVault > rentFloors.laneRentVaultReserveFloor
+        ? rawVault - rentFloors.laneRentVaultReserveFloor
+        : 0n
+    laneVaultAvail.set(vaultPdaB58, avail)
+    return avail
+  }
+
+  for (const openIx of exactOpenPageIxs) {
+    const pagePdaB58 = base58Encode(openIx.accounts[4]!.pubkey)
+    const pageAcc = preAccountInfoMap.get(pagePdaB58)
+    if (pageAcc?.owner === AUDREN_PROGRAM_ID_STR && pageAcc.bytes.length > 0) continue
+    const vaultPdaB58 = base58Encode(openIx.accounts[3]!.pubkey)
+    const avail = getVaultAvail(vaultPdaB58)
+    const pageRent = pageRentForKind(openIx.data[1]!)
+    const existingLamports = BigInt(pageAcc?.lamports ?? 0)
+    const needed = pageRent > existingLamports ? pageRent - existingLamports : 0n
+    const subsidy = avail < needed ? avail : needed
+    laneVaultAvail.set(vaultPdaB58, avail - subsidy)
+  }
+
+  const lookaheadCandidates = listProactiveLookaheadCandidates({
+    entries,
+    fetchedAccounts,
+    alreadyScheduledPdas,
+  })
+  if (lookaheadCandidates.length === 0) {
+    return buildResult()
+  }
+
+  // Only inspect candidates whose `LaneRentVault` can cover full page rent (0 relayer deficit).
+  const affordableCandidates = lookaheadCandidates.filter(
+    (cand) => getVaultAvail(cand.laneRentVaultPda) >= pageRentForKind(cand.pageKind),
+  )
+  if (affordableCandidates.length === 0) {
+    return buildResult()
+  }
+
+  const unfetchedPdas: string[] = []
+  for (const cand of affordableCandidates) {
+    if (!preAccountInfoMap.has(cand.pda) && !unfetchedPdas.includes(cand.pda)) {
+      unfetchedPdas.push(cand.pda)
+    }
+  }
+  if (unfetchedPdas.length > 0) {
+    try {
+      const fetched = await fetchMultipleAccounts(rpcUrl, unfetchedPdas, {
+        dataSlice: { offset: 0, length: 8 },
+      })
+      unfetchedPdas.forEach((pda, idx) => {
+        const acc = fetched[idx] ?? null
+        preAccountInfoMap.set(pda, acc)
+        fetchedAccounts.set(pda, acc ? { bytes: acc.bytes, owner: acc.owner } : null)
+      })
+    } catch {
+      // Proactive lookahead is best-effort; never fail a valid relay submission if lookahead check fails.
+      return buildResult()
+    }
+  }
+
+  let usedProactiveCu = 0
+  for (const cand of affordableCandidates) {
+    if (proactiveOpenPageIxs.length >= maxProactiveCount) break
+    const pageAcc = preAccountInfoMap.get(cand.pda)
+    if (pageAcc?.owner === AUDREN_PROGRAM_ID_STR && pageAcc.bytes.length > 0) {
+      continue
+    }
+    const pageRent = pageRentForKind(cand.pageKind)
+    const needed = pageRent
+    const avail = getVaultAvail(cand.laneRentVaultPda)
+    if (needed > avail) {
+      continue
+    }
+    const openIx = buildOpenPageSolanaIx({
+      payer: payerB58,
+      pageKind: cand.pageKind,
+      poolId: cand.poolId,
+      laneId: cand.laneId,
+      pageSeq: cand.pageSeq,
+    })
+    const pageCu = computeOpenPageIxCuLimit(openIx)
+    if (usedProactiveCu + pageCu > maxExtraCu) {
+      continue
+    }
+    usedProactiveCu += pageCu
+    laneVaultAvail.set(cand.laneRentVaultPda, avail - needed)
+    alreadyScheduledPdas.add(cand.pda)
+    proactiveOpenPageIxs.push(openIx)
+    const laneBucket = proactiveLaneMap.get(cand.laneId)
+    if (laneBucket) {
+      laneBucket.push(openIx)
+    } else {
+      proactiveLaneMap.set(cand.laneId, [openIx])
+    }
+  }
+
+  return buildResult()
+}
+
 // ============================================================================
 // HTTP Helpers & CORS
 // ============================================================================
 
-function parseCluster(raw: string | null | undefined, fallback: Cluster = 'mainnet'): Cluster {
-  return raw?.trim().toLowerCase() === 'devnet' ? 'devnet' : fallback
+export const MAX_POST_BODY_BYTES = 64 * 1024
+
+type BoundedBodyResult =
+  | { ok: true; text: string }
+  | { ok: false; status: 413; error: string }
+
+async function readBoundedBodyText(
+  request: Request,
+  maxBytes = MAX_POST_BODY_BYTES,
+): Promise<BoundedBodyResult> {
+  const clHeader = request.headers.get('content-length')
+  if (clHeader !== null) {
+    const cl = Number(clHeader)
+    if (Number.isFinite(cl) && cl > maxBytes) {
+      return {
+        ok: false,
+        status: 413,
+        error: `Request body exceeds ${maxBytes} byte limit`,
+      }
+    }
+  }
+  if (!request.body) {
+    return { ok: true, text: '' }
+  }
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        return {
+          ok: false,
+          status: 413,
+          error: `Request body exceeds ${maxBytes} byte limit`,
+        }
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return { ok: true, text: new TextDecoder().decode(merged) }
 }
 
-function parseProvider(raw: string | null | undefined): AggregatorSelection | undefined {
-  if (!raw) return undefined
+type BoundedJsonResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; status: 400 | 413; code?: string; error: string }
+
+async function readBoundedJson<T>(
+  request: Request,
+  maxBytes = MAX_POST_BODY_BYTES,
+): Promise<BoundedJsonResult<T>> {
+  const raw = await readBoundedBodyText(request, maxBytes)
+  if (!raw.ok) {
+    return { ok: false, status: 413, code: 'PAYLOAD_TOO_LARGE', error: raw.error }
+  }
+  try {
+    const parsed = JSON.parse(raw.text) as T
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, status: 400, error: 'Invalid JSON body' }
+    }
+    return { ok: true, data: parsed }
+  } catch {
+    return { ok: false, status: 400, error: 'Invalid JSON body' }
+  }
+}
+
+function parseCluster(raw: unknown, fallback: Cluster = 'mainnet'): Cluster {
+  return typeof raw === 'string' && raw.trim().toLowerCase() === 'devnet' ? 'devnet' : fallback
+}
+
+function parseProvider(raw: unknown): AggregatorSelection | undefined {
+  if (typeof raw !== 'string') return undefined
   const v = raw.trim().toLowerCase()
   if (
     v === 'auto' ||
@@ -198,6 +596,17 @@ function sanitizeError(err: unknown, fallback: string): string {
   return raw.replace(/https?:\/\/\S+/gi, '[redacted-url]').slice(0, 320)
 }
 
+/**
+ * Return `true` strictly when an ATA account exists AND is owned by `expectedTokenProgram`
+ * (defending against pre-funded System-owned dust accounts at uninitialized canonical ATAs).
+ */
+function isInitializedAta(
+  acc: { owner: string } | null | undefined,
+  expectedTokenProgram: string,
+): boolean {
+  return acc !== null && acc !== undefined && acc.owner === expectedTokenProgram
+}
+
 interface RelayerSignerEntry {
   secret32: Uint8Array
   pubkey: Uint8Array
@@ -278,15 +687,17 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
   ])
 
   const activeCluster = requestedCluster === 'devnet' ? devnet : mainnet
+  const rootsPda = base58Encode(deriveRootsPda(0).address)
   return json(request, cfg.corsOrigins, {
     ok: true,
+    version: RELAY_VERSION,
     protocolVersion: PROTOCOL_VERSION,
     service: 'audren-relay',
     domain: url.host,
     programId: AUDREN_PROGRAM_ID_STR,
+    rootsPda,
     cluster: requestedCluster,
     configured: activeCluster.configured,
-    checkpointSupport: true,
     relayerPubkey: activeCluster.relayerPubkey,
     relayerPubkeys: activeCluster.relayerPubkeys,
     relayerShieldedAddress: activeCluster.relayerShieldedAddress,
@@ -323,11 +734,6 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
         supportsFeeOnOutput: true,
         supportsPreInstructions: true,
         microSwapSubsidy: cfg.allowMicroSwapSubsidy,
-      },
-      checkpoint: {
-        tag: TAG_PUBLISH_CHECKPOINT,
-        permissionless: true,
-        endpoint: '/v1/checkpoint',
       },
       deposit: {
         tags: [TAG_DEPOSIT],
@@ -424,6 +830,30 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
   const missingAtaCount = /^\d+$/.test(rawMissingAtas)
     ? Math.min(6, Math.max(0, Number(rawMissingAtas)))
     : 0
+  const rawExtraAtaMints = u.searchParams.get('extraAtaMints')
+  const extraAtaMints: string[] = []
+  if (rawExtraAtaMints !== null && rawExtraAtaMints.trim() !== '') {
+    const parts = rawExtraAtaMints.split(',').map((s) => s.trim())
+    if (parts.length > 6) {
+      return json(
+        request,
+        cfg.corsOrigins,
+        { error: 'extraAtaMints cannot contain more than 6 mint pubkeys' },
+        400,
+      )
+    }
+    for (const part of parts) {
+      if (!isValidPubkey(part)) {
+        return json(
+          request,
+          cfg.corsOrigins,
+          { error: 'extraAtaMints must contain valid base58 mint pubkeys' },
+          400,
+        )
+      }
+      extraAtaMints.push(part)
+    }
+  }
 
   let shardId: number | undefined
   let escrowPda: string | undefined
@@ -458,14 +888,52 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
   const feeSide = op === 'transfer' ? 'shielded_cm2' : feeOnOutput ? 'out' : 'in'
 
   try {
+    const resolveExtraAtaRent = (
+      mintMap: Record<string, Awaited<ReturnType<typeof fetchMintMetasWithData>>[string]>,
+      ataRentLamports: bigint,
+      feeTokenProgram: string | null,
+      feeAtaByteLen: number,
+    ): { ok: true; extraAtaRentLamports: bigint | undefined } | { ok: false; error: string } => {
+      if (extraAtaMints.length === 0) {
+        return { ok: true, extraAtaRentLamports: undefined }
+      }
+      let total = 0n
+      for (const extraMint of extraAtaMints) {
+        const extraEntry = mintMap[extraMint]
+        const extraMeta = extraEntry?.meta
+        if (!extraMeta?.isValidMint) {
+          return {
+            ok: false,
+            error: 'extraAtaMints must contain valid on-chain SPL or Token-2022 mints',
+          }
+        }
+        const extraAtaByteLen =
+          extraMeta.safety?.ataByteLen ??
+          computeToken2022AtaByteLen(extraMeta.tokenProgram, extraEntry?.rawBytes)
+        total += estimateAtaRentLamports(ataRentLamports, extraMeta.tokenProgram, extraAtaByteLen)
+      }
+      if (missingAtaCount > extraAtaMints.length) {
+        const feeAtaRent = estimateAtaRentLamports(ataRentLamports, feeTokenProgram, feeAtaByteLen)
+        total += BigInt(missingAtaCount - extraAtaMints.length) * feeAtaRent
+      }
+      return { ok: true, extraAtaRentLamports: total }
+    }
+
     // Atomic WSOL unwrap withdraw pays relayer fee directly in native SOL lamports to `relayerPubkey`.
     if (op === 'withdraw' && unwrapWsol) {
-      const [rentSchedule, prices] = await Promise.all([
+      const [extraMintMetas, rentSchedule, prices] = await Promise.all([
+        extraAtaMints.length > 0
+          ? fetchMintMetasWithData(rpcUrl, extraAtaMints)
+          : Promise.resolve({} as Awaited<ReturnType<typeof fetchMintMetasWithData>>),
         fetchLiveRentSchedule(rpcUrl),
         cluster === 'mainnet'
           ? fetchMintPricesUsd(env, [WSOL_MINT_STR])
           : Promise.resolve({} as Record<string, number>),
       ])
+      const extraRent = resolveExtraAtaRent(extraMintMetas, rentSchedule.ataRentLamports, null, 165)
+      if (!extraRent.ok) {
+        return json(request, cfg.corsOrigins, { error: extraRent.error }, 400)
+      }
       const quote = computeNativeFeeQuote({
         cluster,
         op,
@@ -480,6 +948,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         outputCount,
         omitNf1,
         missingAtaCount,
+        extraAtaRentLamports: extraRent.extraAtaRentLamports,
         relayerPubkey: relayer?.pubkeyB58 ?? null,
         feeRecipient: relayer?.pubkeyB58 ?? null,
         feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
@@ -492,12 +961,24 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
 
     // Fast path for shielded WSOL transfers (WSOL is canonical Classic SPL with 9 decimals, 1:1 SOL).
     if (op === 'transfer' && rawMint === WSOL_MINT_STR) {
-      const [rentSchedule, prices] = await Promise.all([
+      const [extraMintMetas, rentSchedule, prices] = await Promise.all([
+        extraAtaMints.length > 0
+          ? fetchMintMetasWithData(rpcUrl, extraAtaMints)
+          : Promise.resolve({} as Awaited<ReturnType<typeof fetchMintMetasWithData>>),
         fetchLiveRentSchedule(rpcUrl),
         cluster === 'mainnet'
           ? fetchMintPricesUsd(env, [WSOL_MINT_STR])
           : Promise.resolve({} as Record<string, number>),
       ])
+      const extraRent = resolveExtraAtaRent(
+        extraMintMetas,
+        rentSchedule.ataRentLamports,
+        CLASSIC_TOKEN_PROGRAM_ID_STR,
+        165,
+      )
+      if (!extraRent.ok) {
+        return json(request, cfg.corsOrigins, { error: extraRent.error }, 400)
+      }
       const quote = computeNativeFeeQuote({
         cluster,
         op,
@@ -511,6 +992,7 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         outputCount,
         omitNf1,
         missingAtaCount,
+        extraAtaRentLamports: extraRent.extraAtaRentLamports,
         relayerPubkey: relayer?.pubkeyB58 ?? null,
         feeRecipient: null,
         feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
@@ -521,14 +1003,15 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       return json(request, cfg.corsOrigins, quote)
     }
 
-    const [mintMetas, rentSchedule, prices] = await Promise.all([
-      fetchMintMetas(rpcUrl, [rawMint]),
+    const [mintMetasWithData, rentSchedule, prices] = await Promise.all([
+      fetchMintMetasWithData(rpcUrl, [rawMint, ...extraAtaMints]),
       fetchLiveRentSchedule(rpcUrl),
       cluster === 'mainnet'
         ? fetchMintPricesUsd(env, [WSOL_MINT_STR, rawMint])
         : Promise.resolve({} as Record<string, number>),
     ])
-    const meta = mintMetas[rawMint]
+    const entry = mintMetasWithData[rawMint]
+    const meta = entry?.meta
     if (!meta?.isValidMint) {
       return json(
         request,
@@ -537,17 +1020,41 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
         400,
       )
     }
+    const hasTransferFeeExt = Boolean(meta.safety?.hasTransferFeeConfigExt)
+    const feeAtaByteLen =
+      meta.safety?.ataByteLen ?? computeToken2022AtaByteLen(meta.tokenProgram, entry?.rawBytes)
+    const extraRent = resolveExtraAtaRent(
+      mintMetasWithData,
+      rentSchedule.ataRentLamports,
+      meta.tokenProgram,
+      feeAtaByteLen,
+    )
+    if (!extraRent.ok) {
+      return json(request, cfg.corsOrigins, { error: extraRent.error }, 400)
+    }
+    const needsEpoch =
+      meta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR &&
+      hasTransferFeeExt &&
+      entry?.rawBytes !== null &&
+      entry.rawBytes.byteLength > 166
     let feeRecipient: string | null = null
-    let feeRecipientExists = false
     if (relayer && op !== 'transfer') {
       feeRecipient = base58Encode(
         deriveAta(relayer.pubkey, base58Decode(meta.tokenProgram), base58Decode(rawMint)),
       )
-      const [acc] = await fetchMultipleAccounts(rpcUrl, [feeRecipient], {
-        dataSlice: { offset: 0, length: 0 },
-      })
-      feeRecipientExists = acc !== null
     }
+    const [feeAccs, currentEpoch] = await Promise.all([
+      feeRecipient
+        ? fetchMultipleAccounts(rpcUrl, [feeRecipient], { dataSlice: { offset: 0, length: 0 } })
+        : Promise.resolve([]),
+      needsEpoch ? fetchCurrentEpoch(rpcUrl) : Promise.resolve(0n),
+    ])
+    const feeRecipientExists =
+      feeRecipient !== null && isInitializedAta(feeAccs[0], meta.tokenProgram)
+    const transferFee =
+      needsEpoch && entry?.rawBytes
+        ? parseToken2022TransferFeeConfig(entry.rawBytes, currentEpoch)
+        : null
     const quote = computeNativeFeeQuote({
       cluster,
       op,
@@ -562,7 +1069,11 @@ async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
       outputCount,
       omitNf1,
       missingAtaCount,
+      extraAtaRentLamports: extraRent.extraAtaRentLamports,
       hasUnsafeSelfPayExt: meta.hasUnsafeSelfPayExt,
+      hasTransferFeeExt,
+      feeAtaByteLen,
+      transferFee,
       relayerPubkey: relayer?.pubkeyB58 ?? null,
       feeRecipient,
       feeShieldedAddress: fvkInfo?.shieldedAddress ?? null,
@@ -610,22 +1121,35 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       includeFee: u.searchParams.get('includeFee') ?? undefined,
     }
   } else {
-    try {
-      params = (await request.json()) as typeof params
-    } catch {
-      return json(request, cfg.corsOrigins, { error: 'Invalid JSON body' }, 400)
+    const parsed = await readBoundedJson<typeof params>(request)
+    if (!parsed.ok) {
+      return json(
+        request,
+        cfg.corsOrigins,
+        { error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) },
+        parsed.status,
+      )
     }
+    params = parsed.data
   }
 
+  if (params.cluster !== undefined && typeof params.cluster !== 'string') {
+    return json(request, cfg.corsOrigins, { error: 'cluster must be a string' }, 400)
+  }
   const cluster = parseCluster(params.cluster, 'mainnet')
   const rpcUrl = getRpcUrl(env, cluster)
   if (!rpcUrl) {
     return json(request, cfg.corsOrigins, { error: `${cluster} RPC is not configured` }, 503)
   }
 
-  const inputMint = params.inputMint?.trim() ?? ''
-  const outputMint = params.outputMint?.trim() ?? ''
-  const amount = String(params.amount ?? '').trim()
+  const inputMint = typeof params.inputMint === 'string' ? params.inputMint.trim() : ''
+  const outputMint = typeof params.outputMint === 'string' ? params.outputMint.trim() : ''
+  const amount =
+    typeof params.amount === 'string'
+      ? params.amount.trim()
+      : typeof params.amount === 'number' && Number.isSafeInteger(params.amount)
+        ? String(params.amount)
+        : ''
   if (!isValidPubkey(inputMint) || !isValidPubkey(outputMint)) {
     return json(request, cfg.corsOrigins, { error: 'Invalid inputMint or outputMint pubkey' }, 400)
   }
@@ -657,19 +1181,36 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
     }
     maxAccounts = Math.min(Math.max(Math.trunc(rawMax), 12), 48)
   }
-  const includeFee = params.includeFee === false || params.includeFee === 'false' ? false : true
+  // Default `includeFee = false` so swaps pay via atomic protocol-enforced `EXEC_FLAG_FEE_ON_OUTPUT`
+  // (`relayerFee > 0n`) rather than unenforced router-side `platformFeeBps`.
+  const includeFee = params.includeFee === true || params.includeFee === 'true'
 
-  if (params.provider && !parseProvider(params.provider)) {
-    return json(
-      request,
-      cfg.corsOrigins,
-      { error: `Unknown provider "${params.provider}". Valid: jupiter, bedrock, dflow, titan, okx, auto` },
-      400,
-    )
+  if (params.provider !== undefined) {
+    if (typeof params.provider !== 'string') {
+      return json(
+        request,
+        cfg.corsOrigins,
+        { error: 'provider must be a string. Valid: jupiter, bedrock, dflow, titan, okx, auto' },
+        400,
+      )
+    }
+    if (params.provider.trim() !== '' && !parseProvider(params.provider)) {
+      return json(
+        request,
+        cfg.corsOrigins,
+        { error: `Unknown provider "${params.provider}". Valid: jupiter, bedrock, dflow, titan, okx, auto` },
+        400,
+      )
+    }
   }
   const providerSelection = parseProvider(params.provider)
 
-  const relayer = getRelayerPubkeyForCluster(env, cluster, params.relayerPubkey?.trim() || undefined)
+  if (params.relayerPubkey !== undefined && typeof params.relayerPubkey !== 'string') {
+    return json(request, cfg.corsOrigins, { error: 'relayerPubkey must be a string' }, 400)
+  }
+  const requestedRelayerPubkey =
+    typeof params.relayerPubkey === 'string' ? params.relayerPubkey.trim() || undefined : undefined
+  const relayer = getRelayerPubkeyForCluster(env, cluster, requestedRelayerPubkey)
   const escrowPubkey = base58Encode(deriveEscrowPda(0, shardId).address)
 
   try {
@@ -728,17 +1269,53 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
     const escrowInAta = base58Encode(deriveAta(escrowBytes, inTpBytes, inMintBytes))
     const escrowOutAta = base58Encode(deriveAta(escrowBytes, outTpBytes, outMintBytes))
 
-    let relayerFeeAtaB58: string | null = null
-    if (includeFee && relayer) {
-      relayerFeeAtaB58 = base58Encode(deriveAta(relayer.pubkey, outTpBytes, outMintBytes))
-    }
+    const relayerFeeAtaB58: string | null = relayer
+      ? base58Encode(deriveAta(relayer.pubkey, outTpBytes, outMintBytes))
+      : null
     const ataCheckList = [vaultInAta, vaultOutAta, escrowInAta, escrowOutAta]
     if (relayerFeeAtaB58) ataCheckList.push(relayerFeeAtaB58)
-    const ataInfos = await fetchMultipleAccounts(rpcUrl, ataCheckList, {
-      dataSlice: { offset: 0, length: 0 },
-    })
-    const missingVaultEscrowAtaCount = [0, 1, 2, 3].filter((i) => !ataInfos[i]).length
-    const feeAccountExists = relayerFeeAtaB58 !== null && ataInfos[4] !== null
+    const outHasTransferFeeExt = Boolean(outMeta.safety?.hasTransferFeeConfigExt)
+    const inAtaByteLen =
+      inMeta.safety?.ataByteLen ?? computeToken2022AtaByteLen(inMeta.tokenProgram, inEntry?.rawBytes)
+    const outAtaByteLen =
+      outMeta.safety?.ataByteLen ?? computeToken2022AtaByteLen(outMeta.tokenProgram, outEntry?.rawBytes)
+    const needsOutEpoch =
+      outMeta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR &&
+      outHasTransferFeeExt &&
+      outEntry?.rawBytes !== null &&
+      outEntry.rawBytes.byteLength > 166
+    const [ataInfos, outEpoch] = await Promise.all([
+      fetchMultipleAccounts(rpcUrl, ataCheckList, {
+        dataSlice: { offset: 0, length: 0 },
+      }),
+      needsOutEpoch ? fetchCurrentEpoch(rpcUrl) : Promise.resolve(0n),
+    ])
+    const outputTransferFee =
+      needsOutEpoch && outEntry?.rawBytes
+        ? parseToken2022TransferFeeConfig(outEntry.rawBytes, outEpoch)
+        : null
+    const vaultInExists = isInitializedAta(ataInfos[0], inMeta.tokenProgram)
+    const vaultOutExists = isInitializedAta(ataInfos[1], outMeta.tokenProgram)
+    const escrowInExists = isInitializedAta(ataInfos[2], inMeta.tokenProgram)
+    const escrowOutExists = isInitializedAta(ataInfos[3], outMeta.tokenProgram)
+    const missingInAtaCount = (vaultInExists ? 0 : 1) + (escrowInExists ? 0 : 1)
+    const missingOutAtaCount = (vaultOutExists ? 0 : 1) + (escrowOutExists ? 0 : 1)
+    const missingVaultEscrowAtaCount = missingInAtaCount + missingOutAtaCount
+    const extraAtaRentLamports =
+      BigInt(missingInAtaCount) *
+        estimateAtaRentLamports(
+          rentSchedule.ataRentLamports,
+          inMeta.tokenProgram,
+          inAtaByteLen,
+        ) +
+      BigInt(missingOutAtaCount) *
+        estimateAtaRentLamports(
+          rentSchedule.ataRentLamports,
+          outMeta.tokenProgram,
+          outAtaByteLen,
+        )
+    const feeAccountExists =
+      relayerFeeAtaB58 !== null && isInitializedAta(ataInfos[4], outMeta.tokenProgram)
 
     const solPriceUsd = prices[WSOL_MINT_STR] ?? null
     const inPriceUsd = prices[inputMint] ?? null
@@ -762,10 +1339,15 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       estimatedOutAmount: preEstimatedOut ?? 0n,
       solPriceUsd,
       outputTokenPriceUsd: outPriceUsd,
-      feeAccount: includeFee ? relayerFeeAtaB58 : null,
+      feeAccount: relayerFeeAtaB58,
       feeAccountExists,
       hasUnsafeSelfPayExt: outMeta.hasUnsafeSelfPayExt,
+      outputTokenProgram: outMeta.tokenProgram,
+      outputHasTransferFeeExt: outHasTransferFeeExt,
+      outputAtaByteLen: outAtaByteLen,
+      outputTransferFee,
       extraAtaCount: missingVaultEscrowAtaCount,
+      extraAtaRentLamports,
     })
 
     // If USD prices weren't available before quoting, fetch a baseline quote first to know real outAmount
@@ -789,10 +1371,15 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
         estimatedOutAmount: BigInt(baseline.winner.outAmount),
         solPriceUsd,
         outputTokenPriceUsd: outPriceUsd,
-        feeAccount: includeFee ? relayerFeeAtaB58 : null,
+        feeAccount: relayerFeeAtaB58,
         feeAccountExists,
         hasUnsafeSelfPayExt: outMeta.hasUnsafeSelfPayExt,
+        outputTokenProgram: outMeta.tokenProgram,
+        outputHasTransferFeeExt: outHasTransferFeeExt,
+        outputAtaByteLen: outAtaByteLen,
+        outputTransferFee,
         extraAtaCount: missingVaultEscrowAtaCount,
+        extraAtaRentLamports,
       })
       if (feePlan.platformFeeBps > 0 && includeFee && relayer) {
         quoteResult = await quoteWithSelection(env, cfg, baseline.winner.provider, {
@@ -819,24 +1406,50 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
         onlyDirectRoutes,
         maxAccounts,
         platformFeeBps: includeFee ? feePlan.platformFeeBps : 0,
-        relayerOwner: relayer?.pubkeyB58,
-        relayerFeeAta: feePlan.feeAccount ?? undefined,
+        relayerOwner: includeFee ? relayer?.pubkeyB58 : undefined,
+        relayerFeeAta: includeFee ? (feePlan.feeAccount ?? undefined) : undefined,
         escrowPubkey,
       })
-      // Refine feePlan USD numbers against the actual quoted outAmount & platformFee
-      const actualSwapUsd =
-        outPriceUsd && outPriceUsd > 0
-          ? (Number(quoteResult.winner.outAmount) / Math.pow(10, outMeta.decimals)) * outPriceUsd
-          : feePlan.estimatedSwapUsd
-      const actualFeeUsd =
-        quoteResult.winner.platformFee?.amount && outPriceUsd && outPriceUsd > 0
-          ? (Number(quoteResult.winner.platformFee.amount) / Math.pow(10, outMeta.decimals)) *
-            outPriceUsd
-          : feePlan.estimatedFeeUsd
-      feePlan = {
-        ...feePlan,
-        estimatedSwapUsd: actualSwapUsd,
-        estimatedFeeUsd: actualFeeUsd,
+      // When `includeFee === false` (default native EXEC_FLAG_FEE_ON_OUTPUT), recompute feePlan
+      // against the exact DEX `outAmount` so Token-2022 ATA rent & 2x TransferFee gross-up match
+      // the quoted swap output precisely.
+      if (!includeFee && /^\d+$/.test(quoteResult.winner.outAmount)) {
+        feePlan = computeSwapFeePlan({
+          cfg,
+          rentSchedule,
+          outputMint,
+          outputDecimals: outMeta.decimals,
+          estimatedOutAmount: BigInt(quoteResult.winner.outAmount),
+          solPriceUsd,
+          outputTokenPriceUsd: outPriceUsd,
+          feeAccount: relayerFeeAtaB58,
+          feeAccountExists,
+          hasUnsafeSelfPayExt: outMeta.hasUnsafeSelfPayExt,
+          outputTokenProgram: outMeta.tokenProgram,
+          outputHasTransferFeeExt: outHasTransferFeeExt,
+          outputAtaByteLen: outAtaByteLen,
+          outputTransferFee,
+          extraAtaCount: missingVaultEscrowAtaCount,
+          extraAtaRentLamports,
+        })
+      } else {
+        // Refine feePlan USD numbers against the actual quoted outAmount & platformFee
+        const actualSwapUsd =
+          outPriceUsd && outPriceUsd > 0
+            ? (Number(quoteResult.winner.outAmount) / Math.pow(10, outMeta.decimals)) * outPriceUsd
+            : feePlan.estimatedSwapUsd
+        const actualFeeUsd =
+          quoteResult.winner.platformFee?.amount && outPriceUsd && outPriceUsd > 0
+            ? (Number(quoteResult.winner.platformFee.amount) / Math.pow(10, outMeta.decimals)) *
+              outPriceUsd
+            : actualSwapUsd !== null
+              ? (actualSwapUsd * feePlan.platformFeeBps) / 10_000
+              : feePlan.estimatedFeeUsd
+        feePlan = {
+          ...feePlan,
+          estimatedSwapUsd: actualSwapUsd,
+          estimatedFeeUsd: actualFeeUsd,
+        }
       }
     }
 
@@ -853,6 +1466,13 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
       grossInputAmount: inputTransferFee.grossInputAmount,
       netInputAmount: inputTransferFee.netInputAmount,
       inputTransferFeeBps: inputTransferFee.inputTransferFeeBps,
+      inputTransferFee: inputTransferFee.inputTransferFee,
+      outputTransferFee: outputTransferFee
+        ? {
+            bps: Number(outputTransferFee.bps),
+            maxFee: outputTransferFee.maxFee.toString(),
+          }
+        : null,
       mints: {
         input: inMeta,
         output: outMeta,
@@ -865,7 +1485,7 @@ async function handleSwapQuote(request: Request, env: Env): Promise<Response> {
 
 async function handleSwapInstructions(request: Request, env: Env): Promise<Response> {
   const cfg = loadPolicyConfig(env)
-  let body: {
+  const parsed = await readBoundedJson<{
     cluster?: string
     provider?: AggregatorId
     quoteResponse?: Record<string, unknown>
@@ -874,20 +1494,32 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
     shardId?: number
     relayerPubkey?: string
     includeFee?: boolean
+  }>(request)
+  if (!parsed.ok) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      { error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) },
+      parsed.status,
+    )
   }
-  try {
-    body = (await request.json()) as typeof body
-  } catch {
-    return json(request, cfg.corsOrigins, { error: 'Invalid JSON body' }, 400)
-  }
+  const body = parsed.data
 
+  if (body.cluster !== undefined && typeof body.cluster !== 'string') {
+    return json(request, cfg.corsOrigins, { error: 'cluster must be a string' }, 400)
+  }
   const cluster = parseCluster(body.cluster, 'mainnet')
   const rpcUrl = getRpcUrl(env, cluster)
   if (!rpcUrl) {
     return json(request, cfg.corsOrigins, { error: `${cluster} RPC is not configured` }, 503)
   }
 
-  const provider = (body.provider ?? cfg.defaultAggregator) as AggregatorId
+  if (body.provider !== undefined && typeof body.provider !== 'string') {
+    return json(request, cfg.corsOrigins, { error: 'provider must be a string' }, 400)
+  }
+  const provider = (
+    typeof body.provider === 'string' ? body.provider.trim().toLowerCase() : cfg.defaultAggregator
+  ) as AggregatorId
   if (!cfg.enabledAggregators.has(provider)) {
     return json(request, cfg.corsOrigins, { error: `Aggregator "${provider}" is disabled` }, 400)
   }
@@ -901,12 +1533,16 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
     )
   }
 
-  if (!body.quoteResponse || typeof body.quoteResponse !== 'object') {
+  if (!body.quoteResponse || typeof body.quoteResponse !== 'object' || Array.isArray(body.quoteResponse)) {
     return json(request, cfg.corsOrigins, { error: 'Missing quoteResponse' }, 400)
   }
 
-  const inputMint = (body.inputMint ?? String(body.quoteResponse.inputMint ?? '')).trim()
-  const outputMint = (body.outputMint ?? String(body.quoteResponse.outputMint ?? '')).trim()
+  const rawInputMint =
+    body.inputMint !== undefined ? body.inputMint : body.quoteResponse.inputMint
+  const rawOutputMint =
+    body.outputMint !== undefined ? body.outputMint : body.quoteResponse.outputMint
+  const inputMint = typeof rawInputMint === 'string' ? rawInputMint.trim() : ''
+  const outputMint = typeof rawOutputMint === 'string' ? rawOutputMint.trim() : ''
   if (!isValidPubkey(inputMint) || !isValidPubkey(outputMint)) {
     return json(request, cfg.corsOrigins, { error: 'Invalid inputMint or outputMint' }, 400)
   }
@@ -920,13 +1556,20 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
   const vaultAuthBytes = deriveVaultAuthPda(0).address
   const escrowPubkey = base58Encode(escrowBytes)
   const vaultAuthPubkey = base58Encode(vaultAuthBytes)
-  const relayer = getRelayerPubkeyForCluster(env, cluster, body.relayerPubkey?.trim() || undefined)
+  if (body.relayerPubkey !== undefined && typeof body.relayerPubkey !== 'string') {
+    return json(request, cfg.corsOrigins, { error: 'relayerPubkey must be a string' }, 400)
+  }
+  const requestedRelayerPubkey =
+    typeof body.relayerPubkey === 'string' ? body.relayerPubkey.trim() || undefined : undefined
+  const relayer = getRelayerPubkeyForCluster(env, cluster, requestedRelayerPubkey)
 
-  // Detect whether the quote carries a platformFeeBps > 0
+  // Detect whether the quote carries a platformFeeBps > 0.
+  // Default `includeFee = false` so swaps pay via atomic protocol-enforced `EXEC_FLAG_FEE_ON_OUTPUT` (`relayerFee > 0`).
   const rawPlatformFee = body.quoteResponse.platformFee as { feeBps?: number } | null | undefined
   const rawBedrockFee = body.quoteResponse.fee as { feeBps?: number } | null | undefined
-  const quotedFeeBps = Number(rawPlatformFee?.feeBps ?? rawBedrockFee?.feeBps ?? 0)
-  const collectFee = body.includeFee !== false && quotedFeeBps > 0 && relayer !== null
+  const rawQuotedFeeBps = Number(rawPlatformFee?.feeBps ?? rawBedrockFee?.feeBps ?? 0)
+  const quotedFeeBps = Number.isFinite(rawQuotedFeeBps) ? rawQuotedFeeBps : 0
+  const collectFee = body.includeFee === true && quotedFeeBps > 0 && relayer !== null
 
   try {
     const mintMetas = await fetchMintMetas(rpcUrl, [inputMint, outputMint])
@@ -974,7 +1617,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
     const lookupTables = await resolveLookupTables(rpcUrl, built.addressLookupTableAddresses)
 
     const missingAtas: MissingAtaPlan[] = []
-    if (!ataInfos[0]) {
+    if (!isInitializedAta(ataInfos[0], inMeta.tokenProgram)) {
       missingAtas.push({
         label: 'vaultIn',
         ata: vaultInAta,
@@ -983,7 +1626,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
         tokenProgram: inMeta.tokenProgram,
       })
     }
-    if (!ataInfos[1]) {
+    if (!isInitializedAta(ataInfos[1], outMeta.tokenProgram)) {
       missingAtas.push({
         label: 'vaultOut',
         ata: vaultOutAta,
@@ -992,7 +1635,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
         tokenProgram: outMeta.tokenProgram,
       })
     }
-    if (!ataInfos[2]) {
+    if (!isInitializedAta(ataInfos[2], inMeta.tokenProgram)) {
       missingAtas.push({
         label: 'escrowIn',
         ata: escrowInAta,
@@ -1001,7 +1644,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
         tokenProgram: inMeta.tokenProgram,
       })
     }
-    if (!ataInfos[3]) {
+    if (!isInitializedAta(ataInfos[3], outMeta.tokenProgram)) {
       missingAtas.push({
         label: 'escrowOut',
         ata: escrowOutAta,
@@ -1010,7 +1653,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
         tokenProgram: outMeta.tokenProgram,
       })
     }
-    if (relayerFeeAta && relayer && !ataInfos[4]) {
+    if (relayerFeeAta && relayer && !isInitializedAta(ataInfos[4], outMeta.tokenProgram)) {
       missingAtas.push({
         label: 'relayerFee',
         ata: relayerFeeAta,
@@ -1019,6 +1662,14 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
         tokenProgram: outMeta.tokenProgram,
       })
     }
+
+    const hasToken2022Leg =
+      inMeta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR ||
+      outMeta.tokenProgram === TOKEN_2022_PROGRAM_ID_STR
+    const swapComputeUnitLimit = Math.min(
+      built.computeUnitLimit + (hasToken2022Leg ? CU_LIMIT_EXEC_TOKEN_2022_EXTRA : 0),
+      MAX_RELAY_TX_CU_LIMIT,
+    )
 
     return json(request, cfg.corsOrigins, {
       ok: true,
@@ -1039,7 +1690,7 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
       relayerFeeAta,
       platformFeeBps: collectFee ? quotedFeeBps : 0,
       swapInstruction: built.swapInstruction,
-      computeUnitLimit: built.computeUnitLimit,
+      computeUnitLimit: swapComputeUnitLimit,
       addressLookupTableAddresses: built.addressLookupTableAddresses,
       lookupTables,
       missingAtas,
@@ -1056,13 +1707,20 @@ async function handleSwapInstructions(request: Request, env: Env): Promise<Respo
 
 async function handleRelaySubmit(request: Request, env: Env): Promise<Response> {
   const cfg = loadPolicyConfig(env)
-  let body: RelaySubmitRequest
-  try {
-    body = (await request.json()) as RelaySubmitRequest
-  } catch {
-    return json(request, cfg.corsOrigins, { error: 'Invalid JSON body' }, 400)
+  const parsed = await readBoundedJson<RelaySubmitRequest>(request)
+  if (!parsed.ok) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      { error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) },
+      parsed.status,
+    )
   }
+  const body = parsed.data
 
+  if (body.cluster !== undefined && typeof body.cluster !== 'string') {
+    return json(request, cfg.corsOrigins, { error: 'cluster must be a string' }, 400)
+  }
   const cluster = parseCluster(body.cluster, 'mainnet')
   const rpcUrl = getRpcUrl(env, cluster)
   const relayerPool = getRelayerPoolForCluster(env, cluster)
@@ -1077,9 +1735,13 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     )
   }
 
+  const firstBatchAccounts =
+    Array.isArray(body.instructions) && Array.isArray(body.instructions[0]?.accounts)
+      ? body.instructions[0]!.accounts
+      : undefined
   const requestedPayer =
-    Array.isArray(body.instructions) && typeof body.instructions[0]?.accounts?.[0]?.pubkey === 'string'
-      ? body.instructions[0]!.accounts[0]!.pubkey
+    typeof firstBatchAccounts?.[0]?.pubkey === 'string'
+      ? firstBatchAccounts[0]!.pubkey
       : Array.isArray(body.accounts) && typeof body.accounts[0]?.pubkey === 'string'
         ? body.accounts[0]!.pubkey
         : undefined
@@ -1110,7 +1772,6 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       null,
       {
         relayerPoolPubkeys: relayerPool.map((r) => r.pubkey),
-        auditedSwapRouterPrograms: cfg.auditedSwapRouterPrograms,
         selfPayFeeMints: cfg.selfPayFeeMints,
         deferCm2Verification: true,
       },
@@ -1122,28 +1783,62 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     return json(request, cfg.corsOrigins, { error: sanitizeError(err, 'Firewall error') }, 400)
   }
 
-  const defaultCu =
-    verdict.audrenInstructions.length > 1
-      ? Math.min(verdict.audrenInstructions.length * 320_000, 1_400_000)
-      : 850_000
+  const cuBudgets = verdict.audrenInstructions.map((entry) => computeAudrenInstructionCuLimit(entry))
+  const defaultCu = Math.min(
+    cuBudgets.reduce((sum, b) => sum + b.defaultCu, 0),
+    MAX_RELAY_TX_CU_LIMIT,
+  )
+  const minAudrenCuFloor = Math.min(
+    cuBudgets.reduce((sum, b) => sum + b.minFloorCu, 0),
+    MAX_RELAY_TX_CU_LIMIT,
+  )
   const rawCu = body.computeUnitLimit === undefined ? defaultCu : Number(body.computeUnitLimit)
   if (!Number.isFinite(rawCu) || rawCu < 0) {
     return json(request, cfg.corsOrigins, { error: 'computeUnitLimit must be a non-negative number' }, 400)
   }
   const rawPriorityStr =
-    body.priorityFeeLamports === undefined ? '5000' : String(body.priorityFeeLamports).trim()
+    body.priorityFeeLamports === undefined
+      ? '5000'
+      : typeof body.priorityFeeLamports === 'string'
+        ? body.priorityFeeLamports.trim()
+        : typeof body.priorityFeeLamports === 'number' && Number.isSafeInteger(body.priorityFeeLamports)
+          ? String(body.priorityFeeLamports)
+          : ''
   if (!/^\d+$/.test(rawPriorityStr)) {
     return json(request, cfg.corsOrigins, { error: 'priorityFeeLamports must be a non-negative integer string' }, 400)
   }
   const parsedPriority = BigInt(rawPriorityStr)
-  const cappedPriority = parsedPriority > 50_000n ? 50_000n : parsedPriority
+  const hasUntrustedCpiTarget =
+    (verdict.execMeta !== null &&
+      (!cfg.auditedSwapRouterPrograms.has(verdict.execMeta.targetProgramId) ||
+        (verdict.execMeta.tokenProgIn === TOKEN_2022_PROGRAM_ID_STR &&
+          !cfg.selfPayFeeMints.has(verdict.execMeta.mintIn)) ||
+        (verdict.execMeta.tokenProgOut === TOKEN_2022_PROGRAM_ID_STR &&
+          !cfg.selfPayFeeMints.has(verdict.execMeta.mintOut)))) ||
+    Boolean(verdict.transactMeta?.hasTrailingHookAccounts)
+  const maxPriorityFeeLamports = hasUntrustedCpiTarget
+    ? MAX_UNAUDITED_ROUTER_PRIORITY_FEE_LAMPORTS
+    : MAX_RELAY_PRIORITY_FEE_LAMPORTS
+  const cappedPriority =
+    parsedPriority > maxPriorityFeeLamports ? maxPriorityFeeLamports : parsedPriority
 
   const clientIp = extractClientIp(request)
   const guard = getGuardStub(env)
 
   // Pre-simulation guard: hashes IP inside DO using ephemeral in-memory daily 32-byte random salt,
-  // atomically deduplicates all nullifiers across the single ix or batch without linking IP to nullifiers.
-  const beginDecision = await guard.begin({ clientIp, nullifiers: verdict.nullifiers })
+  // atomically deduplicates all nullifiers across the single ix or batch without linking IP to nullifiers,
+  // and short-circuits already revert-blocked IPs (plus concurrent untrusted-CPI bursts) before RPC simulation.
+  const beginDecision = await guard.begin({
+    clientIp,
+    nullifiers: verdict.nullifiers,
+    cluster,
+    hasUntrustedCpiTarget,
+    limits: {
+      ipCooldownSec: cfg.sponsoredCooldownSec[cluster],
+      ipMaxSponsoredPerHour: cfg.sponsoredPerIpPerHour[cluster],
+      ipMaxSponsoredPerDay: cfg.sponsoredPerIpPerDay[cluster],
+    },
+  })
   if (!beginDecision.allowed) {
     return json(
       request,
@@ -1163,23 +1858,30 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
 
   let lockHeld = true
   let reservationId: string | undefined
+  let exactOpenPageLockLease: { poolId: number; laneIds: number[]; leaseId: string } | null = null
+  let proactiveOpenPageLockLease: { poolId: number; laneIds: number[]; leaseId: string } | null = null
+  let openPageBroadcasted = false
+  let openPageConfirmed = false
+  let openPageFailedOnChain = false
   try {
     // Now that per-IP rate limits & nullifier dedup passed, decrypt & verify Mode 1 shielded `cm2` fee notes.
     resolveShieldedCm2Fees(verdict, fvkInfo?.fvk ?? null)
 
     // 2. Fetch blockhash + pre-simulation balances (with `context.slot`) + PoolState + all touched
     //    LaneTreeStates, LaneRentVaults, primary/rollover page PDAs, and setupAtas in ONE RPC batch.
-    const watchAddresses = [relayer.pubkeyB58]
-    const watchedFeeAtaIdx = verdict.watchedRelayerFeeAta ? watchAddresses.push(verdict.watchedRelayerFeeAta) - 1 : -1
+    const baseWatchAddresses = [relayer.pubkeyB58]
+    const watchedFeeAtaIdx = verdict.watchedRelayerFeeAta
+      ? baseWatchAddresses.push(verdict.watchedRelayerFeeAta) - 1
+      : -1
     const watchedNativeRecipientIdx =
       verdict.nativeSolFeeToRelayer > 0n &&
       verdict.nativeSolFeeRecipient &&
       verdict.nativeSolFeeRecipient !== relayer.pubkeyB58
-        ? watchAddresses.push(verdict.nativeSolFeeRecipient) - 1
+        ? baseWatchAddresses.push(verdict.nativeSolFeeRecipient) - 1
         : -1
 
-    const preFetchAddresses: string[] = [...watchAddresses]
-    const seenFetch = new Set<string>(watchAddresses)
+    const preFetchAddresses: string[] = [...baseWatchAddresses]
+    const seenFetch = new Set<string>(baseWatchAddresses)
     const enqueueFetch = (addr: string) => {
       if (!seenFetch.has(addr)) {
         seenFetch.add(addr)
@@ -1199,37 +1901,172 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     }
     for (const s of verdict.setupAtas) {
       enqueueFetch(base58Encode(s.ata))
+      if (base58Encode(s.tokenProgram) === TOKEN_2022_PROGRAM_ID_STR) {
+        enqueueFetch(base58Encode(s.mint))
+      }
     }
 
-    const [bhRes, preCtx] = await Promise.all([
+    const [bhRes, initialPreCtx, liveRentSchedule] = await Promise.all([
       rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
         { commitment: 'confirmed' },
       ]),
       fetchMultipleAccountsWithContext(rpcUrl, preFetchAddresses),
+      fetchLiveRentSchedule(rpcUrl).catch(() => null),
     ])
 
-    let preSlot = preCtx.slot
-    const preAccounts = [...preCtx.accounts]
+    let preCtx = initialPreCtx
+    let preCtxCommitment: 'confirmed' | 'processed' = 'confirmed'
+    let preAccounts = [...preCtx.accounts]
+    const preFetchIndexByAddr = new Map<string, number>()
+    preFetchAddresses.forEach((addr, idx) => preFetchIndexByAddr.set(addr, idx))
     const fetchedMap = new Map<string, FetchedAccountMeta | null>()
     const preAccountInfoMap = new Map<string, { bytes: Uint8Array; lamports: number; owner: string } | null>()
-    preFetchAddresses.forEach((addr, idx) => {
-      const acc = preAccounts[idx] ?? null
-      preAccountInfoMap.set(addr, acc)
-      fetchedMap.set(addr, acc ? { bytes: acc.bytes, owner: acc.owner } : null)
-    })
+    const syncPreAccountsFromCtx = (ctx: typeof preCtx) => {
+      preAccounts = [...ctx.accounts]
+      fetchedMap.clear()
+      preAccountInfoMap.clear()
+      preFetchAddresses.forEach((addr, idx) => {
+        const acc = preAccounts[idx] ?? null
+        preAccountInfoMap.set(addr, acc)
+        fetchedMap.set(addr, acc ? { bytes: acc.bytes, owner: acc.owner } : null)
+      })
+    }
+    const mergePinnedAccounts = (
+      addrs: string[],
+      ctx: typeof preCtx,
+      commitment: 'confirmed' | 'processed' = 'processed',
+    ) => {
+      addrs.forEach((addr, idx) => {
+        const acc = ctx.accounts[idx] ?? null
+        preAccountInfoMap.set(addr, acc)
+        fetchedMap.set(addr, acc ? { bytes: acc.bytes, owner: acc.owner } : null)
+        const preIdx = preFetchIndexByAddr.get(addr)
+        if (preIdx !== undefined) {
+          preAccounts[preIdx] = acc
+        }
+      })
+      preCtx = { slot: ctx.slot, accounts: preAccounts }
+      preCtxCommitment = commitment
+    }
+    syncPreAccountsFromCtx(preCtx)
 
-    // 3. Auto-prepend deduplicated `OpenPage` (Tag 2, reimbursed from `LaneRentVault`) for any missing
-    //    primary or genuinely near-rollover page PDAs across all lanes touched by the single ix or batch.
-    const pagePlan = planBatchMissingOpenPageIxs({
+    const rentSchedule = liveRentSchedule ?? getCachedLiveRentSchedule(rpcUrl)
+    const nullifierRentFloorUnit = rentSchedule?.nullifierRentLamports ?? 890_880n
+    const laneRentVaultReserveFloor = rentSchedule?.laneRentVaultReserveLamports ?? 1_002_240n
+    const ataRentFloorUnit = rentSchedule?.ataRentLamports ?? 2_039_280n
+    // Exact Mainnet `6960 * (len + 128)` cold-isolate fallback page rents:
+    //   SubtreePage (8,256 B) = 58_352_640n, SubtreeRootPage (9,664 B) = 68_152_320n,
+    //   MemoPage (10,240 B)   = 72_161_280n, NullifierPage (9,664 B)   = 68_152_320n.
+    const subRentFloor = rentSchedule?.subtreePageRentLamports ?? 58_352_640n
+    const srRentFloor = rentSchedule?.subrootPageRentLamports ?? 68_152_320n
+    const memoRentFloor = rentSchedule?.memoPageRentLamports ?? 72_161_280n
+    const nfPageRentFloor = rentSchedule?.nfPageRentLamports ?? 68_152_320n
+
+    const setupAtaInstructions: SolanaInstruction[] = verdict.setupAtas.map((s) =>
+      buildCreateAtaIdempotentIx({
+        payer: relayer.pubkey,
+        ata: s.ata,
+        owner: s.owner,
+        mint: s.mint,
+        tokenProgram: s.tokenProgram,
+      }),
+    )
+    const setupAtasCu = verdict.setupAtas.reduce(
+      (sum, s) =>
+        sum +
+        (bytesEqual(s.tokenProgram, TOKEN_2022_PROGRAM_ID)
+          ? CU_LIMIT_SETUP_ATA_TOKEN_2022
+          : CU_LIMIT_SETUP_ATA_CLASSIC),
+      0,
+    )
+    const audrenSolanaInstructions: SolanaInstruction[] = verdict.audrenInstructions.map((entry) => ({
+      programId: AUDREN_PROGRAM_ID,
+      accounts: entry.decodedAccounts,
+      data: entry.ixData,
+    }))
+
+    const pageEntries = verdict.audrenInstructions.map((entry) => ({
+      poolId: entry.poolId,
+      outLaneId: entry.outLaneId,
+      outputCount: entry.outputCount,
+      nullifierCount: entry.nullifiers.length,
+      pages: entry.pages,
+    }))
+    const exactPlan = planBatchMissingOpenPageIxs({
       payerB58: relayer.pubkeyB58,
-      entries: verdict.audrenInstructions.map((entry) => ({
-        poolId: entry.poolId,
-        outLaneId: entry.outLaneId,
-        outputCount: entry.outputCount,
-        nullifierCount: entry.nullifiers.length,
-        pages: entry.pages,
-      })),
+      entries: pageEntries,
       fetchedAccounts: fetchedMap,
+    })
+    if (!exactPlan.ok) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: true,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        { error: exactPlan.error, code: 'INVALID_PAGE_PDA' },
+        400,
+      )
+    }
+
+    // Compute exact non-proactive Transaction v1 account count, wire bytes, and CU budget so
+    // proactive >= 90% lookahead NEVER overflows 64 accounts, 4,096 B wire size, or 1,400,000 CU.
+    const baseInstructionsWithoutProactive: SolanaInstruction[] = [
+      ...setupAtaInstructions,
+      ...exactPlan.openPageIxs,
+      ...verdict.preInstructions,
+      ...audrenSolanaInstructions,
+    ]
+    const { wireLen: baseWireLen, uniqueAccountCount: baseUniqueAccountCount } = estimateV1TxWireLen(
+      relayer.pubkey,
+      baseInstructionsWithoutProactive,
+    )
+    const baseCu = Math.max(Math.trunc(rawCu), minAudrenCuFloor)
+    const exactOpenPagesCu = exactPlan.openPageIxs.reduce(
+      (sum, ix) => sum + computeOpenPageIxCuLimit(ix),
+      0,
+    )
+    const baseNonProactiveCu =
+      baseCu +
+      verdict.preInstructions.length * 40_000 +
+      setupAtasCu +
+      exactOpenPagesCu
+    const maxLookaheadExtraAccounts = Math.max(0, SOLANA_TX_V1_MAX_ACCOUNTS - baseUniqueAccountCount)
+    const maxExtraByBytes = Math.min(
+      Math.floor(Math.max(0, SOLANA_TX_V1_MAX_SIZE - baseWireLen) / PROACTIVE_OPEN_PAGE_WIRE_BYTES),
+      Math.max(0, 64 - baseInstructionsWithoutProactive.length),
+    )
+    const maxExtraCu = Math.max(0, MAX_RELAY_TX_CU_LIMIT - baseNonProactiveCu)
+    const maxExtraByCu = Math.floor(maxExtraCu / CU_LIMIT_OPEN_PAGE)
+
+    // 3. Auto-prepend deduplicated `OpenPage` (Tag 2, reimbursed from `LaneRentVault`) for:
+    //    - exact missing primary / boundary rollover page PDAs across all touched lanes, AND
+    //    - proactive `>= 90%` lookahead pages (`subRem <= 26`, `memoRem <= 10`, `nfRem <= 60`,
+    //      `subrootSlot >= 280`) strictly when live rent is known (`rentSchedule !== null`),
+    //      `LaneRentVault` covers 100% of page rent (0 deficit), and account/wire/CU caps permit.
+    const pagePlan = await planRolloverOpenPages({
+      rpcUrl,
+      payerB58: relayer.pubkeyB58,
+      entries: pageEntries,
+      fetchedAccounts: fetchedMap,
+      preAccountInfoMap,
+      rentFloors: {
+        laneRentVaultReserveFloor,
+        subRentFloor,
+        srRentFloor,
+        memoRentFloor,
+        nfPageRentFloor,
+      },
+      exactPlan,
+      allowProactive: rentSchedule !== null,
+      maxExtraAccounts: maxLookaheadExtraAccounts,
+      maxExtraByBytes,
+      maxExtraByCu,
+      maxExtraCu,
     })
     if (!pagePlan.ok) {
       await guard.release({
@@ -1247,93 +2084,324 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
-    // 4. Build full instruction list (setupAtas + OpenPage Tag 2 + allowlisted preInstructions + Audren ix(s))
-    const instructions: SolanaInstruction[] = []
+    const openPagePoolId = verdict.audrenInstructions[0]?.poolId ?? 0
+    const exactOpenPageIxs = pagePlan.exactOpenPageIxs
+    const exactLaneIds = pagePlan.exactLaneIds
+    const exactLaneSet = new Set<number>(exactLaneIds)
 
-    for (const s of verdict.setupAtas) {
-      instructions.push(
-        buildCreateAtaIdempotentIx({
-          payer: relayer.pubkey,
-          ata: s.ata,
-          owner: s.owner,
-          mint: s.mint,
-          tokenProgram: s.tokenProgram,
-        }),
-      )
-    }
-
-    for (const openIx of pagePlan.openPageIxs) {
-      instructions.push(openIx)
-    }
-
-    // Prepend strictly-allowlisted zero-signer DeFi refresh cranks (Tag 6 only)
-    for (const preIx of verdict.preInstructions) {
-      instructions.push(preIx)
-    }
-
-    for (const entry of verdict.audrenInstructions) {
-      instructions.push({
-        programId: AUDREN_PROGRAM_ID,
-        accounts: entry.decodedAccounts,
-        data: entry.ixData,
+    // Acquire mandatory `openPageLock` strictly for exact rollover lanes first — return
+    // `503 LANE_ROLLOVER_BUSY` ONLY if an exact rollover lane is locked.
+    if (exactLaneIds.length > 0) {
+      const exactLeaseId = crypto.randomUUID()
+      const exactLock = await guard.acquireOpenPageLock({
+        cluster,
+        poolId: openPagePoolId,
+        laneIds: exactLaneIds,
+        leaseId: exactLeaseId,
+        ttlMs: 45_000,
       })
+      if (!exactLock.allowed) {
+        await guard.release({
+          ipHash,
+          cluster,
+          nullifiers: verdict.nullifiers,
+          recordFailure: false,
+        })
+        lockHeld = false
+        return json(
+          request,
+          cfg.corsOrigins,
+          {
+            error: `Lane ${exactLock.busyLaneId ?? exactLaneIds[0]} page rollover is already in progress; please retry shortly`,
+            code: 'LANE_ROLLOVER_BUSY',
+            retryAfterSec: 2,
+          },
+          503,
+          { 'retry-after': '2' },
+        )
+      }
+      exactOpenPageLockLease = { poolId: openPagePoolId, laneIds: exactLaneIds, leaseId: exactLeaseId }
     }
 
-    const baseCu = Math.max(Math.trunc(rawCu), 200_000)
-    const requestedCu =
-      baseCu +
-      verdict.preInstructions.length * 40_000 +
-      pagePlan.openPageIxs.length * 20_000
-    const cuLimit = Math.min(requestedCu, 1_400_000)
+    // For proactive-only lanes (NOT in `exactLaneIds`), acquire `openPageLock` opportunistically
+    // per lane; if a lane is busy, drop that lane's optional proactive `OpenPage`(s) and proceed!
+    let activeProactiveIxs: SolanaInstruction[] = []
+    if (pagePlan.proactiveLaneMap.size > 0) {
+      const proactiveLeaseId = crypto.randomUUID()
+      const acquiredProactiveOnlyLanes: number[] = []
+      for (const [laneId, laneIxs] of pagePlan.proactiveLaneMap.entries()) {
+        if (exactLaneSet.has(laneId)) {
+          activeProactiveIxs.push(...laneIxs)
+          continue
+        }
+        const proLock = await guard.acquireOpenPageLock({
+          cluster,
+          poolId: openPagePoolId,
+          laneIds: [laneId],
+          leaseId: proactiveLeaseId,
+          ttlMs: 45_000,
+        })
+        if (proLock.allowed) {
+          acquiredProactiveOnlyLanes.push(laneId)
+          proactiveOpenPageLockLease = {
+            poolId: openPagePoolId,
+            laneIds: acquiredProactiveOnlyLanes,
+            leaseId: proactiveLeaseId,
+          }
+          activeProactiveIxs.push(...laneIxs)
+        }
+      }
+    }
 
-    // 5. Compile & sign Solana v1 (0x81) single transaction (strictly <= 4,096 B and <= 64 accounts)
-    let signed: ReturnType<typeof buildAndSignV1Transaction>
-    try {
-      signed = buildAndSignV1Transaction(relayer.secret32, bhRes.value.blockhash, instructions, {
+    const dropProactiveOpenPages = async () => {
+      activeProactiveIxs = []
+      if (proactiveOpenPageLockLease) {
+        const lease = proactiveOpenPageLockLease
+        proactiveOpenPageLockLease = null
+        await guard
+          .releaseOpenPageLock({
+            cluster,
+            poolId: lease.poolId,
+            laneIds: lease.laneIds,
+            leaseId: lease.leaseId,
+          })
+          .catch(() => {})
+      }
+    }
+
+    // 4 & 5. Build instruction list, compute calibrated CU limit, and compile & sign Solana v1 (0x81)
+    const buildTxAttempt = (openPageIxs: SolanaInstruction[]) => {
+      const attemptWatchAddresses = [...baseWatchAddresses]
+      for (const openIx of openPageIxs) {
+        const vaultPdaB58 = base58Encode(openIx.accounts[3]!.pubkey)
+        if (!attemptWatchAddresses.includes(vaultPdaB58)) {
+          attemptWatchAddresses.push(vaultPdaB58)
+        }
+      }
+      const instructions: SolanaInstruction[] = [
+        ...setupAtaInstructions,
+        ...openPageIxs,
+        ...verdict.preInstructions,
+        ...audrenSolanaInstructions,
+      ]
+      const openPagesCu = openPageIxs.reduce((sum, ix) => sum + computeOpenPageIxCuLimit(ix), 0)
+      const requestedCu =
+        baseCu +
+        verdict.preInstructions.length * 40_000 +
+        setupAtasCu +
+        openPagesCu
+      const cuLimit = Math.min(requestedCu, MAX_RELAY_TX_CU_LIMIT)
+      const signed = buildAndSignV1Transaction(relayer.secret32, bhRes.value.blockhash, instructions, {
         computeUnitLimit: cuLimit,
         priorityFeeLamports: cappedPriority,
       })
+      return {
+        openPageIxs,
+        watchAddresses: attemptWatchAddresses,
+        cuLimit,
+        signed,
+        priorityFeeLamports: cappedPriority,
+      }
+    }
+
+    let activeOpenPageIxs: SolanaInstruction[] = [...exactOpenPageIxs, ...activeProactiveIxs]
+    let txAttempt: ReturnType<typeof buildTxAttempt>
+    try {
+      txAttempt = buildTxAttempt(activeOpenPageIxs)
     } catch (txErr) {
-      await guard.release({
-        ipHash,
-        cluster,
-        nullifiers: verdict.nullifiers,
-        recordFailure: true,
-      })
-      lockHeld = false
-      return json(
-        request,
-        cfg.corsOrigins,
-        {
-          error: sanitizeError(txErr, 'Transaction exceeds Solana v1 size or account limits'),
-          code: 'TX_TOO_LARGE',
-        },
-        400,
-      )
+      if (activeProactiveIxs.length > 0) {
+        await dropProactiveOpenPages()
+        activeOpenPageIxs = [...exactOpenPageIxs]
+        try {
+          txAttempt = buildTxAttempt(activeOpenPageIxs)
+        } catch (retryErr) {
+          await guard.release({
+            ipHash,
+            cluster,
+            nullifiers: verdict.nullifiers,
+            recordFailure: true,
+          })
+          lockHeld = false
+          return json(
+            request,
+            cfg.corsOrigins,
+            {
+              error: sanitizeError(retryErr, 'Transaction exceeds Solana v1 size or account limits'),
+              code: 'TX_TOO_LARGE',
+            },
+            400,
+          )
+        }
+      } else {
+        await guard.release({
+          ipHash,
+          cluster,
+          nullifiers: verdict.nullifiers,
+          recordFailure: true,
+        })
+        lockHeld = false
+        return json(
+          request,
+          cfg.corsOrigins,
+          {
+            error: sanitizeError(txErr, 'Transaction exceeds Solana v1 size or account limits'),
+            code: 'TX_TOO_LARGE',
+          },
+          400,
+        )
+      }
+    }
+
+    const pageRentForKind = (pageKind: number): bigint =>
+      pageKind === OPEN_PAGE_KIND_SUBTREE
+        ? subRentFloor
+        : pageKind === OPEN_PAGE_KIND_SUBROOT
+          ? srRentFloor
+          : pageKind === OPEN_PAGE_KIND_MEMO
+            ? memoRentFloor
+            : nfPageRentFloor
+
+    // Track per-lane available `LaneRentVault` balance (reserving `SENTINEL_LEN = 16 B` rent and
+    // treating a missing vault as `0n` lamports) separately for exact vs proactive `OpenPage`s.
+    // Exact rollover pages subtract pre-funded lamports; optional proactive pages require
+    // `LaneRentVault` alone to cover full `pageRent` so un-pinned `unfetchedPdas` lamports can
+    // never mask a multi-page proactive deficit.
+    const computeOpenPageDeficits = (
+      exactIxs: SolanaInstruction[],
+      proactiveIxs: SolanaInstruction[],
+    ): { exactDeficitFloor: bigint; proactiveDeficitFloor: bigint; totalDeficitFloor: bigint } => {
+      const laneVaultAvail = new Map<string, bigint>()
+      const consumeOpenIx = (openIx: SolanaInstruction, subtractExistingLamports: boolean): bigint => {
+        const pagePdaB58 = base58Encode(openIx.accounts[4]!.pubkey)
+        const pageAcc = preAccountInfoMap.get(pagePdaB58)
+        if (pageAcc?.owner === AUDREN_PROGRAM_ID_STR && pageAcc.bytes.length > 0) {
+          return 0n
+        }
+        const vaultPdaB58 = base58Encode(openIx.accounts[3]!.pubkey)
+        if (!laneVaultAvail.has(vaultPdaB58)) {
+          const vaultAcc = preAccountInfoMap.get(vaultPdaB58)
+          const rawVault = BigInt(vaultAcc?.lamports ?? 0)
+          laneVaultAvail.set(
+            vaultPdaB58,
+            rawVault > laneRentVaultReserveFloor ? rawVault - laneRentVaultReserveFloor : 0n,
+          )
+        }
+        const pageRent = pageRentForKind(openIx.data[1]!)
+        const existingPageLamports = subtractExistingLamports ? BigInt(pageAcc?.lamports ?? 0) : 0n
+        const needed = pageRent > existingPageLamports ? pageRent - existingPageLamports : 0n
+        const avail = laneVaultAvail.get(vaultPdaB58) ?? 0n
+        const subsidy = avail < needed ? avail : needed
+        laneVaultAvail.set(vaultPdaB58, avail - subsidy)
+        return needed - subsidy
+      }
+
+      let exactDeficitFloor = 0n
+      for (const openIx of exactIxs) {
+        exactDeficitFloor += consumeOpenIx(openIx, true)
+      }
+      let proactiveDeficitFloor = 0n
+      for (const openIx of proactiveIxs) {
+        proactiveDeficitFloor += consumeOpenIx(openIx, false)
+      }
+      return {
+        exactDeficitFloor,
+        proactiveDeficitFloor,
+        totalDeficitFloor: exactDeficitFloor + proactiveDeficitFloor,
+      }
     }
 
     // 6. Pre-flight simulation on Solana RPC before committing lamports:
-    //    measures exact SOL outflow and exact fee token/SOL inflow directly from Solana runtime.
-    let sim = await simulateV1Transaction(rpcUrl, signed.wireBytes, watchAddresses)
+    //    measures exact SOL outflow and exact protocol-enforced fee token/SOL inflow directly from Solana runtime.
+    //    Pin `preCtx.slot === sim.slot` via up to 3 parallel small-watch (`< 1 KB`, omitting `LaneTreeState`
+    //    and existing page accounts) `Promise.all` attempts at `processed` commitment so pre-sim balances,
+    //    LaneRentVault lamports, setupAtas, and fee ATA balances are evaluated against the exact simulated slot.
+    const runPinnedSimulation = async (
+      attempt: ReturnType<typeof buildTxAttempt>,
+      opts?: { skipPin?: boolean; commitment?: 'processed' | 'confirmed' },
+    ) => {
+      const MAX_SLOT_PIN_ATTEMPTS = 3
+      let attemptSim = await simulateV1Transaction(
+        rpcUrl,
+        attempt.signed.wireBytes,
+        attempt.watchAddresses,
+        opts?.commitment ? { commitment: opts.commitment } : undefined,
+      )
+      if (
+        !opts?.skipPin &&
+        !attemptSim.err &&
+        (preCtx.slot === null || attemptSim.slot === null || preCtx.slot !== attemptSim.slot)
+      ) {
+        const pinAddresses: string[] = []
+        const seenPin = new Set<string>()
+        const addPin = (addr: string) => {
+          if (!seenPin.has(addr)) {
+            seenPin.add(addr)
+            pinAddresses.push(addr)
+          }
+        }
+        for (const addr of attempt.watchAddresses) addPin(addr)
+        addPin(pool0PdaB58)
+        for (const s of verdict.setupAtas) addPin(base58Encode(s.ata))
+        for (const openIx of attempt.openPageIxs) {
+          addPin(base58Encode(openIx.accounts[3]!.pubkey))
+          addPin(base58Encode(openIx.accounts[4]!.pubkey))
+        }
 
-    // For zero-protocol-fee (`relayerFee === 0`) allowlisted aggregator swaps, pin pre-balance read
-    // and simulation to the exact same `context.slot` (retrying once if the slot ticked between calls)
-    // so concurrent inflows into the relayer fee ATA between slots can never be replayed as fee credit.
-    if (
-      !sim.err &&
-      verdict.isZeroFeeAuditedRouterSwap &&
-      verdict.watchedRelayerFeeAta &&
-      preSlot !== null &&
-      sim.slot !== null &&
-      sim.slot !== preSlot
-    ) {
-      const refreshed = await fetchMultipleAccountsWithContext(rpcUrl, watchAddresses)
-      const refreshedSim = await simulateV1Transaction(rpcUrl, signed.wireBytes, watchAddresses)
-      preSlot = refreshed.slot
-      for (let wi = 0; wi < watchAddresses.length; wi++) {
-        preAccounts[wi] = refreshed.accounts[wi] ?? null
+        for (let attemptIdx = 0; attemptIdx < MAX_SLOT_PIN_ATTEMPTS; attemptIdx++) {
+          const [pinnedPreCtx, pinnedSim] = await Promise.all([
+            fetchMultipleAccountsWithContext(rpcUrl, pinAddresses, { commitment: 'processed' }),
+            simulateV1Transaction(rpcUrl, attempt.signed.wireBytes, attempt.watchAddresses, {
+              commitment: 'processed',
+            }),
+          ])
+          mergePinnedAccounts(pinAddresses, pinnedPreCtx, 'processed')
+          attemptSim = pinnedSim
+          if (
+            attemptSim.err ||
+            (preCtx.slot !== null && attemptSim.slot !== null && preCtx.slot === attemptSim.slot)
+          ) {
+            break
+          }
+        }
       }
-      sim = refreshedSim
+      return attemptSim
+    }
+
+    let sim = await runPinnedSimulation(txAttempt)
+
+    const hasNonProactiveSlotSensitiveState =
+      exactOpenPageIxs.length > 0 ||
+      verdict.setupAtas.length > 0 ||
+      watchedFeeAtaIdx >= 0 ||
+      watchedNativeRecipientIdx >= 0
+
+    // Guarantee zero relayer deficit and zero false rejections from optional proactive `OpenPage`s:
+    // if post-pin `proactiveDeficitFloor > 0n`, or `SLOT_SKEW` occurred solely due to proactive
+    // pages, or simulation errored while proactive pages were attached, drop ALL proactive pages,
+    // release proactive-only locks immediately, and recompile/re-simulate with exact pages only
+    // (preserving `preCtxCommitment` so a promoted `'processed'` snapshot never regresses to `'confirmed'`).
+    if (activeProactiveIxs.length > 0) {
+      const slotSkewed =
+        preCtx.slot === null || sim.slot === null || preCtx.slot !== sim.slot
+      const proactiveOnlySlotSkew =
+        !sim.err &&
+        preCtx.slot !== null &&
+        sim.slot !== null &&
+        preCtx.slot !== sim.slot &&
+        !hasNonProactiveSlotSensitiveState
+      const proactiveDeficit =
+        !sim.err && !slotSkewed
+          ? computeOpenPageDeficits(exactOpenPageIxs, activeProactiveIxs).proactiveDeficitFloor
+          : 0n
+      if (sim.err || proactiveOnlySlotSkew || proactiveDeficit > 0n) {
+        await dropProactiveOpenPages()
+        activeOpenPageIxs = [...exactOpenPageIxs]
+        txAttempt = buildTxAttempt(activeOpenPageIxs)
+        sim = await runPinnedSimulation(txAttempt, {
+          skipPin: proactiveOnlySlotSkew,
+          commitment: preCtxCommitment,
+        })
+      }
     }
 
     if (sim.err) {
@@ -1354,6 +2422,33 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
           unitsConsumed: sim.unitsConsumed,
         },
         400,
+      )
+    }
+
+    const hasSlotSensitiveState =
+      hasNonProactiveSlotSensitiveState || activeProactiveIxs.length > 0
+    if (
+      preCtx.slot === null ||
+      sim.slot === null ||
+      (hasSlotSensitiveState && preCtx.slot !== sim.slot)
+    ) {
+      await guard.release({
+        ipHash,
+        cluster,
+        nullifiers: verdict.nullifiers,
+        recordFailure: false,
+      })
+      lockHeld = false
+      return json(
+        request,
+        cfg.corsOrigins,
+        {
+          error: `Pre-simulation account state slot (${preCtx.slot}) did not match simulation slot (${sim.slot}); please retry`,
+          code: 'SLOT_SKEW',
+          retryAfterSec: 1,
+        },
+        503,
+        { 'retry-after': '1' },
       )
     }
 
@@ -1415,21 +2510,16 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     // Compute deterministic protocol-side `minExpectedCostLamports` floor strictly from parsed tx
     // structure + live rent/PoolState so concurrent SOL inflows into `relayerPubkey` between
     // `preSlot` and `simSlot` can NEVER erase simulated outflow.
-    const cachedRent = getCachedLiveRentSchedule(rpcUrl)
-    const nullifierRentFloorUnit = cachedRent?.nullifierRentLamports ?? 890_880n
-    const ataRentFloorUnit = cachedRent?.ataRentLamports ?? 2_039_280n
-    const subRentFloor = cachedRent?.subtreePageRentLamports ?? 58_340_000n
-    const srRentFloor = cachedRent?.subrootPageRentLamports ?? 68_140_000n
-    const memoRentFloor = cachedRent?.memoPageRentLamports ?? 72_149_760n
-    const nfPageRentFloor = cachedRent?.nfPageRentLamports ?? 68_140_000n
     const divCeil = (a: bigint, b: bigint) => (a + b - 1n) / b
 
     const poolAcc = preAccountInfoMap.get(pool0PdaB58)
-    let poolNoteRentUnit = cachedRent?.pageRentPerNoteLamports ?? 0n
-    let poolNfRentUnit = cachedRent?.nfPageRentPerNfLamports ?? 0n
+    let poolNoteRentUnit = rentSchedule?.pageRentPerNoteLamports ?? 0n
+    let poolNfRentUnit = rentSchedule?.nfPageRentPerNfLamports ?? 0n
+    let poolDecodedOk = false
     if (poolAcc && poolAcc.owner === AUDREN_PROGRAM_ID_STR && poolAcc.bytes.length > 0) {
       try {
         const decodedPool = decodePoolState(poolAcc.bytes)
+        poolDecodedOk = true
         poolNoteRentUnit =
           decodedPool.noteRentFee > 0n
             ? deterministicNoteRentFee(decodedPool.noteRentFee, subRentFloor, srRentFloor, memoRentFloor)
@@ -1442,47 +2532,39 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     }
 
     const totalOutputs = verdict.audrenInstructions.reduce((sum, ix) => sum + ix.outputCount, 0)
-    const uncreatedSetupAtasCount = verdict.setupAtas.filter(
-      (s) => preAccountInfoMap.get(base58Encode(s.ata)) === null,
-    ).length
-
-    // Track per-lane available `LaneRentVault` balance to compute exact unsubsidized OpenPage deficit floor
-    let openPageDeficitFloor = 0n
-    const laneVaultAvail = new Map<string, bigint>()
-    for (const openIx of pagePlan.openPageIxs) {
-      const vaultPdaB58 = base58Encode(openIx.accounts[3]!.pubkey)
-      const vaultAcc = preAccountInfoMap.get(vaultPdaB58)
-      if (!vaultAcc) continue
-      if (!laneVaultAvail.has(vaultPdaB58)) {
-        const rawVault = BigInt(vaultAcc.lamports)
-        laneVaultAvail.set(
-          vaultPdaB58,
-          rawVault > nullifierRentFloorUnit ? rawVault - nullifierRentFloorUnit : 0n,
-        )
+    // Count EVERY uninitialized setupAta (missing, System-owned / wrong owner, or 0-byte dust-prefunded)
+    // by its exact remaining rent deficit `max(0, ataRent - existingLamports)` using `estimateAtaRentLamports`
+    // (`165 B` classic SPL, `170 B+` Token-2022 with exact per-extension byte length) so dust
+    // pre-funding or same-slot SOL inflows cannot bypass the floor.
+    let setupAtaDeficitFloor = 0n
+    for (const s of verdict.setupAtas) {
+      const ataB58 = base58Encode(s.ata)
+      const tpB58 = base58Encode(s.tokenProgram)
+      const acc = preAccountInfoMap.get(ataB58)
+      if (!acc || acc.owner !== tpB58 || acc.bytes.length === 0) {
+        const existingLamports = BigInt(acc?.lamports ?? 0)
+        const mintAcc =
+          tpB58 === TOKEN_2022_PROGRAM_ID_STR
+            ? preAccountInfoMap.get(base58Encode(s.mint))
+            : null
+        const ataByteLen = computeToken2022AtaByteLen(tpB58, mintAcc?.bytes)
+        const floorUnit = estimateAtaRentLamports(ataRentFloorUnit, tpB58, ataByteLen)
+        if (floorUnit > existingLamports) {
+          setupAtaDeficitFloor += floorUnit - existingLamports
+        }
       }
-      const pageKind = openIx.data[1]!
-      const pageRent =
-        pageKind === OPEN_PAGE_KIND_SUBTREE
-          ? subRentFloor
-          : pageKind === OPEN_PAGE_KIND_SUBROOT
-            ? srRentFloor
-            : pageKind === OPEN_PAGE_KIND_MEMO
-              ? memoRentFloor
-              : nfPageRentFloor
-      const pagePdaB58 = base58Encode(openIx.accounts[4]!.pubkey)
-      const existingPageLamports = BigInt(preAccountInfoMap.get(pagePdaB58)?.lamports ?? 0)
-      const needed = pageRent > existingPageLamports ? pageRent - existingPageLamports : 0n
-      const avail = laneVaultAvail.get(vaultPdaB58) ?? 0n
-      const subsidy = avail < needed ? avail : needed
-      laneVaultAvail.set(vaultPdaB58, avail - subsidy)
-      openPageDeficitFloor += needed - subsidy
     }
+
+    const { totalDeficitFloor: openPageDeficitFloor } = computeOpenPageDeficits(
+      exactOpenPageIxs,
+      activeProactiveIxs,
+    )
 
     const minExpectedCostLamports =
       5_000n +
       cappedPriority +
       BigInt(verdict.nullifiers.length) * (nullifierRentFloorUnit + poolNfRentUnit) +
-      BigInt(uncreatedSetupAtasCount) * ataRentFloorUnit +
+      setupAtaDeficitFloor +
       BigInt(totalOutputs) * poolNoteRentUnit +
       openPageDeficitFloor
 
@@ -1500,14 +2582,28 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       : preRelayerLamports > postRelayerLamports
         ? preRelayerLamports - postRelayerLamports
         : 0n
-    const simulatedCostLamports =
-      rawOutflowLamports > minExpectedCostLamports ? rawOutflowLamports : minExpectedCostLamports
+    // When no slot-sensitive state remains (`openPageIxs.length === 0`, `setupAtas.length === 0`,
+    // no watched fee ATA / external native fee recipient), `preCtx.slot !== sim.slot` is allowed
+    // to proceed (e.g. after `proactiveOnlySlotSkew`). When live rent and `PoolState` both decoded
+    // cleanly, `minExpectedCostLamports` is already the exact protocol upper bound (`relayer` is
+    // blocked from `preInstructions` and `payer` `is_signer` is stripped on external CPIs), so use
+    // it directly rather than cross-slot `rawOutflowLamports` which would absorb concurrent users'
+    // relayer lamport debits from other slots.
+    const useDeterministicCrossSlotBound =
+      !hasSlotSensitiveState &&
+      preCtx.slot !== sim.slot &&
+      rentSchedule !== null &&
+      poolDecodedOk
+    const simulatedCostLamports = useDeterministicCrossSlotBound
+      ? minExpectedCostLamports
+      : rawOutflowLamports > minExpectedCostLamports
+        ? rawOutflowLamports
+        : minExpectedCostLamports
 
-    // Measure & strictly cap SPL/Token-2022 fee tokens earned by the relayer during simulation:
-    //   - Protocol-native `relayerFee > 0n` (Mode 2 / Mode 3): capped strictly at parsed `relayerFee`
-    //     so concurrent token inflows between `preSlot` and `simSlot` can never inflate fee credit.
-    //   - Zero-protocol-fee (`relayerFee === 0n`) allowlisted router swap: requires `sim.slot === preSlot`
-    //     so concurrent token inflows between slots can never be replayed.
+    // Measure & strictly cap protocol-enforced SPL/Token-2022 fee tokens earned by the relayer
+    // during simulation: ONLY protocol-native `relayerFee > 0n` (Mode 2 / Mode 3, capped strictly at
+    // parsed `relayerFee`) earns fee credit so concurrent inflows or unenforced router fees can never
+    // grant `self_paying` status.
     const preFeeUnits =
       watchedFeeAtaIdx >= 0 ? readSplTokenAccountAmount(preAccounts[watchedFeeAtaIdx]?.bytes ?? null) : 0n
     const postFeeUnits =
@@ -1526,14 +2622,12 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         rawSimulatedFeeUnits > verdict.execMeta.relayerFee
           ? verdict.execMeta.relayerFee
           : rawSimulatedFeeUnits
-    } else if (verdict.isZeroFeeAuditedRouterSwap) {
-      simulatedFeeUnits =
-        preSlot !== null && sim.slot !== null && sim.slot === preSlot ? rawSimulatedFeeUnits : 0n
     }
 
     // Dynamically value verified fee earnings in lamports (Modes 1 single/batch, 2, & 3!)
     // Enforces `SELF_PAY_FEE_MINTS` allowlist, `parseMintSafetyInfo` (via `hasUnsafeSelfPayExt`),
-    // AND conservative `2x` active Token-2022 `TransferFeeConfig` haircut at submit time.
+    // AND active Token-2022 `TransferFeeConfig` haircut (`2x` on Mode 1 pre-receipt notes; `1x`
+    // liquidation-hop haircut on Mode 2/3 simulated ATA deltas already net of 1x receipt fee).
     let feeEquivalentLamports = 0n
     let combinedCm2SingleMint: string | null = null
     let combinedCm2SingleMintAmount = 0n
@@ -1604,6 +2698,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
                 mintData: entry?.rawBytes ?? null,
                 currentEpoch,
                 grossAmount: cm2Amt,
+                hops: 2,
               })
               if (netAmount > 0n) {
                 const feeUsd = (Number(netAmount) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
@@ -1643,11 +2738,14 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
             entry?.rawBytes !== null &&
             entry.rawBytes.byteLength > 166
           const currentEpoch = needsEpoch ? await fetchCurrentEpoch(rpcUrl) : 0n
+          // `simulatedFeeUnits = postFeeUnits - preFeeUnits` is already net of 1x on-chain
+          // Token-2022 receipt fee from `vault/escrow -> relayerFeeAta`; apply 1x liquidation haircut.
           const { netAmount } = applyToken2022FeeHaircut({
             tokenProgram: feeMeta.tokenProgram,
             mintData: entry?.rawBytes ?? null,
             currentEpoch,
             grossAmount: simulatedFeeUnits,
+            hops: 1,
           })
           if (netAmount > 0n) {
             const feeUsd = (Number(netAmount) / Math.pow(10, feeMeta.decimals)) * feeUsdPrice
@@ -1673,7 +2771,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     // Hard per-tx outflow safety ceiling (protects against runaway sponsored rent creation)
     const MAX_TX_OUTFLOW_LAMPORTS = 50_000_000n // 0.05 SOL hard per-tx sponsored ceiling
     const maxRawOutflowLamports =
-      isSelfPaying && pagePlan.openPageIxs.length > 0 ? 300_000_000n : MAX_TX_OUTFLOW_LAMPORTS
+      isSelfPaying && activeOpenPageIxs.length > 0 ? 300_000_000n : MAX_TX_OUTFLOW_LAMPORTS
     if (
       netSponsoredLamports > MAX_TX_OUTFLOW_LAMPORTS ||
       simulatedCostLamports > maxRawOutflowLamports
@@ -1696,14 +2794,10 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       )
     }
 
-    // Never allow unvetted (non-allowlisted) mint withdrawals to siphon relayer SOL into attacker-owned
-    // `isWithdrawRecipientAta` setupAtas without self-pay coverage.
-    if (
-      verdict.hasWithdrawRecipientAta &&
-      !isSelfPaying &&
-      verdict.transactMeta?.mint &&
-      !cfg.selfPayFeeMints.has(verdict.transactMeta.mint)
-    ) {
+    // Unconditionally block sponsored (`!isSelfPaying`) withdrawals from funding user-owned
+    // `isWithdrawRecipientAta` setupAtas on ANY mint (preventing direct SOL extraction via
+    // CloseAccount). Zero-SOL WSOL withdrawals already use `WITHDRAW_FLAG_UNWRAP_WSOL`.
+    if (verdict.hasWithdrawRecipientAta && !isSelfPaying) {
       await guard.release({
         ipHash,
         cluster,
@@ -1716,7 +2810,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         cfg.corsOrigins,
         {
           error:
-            'Withdraw recipient ATA setup for non-allowlisted mints cannot be funded by the relay without allowlisted self-pay coverage.',
+            'Withdraw recipient ATA setup cannot be funded by the relay without full self-pay fee coverage.',
           code: 'FEE_REQUIRED',
           simulatedCostLamports: simulatedCostLamports.toString(),
           feeEquivalentLamports: feeEquivalentLamports.toString(),
@@ -1779,6 +2873,8 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       nullifiers: verdict.nullifiers,
       sponsoredLamports: Number(netSponsoredLamports),
       selfPaying: isSelfPaying,
+      hasUntrustedCpiTarget,
+      maxRevertBurnLamports: Number(5_000n + txAttempt.priorityFeeLamports),
       limits: {
         maxDailySponsoredLamports: Number(cfg.maxDailySponsoredLamports[cluster]),
         ipMaxSponsoredPerHour: cfg.sponsoredPerIpPerHour[cluster],
@@ -1805,27 +2901,50 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
 
     // 8. Broadcast & confirm on Solana via RPC
     const sentSig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
-      toBase64(signed.wireBytes),
+      toBase64(txAttempt.signed.wireBytes),
       { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 3 },
     ])
+    openPageBroadcasted = true
     let slot = 0
     try {
       const conf = await waitForConfirmation(rpcUrl, sentSig)
       slot = conf.slot
+      openPageConfirmed = true
     } catch (confErr) {
-      // Transaction was already broadcast and may still land on-chain — commit conservatively
-      // instead of releasing the pending budget reservation.
-      await guard
-        .commit({
-          reservationId,
-          ipHash,
-          cluster,
-          opKind: verdict.opKind,
-          nullifiers: verdict.nullifiers,
-          sponsoredLamports: Number(netSponsoredLamports),
-          selfPaying: isSelfPaying,
-        })
-        .catch(() => {})
+      if (confErr instanceof TransactionFailedOnChainError) {
+        // Confirmed on-chain revert: relayer burned `5_000 + priorityFeeLamports` with zero fee
+        // return even when quoted `selfPaying: true`. Charge burned fee to `daily_budgets`, record
+        // a failure strike (`failed = 1`), and release `open_page_locks` immediately since no
+        // `LaneRentVault` spend occurred.
+        openPageFailedOnChain = true
+        const burnedFeeLamports = Number(5_000n + txAttempt.priorityFeeLamports)
+        await guard
+          .commit({
+            reservationId,
+            ipHash,
+            cluster,
+            opKind: verdict.opKind,
+            nullifiers: verdict.nullifiers,
+            sponsoredLamports: burnedFeeLamports,
+            selfPaying: false,
+            recordFailure: true,
+          })
+          .catch(() => {})
+      } else {
+        // Transaction was already broadcast and confirmation timed out/errored transiently —
+        // it may still land on-chain, so commit conservatively and retain the 10s grace lease.
+        await guard
+          .commit({
+            reservationId,
+            ipHash,
+            cluster,
+            opKind: verdict.opKind,
+            nullifiers: verdict.nullifiers,
+            sponsoredLamports: Number(netSponsoredLamports),
+            selfPaying: isSelfPaying,
+          })
+          .catch(() => {})
+      }
       lockHeld = false
       reservationId = undefined
       throw confErr
@@ -1844,9 +2963,29 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     lockHeld = false
     reservationId = undefined
 
-    const actualOut = body.vaultOutAta
-      ? await resolveVaultOutDelta(rpcUrl, sentSig, body.vaultOutAta)
-      : null
+    const releaseLeaseNow = async (
+      lease: { poolId: number; laneIds: number[]; leaseId: string } | null,
+    ) => {
+      if (!lease) return
+      await guard
+        .releaseOpenPageLock({
+          cluster,
+          poolId: lease.poolId,
+          laneIds: lease.laneIds,
+          leaseId: lease.leaseId,
+        })
+        .catch(() => {})
+    }
+    const exactToRelease = exactOpenPageLockLease
+    exactOpenPageLockLease = null
+    const proactiveToRelease = proactiveOpenPageLockLease
+    proactiveOpenPageLockLease = null
+    await Promise.all([releaseLeaseNow(exactToRelease), releaseLeaseNow(proactiveToRelease)])
+
+    const actualOut =
+      typeof body.vaultOutAta === 'string' && isValidPubkey(body.vaultOutAta)
+        ? await resolveVaultOutDelta(rpcUrl, sentSig, body.vaultOutAta)
+        : null
 
     return json(request, cfg.corsOrigins, {
       ok: true,
@@ -1854,13 +2993,13 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       opKind: verdict.opKind,
       instructionCount: verdict.audrenInstructions.length,
       billingMode: isSelfPaying ? 'self_paying' : 'sponsored',
-      txVersion: signed.version,
-      txWireBytes: signed.wireLen,
-      accountCount: signed.accountCount,
+      txVersion: txAttempt.signed.version,
+      txWireBytes: txAttempt.signed.wireLen,
+      accountCount: txAttempt.signed.accountCount,
       relayerPubkey: relayer.pubkeyB58,
       priorityFeeLamports: cappedPriority.toString(),
-      computeUnitLimit: cuLimit,
-      openedPagesCount: pagePlan.openPageIxs.length,
+      computeUnitLimit: txAttempt.cuLimit,
+      openedPagesCount: activeOpenPageIxs.length,
       simulatedUnitsConsumed: sim.unitsConsumed,
       simulatedCostLamports: simulatedCostLamports.toString(),
       simulatedFeeUnits:
@@ -1909,6 +3048,36 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       { error: sanitizeError(err, 'Privacy relay submission failed') },
       502,
     )
+  } finally {
+    const activeLeases = [exactOpenPageLockLease, proactiveOpenPageLockLease].filter(
+      (l): l is { poolId: number; laneIds: number[]; leaseId: string } => l !== null,
+    )
+    exactOpenPageLockLease = null
+    proactiveOpenPageLockLease = null
+    for (const lease of activeLeases) {
+      if (openPageBroadcasted && !openPageConfirmed && !openPageFailedOnChain) {
+        // Broadcast succeeded but confirmation timed out/errored — keep a short 10s grace lease
+        // so concurrent submissions cannot race the unconfirmed `LaneRentVault` spend.
+        await guard
+          .releaseOpenPageLock({
+            cluster,
+            poolId: lease.poolId,
+            laneIds: lease.laneIds,
+            leaseId: lease.leaseId,
+            graceTtlMs: 10_000,
+          })
+          .catch(() => {})
+      } else {
+        await guard
+          .releaseOpenPageLock({
+            cluster,
+            poolId: lease.poolId,
+            laneIds: lease.laneIds,
+            leaseId: lease.leaseId,
+          })
+          .catch(() => {})
+      }
+    }
   }
 }
 
@@ -1918,105 +3087,6 @@ function timingSafeEqualStrings(a: string, b: string): boolean {
   let diff = 0
   for (let i = 0; i < 32; i++) diff |= ha[i]! ^ hb[i]!
   return diff === 0
-}
-
-function makeCheckpointLockAdapter(guard: DurableObjectStub<RelayGuard>): CheckpointLockAdapter {
-  return {
-    acquire: (req) => guard.acquireCheckpointLock(req),
-    release: (req) => guard.releaseCheckpointLock(req),
-  }
-}
-
-async function handleCheckpoint(request: Request, env: Env): Promise<Response> {
-  const cfg = loadPolicyConfig(env)
-  let body: { cluster?: string; poolId?: number } = {}
-  const rawText = await request.text()
-  if (rawText.trim().length > 0) {
-    try {
-      const parsed = JSON.parse(rawText) as unknown
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        return json(request, cfg.corsOrigins, { error: 'Request body must be a JSON object' }, 400)
-      }
-      body = parsed as { cluster?: string; poolId?: number }
-    } catch {
-      return json(request, cfg.corsOrigins, { error: 'Invalid JSON body' }, 400)
-    }
-  }
-
-  const cluster = parseCluster(body.cluster, 'mainnet')
-  const rawPoolId = body.poolId === undefined ? 0 : Number(body.poolId)
-  if (!Number.isInteger(rawPoolId) || rawPoolId < 0) {
-    return json(request, cfg.corsOrigins, { error: 'poolId must be a non-negative integer' }, 400)
-  }
-  if (rawPoolId !== 0) {
-    return json(
-      request,
-      cfg.corsOrigins,
-      { error: 'Only canonical Pool #0 is permitted on this relay' },
-      400,
-    )
-  }
-
-  const rpcUrl = getRpcUrl(env, cluster)
-  const relayer = getRelayerPubkeyForCluster(env, cluster)
-  if (!rpcUrl || !relayer) {
-    const reqHost = new URL(request.url).host
-    return json(
-      request,
-      cfg.corsOrigins,
-      { error: `${cluster} privacy relayer is not configured on ${reqHost}` },
-      503,
-    )
-  }
-
-  const clientIp = extractClientIp(request)
-  const guard = getGuardStub(env)
-  const rateDecision = await guard.checkCheckpointRateLimit({ clientIp, cluster })
-  if (!rateDecision.allowed) {
-    return json(
-      request,
-      cfg.corsOrigins,
-      {
-        error: rateDecision.reason ?? 'Checkpoint rate limit reached',
-        code: rateDecision.code ?? 'CHECKPOINT_RATE_LIMITED',
-        retryAfterSec: rateDecision.retryAfterSec,
-      },
-      rateDecision.status ?? 429,
-      rateDecision.retryAfterSec ? { 'retry-after': String(rateDecision.retryAfterSec) } : undefined,
-    )
-  }
-
-  try {
-    const result = await publishCheckpointIfNeeded({
-      rpcUrl,
-      cluster,
-      poolId: rawPoolId,
-      relayerSecret32: relayer.secret32,
-      lock: makeCheckpointLockAdapter(guard),
-      confirm: true,
-    })
-    return json(request, cfg.corsOrigins, result)
-  } catch (err) {
-    if (err instanceof CheckpointError) {
-      return json(
-        request,
-        cfg.corsOrigins,
-        {
-          error: err.message,
-          ...(err.code ? { code: err.code } : {}),
-          ...(err.retryAfterSec ? { retryAfterSec: err.retryAfterSec } : {}),
-        },
-        err.status,
-        err.retryAfterSec ? { 'retry-after': String(err.retryAfterSec) } : undefined,
-      )
-    }
-    return json(
-      request,
-      cfg.corsOrigins,
-      { error: sanitizeError(err, 'Checkpoint publish failed') },
-      502,
-    )
-  }
 }
 
 async function handleAdminRefill(request: Request, env: Env): Promise<Response> {
@@ -2038,7 +3108,6 @@ const RELAY_ENDPOINTS = [
   'GET  /v1/stats',
   'GET|POST /v1/swap/quote',
   'POST /v1/swap/instructions',
-  'POST /v1/checkpoint',
   'POST /v1/relay/submit',
 ] as const
 
@@ -2055,12 +3124,32 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request, cfg.corsOrigins) })
     }
 
+    if (request.method === 'POST') {
+      const clHeader = request.headers.get('content-length')
+      if (clHeader !== null) {
+        const cl = Number(clHeader)
+        if (Number.isFinite(cl) && cl > MAX_POST_BODY_BYTES) {
+          return json(
+            request,
+            cfg.corsOrigins,
+            {
+              error: `Request body exceeds ${MAX_POST_BODY_BYTES} byte limit`,
+              code: 'PAYLOAD_TOO_LARGE',
+            },
+            413,
+          )
+        }
+      }
+    }
+
     if ((url.pathname === '/' || url.pathname === '/health') && request.method === 'GET') {
       return json(request, cfg.corsOrigins, {
         ok: true,
+        version: RELAY_VERSION,
         service: 'audren-relay',
         domain: url.host,
         programId: AUDREN_PROGRAM_ID_STR,
+        rootsPda: base58Encode(deriveRootsPda(0).address),
         timestamp: new Date().toISOString(),
         ...(url.pathname === '/' ? { endpoints: RELAY_ENDPOINTS } : {}),
       })
@@ -2097,10 +3186,6 @@ export default {
       return handleSwapInstructions(request, env)
     }
 
-    if (url.pathname === '/v1/checkpoint' && request.method === 'POST') {
-      return handleCheckpoint(request, env)
-    }
-
     if (url.pathname === '/v1/relay/submit' && request.method === 'POST') {
       return handleRelaySubmit(request, env)
     }
@@ -2122,21 +3207,14 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const cfg = loadPolicyConfig(env)
-    const ckptLock = makeCheckpointLockAdapter(getGuardStub(env))
     ctx.waitUntil(
-      Promise.all([
-        runAutoRefill(env, cfg).then((report) => {
+      runAutoRefill(env, cfg)
+        .then((report) => {
           console.log('[audren-relay cron refill]', JSON.stringify(report))
+        })
+        .catch((err) => {
+          console.error('[audren-relay cron error]', err)
         }),
-        runMaintenanceCrank(env, 'mainnet', ckptLock).then((crank) => {
-          console.log('[audren-relay cron crank mainnet]', JSON.stringify(crank))
-        }),
-        runMaintenanceCrank(env, 'devnet', ckptLock).then((crank) => {
-          console.log('[audren-relay cron crank devnet]', JSON.stringify(crank))
-        }),
-      ]).catch((err) => {
-        console.error('[audren-relay cron error]', err)
-      }),
     )
   },
 } satisfies ExportedHandler<Env>

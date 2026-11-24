@@ -1,7 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import { sha256 } from '@noble/hashes/sha2.js'
 import type { Env } from '../env'
-import type { CheckpointLockAcquireResult } from '../solana/checkpoint'
 import { toHex, utf8 } from '../solana/codec'
 import type { AudrenOpKind, Cluster } from '../types'
 
@@ -11,6 +10,16 @@ export interface GuardBeginRequest {
   /** Optional pre-hashed identifier (used only by unit mocks; production callers pass `clientIp`). */
   ipHash?: string
   nullifiers: string[]
+  /** Optional cluster for pre-simulation revert-burn short-circuiting. */
+  cluster?: Cluster
+  /** True when the tx invokes an untrusted CPI target (includes in-flight burn-risk reservations pre-sim). */
+  hasUntrustedCpiTarget?: boolean
+  /** Optional per-IP revert-burn limits enforced pre-simulation when `cluster` is also provided. */
+  limits?: {
+    ipCooldownSec: number
+    ipMaxSponsoredPerHour: number
+    ipMaxSponsoredPerDay: number
+  }
 }
 
 export interface GuardAuthorizeRequest {
@@ -20,6 +29,10 @@ export interface GuardAuthorizeRequest {
   nullifiers: string[]
   sponsoredLamports: number
   selfPaying: boolean
+  /** True when the tx invokes an untrusted CPI target (unaudited router, non-allowlisted Token-2022 leg, or TransferHook). */
+  hasUntrustedCpiTarget?: boolean
+  /** Worst-case relayer fee burn (`5_000 + priorityFeeLamports`) if the tx reverts on-chain. */
+  maxRevertBurnLamports?: number
   limits: {
     maxDailySponsoredLamports: number
     ipMaxSponsoredPerHour: number
@@ -48,6 +61,11 @@ export interface GuardCommitRequest {
   nullifiers: string[]
   sponsoredLamports: number
   selfPaying: boolean
+  /**
+   * When true (confirmed on-chain revert), records `failed = 1` in `ip_events` alongside the
+   * burned fee debit in `daily_budgets` and clears `inflight_nullifiers` immediately.
+   */
+  recordFailure?: boolean
 }
 
 export interface GuardReleaseRequest {
@@ -56,6 +74,38 @@ export interface GuardReleaseRequest {
   cluster: Cluster
   nullifiers: string[]
   recordFailure?: boolean
+}
+
+export interface OpenPageLockAcquireRequest {
+  cluster: Cluster
+  poolId: number
+  laneIds: number[]
+  leaseId: string
+  ttlMs?: number
+}
+
+export interface OpenPageLockAcquireResult {
+  allowed: boolean
+  busyLaneId?: number
+  retryAfterSec?: number
+}
+
+export interface OpenPageLockReleaseRequest {
+  cluster: Cluster
+  poolId: number
+  laneIds: number[]
+  leaseId: string
+  /**
+   * Optional post-broadcast grace TTL (ms). When > 0, keeps the lease active for this
+   * short window instead of deleting immediately so concurrent callers cannot race an
+   * unconfirmed `OpenPage` transaction's `LaneRentVault` spend.
+   */
+  graceTtlMs?: number
+}
+
+export interface OpenPageLockAdapter {
+  acquire(req: OpenPageLockAcquireRequest): Promise<OpenPageLockAcquireResult>
+  release(req: OpenPageLockReleaseRequest): Promise<void>
 }
 
 export interface GuardStatsResponse {
@@ -79,17 +129,9 @@ const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
 const INFLIGHT_TTL_MS = 45_000
 const MAX_FAILED_ATTEMPTS_PER_HOUR = 30
-const CHECKPOINT_IP_WINDOW_MS = 60_000
-const CHECKPOINT_MAX_PER_IP_PER_MIN = 30
-const CHECKPOINT_LOCK_TTL_MS = 15_000
-const CHECKPOINT_RECENT_PUBLISH_GRACE_MS = 10_000
+export const OPEN_PAGE_LOCK_TTL_MS = 45_000
 
-export type IpHashDomain = 'relay' | 'ckpt'
-
-const IP_HASH_DOMAIN_SEP: Record<IpHashDomain, string> = {
-  relay: 'audren/relay/ip-salt',
-  ckpt: 'audren/ckpt/ip-salt',
-}
+const IP_HASH_DOMAIN_SEP = 'audren/relay/ip-salt'
 
 function utcDayKey(nowMs: number): string {
   return new Date(nowMs).toISOString().slice(0, 10)
@@ -105,14 +147,14 @@ function nextUtcMidnightMs(nowMs: number): number {
  * against rent-drain / ping-pong / simulation-spam abuse:
  *   - Ephemeral per-day random 32-byte secret IP-hash salt held STRICTLY in DO memory
  *     (never written to SQLite disk; auto-purged on UTC day rollover and via UTC midnight `alarm()`)
- *   - Domain-separated IP hashing between relay submissions (`audren/relay/ip-salt`) and
- *     checkpoint requests (`audren/ckpt/ip-salt`)
+ *   - Domain-separated relay IP hashing (`audren/relay/ip-salt`)
  *   - Zero IP-hash linkage on `inflight_nullifiers` (stores only `(nullifier, expires_at)`)
  *   - Global daily sponsored SOL budget cap per cluster
  *   - Per-IP sliding-window hourly & daily sponsored tx limits
  *   - Per-IP cooldown between sponsored txs (prevents rapid back-and-forth ping-pong)
  *   - Per-IP self-paying burst cap & failed-attempt flood guard
  *   - Atomic in-flight nullifier deduplication across single & batched transactions
+ *   - Per-lane `open_page_locks` mutual exclusion for concurrent auto-`OpenPage` rollovers
  */
 export class RelayGuard extends DurableObject<Env> {
   private readonly sql: SqlStorage
@@ -126,6 +168,8 @@ export class RelayGuard extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`
         DROP TABLE IF EXISTS daily_ip_salts;
+        DROP TABLE IF EXISTS checkpoint_locks;
+        DROP TABLE IF EXISTS checkpoint_ip_hits;
 
         CREATE TABLE IF NOT EXISTS ip_events (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,21 +212,11 @@ export class RelayGuard extends DurableObject<Env> {
         CREATE INDEX IF NOT EXISTS idx_pending_cluster_day ON pending_reservations (day, cluster);
         CREATE INDEX IF NOT EXISTS idx_pending_ip ON pending_reservations (ip_hash, cluster);
 
-        CREATE TABLE IF NOT EXISTS checkpoint_locks (
-          cluster_pool TEXT PRIMARY KEY,
-          locked_until INTEGER NOT NULL DEFAULT 0,
-          last_published_at INTEGER NOT NULL DEFAULT 0,
-          last_epoch INTEGER NOT NULL DEFAULT -1,
-          last_signature TEXT NOT NULL DEFAULT ''
+        CREATE TABLE IF NOT EXISTS open_page_locks (
+          lane_key TEXT PRIMARY KEY,
+          lease_id TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS checkpoint_ip_hits (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          ip_hash TEXT NOT NULL,
-          cluster TEXT NOT NULL,
-          created_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_ckpt_ip_hits ON checkpoint_ip_hits (ip_hash, cluster, created_at);
       `)
 
       // Privacy migration: drop & recreate legacy `inflight_nullifiers` if it carried `ip_hash`
@@ -257,13 +291,9 @@ export class RelayGuard extends DurableObject<Env> {
     return saltHex
   }
 
-  private computeDailyIpHash(
-    clientIp: string,
-    now: number,
-    domain: IpHashDomain = 'relay',
-  ): string {
+  private computeDailyIpHash(clientIp: string, now: number): string {
     const saltHex = this.getOrCreateDailySaltHex(now)
-    return toHex(sha256(utf8(`${IP_HASH_DOMAIN_SEP[domain]}|${saltHex}|${clientIp}`))).slice(0, 32)
+    return toHex(sha256(utf8(`${IP_HASH_DOMAIN_SEP}|${saltHex}|${clientIp}`))).slice(0, 32)
   }
 
   private prune(now: number): void {
@@ -272,30 +302,177 @@ export class RelayGuard extends DurableObject<Env> {
     this.sql.exec('DELETE FROM inflight_nullifiers WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM pending_reservations WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM ip_events WHERE created_at < ?', now - DAY_MS - HOUR_MS)
-    this.sql.exec('DELETE FROM checkpoint_ip_hits WHERE created_at < ?', now - CHECKPOINT_IP_WINDOW_MS)
+    this.sql.exec('DELETE FROM open_page_locks WHERE expires_at <= ?', now)
   }
 
   /**
    * Hash a client IP inside `RelayGuard` using the current UTC day's ephemeral in-memory
-   * 32-byte random salt and domain separator (`relay` vs `ckpt`).
+   * 32-byte random salt (`audren/relay/ip-salt`).
    */
-  async hashClientIp(
-    clientIp: string,
-    nowMs: number = Date.now(),
-    domain: IpHashDomain = 'relay',
-  ): Promise<string> {
-    return this.computeDailyIpHash(clientIp || 'unknown', nowMs, domain)
+  async hashClientIp(clientIp: string, nowMs: number = Date.now()): Promise<string> {
+    return this.computeDailyIpHash(clientIp || 'unknown', nowMs)
+  }
+
+  /**
+   * Enforce per-IP confirmed on-chain revert burn limits (`ip_events` with
+   * `failed = 1 AND self_paying = 0 AND sponsored_lamports > 0`), optionally combined with
+   * in-flight burn-risk self-pay reservations (`pending_reservations` with
+   * `self_paying = 1 AND sponsored_lamports > 0`).
+   *
+   * Pre-simulation rejections (`sponsored_lamports = 0`), honest sponsored txs (`failed = 0`),
+   * and honest audited in-flight self-pay swaps (`pending_reservations` with `sponsored_lamports = 0`)
+   * are strictly excluded.
+   */
+  private checkPerIpRevertBurnLimits(params: {
+    ipHash: string
+    cluster: Cluster
+    now: number
+    includePendingBurnRisk: boolean
+    hasUntrustedCpiTarget?: boolean
+    limits: {
+      ipCooldownSec: number
+      ipMaxSponsoredPerHour: number
+      ipMaxSponsoredPerDay: number
+    }
+  }): { denied: GuardDecision | null; revertBurnsDay: number } {
+    const { ipHash, cluster, now, includePendingBurnRisk, hasUntrustedCpiTarget, limits } = params
+
+    const committedRevertBurnsDay = Number(
+      this.sql
+        .exec(
+          'SELECT COUNT(*) AS cnt FROM ip_events WHERE ip_hash = ? AND cluster = ? AND failed = 1 AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
+          ipHash,
+          cluster,
+          now - DAY_MS,
+        )
+        .one().cnt ?? 0,
+    )
+    const isBurnRiskCaller = hasUntrustedCpiTarget === true || committedRevertBurnsDay > 0
+    const checkPending = includePendingBurnRisk || isBurnRiskCaller
+
+    if (limits.ipCooldownSec > 0) {
+      const committedLastRevertTs = Number(
+        this.sql
+          .exec(
+            'SELECT MAX(created_at) AS last_ts FROM ip_events WHERE ip_hash = ? AND cluster = ? AND failed = 1 AND self_paying = 0 AND sponsored_lamports > 0',
+            ipHash,
+            cluster,
+          )
+          .toArray()[0]?.last_ts ?? 0,
+      )
+      const pendingBurnRiskLastTs = checkPending
+        ? Number(
+            this.sql
+              .exec(
+                isBurnRiskCaller
+                  ? 'SELECT MAX(created_at) AS last_ts FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND sponsored_lamports > 0'
+                  : 'SELECT MAX(created_at) AS last_ts FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND self_paying = 1 AND sponsored_lamports > 0',
+                ipHash,
+                cluster,
+              )
+              .toArray()[0]?.last_ts ?? 0,
+          )
+        : 0
+      const lastRevertTs = Math.max(committedLastRevertTs, pendingBurnRiskLastTs)
+      const elapsedMs = now - lastRevertTs
+      const cooldownMs = limits.ipCooldownSec * 1000
+      if (lastRevertTs > 0 && elapsedMs < cooldownMs) {
+        const waitSec = Math.max(1, Math.ceil((cooldownMs - elapsedMs) / 1000))
+        return {
+          denied: {
+            allowed: false,
+            status: 429,
+            code: 'SPONSOR_COOLDOWN',
+            reason:
+              pendingBurnRiskLastTs > committedLastRevertTs
+                ? `Please wait ${waitSec}s while a high-risk transaction is in flight before retrying.`
+                : `Please wait ${waitSec}s after a failed on-chain transaction before retrying.`,
+            retryAfterSec: waitSec,
+          },
+          revertBurnsDay: 0,
+        }
+      }
+    }
+
+    const committedRevertBurnsHour = Number(
+      this.sql
+        .exec(
+          'SELECT COUNT(*) AS cnt FROM ip_events WHERE ip_hash = ? AND cluster = ? AND failed = 1 AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
+          ipHash,
+          cluster,
+          now - HOUR_MS,
+        )
+        .one().cnt ?? 0,
+    )
+    const pendingBurnRiskHour = checkPending
+      ? Number(
+          this.sql
+            .exec(
+              isBurnRiskCaller
+                ? 'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND sponsored_lamports > 0 AND created_at >= ?'
+                : 'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND self_paying = 1 AND sponsored_lamports > 0 AND created_at >= ?',
+              ipHash,
+              cluster,
+              now - HOUR_MS,
+            )
+            .one().cnt ?? 0,
+        )
+      : 0
+    const revertBurnsHour = committedRevertBurnsHour + pendingBurnRiskHour
+    if (revertBurnsHour >= limits.ipMaxSponsoredPerHour) {
+      return {
+        denied: {
+          allowed: false,
+          status: 429,
+          code: 'IP_HOURLY_SPONSOR_LIMIT',
+          reason: `Hourly failed-transaction burn limit (${limits.ipMaxSponsoredPerHour}/hr) reached for this IP.`,
+          retryAfterSec: 600,
+        },
+        revertBurnsDay: 0,
+      }
+    }
+
+    const pendingBurnRiskDay = checkPending
+      ? Number(
+          this.sql
+            .exec(
+              isBurnRiskCaller
+                ? 'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND sponsored_lamports > 0 AND created_at >= ?'
+                : 'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND self_paying = 1 AND sponsored_lamports > 0 AND created_at >= ?',
+              ipHash,
+              cluster,
+              now - DAY_MS,
+            )
+            .one().cnt ?? 0,
+        )
+      : 0
+    const revertBurnsDay = committedRevertBurnsDay + pendingBurnRiskDay
+    if (revertBurnsDay >= limits.ipMaxSponsoredPerDay) {
+      return {
+        denied: {
+          allowed: false,
+          status: 429,
+          code: 'IP_DAILY_SPONSOR_LIMIT',
+          reason: `Daily failed-transaction burn limit (${limits.ipMaxSponsoredPerDay}/day) reached for this IP.`,
+          retryAfterSec: 3600,
+        },
+        revertBurnsDay,
+      }
+    }
+
+    return { denied: null, revertBurnsDay }
   }
 
   /**
    * Pre-simulation guard (before RPC simulation):
-   * Atomically dedup concurrent nullifiers (without storing any IP association on nullifiers)
-   * and block IPs flooding invalid payloads.
+   * Atomically dedup concurrent nullifiers (without storing any IP association on nullifiers),
+   * block IPs flooding invalid payloads, and short-circuit already revert-blocked IPs (plus
+   * concurrent untrusted-CPI bursts) before burning RPC simulation capacity.
    */
   async begin(req: GuardBeginRequest): Promise<GuardDecision> {
     const now = Date.now()
     this.prune(now)
-    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now, 'relay')
+    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now)
 
     const seenInReq = new Set<string>()
     for (const nf of req.nullifiers) {
@@ -338,6 +515,20 @@ export class RelayGuard extends DurableObject<Env> {
         code: 'TOO_MANY_FAILURES',
         reason: 'Too many invalid relay attempts from this IP. Please wait before retrying.',
         retryAfterSec: 300,
+      }
+    }
+
+    if (req.cluster && req.limits) {
+      const revertCheck = this.checkPerIpRevertBurnLimits({
+        ipHash,
+        cluster: req.cluster,
+        now,
+        includePendingBurnRisk: req.hasUntrustedCpiTarget === true,
+        hasUntrustedCpiTarget: req.hasUntrustedCpiTarget,
+        limits: req.limits,
+      })
+      if (revertCheck.denied) {
+        return { ...revertCheck.denied, ipHash }
       }
     }
 
@@ -398,13 +589,73 @@ export class RelayGuard extends DurableObject<Env> {
           retryAfterSec: 60,
         })
       }
+
+      // Enforce confirmed on-chain revert burn limits (`failed = 1 AND self_paying = 0 AND sponsored_lamports > 0`)
+      // PLUS in-flight burn-risk reservations (`pending_reservations` with `self_paying = 1 AND sponsored_lamports > 0`)
+      // on `selfPaying: true` requests so concurrent or sequential reverting self-pay txs cannot bypass
+      // cooldown, hourly/daily limits, or the global daily sponsored SOL cap. Honest audited self-paying
+      // swaps (`revertBurnsDay === 0 && !hasUntrustedCpiTarget`) store `sponsored_lamports = 0` in
+      // `pending_reservations`, and pre-sim rejections (`sponsored_lamports = 0`) & honest sponsored txs
+      // (`failed = 0`) are excluded.
+      const revertCheck = this.checkPerIpRevertBurnLimits({
+        ipHash: req.ipHash,
+        cluster: req.cluster,
+        now,
+        includePendingBurnRisk: true,
+        hasUntrustedCpiTarget: req.hasUntrustedCpiTarget,
+        limits: req.limits,
+      })
+      if (revertCheck.denied) {
+        return deny(revertCheck.denied)
+      }
+      const revertBurnsDay = revertCheck.revertBurnsDay
+
+      const checkRevertBudget = revertBurnsDay > 0 || req.hasUntrustedCpiTarget === true
+      const burnRiskLamports = checkRevertBudget
+        ? typeof req.maxRevertBurnLamports === 'number' &&
+          Number.isFinite(req.maxRevertBurnLamports) &&
+          req.maxRevertBurnLamports > 0
+          ? Math.trunc(req.maxRevertBurnLamports)
+          : 10_000
+        : 0
+      if (checkRevertBudget) {
+        const budgetRows = this.sql
+          .exec(
+            'SELECT sponsored_lamports FROM daily_budgets WHERE day = ? AND cluster = ?',
+            day,
+            req.cluster,
+          )
+          .toArray()
+        const spentToday = Number(budgetRows[0]?.sponsored_lamports ?? 0)
+        const pendingToday = Number(
+          this.sql
+            .exec(
+              'SELECT COALESCE(SUM(sponsored_lamports), 0) AS lamports FROM pending_reservations WHERE day = ? AND cluster = ?',
+              day,
+              req.cluster,
+            )
+            .one().lamports ?? 0,
+        )
+        if (spentToday + pendingToday + burnRiskLamports > req.limits.maxDailySponsoredLamports) {
+          return deny({
+            allowed: false,
+            status: 429,
+            code: 'DAILY_SPONSOR_BUDGET_REACHED',
+            reason:
+              'Daily sponsored relay budget has been reached. Audited self-paying swaps without recent failed transactions remain available or try again after UTC midnight.',
+            retryAfterSec: 3600,
+          })
+        }
+      }
+
       const reservationId = crypto.randomUUID()
       this.sql.exec(
-        'INSERT INTO pending_reservations (id, day, ip_hash, cluster, sponsored_lamports, self_paying, created_at, expires_at) VALUES (?, ?, ?, ?, 0, 1, ?, ?)',
+        'INSERT INTO pending_reservations (id, day, ip_hash, cluster, sponsored_lamports, self_paying, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
         reservationId,
         day,
         req.ipHash,
         req.cluster,
+        burnRiskLamports,
         now,
         now + INFLIGHT_TTL_MS,
       )
@@ -423,7 +674,7 @@ export class RelayGuard extends DurableObject<Env> {
       const pendingToday = Number(
         this.sql
           .exec(
-            'SELECT COALESCE(SUM(sponsored_lamports), 0) AS lamports FROM pending_reservations WHERE day = ? AND cluster = ? AND self_paying = 0',
+            'SELECT COALESCE(SUM(sponsored_lamports), 0) AS lamports FROM pending_reservations WHERE day = ? AND cluster = ?',
             day,
             req.cluster,
           )
@@ -444,7 +695,7 @@ export class RelayGuard extends DurableObject<Env> {
         const lastCommitted = Number(
           this.sql
             .exec(
-              'SELECT MAX(created_at) AS last_ts FROM ip_events WHERE ip_hash = ? AND cluster = ? AND failed = 0 AND self_paying = 0 AND sponsored_lamports > 0',
+              'SELECT MAX(created_at) AS last_ts FROM ip_events WHERE ip_hash = ? AND cluster = ? AND self_paying = 0 AND sponsored_lamports > 0',
               req.ipHash,
               req.cluster,
             )
@@ -453,7 +704,7 @@ export class RelayGuard extends DurableObject<Env> {
         const lastPending = Number(
           this.sql
             .exec(
-              'SELECT MAX(created_at) AS last_ts FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND self_paying = 0 AND sponsored_lamports > 0',
+              'SELECT MAX(created_at) AS last_ts FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND sponsored_lamports > 0',
               req.ipHash,
               req.cluster,
             )
@@ -477,7 +728,7 @@ export class RelayGuard extends DurableObject<Env> {
       const committedHour = Number(
         this.sql
           .exec(
-            'SELECT COUNT(*) AS cnt FROM ip_events WHERE ip_hash = ? AND cluster = ? AND failed = 0 AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
+            'SELECT COUNT(*) AS cnt FROM ip_events WHERE ip_hash = ? AND cluster = ? AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
             req.ipHash,
             req.cluster,
             now - HOUR_MS,
@@ -487,7 +738,7 @@ export class RelayGuard extends DurableObject<Env> {
       const pendingHour = Number(
         this.sql
           .exec(
-            'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
+            'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND sponsored_lamports > 0 AND created_at >= ?',
             req.ipHash,
             req.cluster,
             now - HOUR_MS,
@@ -507,7 +758,7 @@ export class RelayGuard extends DurableObject<Env> {
       const committedDay = Number(
         this.sql
           .exec(
-            'SELECT COUNT(*) AS cnt FROM ip_events WHERE ip_hash = ? AND cluster = ? AND failed = 0 AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
+            'SELECT COUNT(*) AS cnt FROM ip_events WHERE ip_hash = ? AND cluster = ? AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
             req.ipHash,
             req.cluster,
             now - DAY_MS,
@@ -517,7 +768,7 @@ export class RelayGuard extends DurableObject<Env> {
       const pendingDay = Number(
         this.sql
           .exec(
-            'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND self_paying = 0 AND sponsored_lamports > 0 AND created_at >= ?',
+            'SELECT COUNT(*) AS cnt FROM pending_reservations WHERE ip_hash = ? AND cluster = ? AND sponsored_lamports > 0 AND created_at >= ?',
             req.ipHash,
             req.cluster,
             now - DAY_MS,
@@ -554,8 +805,9 @@ export class RelayGuard extends DurableObject<Env> {
   async commit(req: GuardCommitRequest): Promise<void> {
     const now = Date.now()
     const day = utcDayKey(now)
-    const isSelf = req.selfPaying ? 1 : 0
-    const isSponsored = !req.selfPaying && req.sponsoredLamports > 0 ? 1 : 0
+    const isFailed = req.recordFailure === true ? 1 : 0
+    const isSelf = !isFailed && req.selfPaying ? 1 : 0
+    const isSponsored = (!req.selfPaying || isFailed === 1) && req.sponsoredLamports > 0 ? 1 : 0
     const lamports = isSponsored ? req.sponsoredLamports : 0
 
     if (req.reservationId) {
@@ -563,12 +815,13 @@ export class RelayGuard extends DurableObject<Env> {
     }
 
     this.sql.exec(
-      'INSERT INTO ip_events (ip_hash, cluster, op_kind, sponsored_lamports, self_paying, failed, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
+      'INSERT INTO ip_events (ip_hash, cluster, op_kind, sponsored_lamports, self_paying, failed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       req.ipHash,
       req.cluster,
       req.opKind,
       lamports,
       isSelf,
+      isFailed,
       now,
     )
 
@@ -586,6 +839,13 @@ export class RelayGuard extends DurableObject<Env> {
       isSponsored,
       isSelf,
     )
+
+    if (isFailed) {
+      for (const nf of req.nullifiers) {
+        this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
+      }
+      return
+    }
 
     const grace = now + 10_000
     for (const nf of req.nullifiers) {
@@ -616,117 +876,87 @@ export class RelayGuard extends DurableObject<Env> {
     }
   }
 
-  async checkCheckpointRateLimit(req: {
-    clientIp?: string
-    ipHash?: string
-    cluster: Cluster
-    maxPerMinute?: number
-  }): Promise<GuardDecision> {
+  /**
+   * Atomically acquire a short-TTL per-`(cluster, poolId, laneId)` `OpenPage` lease across all
+   * requested lanes (all-or-nothing) so concurrent rollovers cannot race the same
+   * `LaneRentVault` balance.
+   */
+  async acquireOpenPageLock(req: OpenPageLockAcquireRequest): Promise<OpenPageLockAcquireResult> {
+    const uniqueLanes = [
+      ...new Set(req.laneIds.map((l) => Math.trunc(l)).filter((l) => Number.isInteger(l) && l >= 0)),
+    ]
+    if (uniqueLanes.length === 0) return { allowed: true }
+
     const now = Date.now()
-    const ipHash = req.ipHash ?? this.computeDailyIpHash(req.clientIp ?? 'unknown', now, 'ckpt')
-    const limit = req.maxPerMinute ?? CHECKPOINT_MAX_PER_IP_PER_MIN
-    this.sql.exec('DELETE FROM checkpoint_ip_hits WHERE created_at < ?', now - CHECKPOINT_IP_WINDOW_MS)
-    const cnt = Number(
-      this.sql
-        .exec(
-          'SELECT COUNT(*) AS cnt FROM checkpoint_ip_hits WHERE ip_hash = ? AND cluster = ? AND created_at >= ?',
-          ipHash,
-          req.cluster,
-          now - CHECKPOINT_IP_WINDOW_MS,
-        )
-        .one().cnt ?? 0,
-    )
-    if (cnt >= limit) {
-      return {
-        allowed: false,
-        ipHash,
-        status: 429,
-        code: 'CHECKPOINT_RATE_LIMITED',
-        reason: 'Too many checkpoint requests from this IP. Please retry shortly.',
-        retryAfterSec: 15,
+    this.sql.exec('DELETE FROM open_page_locks WHERE expires_at <= ?', now)
+
+    for (const laneId of uniqueLanes) {
+      const key = `${req.cluster}:${req.poolId}:${laneId}`
+      const rows = this.sql
+        .exec('SELECT lease_id, expires_at FROM open_page_locks WHERE lane_key = ?', key)
+        .toArray()
+      const row = rows[0]
+      if (row && String(row.lease_id) !== req.leaseId && Number(row.expires_at ?? 0) > now) {
+        const remainingMs = Math.max(1_000, Number(row.expires_at) - now)
+        return {
+          allowed: false,
+          busyLaneId: laneId,
+          retryAfterSec: Math.min(Math.max(Math.ceil(remainingMs / 1000), 1), 15),
+        }
       }
     }
-    this.sql.exec(
-      'INSERT INTO checkpoint_ip_hits (ip_hash, cluster, created_at) VALUES (?, ?, ?)',
-      ipHash,
-      req.cluster,
-      now,
-    )
-    return { allowed: true, ipHash }
-  }
 
-  async acquireCheckpointLock(req: {
-    cluster: Cluster
-    poolId: number
-    epoch: number
-    lockTtlMs?: number
-  }): Promise<CheckpointLockAcquireResult> {
-    const now = Date.now()
-    const key = `${req.cluster}:${req.poolId}`
-    const rows = this.sql
-      .exec(
-        'SELECT locked_until, last_published_at, last_epoch, last_signature FROM checkpoint_locks WHERE cluster_pool = ?',
+    const rawTtl =
+      typeof req.ttlMs === 'number' && Number.isFinite(req.ttlMs)
+        ? req.ttlMs
+        : OPEN_PAGE_LOCK_TTL_MS
+    const ttlMs = Math.min(Math.max(Math.trunc(rawTtl), 1), 60_000)
+    const expiresAt = now + ttlMs
+    for (const laneId of uniqueLanes) {
+      const key = `${req.cluster}:${req.poolId}:${laneId}`
+      this.sql.exec(
+        `INSERT INTO open_page_locks (lane_key, lease_id, expires_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (lane_key) DO UPDATE SET
+           lease_id = excluded.lease_id,
+           expires_at = excluded.expires_at`,
         key,
+        req.leaseId,
+        expiresAt,
       )
-      .toArray()
-    const row = rows[0]
-    if (row) {
-      const lockedUntil = Number(row.locked_until ?? 0)
-      if (lockedUntil > now) {
-        return {
-          allowed: false,
-          inFlight: true,
-          waitMs: Math.min(Math.max(lockedUntil - now, 1_000), 4_000),
-        }
-      }
-      const lastEpoch = Number(row.last_epoch ?? -1)
-      const lastPublishedAt = Number(row.last_published_at ?? 0)
-      if (lastEpoch >= req.epoch && now - lastPublishedAt < CHECKPOINT_RECENT_PUBLISH_GRACE_MS) {
-        return {
-          allowed: false,
-          alreadyPublished: true,
-          lastEpoch,
-          lastSignature: String(row.last_signature ?? '') || undefined,
-        }
-      }
     }
-
-    const lockedUntil = now + (req.lockTtlMs ?? CHECKPOINT_LOCK_TTL_MS)
-    this.sql.exec(
-      `INSERT INTO checkpoint_locks (cluster_pool, locked_until, last_published_at, last_epoch, last_signature)
-       VALUES (?, ?, 0, -1, '')
-       ON CONFLICT (cluster_pool) DO UPDATE SET locked_until = excluded.locked_until`,
-      key,
-      lockedUntil,
-    )
     return { allowed: true }
   }
 
-  async releaseCheckpointLock(req: {
-    cluster: Cluster
-    poolId: number
-    published: boolean
-    epoch?: number
-    signature?: string
-  }): Promise<void> {
+  async releaseOpenPageLock(req: OpenPageLockReleaseRequest): Promise<void> {
+    const uniqueLanes = [
+      ...new Set(req.laneIds.map((l) => Math.trunc(l)).filter((l) => Number.isInteger(l) && l >= 0)),
+    ]
+    if (uniqueLanes.length === 0) return
+
     const now = Date.now()
-    const key = `${req.cluster}:${req.poolId}`
-    if (req.published && req.epoch !== undefined) {
+    if (typeof req.graceTtlMs === 'number' && Number.isFinite(req.graceTtlMs) && req.graceTtlMs > 0) {
+      const graceMs = Math.min(Math.max(Math.trunc(req.graceTtlMs), 1), 30_000)
+      const expiresAt = now + graceMs
+      for (const laneId of uniqueLanes) {
+        const key = `${req.cluster}:${req.poolId}:${laneId}`
+        this.sql.exec(
+          'UPDATE open_page_locks SET expires_at = ? WHERE lane_key = ? AND lease_id = ?',
+          expiresAt,
+          key,
+          req.leaseId,
+        )
+      }
+      return
+    }
+
+    for (const laneId of uniqueLanes) {
+      const key = `${req.cluster}:${req.poolId}:${laneId}`
       this.sql.exec(
-        `INSERT INTO checkpoint_locks (cluster_pool, locked_until, last_published_at, last_epoch, last_signature)
-         VALUES (?, 0, ?, ?, ?)
-         ON CONFLICT (cluster_pool) DO UPDATE SET
-           locked_until = 0,
-           last_published_at = excluded.last_published_at,
-           last_epoch = excluded.last_epoch,
-           last_signature = excluded.last_signature`,
+        'DELETE FROM open_page_locks WHERE lane_key = ? AND lease_id = ?',
         key,
-        now,
-        req.epoch,
-        req.signature ?? '',
+        req.leaseId,
       )
-    } else {
-      this.sql.exec('UPDATE checkpoint_locks SET locked_until = 0 WHERE cluster_pool = ?', key)
     }
   }
 

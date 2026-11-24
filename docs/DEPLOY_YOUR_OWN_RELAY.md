@@ -1,12 +1,12 @@
 # Deploy Your Own Audren Privacy Relayer
 
-Audren is **100% relayer-agnostic**. Anyone can run an independent Privacy Relayer in under 5 minutes on Cloudflare Workers (free or paid plan) with zero shared credentials, zero trust in `relay.audren.xyz`, and full support for all three fee settlement modes:
+Audren is **100% relayer-agnostic** and **zero-crank**. Anyone can run an independent Privacy Relayer in under 5 minutes on Cloudflare Workers (free or paid plan) with zero shared credentials, zero trust in `relay.audren.xyz`, and full support for all three fee settlement modes:
 
 1. **Private Transfers (`Transact` Tag 5, `ASSET_MODE_PRIVATE`)** — collects an encrypted shielded `cm2` fee note verified instantaneously in the Worker via a read-only `FullViewingKey` (zero spend authority in hot Worker memory).
 2. **Public Withdrawals (`Transact` Tag 5, `ASSET_MODE_PUBLIC` + optional `WITHDRAW_FLAG_UNWRAP_WSOL`)** — collects an explicit on-chain `relayer_fee` directly to the relayer fee recipient (or atomic unwrapped Native SOL).
 3. **Shielded DeFi Execution (`ExecViaEscrow` Tag 6)** — routes through Jupiter, Bedrock, DFlow, Titan, or OKX via isolated `escrow` shards with input-leg or post-CPI output-leg (`EXEC_FLAG_FEE_ON_OUTPUT`) fee deduction.
 
-A relayer **never** receives user spending keys or viewing keys — its strict firewall rejects `Deposit` (`Tag 3`) and admin instructions (`InitPool`, `InitLane`, `SetPaused`, `UpdatePool`), requires a configured `relayerPool` member to be the sole signer (`accounts[0]`), enforces a configurable `SELF_PAY_FEE_MINTS` allowlist with on-chain mint safety inspection (rejecting Token-2022 `Pausable`, mutable `TransferFeeConfig` authority, and untrusted `FreezeAuthority`), requires an audited swap router allowlist (`AUDITED_SWAP_ROUTER_PROGRAMS`) before crediting zero-native-fee (`relayer_fee == 0`) platform-fee gains on `ExecViaEscrow`, pins pre-state and simulation slots (`preSlot`/`simSlot`) with a deterministic minimum-outflow floor, enforces self-pay (`isSelfPaying`) and `<= 2` outputs/ix on multi-instruction merge batches, keeps its UTC-day domain-separated IP-hash salt strictly in ephemeral DO memory, and runs a permissionless cron (`PublishCheckpoint` Tag 4 + `OpenPage` Tag 2) to keep checkpoints fresh.
+A relayer **never** receives user spending keys or viewing keys — its strict firewall rejects `Deposit` (`Tag 3`) and admin instructions (`InitPool`, `InitLane`, `InitRootHistory`, `SetPaused`, `UpdatePool`), requires a configured `relayerPool` member to be the sole signer (`accounts[0]`), validates canonical `GlobalRootHistory` (`rootsPda`) at account `[2]` (requiring read-only `rootsPda` on `output_mask == 0` full exits and blocking `rootsPda` from `router_accounts` / `preInstructions` / `setupAtas`), auto-prepends idempotent `LaneRentVault`-funded `OpenPage` (`Tag 2`) pre-instructions inline at rollover or `>= 90%` lookahead under Durable Object `open_page_locks` mutual exclusion, enforces calibrated tight Compute Unit budgets, enforces a configurable `SELF_PAY_FEE_MINTS` allowlist with on-chain mint safety inspection (rejecting Token-2022 `Pausable`, mutable `TransferFeeConfig` authority, and untrusted `FreezeAuthority`), uses an audited swap router allowlist (`AUDITED_SWAP_ROUTER_PROGRAMS`) both to restrict relayer treasury auto-refill swaps and to classify `/v1/relay/submit` `ExecViaEscrow` untrusted CPI targets (enforcing the `5_000` vs `50_000` lamport priority-fee cap, pre-sim/in-flight revert-burn cooldown serialization, and `DAILY_SPONSOR_BUDGET_REACHED` gating; `ExecViaEscrow` self-pay always requires an on-chain `relayer_fee > 0`), pins pre-state and simulation slots (`preSlot`/`simSlot`) with a deterministic minimum-outflow floor, enforces self-pay (`isSelfPaying`) and `<= 2` outputs/ix on multi-instruction merge batches, keeps its UTC-day domain-separated IP-hash salt strictly in ephemeral DO memory, and runs zero background protocol cranks (the scheduled cron only converts collected fee tokens back into SOL for operator gas float).
 
 ---
 
@@ -62,7 +62,7 @@ npx wrangler secret put JUPITER_API_KEY
 Optional non-secret firewall and solvency overrides in `apps/relay/wrangler.jsonc` (`vars`):
 
 - `SELF_PAY_FEE_MINTS` — comma-separated allowlist of liquid self-pay fee mints (defaults to WSOL, USDC, USDT, and verified liquid blue-chips; non-allowlisted mints and unsafe Token-2022 mints never earn self-pay credit).
-- `AUDITED_SWAP_ROUTER_PROGRAMS` — comma-separated allowlist of audited DEX router program IDs eligible for zero-native-fee (`relayer_fee == 0`) platform-fee simulation credit on `ExecViaEscrow`.
+- `AUDITED_SWAP_ROUTER_PROGRAMS` — comma-separated allowlist of audited DEX router program IDs governing both relayer treasury auto-refill swaps and `/v1/relay/submit` `ExecViaEscrow` untrusted-CPI classification (unlisted routers are capped at `5_000` vs `50_000` lamports priority fee, serialized under pre-sim/in-flight revert-burn cooldowns, and gated by `DAILY_SPONSOR_BUDGET_REACHED`; add custom audited routers such as Bedrock here; `ExecViaEscrow` self-pay always requires an on-chain `relayer_fee > 0`).
 - `ALLOWED_PRE_IX_PROGRAMS` — comma-separated allowlist of zero-signer DeFi refresh/oracle crank programs permitted in `preInstructions` before `ExecViaEscrow`.
 
 ---
@@ -96,4 +96,5 @@ import { AudrenRelayClient } from '@audren/sdk';
 const relay = new AudrenRelayClient('https://audren-relay.<your-subdomain>.workers.dev');
 const info = await relay.getInfo('mainnet');
 console.log('Relayer fee payer:', info.relayerPubkey);
+console.log('GlobalRootHistory PDA:', info.rootsPda);
 ```

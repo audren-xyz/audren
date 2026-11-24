@@ -2,7 +2,7 @@
   "address": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
   "metadata": {
     "name": "audren",
-    "version": "1.2.1",
+    "version": "1.3.0",
     "spec": "0.1.0",
     "description": "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16) and Protocol-Agnostic DeFi Execution Program on Solana (Pinocchio + sBPFv3).",
     "repository": "https://github.com/audren-xyz/audren"
@@ -11,7 +11,7 @@
     {
       "name": "init_pool",
       "docs": [
-        "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0)."
+        "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0) and empty GlobalRootHistory (10,216 B) atomically."
       ],
       "discriminator": [
         0
@@ -28,6 +28,11 @@
           "signer": false
         },
         {
+          "name": "roots",
+          "writable": true,
+          "signer": false
+        },
+        {
           "name": "system_program",
           "writable": false,
           "signer": false
@@ -39,11 +44,7 @@
           "type": "u32"
         },
         {
-          "name": "ckpt_interval",
-          "type": "u64"
-        },
-        {
-          "name": "max_ckpt_age",
+          "name": "root_epoch_interval",
           "type": "u64"
         },
         {
@@ -184,7 +185,7 @@
     {
       "name": "deposit",
       "docs": [
-        "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA."
+        "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA, updating GlobalRootHistory atomically inline."
       ],
       "discriminator": [
         3
@@ -198,6 +199,11 @@
         {
           "name": "pool_state",
           "writable": false,
+          "signer": false
+        },
+        {
+          "name": "roots",
+          "writable": true,
           "signer": false
         },
         {
@@ -315,26 +321,26 @@
       ]
     },
     {
-      "name": "publish_checkpoint",
+      "name": "init_root_history",
       "docs": [
-        "Permissionless, pause-exempt global super_root checkpoint publisher over active_lanes read-only lanes."
+        "Authority-gated one-shot initializer creating GlobalRootHistory (10,216 B) from existing active lanes (passed as trailing read-only accounts) and updating PoolState.root_epoch_interval."
       ],
       "discriminator": [
         4
       ],
       "accounts": [
         {
-          "name": "payer",
+          "name": "authority",
           "writable": true,
           "signer": true
         },
         {
           "name": "pool_state",
-          "writable": false,
+          "writable": true,
           "signer": false
         },
         {
-          "name": "checkpoint",
+          "name": "roots",
           "writable": true,
           "signer": false
         },
@@ -348,13 +354,17 @@
         {
           "name": "pool_id",
           "type": "u32"
+        },
+        {
+          "name": "root_epoch_interval",
+          "type": "u64"
         }
       ]
     },
     {
       "name": "transact",
       "docs": [
-        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit)."
+        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit) with GlobalRootHistory verification and inline root update."
       ],
       "discriminator": [
         5
@@ -371,8 +381,8 @@
           "signer": false
         },
         {
-          "name": "checkpoint",
-          "writable": false,
+          "name": "roots",
+          "writable": true,
           "signer": false
         },
         {
@@ -447,6 +457,14 @@
           "type": "u8"
         },
         {
+          "name": "root_ring_kind",
+          "type": "u8"
+        },
+        {
+          "name": "root_ring_idx",
+          "type": "u8"
+        },
+        {
           "name": "proof192",
           "type": {
             "array": [
@@ -517,7 +535,7 @@
     {
       "name": "exec_via_escrow",
       "docs": [
-        "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, and XOR-masked 72 B dynamic output memo."
+        "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, XOR-masked 72 B dynamic output memo, and inline GlobalRootHistory update."
       ],
       "discriminator": [
         6
@@ -534,8 +552,8 @@
           "signer": false
         },
         {
-          "name": "checkpoint",
-          "writable": false,
+          "name": "roots",
+          "writable": true,
           "signer": false
         },
         {
@@ -617,6 +635,14 @@
         },
         {
           "name": "flags",
+          "type": "u8"
+        },
+        {
+          "name": "root_ring_kind",
+          "type": "u8"
+        },
+        {
+          "name": "root_ring_idx",
           "type": "u8"
         },
         {
@@ -730,7 +756,7 @@
     {
       "name": "set_paused",
       "docs": [
-        "Authority-only emergency pause toggle (full withdrawals, PublishCheckpoint, and OpenPage remain permanently open)."
+        "Authority-only emergency pause toggle (full withdrawals and OpenPage remain permanently open)."
       ],
       "discriminator": [
         7
@@ -761,7 +787,7 @@
     {
       "name": "update_pool",
       "docs": [
-        "Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."
+        "Update pool governance parameters (note_rent_fee, nf_rent_fee; root_epoch_interval is immutable after InitPool / InitRootHistory) or execute two-step authority transfer / renounce (renounce requires !paused)."
       ],
       "discriminator": [
         8
@@ -887,14 +913,14 @@
       ]
     },
     {
-      "name": "RootCheckpoint",
+      "name": "GlobalRootHistory",
       "discriminator": [
         65,
         85,
         68,
         49,
-        67,
-        75,
+        82,
+        84,
         48,
         49
       ]
@@ -902,9 +928,33 @@
   ],
   "types": [
     {
+      "name": "RootEntry",
+      "docs": [
+        "Single ring entry inside GlobalRootHistory (40 B: super_root[32] || slot[8])."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "super_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "PoolState",
       "docs": [
-        "Global pool configuration (128 B; read-only on all deposits, spends, checkpoints, and DeFi swaps)."
+        "Global pool configuration (128 B; read-only on all deposits, spends, and DeFi swaps)."
       ],
       "type": {
         "kind": "struct",
@@ -939,12 +989,17 @@
             "type": "u32"
           },
           {
-            "name": "ckpt_interval",
+            "name": "root_epoch_interval",
             "type": "u64"
           },
           {
-            "name": "max_ckpt_age",
-            "type": "u64"
+            "name": "reserved24",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
           },
           {
             "name": "authority",
@@ -1405,9 +1460,9 @@
       }
     },
     {
-      "name": "RootCheckpoint",
+      "name": "GlobalRootHistory",
       "docs": [
-        "Fixed-size cyclic global checkpoint ring slot (704 B, 256 slots max)."
+        "Protocol-automated dual-ring global super_root history (10,216 B <= 10 KiB CPI cap; 128-entry slot ring + 89-entry epoch ring, updated atomically inline on every note commitment)."
       ],
       "type": {
         "kind": "struct",
@@ -1430,7 +1485,7 @@
             "type": "u8"
           },
           {
-            "name": "slot_idx",
+            "name": "slot_cursor",
             "type": "u16"
           },
           {
@@ -1438,15 +1493,66 @@
             "type": "u32"
           },
           {
-            "name": "epoch_id",
+            "name": "epoch_cursor",
+            "type": "u16"
+          },
+          {
+            "name": "slot_count",
+            "type": "u16"
+          },
+          {
+            "name": "epoch_count",
+            "type": "u16"
+          },
+          {
+            "name": "same_slot_bumped",
+            "type": "u8"
+          },
+          {
+            "name": "pad",
+            "type": "u8"
+          },
+          {
+            "name": "latest_slot",
             "type": "u64"
           },
           {
-            "name": "published_slot",
+            "name": "stable_epoch_id",
             "type": "u64"
           },
           {
-            "name": "super_root",
+            "name": "stable_slot",
+            "type": "u64"
+          },
+          {
+            "name": "epoch_interval",
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "group_roots",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                4
+              ]
+            }
+          },
+          {
+            "name": "latest_super_root",
             "type": {
               "array": [
                 "u8",
@@ -1455,7 +1561,7 @@
             }
           },
           {
-            "name": "lane_roots",
+            "name": "latest_lane_roots",
             "type": {
               "array": [
                 {
@@ -1469,11 +1575,69 @@
             }
           },
           {
-            "name": "lane_counts",
+            "name": "latest_lane_counts",
             "type": {
               "array": [
                 "u64",
                 16
+              ]
+            }
+          },
+          {
+            "name": "stable_super_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "stable_lane_roots",
+            "type": {
+              "array": [
+                {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                },
+                16
+              ]
+            }
+          },
+          {
+            "name": "stable_lane_counts",
+            "type": {
+              "array": [
+                "u64",
+                16
+              ]
+            }
+          },
+          {
+            "name": "slot_ring",
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "RootEntry"
+                  }
+                },
+                128
+              ]
+            }
+          },
+          {
+            "name": "epoch_ring",
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "RootEntry"
+                  }
+                },
+                89
               ]
             }
           }
@@ -1519,18 +1683,18 @@
     },
     {
       "code": 6007,
-      "name": "CheckpointTooSoon",
-      "msg": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots."
+      "name": "InvalidRootRing",
+      "msg": "Root ring selector must be 0 (slot ring) or 1 (epoch ring)."
     },
     {
       "code": 6008,
-      "name": "CheckpointExpired",
-      "msg": "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots."
+      "name": "RootIndexOutOfBounds",
+      "msg": "Referenced GlobalRootHistory ring index is out of bounds or unpopulated."
     },
     {
       "code": 6009,
-      "name": "CheckpointMismatch",
-      "msg": "Referenced RootCheckpoint account is uninitialized or belongs to another pool."
+      "name": "RootHistoryMismatch",
+      "msg": "Referenced GlobalRootHistory account is uninitialized, corrupted, or belongs to another pool."
     },
     {
       "code": 6010,
@@ -1620,7 +1784,7 @@
     {
       "code": 6027,
       "name": "PoolPaused",
-      "msg": "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open)."
+      "msg": "Pool is paused by authority (full exits and OpenPage remain open)."
     },
     {
       "code": 6028,
@@ -1635,7 +1799,7 @@
     {
       "code": 6030,
       "name": "InvalidTargetProgram",
-      "msg": "Target program must be executable and cannot be Audren, System, Token, or ATA."
+      "msg": "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry."
     },
     {
       "code": 6031,

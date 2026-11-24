@@ -192,7 +192,7 @@ export async function connectSolanaWallet(
 
 export function subscribeWalletStandardAccounts(
   discovered: DiscoveredSolanaWallet,
-  onAccount: (conn: ConnectedSolanaWallet) => void,
+  onAccountChange: (conn: ConnectedSolanaWallet | null) => void,
 ): () => void {
   const eventsFeature = discovered.wallet.features['standard:events'] as
     | {
@@ -206,8 +206,11 @@ export function subscribeWalletStandardAccounts(
   return eventsFeature.on('change', ({ accounts }) => {
     const list = accounts ?? discovered.wallet.accounts
     const account = list.find((a) => a.chains.some((c) => c.startsWith('solana:'))) ?? list[0]
-    if (!account) return
-    onAccount({
+    if (!account) {
+      onAccountChange(null)
+      return
+    }
+    onAccountChange({
       name: discovered.name,
       icon: discovered.icon,
       address: account.address,
@@ -393,18 +396,23 @@ export async function sendAndConfirmSignedTransactions(
         transactionB64: toBase64(wire),
       }),
     })
-    const sendJson = (await sendRes.json()) as {
+    const rawJson: unknown = await sendRes.json().catch(() => null)
+    const sendJson = (rawJson && typeof rawJson === 'object' ? rawJson : {}) as {
       signature?: string
       slot?: number
       error?: string
     }
-    if (!sendRes.ok || !sendJson.signature) {
-      throw new Error(sendJson.error ?? `Transaction #${i + 1} failed to send`)
+    const sig = typeof sendJson.signature === 'string' ? sendJson.signature.trim() : ''
+    if (!sendRes.ok || !sig) {
+      const baseMsg =
+        (typeof sendJson.error === 'string' && sendJson.error.trim()) ||
+        `Transaction #${i + 1} failed to send (HTTP ${sendRes.status})`
+      throw new Error(sig && !baseMsg.includes(sig) ? `${baseMsg} (tx ${sig})` : baseMsg)
     }
-    options?.onProgress?.(i, signedTransactions.length, sendJson.signature)
+    options?.onProgress?.(i, signedTransactions.length, sig)
     results.push({
-      signature: sendJson.signature,
-      slot: sendJson.slot ?? 0,
+      signature: sig,
+      slot: typeof sendJson.slot === 'number' ? sendJson.slot : 0,
       wireBytes: wire.length,
     })
   }

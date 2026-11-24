@@ -86,17 +86,17 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: '500 USDC → Unified vault · cm → SubtreePage',
         packetLabel: '4^20 Global Tree (4 of 16 lanes active)',
         detail:
-          'Solana transfers 500 USDC into Audren’s canonical vault_auth ATA, computes cm = Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, net_received, blinding) on-chain, updates the active lane’s 4-ary Depth-18 frontier, and writes the 106 B SoA memo entry to MemoPage (10,240 B, 96 notes/page).',
-        cryptoTag: 'Unified Pool #0 · Net-delta Token-2022 solvency · 4→8→16 lanes',
+          'Solana transfers 500 USDC into Audren’s canonical vault_auth ATA, computes cm = Poseidon5(DOMAIN_NOTE, stealth_owner, asset_id, net_received, blinding) on-chain, updates the active lane’s 4-ary Depth-18 frontier and inline GlobalRootHistory (AUD1RT01, 10,216 B) super-root (~54k–56k CU, 75k budget), and writes the 106 B SoA memo entry to MemoPage (10,240 B, 96 notes/page).',
+        cryptoTag: 'Unified Pool #0 · Inline GlobalRootHistory · 54k–56k CU (75k budget)',
       },
       {
         actor: 'Your private balance',
-        title: 'Discovered via ordinary RPC with zero indexer',
+        title: 'Discovered via ordinary RPC with instant spendability',
         shortLabel: 'CompactWalletStore scans MemoPages and freezes siblings',
         packetLabel: '+500 USDC Private',
         detail:
-          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts and checks each memo’s 2-byte view tag (one cheap key exchange per memo; about 65,535 of every 65,536 stranger memos are skipped without decryption). It verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages. The note is spendable once a RootCheckpoint covering it is published (on demand; checkpoints are at least 8 slots apart).',
-        cryptoTag: 'Ordinary Solana RPC · Zero indexer · 1.28 MB store @ 10M notes',
+          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts and checks each memo’s 2-byte view tag (one cheap key exchange per memo; about 65,535 of every 65,536 stranger memos are skipped without decryption). It verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages. Because Deposit updates GlobalRootHistory inline on-chain, the note is spendable immediately upon confirmation (~400ms today; ~150ms under Alpenglow, zero checkpoint wait, zero cranks, zero checkpoint fees).',
+        cryptoTag: 'Ordinary Solana RPC · Zero indexer · ~400ms today (~150ms under Alpenglow)',
       },
     ],
     solscan: [
@@ -144,7 +144,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'BN254 Groth16 over 20-level 4-ary super_root',
         packetLabel: '192 B Groth16 Proof',
         detail:
-          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in a dedicated WASM Web Worker against a recent RootCheckpoint: “I own 1 or 2 notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and these are their correctly derived, key-separated nullifiers.” Solana then rejects the spend if either nullifier was already recorded.',
+          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in a dedicated WASM Web Worker against GlobalRootHistory (preferring the 89-entry stable epoch_ring covering >= 2,848 slots / >= 10.2m under saturation, or the 128-entry recent slot_ring covering 64–128 active slots / ~13.8s–27.5s for instant spends, with zero idle wall-clock expiry): “I own 1 or 2 notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and these are their correctly derived, key-separated nullifiers.” Solana then rejects the spend if either nullifier was already recorded.',
         cryptoTag: 'Tag 5 Transact · 17,861 R1CS · Key-separated nk nullifiers',
       },
       {
@@ -163,7 +163,7 @@ const FLOWS: FlowDefinition[] = [
         packetLabel: 'Relayed Solana v1 Tx',
         detail:
           'Your browser sends the finished proof to relay.audren.xyz (or your own self-hosted relay). The hosted relay currently sponsors private transfers and takes no fee note. A relay that charges a fee is paid as a private output (cm2) that it checks with its own read-only viewing key, so it learns the fee’s token and amount (not the amount sent to Bob). Any relay sees your IP. Your public wallet never signs.',
-        cryptoTag: 'Solana Tx v1 (0x81) · ~130k–160k CU · Zero user wallet signers',
+        cryptoTag: 'Solana Tx v1 (0x81) · ~205k CU (235k budget) · Zero user wallet signers',
       },
       {
         actor: 'Bob’s private balance',
@@ -171,8 +171,8 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Bob gets 500 USDC · You keep hidden change',
         packetLabel: 'Bob +500 · Your Change',
         detail:
-          'Solana verifies the 192 B Groth16 proof via native alt_bn128 pairing syscalls, locks NullifierPDA(s) and appends 16 B prefixes to NullifierPage, and writes the new commitments and 106 B SoA memos to your chosen append lane.',
-        cryptoTag: 'alt_bn128 syscall verified · 16 B NullifierPage sync',
+          'Solana verifies the 192 B Groth16 proof via native alt_bn128 pairing syscalls, locks NullifierPDA(s) and appends 16 B prefixes to NullifierPage, updates GlobalRootHistory inline (~400ms confirmation today; ~150ms under Alpenglow), and writes the new commitments and 106 B SoA memos to your chosen append lane (auto-prepending idempotent OpenPage when needed).',
+        cryptoTag: 'alt_bn128 syscall verified · Inline root update · Auto-OpenPage',
       },
     ],
     solscan: [
@@ -221,7 +221,7 @@ const FLOWS: FlowDefinition[] = [
         packetLabel: '192 B Groth16 Proof',
         detail:
           'Your browser proves ownership of 1–2 global pool notes, binds router_program, every router account (pubkey + is_writable), min_amount_out, and relayer_fee inside ctx_hash, and optionally pays the relayer from the input or output leg (EXEC_FLAG_FEE_ON_OUTPUT).',
-        cryptoTag: 'Tag 6 ExecViaEscrow · ctx_hash-bound router_accounts · ~158k CU',
+        cryptoTag: 'Tag 6 ExecViaEscrow · ctx_hash-bound router_accounts · ~165k–238k CU base',
       },
       {
         actor: 'Shared escrow shard',
@@ -238,7 +238,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'Aggregator swap today · other one-call programs via SDK',
         packetLabel: 'DeFi Fill ≥ min_out',
         detail:
-          'Inside the same Solana Transaction v1, Audren invokes the target Solana program via PDA CPI, leaving >1.2M CU for multi-hop aggregator routes or other single-call programs. If net output falls below min_amount_out, the entire transaction reverts cleanly.',
+          'Inside the same Solana Transaction v1, Audren invokes the target Solana program via PDA CPI, leaving >1.11M CU for multi-hop aggregator routes or other single-call programs. If net output falls below min_amount_out, the entire transaction reverts cleanly.',
         cryptoTag: 'Any stateless Token A → Token B CPI · min_amount_out enforced',
       },
       {
@@ -321,7 +321,7 @@ const FLOWS: FlowDefinition[] = [
         packetLabel: 'Direct Native SOL',
         detail:
           'Withdraw SOL or any SPL token to any wallet or deterministic DeFi Session keypair B_i with zero prior gas: pay relayer_fee natively from the withdrawn note and unwrap WSOL straight into Native SOL in one instruction via an ephemeral audren_unwrap PDA (full exit bypasses SetPaused).',
-        cryptoTag: 'Tag 5 Transact · WITHDRAW_FLAG_UNWRAP_WSOL · ~103k–148k CU',
+        cryptoTag: 'Tag 5 Transact · WITHDRAW_FLAG_UNWRAP_WSOL · ~116k–121k CU full exit / ~145k–217k CU withdraw',
       },
       {
         actor: 'Zero-dust session sweep',
@@ -414,8 +414,8 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
     question: 'Can Audren, a relayer, or a viewing-key holder steal or freeze funds?',
     verdict: 'Full-note exit bypasses pause',
     answer:
-      'Pool authority cannot spend shielded notes. Full withdrawals (output_mask == 0, including atomic WSOL unwrap) bypass SetPaused. Relayers cannot alter ctx_hash-bound outputs or router accounts. FullViewingKey (spend_pk, nk, view_sk, view_pk) is strictly read-only. Token issuer controls, the pool authority’s power over checkpoint timing, and the mutable upgrade authority (one operator key today) remain separate risks.',
-    primitive: 'ctx_hash-bound outputs · Full exits pass pause · Key separation',
+      'Pool authority cannot spend shielded notes. Full withdrawals (output_mask == 0, including atomic WSOL unwrap, with read-only GlobalRootHistory) bypass SetPaused. Relayers cannot alter ctx_hash-bound outputs or router accounts. FullViewingKey (spend_pk, nk, view_sk, view_pk) is strictly read-only. GlobalRootHistory updates inline with zero idle wall-clock expiry and immutable root_epoch_interval, so no authority can delay or block full exits; token issuer controls and the mutable upgrade authority (one operator key today) remain separate risks.',
+    primitive: 'ctx_hash-bound outputs · Full exits pass pause · Inline GlobalRootHistory',
   },
   {
     tag: 'Atomic escrow',
@@ -423,7 +423,7 @@ const SOUNDNESS_PILLARS: SoundnessItem[] = [
     verdict: 'Escrow firewall · Exact delta',
     answer:
       'During ExecViaEscrow (Tag 6), Audren binds router_program, every router account (pubkey + is_writable), min_amount_out, and relayer_fee inside ctx_hash, snapshots pre/post owner, delegate, close_authority, and lamports on escrow and token accounts, supports EXEC_FLAG_FEE_ON_OUTPUT, and commits the exact measured vault delta on-chain.',
-    primitive: 'ExecViaEscrow (Tag 6) · WatchedEscrowBuf firewall · ~158k CU',
+    primitive: 'ExecViaEscrow (Tag 6) · WatchedEscrowBuf firewall · ~165k–238k CU base',
   },
 ]
 

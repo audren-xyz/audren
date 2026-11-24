@@ -1,9 +1,10 @@
 import type { Env } from '../env'
 import type { NormalizedQuote, NormalizedSwapInstructions, RouteLegSummary } from '../types'
-import type {
-  AdapterQuoteRequest,
-  AdapterSwapInstructionsRequest,
-  AggregatorAdapter,
+import {
+  computeAggregatorExecCuLimit,
+  type AdapterQuoteRequest,
+  type AdapterSwapInstructionsRequest,
+  type AggregatorAdapter,
 } from './types'
 
 /**
@@ -172,12 +173,18 @@ export const bedrockAdapter: AggregatorAdapter = {
       throw new Error('Bedrock did not return swapInstruction')
     }
 
-    const baseCu = payload.transactionConfig?.computeUnitLimit ?? 350_000
+    const rawRoutePlan = (req.quoteResponse as BedrockQuoteRaw | undefined)?.routePlan
+    const routeHopCount =
+      Array.isArray(rawRoutePlan) && rawRoutePlan.length > 0 ? rawRoutePlan.length : null
+
     return {
       provider: 'bedrock',
       swapInstruction: payload.swapInstruction,
       addressLookupTableAddresses: payload.addressLookupTableAddresses ?? [],
-      computeUnitLimit: Math.min(Math.max(baseCu + 700_000, 1_050_000), 1_400_000),
+      computeUnitLimit: computeAggregatorExecCuLimit({
+        reportedRouterCu: payload.transactionConfig?.computeUnitLimit,
+        routeHopCount,
+      }),
       feeAccount: req.feeAccountAta ?? req.feeOwnerWallet ?? null,
     }
   },

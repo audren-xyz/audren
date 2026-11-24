@@ -62,9 +62,9 @@ const POOL_CASES: readonly PoolCase[] = [
       },
     ],
     resultText:
-      'Private Transact settles in ~130k–160k CU with hidden inputs, stealth recipient, hidden asset, and hidden amount.',
+      'Private Transact settles in ~205k CU (235k budget) with inline GlobalRootHistory update (~400ms confirmation today; ~150ms under Alpenglow), hidden inputs, stealth recipient, hidden asset, and hidden amount.',
     hiddenLabel: 'Which pool note was spent, recipient, token, and amount',
-    publicLabel: 'Checkpoint root, lane append slot, timing, and fee payer',
+    publicLabel: 'GlobalRootHistory ring index, lane append slot, timing, and fee payer',
     txHref: solscanTx(AUDREN.mainnet.transferTx),
     txLabel: 'Inspect a self-paid Mainnet private send (economy 1-in/2-out shape)',
     tone: 'pool',
@@ -94,7 +94,7 @@ const POOL_CASES: readonly PoolCase[] = [
       },
     ],
     resultText:
-      'Output token or yield receipt settles straight into a fresh pool note (~158k–189k CU, leaving >1.2M CU for DeFi).',
+      'Output token or yield receipt settles straight into a fresh pool note (~165k–238k CU base / 285k budget, leaving >1.11M CU for DeFi).',
     hiddenLabel: 'Spent pool notes and primary user wallet',
     publicLabel: 'External DeFi program, mints, routed amounts, output slot, and fee payer',
     txHref: solscanTx(AUDREN.mainnet.swapTx),
@@ -126,7 +126,7 @@ const POOL_CASES: readonly PoolCase[] = [
       },
     ],
     resultText:
-      'Public payout or 0-SOL DeFi session funded in one transaction (~103k–148k CU); the proof conceals which pool note paid for it.',
+      'Public payout or 0-SOL DeFi session funded in one transaction (~116k–121k CU full exit with read-only roots / 165k budget; ~145k–217k CU withdraw / 255k budget); the proof conceals which pool note paid for it.',
     hiddenLabel: 'Which historical pool note funded the payout or session wallet',
     publicLabel: 'Destination wallet, token, payout amount, fee payer, and any DeFi positions opened',
     txHref: solscanTx(AUDREN.mainnet.withdrawTx),
@@ -393,7 +393,7 @@ function ProtocolTracePanel({ activeCase }: { activeCase: PoolCase }) {
 const HANDOFF_STEPS = ['Prove', 'Send', 'Membership', 'Conservation', 'Nullifier', 'Accepted'] as const
 const HANDOFF_MS = [1700, 1300, 950, 950, 950, 3200] as const
 const CHAIN_CHECKS = [
-  'Global 4-ary Depth-20 Merkle membership against RootCheckpoint',
+  'Global 4-ary Depth-20 Merkle membership against inline GlobalRootHistory',
   'BN254 Groth16 value conservation and 64-bit range checks (17,861 R1CS)',
   'Pool-wide nullifier PDAs reject repeated spends',
 ] as const
@@ -638,8 +638,8 @@ export function LandingExperience() {
               <p>
                 <code>ExecViaEscrow</code> (Tag 6) runs one SPL or Token-2022{' '}
                 <code>Token A → Token B</code> Solana program call through 16 shared escrow PDAs
-                and reshields the exact net vault delta on-chain (~158k–189k CU, leaving &gt;1.2M
-                CU for DeFi). Aggregator swaps ship in the app today; any program that takes the
+                and reshields the exact net vault delta on-chain (~165k–238k CU base / 285k budget,
+                leaving &gt;1.11M CU for DeFi). Aggregator swaps ship in the app today; any program that takes the
                 input and returns the output in that one call fits the same instruction through
                 the SDK. Stateful protocols use self-funded session wallets.
               </p>
@@ -797,13 +797,16 @@ export function LandingExperience() {
                   across SOL, Classic SPL, and transferable Token-2022
                 </li>
                 <li>
-                  No mandatory indexer or Forester (~1.28 MB kept at 10M notes); anyone can publish
-                  the checkpoints spends prove against, and full exits including atomic WSOL unwrap
-                  bypass pause
+                  Zero mandatory indexer, Forester, or background cranks (~1.28 MB kept at 10M
+                  notes): inline GlobalRootHistory (128-entry recent slot_ring + 89-entry stable
+                  epoch_ring) gives instant spendability on confirmation (~400ms today; ~150ms under
+                  Alpenglow) with auto-prepended idempotent OpenPage, and full exits including
+                  atomic WSOL unwrap bypass pause
                 </li>
                 <li>
-                  Atomic ExecViaEscrow CPI (~158k–189k CU) reaches live aggregator liquidity today
-                  without per-protocol circuits (external DeFi leg stays public)
+                  Atomic ExecViaEscrow CPI (~165k–238k CU base / 285k budget) reaches live
+                  aggregator liquidity today without per-protocol circuits (external DeFi leg stays
+                  public)
                 </li>
                 <li>
                   No protocol fee and no on-chain sign-up to receive. Each spend pays permanent

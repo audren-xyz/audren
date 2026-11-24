@@ -22,6 +22,8 @@ import {
 } from './poseidon.ts';
 
 const utf8Encoder = new TextEncoder();
+const U32_MAX = 0xffff_ffff;
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
 export interface AudrenKeys {
   spendSk: bigint;
@@ -71,14 +73,19 @@ export interface SelectiveDisclosureProof {
 }
 
 function u32le(n: number): Uint8Array {
+  if (!Number.isInteger(n) || n < 0 || n > U32_MAX) {
+    throw new RangeError(`u32 value out of range (expected 0..=${U32_MAX}), got ${n}`);
+  }
   const out = new Uint8Array(4);
   new DataView(out.buffer).setUint32(0, n, true);
   return out;
 }
 
 export function deriveKeysFromSeed(seed32: Uint8Array): AudrenKeys {
-  if (seed32.byteLength !== 32) {
-    throw new RangeError(`Master seed must be 32 bytes, got ${seed32.byteLength}`);
+  if (!(seed32 instanceof Uint8Array) || seed32.byteLength !== 32) {
+    throw new RangeError(
+      `Master seed must be 32 bytes (Uint8Array), got ${seed32 instanceof Uint8Array ? seed32.byteLength : String(seed32)}`,
+    );
   }
   const salt = utf8Encoder.encode('audren/v1/root');
   const spendRaw = hkdf(sha256, seed32, salt, utf8Encoder.encode('audren/v1/spend_sk'), 32);
@@ -108,8 +115,13 @@ export function deriveKeysFromSeed(seed32: Uint8Array): AudrenKeys {
 }
 
 export function deriveSubaccountKeys(masterSeed32: Uint8Array, accountIndex: number): AudrenKeys {
-  if (!Number.isInteger(accountIndex) || accountIndex < 0) {
-    throw new RangeError(`accountIndex must be a non-negative integer, got ${accountIndex}`);
+  if (!(masterSeed32 instanceof Uint8Array) || masterSeed32.byteLength !== 32) {
+    throw new RangeError(
+      `Master seed must be 32 bytes (Uint8Array), got ${masterSeed32 instanceof Uint8Array ? masterSeed32.byteLength : String(masterSeed32)}`,
+    );
+  }
+  if (!Number.isInteger(accountIndex) || accountIndex < 0 || accountIndex > U32_MAX) {
+    throw new RangeError(`accountIndex must be a u32 integer in 0..=${U32_MAX}, got ${accountIndex}`);
   }
   if (accountIndex === 0) return deriveKeysFromSeed(masterSeed32);
   const child = hkdf(
@@ -123,6 +135,20 @@ export function deriveSubaccountKeys(masterSeed32: Uint8Array, accountIndex: num
 }
 
 export function exportFullViewingKey(keys: AudrenKeys): FullViewingKey {
+  if (
+    !keys ||
+    typeof keys !== 'object' ||
+    !(keys.spendPkBytes instanceof Uint8Array) ||
+    keys.spendPkBytes.byteLength !== 32 ||
+    !(keys.nkBytes instanceof Uint8Array) ||
+    keys.nkBytes.byteLength !== 32 ||
+    !(keys.viewSk instanceof Uint8Array) ||
+    keys.viewSk.byteLength !== 32 ||
+    !(keys.viewPk instanceof Uint8Array) ||
+    keys.viewPk.byteLength !== 32
+  ) {
+    throw new RangeError('keys must provide 32-byte Uint8Array spendPkBytes, nkBytes, viewSk, and viewPk');
+  }
   return {
     spendPk: new Uint8Array(keys.spendPkBytes),
     nk: new Uint8Array(keys.nkBytes),
@@ -135,11 +161,13 @@ export function deriveDefiSessionKeypair(
   masterSeed32: Uint8Array,
   sessionIndex: number,
 ): DefiSessionKeypair {
-  if (masterSeed32.byteLength !== 32) {
-    throw new RangeError(`Master seed must be 32 bytes, got ${masterSeed32.byteLength}`);
+  if (!(masterSeed32 instanceof Uint8Array) || masterSeed32.byteLength !== 32) {
+    throw new RangeError(
+      `Master seed must be 32 bytes (Uint8Array), got ${masterSeed32 instanceof Uint8Array ? masterSeed32.byteLength : String(masterSeed32)}`,
+    );
   }
-  if (!Number.isInteger(sessionIndex) || sessionIndex < 0) {
-    throw new RangeError(`sessionIndex must be a non-negative integer, got ${sessionIndex}`);
+  if (!Number.isInteger(sessionIndex) || sessionIndex < 0 || sessionIndex > U32_MAX) {
+    throw new RangeError(`sessionIndex must be a u32 integer in 0..=${U32_MAX}, got ${sessionIndex}`);
   }
   const secretSeed = hkdf(
     sha256,
@@ -158,6 +186,9 @@ export function deriveDefiSessionKeypair(
 }
 
 export function fvkStealthOwner(fvk: FullViewingKey, tweak: bigint): bigint {
+  if (!fvk || typeof fvk !== 'object') {
+    throw new RangeError('fvk must be an object');
+  }
   return deriveStealthOwner(frFromBeBytesStrict(fvk.spendPk), tweak);
 }
 
@@ -166,11 +197,11 @@ export function fvkRealNullifier(
   noteCm: bigint,
   globalLeafIndex: bigint,
 ): Uint8Array {
+  if (!fvk || typeof fvk !== 'object') {
+    throw new RangeError('fvk must be an object');
+  }
   return frToBeBytes(computeRealNullifier(frFromBeBytesStrict(fvk.nk), noteCm, globalLeafIndex));
 }
-
-const U32_MAX = 0xffff_ffff;
-const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
 /**
  * Verify a Mode 1 per-transaction `SelectiveDisclosureProof` against an on-chain
@@ -184,6 +215,13 @@ export function verifySelectiveDisclosureProof(
   onchainSubtreeLeaf: Uint8Array,
 ): boolean {
   if (
+    !proof ||
+    typeof proof !== 'object' ||
+    !(onchainSubtreeLeaf instanceof Uint8Array) ||
+    !(proof.stealthOwner instanceof Uint8Array) ||
+    !(proof.mint instanceof Uint8Array) ||
+    !(proof.blinding instanceof Uint8Array) ||
+    !(proof.commitment instanceof Uint8Array) ||
     onchainSubtreeLeaf.byteLength !== 32 ||
     proof.stealthOwner.byteLength !== 32 ||
     proof.mint.byteLength !== 32 ||

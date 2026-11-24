@@ -14,7 +14,7 @@ interface PendingJob {
   timer: ReturnType<typeof setTimeout>
 }
 
-export const PROVER_WORKER_URL = '/wasm/prover-worker.js?v=1.2.1'
+export const PROVER_WORKER_URL = '/wasm/prover-worker.js?v=1.3.0'
 export const PROVER_WARM_TIMEOUT_MS = 30_000
 export const PROVER_PROVE_TIMEOUT_MS = 45_000
 
@@ -58,7 +58,6 @@ export function callProverWorker(
   const id = nextRequestId++
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      pending.delete(id)
       terminateAndRejectAll(new Error('Prover worker timed out'))
     }, timeoutMs)
     pending.set(id, { resolve, reject, timer })

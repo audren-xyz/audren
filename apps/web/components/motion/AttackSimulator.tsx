@@ -8,7 +8,7 @@ import { usePhase } from './useDocks'
 
 /** The key on-chain checks for a spend, in the order the program reaches them. */
 const CHECKS = [
-  { id: 'root', label: 'Proof uses a recent checkpoint root' },
+  { id: 'root', label: 'Proof matches GlobalRootHistory dual-ring root' },
   { id: 'proof', label: 'Groth16 proof verifies: ownership, balance, 64-bit ranges, bound outputs' },
   { id: 'nullifier', label: 'Record spent marks (fails if a mark already exists)' },
   { id: 'defi', label: 'DeFi leg: escrow accounts unaltered, output ≥ minimum' },

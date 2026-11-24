@@ -24,10 +24,12 @@ const SNIPPETS: Record<SnippetId, { tab: string; file: string; code: string }> =
   deriveDefiSessionKeypair,
   deriveKeysFromSeed,
   derivePoolPdaSync,
+  deriveRootsPdaSync,
   deriveSubaccountKeys,
   deriveSubtreePdaSync,
   exportFullViewingKey,
   exportSelectiveDisclosureProof,
+  fetchGlobalRootHistory,
   syncCompactStoreWithRpc,
   verifySelectiveDisclosureProof,
 } from '@audren/sdk';
@@ -40,13 +42,15 @@ const fvk     = exportFullViewingKey(alice);
 const session = deriveDefiSessionKeypair(seed32, 0); // public when it touches external DeFi
 console.log(alice.address, trading.address);
 
-// 2. Canonical PDAs (12 audren_* seeds)
-const poolPda = derivePoolPdaSync(0).address;
+// 2. Canonical PDAs (12 audren_* seeds: PoolState + inline GlobalRootHistory)
+const poolPda  = derivePoolPdaSync(0).address;
+const rootsPda = deriveRootsPdaSync(0).address;
 
-// 3. Sync over ordinary Solana RPC (strict privacy mode by default)
+// 3. Sync over ordinary Solana RPC + finalized-first GlobalRootHistory (~400ms today; ~150ms under Alpenglow)
 const fetchBatch = createSolanaRpcBatchFetcher(rpcUrl);
 const store = new CompactWalletStore(0);
 await syncCompactStoreWithRpc({ store, fvk, fetchBatch });
+const { snapshot } = await fetchGlobalRootHistory({ poolId: 0, rpcUrl });
 
 // 4. Mode 1 receipt for one note; the verifier checks it against the on-chain leaf
 const note = store.unspentNotes()[0];
@@ -72,7 +76,7 @@ const relay = new AudrenRelayClient(AUDREN_DEFAULT_RELAY_URL);`,
     code: `use audren_client::{
     audren_core::AUDREN_PROGRAM_ID,
     keys::AudrenKeys,
-    pda::derive_pool_pda,
+    pda::{derive_pool_pda, derive_roots_pda},
     prover::AudrenProver,
     router::DEFAULT_RELAY_URL,
     scanner::{sync_compact_store_with_batch, SyncOptions},
@@ -87,9 +91,10 @@ let fvk     = alice.full_viewing_key();
 let session = AudrenKeys::derive_defi_session_keypair(&seed_32, 0); // public on external DeFi
 println!("{}", alice.address().encode()?);
 
-// 2. Canonical PDAs (12 audren_* seeds)
+// 2. Canonical PDAs (12 audren_* seeds: PoolState + inline GlobalRootHistory)
 let pid = Address::new_from_array(AUDREN_PROGRAM_ID);
-let (pool_pda, _) = derive_pool_pda(&pid, 0);
+let (pool_pda, _)  = derive_pool_pda(&pid, 0);
+let (roots_pda, _) = derive_roots_pda(&pid, 0);
 
 // 3. Sync over ordinary Solana RPC (strict privacy mode by default);
 //    rpc_get_multiple_accounts is your getMultipleAccounts closure
@@ -119,8 +124,9 @@ let fvk     = try exportFullViewingKey(seed: seed32)
 let session = try deriveDefiSessionKeypair(seed: seed32, sessionIndex: 0)
 print(alice.address)
 
-// 2. Canonical PDAs (12 audren_* seeds)
-let pool = try derivePoolPda(programId: canonicalProgramId(), poolId: 0)
+// 2. Canonical PDAs (12 audren_* seeds: PoolState + GlobalRootHistory)
+let pool  = try derivePoolPda(programId: canonicalProgramId(), poolId: 0)
+let roots = try deriveRootsPda(programId: canonicalProgramId(), poolId: 0)
 
 // 3. Open one memo you fetched over RPC (106 B MemoPage entry + its SubtreePage leaf)
 if let note = try decryptAndVerifyMemoEntry(fvk: fvk, memo106: memo106, onchainCommitment: leafCm) {
@@ -145,8 +151,9 @@ val fvk     = exportFullViewingKey(seed32)
 val session = deriveDefiSessionKeypair(seed32, 0u)
 println(alice.address)
 
-// 2. Canonical PDAs (12 audren_* seeds)
-val pool = derivePoolPda(canonicalProgramId(), 0u)
+// 2. Canonical PDAs (12 audren_* seeds: PoolState + GlobalRootHistory)
+val pool  = derivePoolPda(canonicalProgramId(), 0u)
+val roots = deriveRootsPda(canonicalProgramId(), 0u)
 
 // 3. Open one memo you fetched over RPC (106 B MemoPage entry + its SubtreePage leaf)
 decryptAndVerifyMemoEntry(fvk, memo106, leafCm)?.let { println(it.amount) }
@@ -178,8 +185,8 @@ const PIPELINE_STEPS = [
     tag: '3. Submit',
     title: 'One transaction',
     line1: 'Relay: Tx v1 (0x81, 4,096 B)',
-    line2: 'Direct wallet: v0 (1,232 B)',
-    foot: '~103k–189k CU per spend',
+    line2: 'Direct wallet: v0 + Auto-OpenPage',
+    foot: '75k–285k CU tight budgets',
   },
   {
     tag: '4. Settle',
@@ -493,7 +500,7 @@ export function DevelopersExperience() {
                   <li>Persist <code>CompactWalletStore</code> locally (IndexedDB / mobile disk) with an optional birthday slot so recovery skips pages closed before the wallet existed.</li>
                   <li>Back up the encrypted 32-byte master seed; lost spend keys cannot be recovered by any operator.</li>
                   <li>Surface clear UX notices that deposits, withdrawals, DeFi CPI legs, and session wallet positions remain public on Solana.</li>
-                  <li>Request a fresh checkpoint before proving: a spend must reference one at most <code>max_ckpt_age</code> slots old (1,800 on Pool #0).</li>
+                  <li>Fetch <code>GlobalRootHistory</code> via <code>fetchGlobalRootHistory</code> (finalized-first with confirmed fallback for instant spendability on confirmation: ~400ms today, ~150ms under Alpenglow), pass all input notes to <code>selectRootSnapshotForNotes</code>, and prepend <code>buildAutoOpenPageInstructions</code> on direct transactions with calibrated tight CU limits.</li>
                 </ul>
                 <div className={styles.cellFoot}>
                   <Link href="/architecture" className={styles.textLink}>

@@ -64,6 +64,7 @@ export interface NativeFeeQuote {
   feeSide: 'in' | 'out' | 'shielded_cm2'
   feeMint: string
   feeTokenProgram: string | null
+  feeDecimals: number
   feeRecipient: string | null
   feeShieldedAddress: string | null
   feeRecipientExists: boolean
@@ -84,24 +85,6 @@ export interface NativeFeeQuote {
   estimatedRelayCostLamports: string
   estimatedRelayCostUsd: number | null
   reason: string
-}
-
-export interface CheckpointResponse {
-  ok: true
-  cluster: Cluster
-  poolId: number
-  status: 'up_to_date' | 'cooldown' | 'published'
-  epoch: number
-  slotIdx?: number
-  slotsRemaining?: number
-  waitMs?: number
-  signature?: string
-  slot?: number
-  totalLeaves?: string
-  lastCkptTotalLeaves?: string
-  inFlight?: boolean
-  solscanUrl?: string
-  explorerUrl?: string
 }
 
 export interface MissingAtaPlan {

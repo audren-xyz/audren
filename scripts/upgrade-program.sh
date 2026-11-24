@@ -6,9 +6,13 @@ set -euo pipefail
 # Every program upgrade automatically enforces release compliance:
 #   1. Local drift verification (`idl/verify-idl.py`: IDLs, @audren/sdk, security.json,
 #      embedded .security.txt, Cargo.toml versions, and pinned Agave/sBPFv3 toolchain).
-#   2. sBPFv3 ELF64 header verification (`scripts/build-sbf.py --check-elf`).
+#   2. sBPFv3 ELF64 header verification (`scripts/build-sbf.py --check-elf`) and, on Mainnet,
+#      ELF-to-HEAD freshness verification against `program/target/deploy/audren.verifiable.json`
+#      (`elf_sha256`, `head_commit`, `program_tree`, `core_tree`, `version`, `worktree_clean`).
 #   3. Program deployment (two-step `write-buffer --use-rpc` + `deploy --buffer --use-rpc`
-#      on Mainnet to eliminate UDP/QUIC chunk drops and orphaned buffer leaks).
+#      on Mainnet to eliminate UDP/QUIC chunk drops and orphaned buffer leaks), followed
+#      IMMEDIATELY by idempotent Pool #0 `GlobalRootHistory` migration (`InitRootHistory`, Tag 4,
+#      unless `SKIP_INIT_ROOT_HISTORY=1`) so live Pool #0 never waits on metadata/verify/release.
 #   4. Automatic Solana Program Metadata sync (`security` + `idl`) with round-trip verification.
 #   5. On Mainnet: automatic Solana Verified Build attestation (Otter Verify PDA update +
 #      remote job submission to `verify.osec.io`) AND automatic GitHub tag + Release cutting
@@ -60,6 +64,7 @@ PROGRAM_WORKSPACE_PATH="program"
 PROGRAM_ID="${AUDREN_PROGRAM_ID:-AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3}"
 KEYPAIR="${AUDREN_KEYPAIR_PATH:-$ROOT/.credentials/funder.json}"
 VERIFIABLE_SO_PATH="$ROOT/program/target/deploy/audren.so"
+VERIFIABLE_META_PATH="$ROOT/program/target/deploy/audren.verifiable.json"
 LOCAL_SO_PATH="$ROOT/target/deploy/audren.so"
 IDL_PATH="$ROOT/idl/audren.codama.json"
 SECURITY_PATH="$ROOT/idl/security.json"
@@ -187,8 +192,10 @@ verify_onchain_metadata() {
   local seed="$1"
   local rpc_url="$2"
   local expected_path="$3"
-  local fetched attempt
-  fetched="$(mktemp "/tmp/audren-fetch-${seed}-XXXXXX.txt")"
+  local tmp_dir fetched attempt
+  tmp_dir="$(mktemp -d "/tmp/audren-meta-XXXXXX")"
+  _AUDREN_CLEANUP_PATHS+=("$tmp_dir")
+  fetched="${tmp_dir}/${seed}.txt"
   for attempt in 1 2 3 4; do
     if npx --yes "$PROGRAM_METADATA_PKG" fetch "$seed" \
       "$PROGRAM_ID" \
@@ -208,7 +215,7 @@ if actual != expected:
 print(f"Verified on-chain Program Metadata '{seed}' matches {expected_path} byte-for-byte.")
 PY
     then
-      rm -f "$fetched"
+      rm -rf "$tmp_dir"
       return 0
     fi
     if [[ "$attempt" -lt 4 ]]; then
@@ -216,7 +223,7 @@ PY
       sleep 3
     fi
   done
-  rm -f "$fetched"
+  rm -rf "$tmp_dir"
   echo "Error: failed to verify on-chain Program Metadata '${seed}' for $PROGRAM_ID after 4 attempts" >&2
   exit 1
 }
@@ -248,9 +255,10 @@ for m in re.findall(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", sys.stdin.read()):
 publish_idl() {
   local cluster="$1"
   local rpc_url="$2"
-  local min_idl solana_keygen
-  min_idl="$(mktemp /tmp/audren-idl-XXXXXX.json)"
-  _AUDREN_CLEANUP_PATHS+=("$min_idl")
+  local tmp_dir min_idl solana_keygen
+  tmp_dir="$(mktemp -d "/tmp/audren-meta-XXXXXX")"
+  _AUDREN_CLEANUP_PATHS+=("$tmp_dir")
+  min_idl="${tmp_dir}/idl.json"
   python3 -c "import json, pathlib, sys; pathlib.Path(sys.argv[2]).write_text(json.dumps(json.loads(pathlib.Path(sys.argv[1]).read_text()), separators=(',',':')))" "$IDL_PATH" "$min_idl"
 
   local authority
@@ -280,7 +288,7 @@ if after:
 PY
 )"
     if [[ -z "$new_buffer" ]]; then
-      rm -f "$min_idl"
+      rm -rf "$tmp_dir"
       echo "Error: direct IDL upload failed and no new buffer account was found." >&2
       exit 1
     fi
@@ -292,7 +300,7 @@ PY
       --keypair "$KEYPAIR" \
       --rpc "$rpc_url"; then
       npx --yes "$PROGRAM_METADATA_PKG" close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
-      rm -f "$min_idl"
+      rm -rf "$tmp_dir"
       exit 1
     fi
     if ! npx --yes "$PROGRAM_METADATA_PKG" write idl \
@@ -302,11 +310,11 @@ PY
       --keypair "$KEYPAIR" \
       --rpc "$rpc_url"; then
       npx --yes "$PROGRAM_METADATA_PKG" close "$new_buffer" --keypair "$KEYPAIR" --rpc "$rpc_url" >/dev/null 2>&1 || true
-      rm -f "$min_idl"
+      rm -rf "$tmp_dir"
       exit 1
     fi
   fi
-  rm -f "$min_idl"
+  rm -rf "$tmp_dir"
   verify_onchain_metadata idl "$rpc_url" "$IDL_PATH"
 }
 
@@ -343,6 +351,17 @@ build_verifiable() {
   command -v docker >/dev/null 2>&1 || { echo "Error: docker is required for verifiable builds" >&2; exit 1; }
   python3 "$ROOT/idl/verify-idl.py"
 
+  local head_commit program_tree core_tree version worktree_clean
+  head_commit="$(git rev-parse HEAD)"
+  program_tree="$(git rev-parse HEAD:program)"
+  core_tree="$(git rev-parse HEAD:crates/audren-core)"
+  version="$(read_program_version)"
+  if [[ -z "$(git status --porcelain -- program crates/audren-core)" ]]; then
+    worktree_clean="true"
+  else
+    worktree_clean="false"
+  fi
+
   echo "Building deterministic sBPFv3 binary (Agave ${AGAVE_VERSION}, tools ${TOOLS_VERSION}, arch ${SBF_ARCH})..."
   solana-verify build \
     --workspace-path "$PROGRAM_WORKSPACE_PATH" \
@@ -353,7 +372,122 @@ build_verifiable() {
 
   echo "Validating sBPFv3 ELF header..."
   python3 "$ROOT/scripts/build-sbf.py" --check-elf "$VERIFIABLE_SO_PATH"
-  solana-verify get-executable-hash "$VERIFIABLE_SO_PATH"
+  local exec_hash
+  exec_hash="$(solana-verify get-executable-hash "$VERIFIABLE_SO_PATH" | tail -n 1 | tr -d '[:space:]')"
+  echo "solana-verify executable hash: ${exec_hash}"
+
+  python3 - "$VERIFIABLE_SO_PATH" "$VERIFIABLE_META_PATH" "$head_commit" "$program_tree" "$core_tree" "$version" "$exec_hash" "$worktree_clean" "$AGAVE_VERSION" "$TOOLS_VERSION" "$SBF_ARCH" "$VERIFY_BASE_IMAGE" <<'PY'
+import datetime, hashlib, json, pathlib, sys
+
+(
+    so_path,
+    meta_path,
+    head_commit,
+    program_tree,
+    core_tree,
+    version,
+    exec_hash,
+    worktree_clean,
+    agave_version,
+    tools_version,
+    sbf_arch,
+    base_image,
+) = sys.argv[1:]
+
+elf = pathlib.Path(so_path).read_bytes()
+elf_sha256 = hashlib.sha256(elf).hexdigest()
+meta = {
+    "version": version,
+    "head_commit": head_commit,
+    "program_tree": program_tree,
+    "core_tree": core_tree,
+    "elf_sha256": elf_sha256,
+    "executable_hash": exec_hash,
+    "elf_bytes": len(elf),
+    "worktree_clean": worktree_clean == "true",
+    "agave_version": agave_version,
+    "tools_version": tools_version,
+    "sbf_arch": sbf_arch,
+    "base_image": base_image,
+    "built_at_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+pathlib.Path(meta_path).write_text(json.dumps(meta, indent=2) + "\n")
+print(
+    f"Stamped verifiable build manifest: {meta_path} "
+    f"(v{version}, {len(elf)} B, sha256={elf_sha256[:16]}..., head={head_commit[:12]}, clean={meta['worktree_clean']})"
+)
+PY
+  if [[ "$worktree_clean" != "true" ]]; then
+    echo "WARNING: working tree had uncommitted changes in program/ or crates/audren-core/ during build-verifiable. Commit and re-run build-verifiable before Mainnet deploy." >&2
+  fi
+}
+
+verify_verifiable_elf_freshness() {
+  local so_path="$1"
+  local expected_commit="$2"
+  local expected_version="$3"
+  if [[ ! -f "$VERIFIABLE_META_PATH" ]]; then
+    echo "Error: verifiable build freshness manifest missing at $VERIFIABLE_META_PATH." >&2
+    echo "Refusing to deploy an unattested or potentially stale ELF ($so_path)." >&2
+    echo "Rebuild on clean HEAD first: ./scripts/upgrade-program.sh build-verifiable" >&2
+    exit 1
+  fi
+  local expected_program_tree expected_core_tree
+  expected_program_tree="$(git rev-parse HEAD:program)"
+  expected_core_tree="$(git rev-parse HEAD:crates/audren-core)"
+  python3 - "$VERIFIABLE_META_PATH" "$so_path" "$expected_commit" "$expected_program_tree" "$expected_core_tree" "$expected_version" <<'PY'
+import hashlib, json, pathlib, sys
+
+meta_path, so_path, exp_commit, exp_prog_tree, exp_core_tree, exp_version = sys.argv[1:]
+try:
+    meta = json.loads(pathlib.Path(meta_path).read_text())
+except Exception as exc:
+    sys.exit(f"Error: failed to parse {meta_path}: {exc}. Re-run ./scripts/upgrade-program.sh build-verifiable.")
+
+elf = pathlib.Path(so_path).read_bytes()
+actual_sha = hashlib.sha256(elf).hexdigest()
+actual_bytes = len(elf)
+
+if meta.get("worktree_clean") is not True:
+    sys.exit(
+        f"Error: {meta_path} indicates the ELF was built from a dirty working tree. "
+        "Re-run ./scripts/upgrade-program.sh build-verifiable on clean committed HEAD."
+    )
+if meta.get("elf_sha256") != actual_sha:
+    sys.exit(
+        f"Error: stale or tampered ELF at {so_path} ({actual_bytes} B): "
+        f"actual sha256={actual_sha} != {meta_path} elf_sha256={meta.get('elf_sha256')}. "
+        "Re-run ./scripts/upgrade-program.sh build-verifiable."
+    )
+if "elf_bytes" in meta and meta.get("elf_bytes") != actual_bytes:
+    sys.exit(
+        f"Error: ELF size mismatch at {so_path}: actual={actual_bytes} B != {meta_path} elf_bytes={meta.get('elf_bytes')}."
+    )
+if meta.get("version") != exp_version:
+    sys.exit(
+        f"Error: stale verifiable ELF version in {meta_path}: {meta.get('version')} != program/Cargo.toml {exp_version}. "
+        "Re-run ./scripts/upgrade-program.sh build-verifiable."
+    )
+if meta.get("head_commit") != exp_commit:
+    sys.exit(
+        f"Error: stale verifiable ELF in {meta_path}: head_commit={meta.get('head_commit')} != HEAD {exp_commit}. "
+        "Re-run ./scripts/upgrade-program.sh build-verifiable."
+    )
+if meta.get("program_tree") != exp_prog_tree:
+    sys.exit(
+        f"Error: stale verifiable ELF in {meta_path}: program_tree={meta.get('program_tree')} != HEAD:program {exp_prog_tree}. "
+        "Re-run ./scripts/upgrade-program.sh build-verifiable."
+    )
+if meta.get("core_tree") != exp_core_tree:
+    sys.exit(
+        f"Error: stale verifiable ELF in {meta_path}: core_tree={meta.get('core_tree')} != HEAD:crates/audren-core {exp_core_tree}. "
+        "Re-run ./scripts/upgrade-program.sh build-verifiable."
+    )
+print(
+    f"Verified verifiable ELF freshness ({so_path}: v{exp_version}, {actual_bytes} B, "
+    f"sha256={actual_sha[:16]}..., HEAD={exp_commit[:12]}, program_tree & core_tree matched)."
+)
+PY
 }
 
 verify_onchain_build() {
@@ -528,7 +662,7 @@ solana-verify verify-from-repo -um \\
 
 - \`audren.so\` — deterministic \`sBPFv3\` binary (\`${elf_bytes} B\`, embedded \`.security.txt\`)
 - \`audren.so.sha256\` — raw SHA-256 and \`solana-verify\` executable hash manifest
-- \`audren_joinsplit.pk\` — compressed BN254 Groth16 ceremony proving key (\`${pk_bytes} B\`, Perpetual Powers of Tau 71+ contributors + BGM17 Phase-2 ceremony)
+- \`audren_joinsplit.pk\` — compressed BN254 Groth16 ceremony proving key (\`${pk_bytes} B\`, Hermez Perpetual Powers of Tau (54 contributions + beacon) + Audren BGM17 Phase-2 ceremony)
 - \`transcript.json\` — pairing-verifiable Groth16 ceremony transcript (Schnorr PoKs, G1/G2 deltas, live drand Quicknet & Solana Mainnet finalized beacon)
 - \`audren.codama.json\` — canonical Codama v1.8.0 IDL
 - \`audren.anchor.json\` — Anchor v0.30+ compatible IDL
@@ -579,37 +713,86 @@ check_compliance() {
   verify_onchain_metadata idl "$rpc_url" "$IDL_PATH"
 
   if [[ "$cluster" == "mainnet" ]]; then
+    local version tag
+    version="$(read_program_version)"
+    tag="v${version}"
+
     echo "3. Checking OtterSec Verified Build status & apps/web/lib/protocol.ts parity (https://verify.osec.io/status/${PROGRAM_ID})..."
-    local status_json
+    local status_json local_exec_hash
     status_json="$(curl -fsS "https://verify.osec.io/status/${PROGRAM_ID}")"
-    python3 - "$status_json" "$ROOT/apps/web/lib/protocol.ts" <<'PY'
-import json, pathlib, re, sys
+    local_exec_hash=""
+    if [[ -f "$VERIFIABLE_SO_PATH" ]] && command -v solana-verify >/dev/null 2>&1; then
+      local_exec_hash="$(solana-verify get-executable-hash "$VERIFIABLE_SO_PATH" | tail -n 1 | tr -d '[:space:]')"
+    fi
+    python3 - "$status_json" "$ROOT/apps/web/lib/protocol.ts" "$tag" "$VERIFIABLE_SO_PATH" "$local_exec_hash" <<'PY'
+import hashlib, json, pathlib, re, sys
 data = json.loads(sys.argv[1])
 proto = pathlib.Path(sys.argv[2]).read_text()
+expected_tag = sys.argv[3]
+so_path = pathlib.Path(sys.argv[4])
+local_exec_hash = sys.argv[5].strip()
 print(json.dumps(data, indent=2))
 if not data.get("is_verified"):
     sys.exit("Compliance check incomplete: Mainnet Verified Build is not yet verified (run build-verifiable + mainnet upgrade).")
 exec_hash = re.search(r"\bexecutableHash:\s*'([0-9a-f]{64})'", proto).group(1)
 verified_commit = re.search(r"\bverifiedCommit:\s*'([0-9a-f]{40})'", proto).group(1)
+deployed_tag_m = re.search(r"\bdeployedReleaseTag:\s*'([^']+)'", proto)
+if not deployed_tag_m or deployed_tag_m.group(1) != expected_tag:
+    sys.exit(
+        f"Drift detected: apps/web/lib/protocol.ts deployedReleaseTag "
+        f"({deployed_tag_m.group(1) if deployed_tag_m else None}) != {expected_tag}"
+    )
+deployed_url_m = re.search(r"\bdeployedReleaseUrl:\s*'([^']+)'", proto)
+if not deployed_url_m or not deployed_url_m.group(1).endswith(f"/releases/tag/{expected_tag}"):
+    sys.exit(
+        f"Drift detected: apps/web/lib/protocol.ts deployedReleaseUrl "
+        f"({deployed_url_m.group(1) if deployed_url_m else None}) does not end with /releases/tag/{expected_tag}"
+    )
+elf_sha_m = re.search(r"\belfSha256:\s*'([0-9a-f]{64})'", proto)
+if not elf_sha_m:
+    sys.exit("Drift detected: apps/web/lib/protocol.ts missing elfSha256")
+elf_sha = elf_sha_m.group(1)
+elf_bytes_m = re.search(r"\belfBytes:\s*([0-9_]+)", proto)
+if not elf_bytes_m:
+    sys.exit("Drift detected: apps/web/lib/protocol.ts missing elfBytes")
+proto_elf_bytes = int(elf_bytes_m.group(1).replace("_", ""))
+
 if data.get("on_chain_hash") != exec_hash or data.get("executable_hash") != exec_hash:
     sys.exit(f"Drift detected: apps/web/lib/protocol.ts executableHash ({exec_hash}) != Mainnet verified hash ({data.get('on_chain_hash')})")
 if data.get("commit") != verified_commit:
     sys.exit(f"Drift detected: apps/web/lib/protocol.ts verifiedCommit ({verified_commit}) != Mainnet verified commit ({data.get('commit')})")
-print("Verified apps/web/lib/protocol.ts matches live Mainnet verified build hash & commit.")
+
+if so_path.is_file():
+    if local_exec_hash and local_exec_hash != data.get("on_chain_hash"):
+        sys.exit(
+            f"Drift detected: local verifiable ELF {so_path} executable hash ({local_exec_hash}) "
+            f"!= live Mainnet on_chain_hash ({data.get('on_chain_hash')}); rebuild with ./scripts/upgrade-program.sh build-verifiable."
+        )
+    elf_raw = so_path.read_bytes()
+    actual_elf_sha = hashlib.sha256(elf_raw).hexdigest()
+    if elf_sha != actual_elf_sha:
+        sys.exit(
+            f"Drift detected: apps/web/lib/protocol.ts elfSha256 ({elf_sha}) != deployed binary SHA-256 ({actual_elf_sha})"
+        )
+    if proto_elf_bytes != len(elf_raw):
+        sys.exit(
+            f"Drift detected: apps/web/lib/protocol.ts elfBytes ({proto_elf_bytes}) != deployed binary size ({len(elf_raw)} B)"
+        )
+    print(f"Verified apps/web/lib/protocol.ts matches live Mainnet verified build ({expected_tag}, commit, executableHash, elfSha256 & {len(elf_raw)} B ELF).")
+else:
+    print(f"Verified apps/web/lib/protocol.ts matches live Mainnet verified build ({expected_tag}, commit & executableHash; verifying elfSha256 via release manifest in step 4).")
 PY
 
-    local version tag
-    version="$(read_program_version)"
-    tag="v${version}"
     echo "4. Checking GitHub Release ${tag} (${REPO_URL}/releases/tag/${tag})..."
     local release_json
     release_json="$(curl -fsS "https://api.github.com/repos/${REPO_OWNER_NAME}/releases/tags/${tag}")"
-    python3 - "$release_json" "$tag" <<'PY'
+    local sha_asset_url sha_manifest
+    sha_asset_url="$(python3 - "$release_json" "$tag" <<'PY'
 import json, sys
 rel = json.loads(sys.argv[1])
 tag = sys.argv[2]
 assert rel.get("tag_name") == tag, f"Release tag mismatch: {rel.get('tag_name')} != {tag}"
-assets = {a["name"] for a in rel.get("assets", [])}
+assets = {a["name"]: a.get("browser_download_url", "") for a in rel.get("assets", [])}
 required = {
     "audren.so",
     "audren.so.sha256",
@@ -619,10 +802,39 @@ required = {
     "audren.anchor.json",
     "security.json",
 }
-missing = required - assets
+missing = required - set(assets.keys())
 if missing:
     sys.exit(f"GitHub Release {tag} missing required assets: {sorted(missing)}")
-print(f"Verified GitHub Release {tag} ({rel.get('html_url')}) with all {len(required)} release assets.")
+print(assets["audren.so.sha256"])
+PY
+)"
+    sha_manifest="$(curl -fsSL "$sha_asset_url")"
+    python3 - "$sha_manifest" "$status_json" "$ROOT/apps/web/lib/protocol.ts" "$tag" <<'PY'
+import json, pathlib, re, sys
+manifest, status_raw, proto_path, tag = sys.argv[1:]
+data = json.loads(status_raw)
+proto = pathlib.Path(proto_path).read_text()
+proto_elf_sha = re.search(r"\belfSha256:\s*'([0-9a-f]{64})'", proto).group(1)
+proto_elf_bytes = int(re.search(r"\belfBytes:\s*([0-9_]+)", proto).group(1).replace("_", ""))
+
+raw_m = re.search(r"(?m)^([0-9a-f]{64})\s+audren\.so\s*$", manifest)
+exec_m = re.search(r"(?m)^#\s*solana-verify executable hash:\s*([0-9a-f]{64})\s*$", manifest)
+bytes_m = re.search(r"(?m)^#\s*elf_bytes:\s*(\d+)\s*$", manifest)
+if not raw_m or not exec_m:
+    sys.exit(f"Drift detected: GitHub Release {tag} audren.so.sha256 manifest is malformed:\n{manifest}")
+if exec_m.group(1) != data.get("on_chain_hash"):
+    sys.exit(
+        f"Drift detected: GitHub Release {tag} executable hash ({exec_m.group(1)}) != live Mainnet on_chain_hash ({data.get('on_chain_hash')})"
+    )
+if raw_m.group(1) != proto_elf_sha:
+    sys.exit(
+        f"Drift detected: apps/web/lib/protocol.ts elfSha256 ({proto_elf_sha}) != GitHub Release {tag} audren.so SHA-256 ({raw_m.group(1)})"
+    )
+if bytes_m and int(bytes_m.group(1)) != proto_elf_bytes:
+    sys.exit(
+        f"Drift detected: apps/web/lib/protocol.ts elfBytes ({proto_elf_bytes}) != GitHub Release {tag} elf_bytes ({bytes_m.group(1)})"
+    )
+print(f"Verified GitHub Release {tag} with all 7 release assets and exact elfSha256/on_chain_hash parity ({raw_m.group(1)[:16]}...).")
 PY
 
     echo "5. Checking GitHub org & repository metadata (${REPO_URL})..."
@@ -746,14 +958,32 @@ case "$1" in
     echo "Pre-flight: verifying local IDLs, security metadata, and toolchain pins..."
     python3 "$ROOT/idl/verify-idl.py"
 
+    EXPECTED_VERSION="$(read_program_version)"
+
     if [[ -n "${AUDREN_SO_PATH:-}" ]]; then
       SO_PATH="$AUDREN_SO_PATH"
     elif [[ "$CLUSTER" == "mainnet" ]]; then
       SO_PATH="$VERIFIABLE_SO_PATH"
-    elif [[ -f "$VERIFIABLE_SO_PATH" ]]; then
-      SO_PATH="$VERIFIABLE_SO_PATH"
     else
-      SO_PATH="$LOCAL_SO_PATH"
+      DEVNET_VERIFIABLE_FRESH=0
+      if [[ -f "$VERIFIABLE_SO_PATH" ]] \
+        && git -C "$ROOT" diff --quiet HEAD -- program crates/audren-core \
+        && git -C "$ROOT" diff --cached --quiet HEAD -- program crates/audren-core \
+        && [[ -z "$(git -C "$ROOT" ls-files --others --exclude-standard -- program crates/audren-core)" ]] \
+        && ( verify_verifiable_elf_freshness "$VERIFIABLE_SO_PATH" "$(git -C "$ROOT" rev-parse HEAD)" "$EXPECTED_VERSION" ) >/dev/null 2>&1; then
+        DEVNET_VERIFIABLE_FRESH=1
+      fi
+      if [[ "$DEVNET_VERIFIABLE_FRESH" == "1" ]] && [[ ! -f "$LOCAL_SO_PATH" || "$VERIFIABLE_SO_PATH" -nt "$LOCAL_SO_PATH" ]]; then
+        SO_PATH="$VERIFIABLE_SO_PATH"
+      elif [[ -f "$LOCAL_SO_PATH" ]]; then
+        SO_PATH="$LOCAL_SO_PATH"
+      elif [[ -f "$VERIFIABLE_SO_PATH" ]]; then
+        echo "Error: verifiable ELF at $VERIFIABLE_SO_PATH is stale for current program/crates/audren-core and local ELF $LOCAL_SO_PATH is absent." >&2
+        echo "Rebuild via: ./scripts/upgrade-program.sh build-verifiable  (or python3 scripts/build-sbf.py --manifest-path program/Cargo.toml --sbf-out-dir target/deploy)" >&2
+        exit 1
+      else
+        SO_PATH="$LOCAL_SO_PATH"
+      fi
     fi
 
     if [[ ! -f "$SO_PATH" ]]; then
@@ -768,8 +998,11 @@ case "$1" in
     fi
 
     echo "Pre-flight: verifying sBPFv3 ELF header & embedded .security.txt version ($SO_PATH)..."
-    python3 "$ROOT/scripts/build-sbf.py" --check-elf "$SO_PATH"
-    EXPECTED_VERSION="$(read_program_version)"
+    if [[ "$SO_PATH" == "$LOCAL_SO_PATH" && -f "${LOCAL_SO_PATH%.so}.build.json" ]]; then
+      python3 "$ROOT/scripts/build-sbf.py" --check "$SO_PATH"
+    else
+      python3 "$ROOT/scripts/build-sbf.py" --check-elf "$SO_PATH"
+    fi
     python3 - "$SO_PATH" "$EXPECTED_VERSION" <<'PY'
 import pathlib, sys
 elf = pathlib.Path(sys.argv[1]).read_bytes()
@@ -786,6 +1019,62 @@ PY
       fi
       require_solana_verify
       COMMIT_SHA="$(resolve_verified_commit "$COMMIT_ARG" 1)"
+      verify_verifiable_elf_freshness "$SO_PATH" "$COMMIT_SHA" "$EXPECTED_VERSION"
+    fi
+
+    if [[ "${SKIP_INIT_ROOT_HISTORY:-0}" != "1" ]]; then
+      command -v node >/dev/null 2>&1 || {
+        echo "Error: node is required for immediate post-deploy Pool #0 InitRootHistory migration (or set SKIP_INIT_ROOT_HISTORY=1)." >&2
+        exit 1
+      }
+      echo "Pre-flight: verifying @audren/sdk ESM dist & runtime imports for Step [1c] InitRootHistory..."
+      if ! (
+        cd "$ROOT" && node --input-type=module <<'JS'
+import {
+  buildInitRootHistoryInstruction,
+  decodeGlobalRootHistory,
+  deriveRootsPdaSync,
+  CU_LIMIT_INIT_ROOT_HISTORY,
+  DEFAULT_ROOT_EPOCH_INTERVAL,
+  ROOT_RING_EPOCH,
+  ROOT_RING_SLOT,
+  fetchGlobalRootHistory,
+  selectRootSnapshotForNotes,
+  planAutoOpenPages,
+  buildAutoOpenPageInstructions,
+} from './packages/sdk/dist/index.js';
+import {
+  AudrenWasmProver,
+  dummyInputWitness,
+  dummyOutputWitness,
+} from './packages/sdk/dist/prover-entry.js';
+import { ed25519 } from './packages/sdk/node_modules/@noble/curves/ed25519.js';
+
+if (
+  typeof buildInitRootHistoryInstruction !== 'function' ||
+  typeof decodeGlobalRootHistory !== 'function' ||
+  typeof deriveRootsPdaSync !== 'function' ||
+  typeof CU_LIMIT_INIT_ROOT_HISTORY !== 'number' ||
+  typeof DEFAULT_ROOT_EPOCH_INTERVAL !== 'bigint' ||
+  typeof ROOT_RING_EPOCH !== 'number' ||
+  typeof ROOT_RING_SLOT !== 'number' ||
+  typeof fetchGlobalRootHistory !== 'function' ||
+  typeof selectRootSnapshotForNotes !== 'function' ||
+  typeof planAutoOpenPages !== 'function' ||
+  typeof buildAutoOpenPageInstructions !== 'function' ||
+  typeof AudrenWasmProver !== 'function' ||
+  typeof dummyInputWitness !== 'function' ||
+  typeof dummyOutputWitness !== 'function' ||
+  typeof ed25519?.getPublicKey !== 'function'
+) {
+  throw new Error('Stale or incomplete @audren/sdk ESM exports for InitRootHistory.');
+}
+JS
+      ); then
+        echo "Error: @audren/sdk ESM dist or runtime dependencies are missing/stale for post-deploy Pool #0 InitRootHistory migration." >&2
+        echo "Run: pnpm --dir packages/sdk build  (and pnpm --dir packages/sdk install if @noble/curves is missing, or set SKIP_INIT_ROOT_HISTORY=1)." >&2
+        exit 1
+      fi
     fi
 
     SOLANA_BIN="$(resolve_solana_cli)"
@@ -853,6 +1142,32 @@ PY
         --url "$RPC_URL"
     fi
 
+    if [[ "${SKIP_INIT_ROOT_HISTORY:-0}" != "1" ]]; then
+      echo "  [1c] Immediately ensuring Pool #0 GlobalRootHistory PDA is initialized on $CLUSTER (idempotent Tag 4 InitRootHistory)..."
+      INIT_RT_OK=0
+      for attempt in 1 2 3; do
+        if AUDREN_KEYPAIR_PATH="$KEYPAIR" \
+          AUDREN_PROGRAM_ID="$PROGRAM_ID" \
+          MAINNET_RPC_URL="$RPC_URL" \
+          DEVNET_RPC_URL="$RPC_URL" \
+          node "$ROOT/scripts/live-cluster-e2e.mjs" --cluster "$CLUSTER" --init-root-history; then
+          INIT_RT_OK=1
+          break
+        fi
+        if [[ "$attempt" -lt 3 ]]; then
+          echo "  InitRootHistory attempt ${attempt}/3 hit transient RPC propagation lag after deploy; retrying in 2s..." >&2
+          sleep 2
+        fi
+      done
+      if [[ "$INIT_RT_OK" != "1" ]]; then
+        echo "Error: automatic post-deploy Pool #0 InitRootHistory failed on $CLUSTER after 3 attempts." >&2
+        echo "Run immediately: AUDREN_PROGRAM_ID=$PROGRAM_ID node scripts/live-cluster-e2e.mjs --cluster $CLUSTER --init-root-history" >&2
+        exit 1
+      fi
+    else
+      echo "  [1c] Skipping automatic Pool #0 InitRootHistory (SKIP_INIT_ROOT_HISTORY=1)."
+    fi
+
     echo "Step 2/${TOTAL_STEPS}: Syncing canonical Program Metadata (security + idl) on $CLUSTER..."
     publish_security "$CLUSTER" "$RPC_URL"
     publish_idl "$CLUSTER" "$RPC_URL"
@@ -862,6 +1177,9 @@ PY
       verify_onchain_build "$CLUSTER" "$RPC_URL" "$COMMIT_SHA"
       echo "Step 4/${TOTAL_STEPS}: Tagging & publishing GitHub Release..."
       publish_github_release "$COMMIT_SHA"
+      echo ""
+      echo "Next: update apps/web/lib/protocol.ts + docs/DEPLOYMENTS.md with the v${EXPECTED_VERSION} commit & ELF SHA-256,"
+      echo "run 'python3 idl/verify-idl.py', deploy apps/web, and then run './scripts/upgrade-program.sh check mainnet'."
     elif [[ "$CLUSTER" == "mainnet" ]]; then
       echo "WARNING: ALLOW_UNVERIFIED_DEPLOY=1 skipped Verified Build attestation and GitHub Release. Run './scripts/upgrade-program.sh verify mainnet --commit <sha>' and './scripts/upgrade-program.sh release --commit <sha>' to restore compliance." >&2
     else

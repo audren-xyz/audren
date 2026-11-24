@@ -56,16 +56,27 @@ export interface CompiledV1Message {
   signerPubkeys: Uint8Array[];
 }
 
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
+
 function bytesToHex(bytes: Uint8Array): string {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new RangeError(`Expected Uint8Array, got ${String(bytes)}`);
+  }
   let out = '';
-  for (let i = 0; i < bytes.length; i++) {
+  for (let i = 0; i < bytes.byteLength; i++) {
     out += bytes[i]!.toString(16).padStart(2, '0');
   }
   return out;
 }
 
 function concatBytes(...chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+  let total = 0;
+  for (const c of chunks) {
+    if (!(c instanceof Uint8Array)) {
+      throw new RangeError(`Expected Uint8Array chunk, got ${String(c)}`);
+    }
+    total += c.byteLength;
+  }
   const out = new Uint8Array(total);
   let off = 0;
   for (const c of chunks) {
@@ -103,21 +114,35 @@ export function compileV1Message(params: {
   instructions: V1Instruction[];
   config: V1TransactionConfig;
 }): CompiledV1Message {
+  if (!params || typeof params !== 'object') {
+    throw new RangeError('compileV1Message params must be an object');
+  }
   const { feePayer, recentBlockhash, instructions, config } = params;
-  if (feePayer.byteLength !== 32) {
-    throw new Error(`feePayer must be 32 bytes, got ${feePayer.byteLength}`);
+  if (!(feePayer instanceof Uint8Array) || feePayer.byteLength !== 32) {
+    throw new RangeError(
+      `feePayer must be a 32-byte Uint8Array, got ${feePayer instanceof Uint8Array ? feePayer.byteLength : String(feePayer)}`,
+    );
   }
-  if (recentBlockhash.byteLength !== 32) {
-    throw new Error(`recentBlockhash must be 32 bytes, got ${recentBlockhash.byteLength}`);
+  if (!(recentBlockhash instanceof Uint8Array) || recentBlockhash.byteLength !== 32) {
+    throw new RangeError(
+      `recentBlockhash must be a 32-byte Uint8Array, got ${recentBlockhash instanceof Uint8Array ? recentBlockhash.byteLength : String(recentBlockhash)}`,
+    );
   }
-  if (instructions.length === 0 || instructions.length > 64) {
-    throw new Error(`V1 instruction count must be 1..=64, got ${instructions.length}`);
+  if (!Array.isArray(instructions) || instructions.length === 0 || instructions.length > 64) {
+    throw new RangeError(
+      `V1 instruction count must be 1..=64, got ${Array.isArray(instructions) ? instructions.length : String(instructions)}`,
+    );
+  }
+  if (!config || typeof config !== 'object') {
+    throw new RangeError('config must be an object');
   }
 
   const map = new Map<string, V1AccountMeta>();
   const addMeta = (m: V1AccountMeta) => {
-    if (m.pubkey.byteLength !== 32) {
-      throw new Error(`account pubkey must be 32 bytes, got ${m.pubkey.byteLength}`);
+    if (!m || typeof m !== 'object' || !(m.pubkey instanceof Uint8Array) || m.pubkey.byteLength !== 32) {
+      throw new RangeError(
+        `account pubkey must be a 32-byte Uint8Array, got ${m && m.pubkey instanceof Uint8Array ? m.pubkey.byteLength : String(m?.pubkey)}`,
+      );
     }
     const k = bytesToHex(m.pubkey);
     const prev = map.get(k);
@@ -131,6 +156,17 @@ export function compileV1Message(params: {
 
   addMeta({ pubkey: feePayer, isSigner: true, isWritable: true });
   for (const ix of instructions) {
+    if (!ix || typeof ix !== 'object' || !Array.isArray(ix.accounts)) {
+      throw new RangeError('Each V1Instruction must be an object with an accounts array');
+    }
+    if (!(ix.programId instanceof Uint8Array) || ix.programId.byteLength !== 32) {
+      throw new RangeError(
+        `instruction programId must be a 32-byte Uint8Array, got ${ix.programId instanceof Uint8Array ? ix.programId.byteLength : String(ix.programId)}`,
+      );
+    }
+    if (!(ix.data instanceof Uint8Array)) {
+      throw new RangeError(`instruction data must be a Uint8Array, got ${String(ix.data)}`);
+    }
     for (const acc of ix.accounts) addMeta(acc);
     addMeta({ pubkey: ix.programId, isSigner: false, isWritable: false });
   }
@@ -160,8 +196,14 @@ export function compileV1Message(params: {
   let configMask = 0;
   const configValues: Uint8Array[] = [];
   if (config.priorityFeeLamports !== undefined) {
-    if (config.priorityFeeLamports < 0n || config.priorityFeeLamports > 0xffff_ffff_ffff_ffffn) {
-      throw new RangeError(`Invalid priorityFeeLamports (must be u64): ${config.priorityFeeLamports}`);
+    if (
+      typeof config.priorityFeeLamports !== 'bigint' ||
+      config.priorityFeeLamports < 0n ||
+      config.priorityFeeLamports > U64_MAX
+    ) {
+      throw new RangeError(
+        `Invalid priorityFeeLamports (must be u64 bigint): ${String(config.priorityFeeLamports)}`,
+      );
     }
     configMask |= CONFIG_MASK_PRIORITY_FEE;
     configValues.push(u64le(config.priorityFeeLamports));
@@ -181,8 +223,13 @@ export function compileV1Message(params: {
   configValues.push(u32le(loadedLimit));
 
   if (config.heapSize !== undefined) {
-    if (config.heapSize % 1024 !== 0 || config.heapSize < 32 * 1024 || config.heapSize > 256 * 1024) {
-      throw new Error(`Invalid V1 heapSize: ${config.heapSize}`);
+    if (
+      !Number.isInteger(config.heapSize) ||
+      config.heapSize % 1024 !== 0 ||
+      config.heapSize < 32 * 1024 ||
+      config.heapSize > 256 * 1024
+    ) {
+      throw new RangeError(`Invalid V1 heapSize: ${String(config.heapSize)}`);
     }
     configMask |= CONFIG_MASK_HEAP_SIZE;
     configValues.push(u32le(config.heapSize));
@@ -199,7 +246,7 @@ export function compileV1Message(params: {
       throw new Error(`Instruction account count ${ix.accounts.length} exceeds 255`);
     }
     if (ix.data.byteLength > 65_535) {
-      throw new Error(`Instruction data length ${ix.data.byteLength} exceeds 65,535`);
+      throw new RangeError(`Instruction data length ${ix.data.byteLength} exceeds 65,535`);
     }
     const accIndices = new Uint8Array(ix.accounts.map((a) => indexByHex.get(bytesToHex(a.pubkey))!));
     ixHeaders.push(
@@ -240,14 +287,32 @@ export function serializeV1Transaction(
   compiled: CompiledV1Message,
   signatures: Uint8Array[],
 ): Uint8Array {
+  if (!compiled || typeof compiled !== 'object') {
+    throw new RangeError('compiled must be a CompiledV1Message object');
+  }
+  if (!(compiled.messageBytes instanceof Uint8Array)) {
+    throw new RangeError(
+      `compiled.messageBytes must be a Uint8Array, got ${String(compiled.messageBytes)}`,
+    );
+  }
+  if (!Number.isInteger(compiled.numRequiredSignatures) || compiled.numRequiredSignatures < 0) {
+    throw new RangeError(
+      `compiled.numRequiredSignatures must be a non-negative integer, got ${String(compiled.numRequiredSignatures)}`,
+    );
+  }
+  if (!Array.isArray(signatures)) {
+    throw new RangeError('signatures must be an array of 64-byte Uint8Arrays');
+  }
   if (signatures.length !== compiled.numRequiredSignatures) {
-    throw new Error(
+    throw new RangeError(
       `Expected ${compiled.numRequiredSignatures} signatures, got ${signatures.length}`,
     );
   }
   for (const sig of signatures) {
-    if (sig.byteLength !== 64) {
-      throw new Error(`Signature must be 64 bytes, got ${sig.byteLength}`);
+    if (!(sig instanceof Uint8Array) || sig.byteLength !== 64) {
+      throw new RangeError(
+        `Signature must be a 64-byte Uint8Array, got ${sig instanceof Uint8Array ? sig.byteLength : String(sig)}`,
+      );
     }
   }
   const wireBytes = concatBytes(compiled.messageBytes, ...signatures);

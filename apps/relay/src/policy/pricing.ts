@@ -1,7 +1,104 @@
+import { computeToken2022NetAmount, type Token2022TransferFee } from '@audren/sdk'
 import type { Env, RelayPolicyConfig } from '../env'
-import { WSOL_MINT_STR } from '../solana/codec'
+import { TOKEN_2022_PROGRAM_ID_STR, WSOL_MINT_STR } from '../solana/codec'
 import type { LiveRentSchedule } from '../solana/rpc'
 import type { Cluster, NativeFeeQuote, SwapFeePlan } from '../types'
+
+/**
+ * Estimate exact rent-exemption lamports for a canonical SPL or Token-2022 ATA:
+ *   - Classic SPL (`165 B` -> `293` storage bytes): `ataRent` (`2_039_280` lamports at mainnet rent)
+ *   - Token-2022 base (`165 + 1 + 4 = 170 B` `ImmutableOwner` -> `298` storage bytes):
+ *     `ceil(ataRent * 298 / 293)` (`2_074_080` lamports)
+ *   - Token-2022 with required account extensions (e.g. `TransferFeeAmount` `182 B`,
+ *     `TransferHookAccount` `175 B`, `TransferFeeAmount + TransferHookAccount` `187 B`,
+ *     `PausableAccount` / `NonTransferableAccount` `+4 B`):
+ *     `ceil(ataRent * (ataByteLen + 128) / 293)`
+ */
+export function estimateAtaRentLamports(
+  ataRent: bigint,
+  tokenProgram: string | null | undefined,
+  ataByteLenOrHasTransferFeeExt: number | boolean = false,
+): bigint {
+  if (ataRent <= 0n) return 0n
+  if (tokenProgram === TOKEN_2022_PROGRAM_ID_STR) {
+    const byteLen =
+      typeof ataByteLenOrHasTransferFeeExt === 'number'
+        ? Math.max(170, Math.trunc(ataByteLenOrHasTransferFeeExt))
+        : ataByteLenOrHasTransferFeeExt
+          ? 182
+          : 170
+    return (ataRent * BigInt(byteLen + 128) + 292n) / 293n
+  }
+  if (typeof ataByteLenOrHasTransferFeeExt === 'number') {
+    const byteLen = Math.max(165, Math.trunc(ataByteLenOrHasTransferFeeExt))
+    return byteLen === 165 ? ataRent : (ataRent * BigInt(byteLen + 128) + 292n) / 293n
+  }
+  return ataRent
+}
+
+/**
+ * Gross up a required net token-unit fee to survive `hops` (`2` = receipt + liquidation) of an
+ * active Token-2022 `TransferFeeConfig` schedule so BOTH:
+ *   - Mode 1 (`gross - 2 * singleFee(gross)`) >= `netRequired`
+ *   - Mode 2 / Mode 3 (`net(net(gross))`) >= `netRequired`
+ */
+export function grossUpToken2022Amount(
+  netRequired: bigint,
+  fee: Token2022TransferFee | null | undefined,
+  hops: 1 | 2 = 2,
+): bigint {
+  if (netRequired <= 0n) return 0n
+  if (!fee || fee.bps <= 0n) return netRequired
+  const hopMult = BigInt(hops)
+  const effectiveBps = fee.bps * hopMult
+  if (effectiveBps >= 10_000n) {
+    return netRequired + hopMult * fee.maxFee
+  }
+  const denom = 10_000n - effectiveBps
+  const byBps = (netRequired * 10_000n + denom - 1n) / denom
+  const byCap = netRequired + hopMult * fee.maxFee
+  let gross = byBps < byCap ? byBps : byCap
+  const netAfterHops = (g: bigint): bigint => {
+    const afterOne = computeToken2022NetAmount(g, fee)
+    const singleFee = g > afterOne ? g - afterOne : 0n
+    const totalFee = hops === 1 ? singleFee : singleFee * 2n
+    return g > totalFee ? g - totalFee : 0n
+  }
+  for (let i = 0; i < 6 && netAfterHops(gross) < netRequired; i++) {
+    gross += 1n
+  }
+  return gross
+}
+
+function lamportsToGrossTokenUnits(params: {
+  costLamports: bigint
+  marginBps: number
+  mint: string
+  decimals: number
+  solPriceUsd: number | null
+  tokenPriceUsd: number | null
+  transferFee?: Token2022TransferFee | null
+}): bigint | null {
+  const { costLamports, marginBps, mint, decimals, solPriceUsd, tokenPriceUsd, transferFee } = params
+  const clampedMarginBps = BigInt(Math.max(marginBps, 10_000))
+  const requiredLamports = (costLamports * clampedMarginBps + 9_999n) / 10_000n
+  if (mint === WSOL_MINT_STR) {
+    return requiredLamports
+  }
+  if (!solPriceUsd || solPriceUsd <= 0 || !tokenPriceUsd || tokenPriceUsd <= 0) {
+    return null
+  }
+  const scale = Math.pow(10, Math.max(0, decimals))
+  const neededUi = ((Number(requiredLamports) / 1e9) * solPriceUsd) / tokenPriceUsd
+  if (!Number.isFinite(neededUi) || neededUi <= 0) return null
+  let netUnits = BigInt(Math.max(1, Math.ceil(neededUi * scale)))
+  const valuedLamports = (u: bigint) =>
+    BigInt(Math.max(0, Math.floor((((Number(u) / scale) * tokenPriceUsd) / solPriceUsd) * 1e9)))
+  if (valuedLamports(netUnits) < requiredLamports) {
+    netUnits += 1n
+  }
+  return grossUpToken2022Amount(netUnits, transferFee, 2)
+}
 
 interface CachedPrice {
   usd: number
@@ -10,6 +107,34 @@ interface CachedPrice {
 
 const PRICE_CACHE = new Map<string, CachedPrice>()
 const PRICE_TTL_MS = 60_000
+export const PRICE_CACHE_MAX_ENTRIES = 512
+
+function setBoundedPriceCache(key: string, entry: CachedPrice, now: number): void {
+  if (PRICE_CACHE.has(key)) {
+    PRICE_CACHE.delete(key)
+  }
+  if (PRICE_CACHE.size >= PRICE_CACHE_MAX_ENTRIES) {
+    for (const [k, v] of PRICE_CACHE) {
+      if (now - v.fetchedAt >= PRICE_TTL_MS) {
+        PRICE_CACHE.delete(k)
+      }
+    }
+  }
+  while (PRICE_CACHE.size >= PRICE_CACHE_MAX_ENTRIES) {
+    const oldestKey = PRICE_CACHE.keys().next().value
+    if (oldestKey === undefined) break
+    PRICE_CACHE.delete(oldestKey)
+  }
+  PRICE_CACHE.set(key, entry)
+}
+
+export function getPriceCacheSize(): number {
+  return PRICE_CACHE.size
+}
+
+export function clearPriceCache(): void {
+  PRICE_CACHE.clear()
+}
 
 /**
  * Dynamically fetch live USD prices for ANY set of Solana mints via Jupiter Price API v3
@@ -27,8 +152,11 @@ export async function fetchMintPricesUsd(
     const cached = PRICE_CACHE.get(m)
     if (cached && now - cached.fetchedAt < PRICE_TTL_MS) {
       out[m] = cached.usd
-    } else if (!missing.includes(m)) {
-      missing.push(m)
+    } else {
+      if (cached) PRICE_CACHE.delete(m)
+      if (!missing.includes(m)) {
+        missing.push(m)
+      }
     }
   }
 
@@ -60,7 +188,7 @@ export async function fetchMintPricesUsd(
           const val = Number(entry?.usdPrice ?? entry?.price ?? NaN)
           if (Number.isFinite(val) && val > 0) {
             out[m] = val
-            PRICE_CACHE.set(m, { usd: val, fetchedAt: now })
+            setBoundedPriceCache(m, { usd: val, fetchedAt: now }, now)
           }
         }
       }
@@ -87,8 +215,22 @@ export function computeSwapFeePlan(params: {
   feeAccount: string | null
   feeAccountExists: boolean
   hasUnsafeSelfPayExt?: boolean
+  /** Token program of `outputMint` (and `feeAccount` since `feeSide === 'output'`). Defaults to Classic SPL. */
+  outputTokenProgram?: string | null
+  /** True when `outputMint` is a Token-2022 mint carrying `TransferFeeConfig` (182 B ATA vs 170 B). */
+  outputHasTransferFeeExt?: boolean
+  /** Exact expected byte length of `outputMint` ATAs (`165 B` Classic SPL, `170 B+` Token-2022). */
+  outputAtaByteLen?: number
+  /** Active epoch Token-2022 `TransferFeeConfig` schedule for `outputMint` (grossed up 2x in required bps). */
+  outputTransferFee?: Token2022TransferFee | null
   /** Number of missing canonical vault/escrow ATAs (`0..4`) whose creation rent is priced into the quote. */
   extraAtaCount?: number
+  /**
+   * Optional exact pre-computed rent lamports for missing vault/escrow ATAs (summing per-ATA
+   * `estimateAtaRentLamports` for each missing input/output ATA). When omitted, falls back to
+   * `extraAtaCount * estimateAtaRentLamports(ataRentLamports, outputTokenProgram, outputAtaByteLen ?? outputHasTransferFeeExt)`.
+   */
+  extraAtaRentLamports?: bigint
   /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers, padded spend). */
   omitNf1?: boolean
   /** Shielded output note count (change + dynamic output). Defaults to `2`. */
@@ -105,14 +247,28 @@ export function computeSwapFeePlan(params: {
     feeAccount,
     feeAccountExists,
     hasUnsafeSelfPayExt = false,
+    outputTokenProgram = null,
+    outputHasTransferFeeExt = false,
+    outputAtaByteLen,
+    outputTransferFee = null,
     extraAtaCount = 0,
+    extraAtaRentLamports,
     omitNf1 = false,
     outputCount,
   } = params
 
   const hasCustomShape = omitNf1 || outputCount !== undefined
+  const feeAtaRentLamports = estimateAtaRentLamports(
+    rentSchedule.ataRentLamports,
+    outputTokenProgram,
+    outputAtaByteLen ?? (outputHasTransferFeeExt || Boolean(outputTransferFee)),
+  )
   const extraAtaLamports =
-    BigInt(Math.max(0, Math.min(4, Math.trunc(extraAtaCount)))) * rentSchedule.ataRentLamports
+    extraAtaRentLamports !== undefined
+      ? extraAtaRentLamports > 0n
+        ? extraAtaRentLamports
+        : 0n
+      : BigInt(Math.max(0, Math.min(4, Math.trunc(extraAtaCount)))) * feeAtaRentLamports
   const baseSwapLamports =
     (hasCustomShape
       ? BigInt(omitNf1 ? 1 : 2) *
@@ -121,7 +277,7 @@ export function computeSwapFeePlan(params: {
           rentSchedule.pageRentPerNoteLamports +
         20_000n
       : rentSchedule.swapBaselineLamports) + extraAtaLamports
-  const totalLamportsIfCreatingAta = baseSwapLamports + rentSchedule.ataRentLamports
+  const totalLamportsIfCreatingAta = baseSwapLamports + feeAtaRentLamports
   const costSol = Number(baseSwapLamports) / 1e9
   const estimatedRelayCostUsd =
     solPriceUsd && solPriceUsd > 0 ? costSol * solPriceUsd : null
@@ -169,11 +325,28 @@ export function computeSwapFeePlan(params: {
       : null
 
   const marginMult = cfg.selfPayMarginBps / 10_000
+  const computeRequiredSwapBps = (costLamports: bigint, fallbackSolValue: number): number => {
+    if (outputTransferFee && outputTransferFee.bps > 0n && estimatedOutAmount > 0n) {
+      const grossUnits = lamportsToGrossTokenUnits({
+        costLamports,
+        marginBps: cfg.selfPayMarginBps,
+        mint: outputMint,
+        decimals: outputDecimals,
+        solPriceUsd,
+        tokenPriceUsd: outputTokenPriceUsd,
+        transferFee: outputTransferFee,
+      })
+      if (grossUnits !== null) {
+        return Number((grossUnits * 10_000n + estimatedOutAmount - 1n) / estimatedOutAmount)
+      }
+    }
+    const neededSol = (Number(costLamports) / 1e9) * marginMult
+    return Math.ceil((neededSol / fallbackSolValue) * 10_000)
+  }
 
   if (!feeAccountExists) {
-    const neededSolWithAta = (Number(totalLamportsIfCreatingAta) / 1e9) * marginMult
     if (swapSolValue !== null && swapSolValue > 0) {
-      const reqBpsWithAta = Math.ceil((neededSolWithAta / swapSolValue) * 10_000)
+      const reqBpsWithAta = computeRequiredSwapBps(totalLamportsIfCreatingAta, swapSolValue)
       if (reqBpsWithAta <= cfg.maxSelfPayBps) {
         const feeBps = Math.max(cfg.baseSwapFeeBps, reqBpsWithAta)
         const estimatedFeeUsd =
@@ -230,7 +403,7 @@ export function computeSwapFeePlan(params: {
     }
   }
 
-  const requiredBps = Math.ceil(((costSol * marginMult) / swapSolValue) * 10_000)
+  const requiredBps = computeRequiredSwapBps(baseSwapLamports, swapSolValue)
   if (requiredBps <= cfg.maxSelfPayBps) {
     const feeBps = Math.max(cfg.baseSwapFeeBps, requiredBps)
     const estimatedFeeUsd =
@@ -297,7 +470,18 @@ export function computeNativeFeeQuote(params: {
   /** Omit second nullifier (`nf1 = 0`). Defaults to `false` (2 nullifiers) across ALL ops. */
   omitNf1?: boolean
   missingAtaCount?: number
+  /**
+   * Optional exact pre-computed rent lamports for missing ATAs (e.g. summed per mint from
+   * `extraAtaMints`). When omitted, falls back to `missingAtaCount * effectiveAtaRent`.
+   */
+  extraAtaRentLamports?: bigint
   hasUnsafeSelfPayExt?: boolean
+  /** True when `feeMint` is a Token-2022 mint carrying `TransferFeeConfig` (182 B ATA vs 170 B). */
+  hasTransferFeeExt?: boolean
+  /** Exact expected byte length of `feeMint` ATAs (`165 B` Classic SPL, `170 B+` Token-2022). */
+  feeAtaByteLen?: number
+  /** Active epoch Token-2022 `TransferFeeConfig` schedule for `feeMint` (grossed up 2x in quoted `relayerFee`). */
+  transferFee?: Token2022TransferFee | null
   relayerPubkey?: string | null
   feeRecipient: string | null
   feeShieldedAddress?: string | null
@@ -320,7 +504,11 @@ export function computeNativeFeeQuote(params: {
     outputCount = op === 'transfer' ? 3 : op === 'exec_escrow' ? 2 : 0,
     omitNf1 = false,
     missingAtaCount = 0,
+    extraAtaRentLamports,
     hasUnsafeSelfPayExt = false,
+    hasTransferFeeExt = false,
+    feeAtaByteLen,
+    transferFee = null,
     relayerPubkey = null,
     feeRecipient,
     feeShieldedAddress = null,
@@ -338,11 +526,20 @@ export function computeNativeFeeQuote(params: {
   const nullifierRent =
     nullifierCount * (rentSchedule.nullifierRentLamports + rentSchedule.nfPageRentPerNfLamports)
   const noteRent = clampedOutputs * rentSchedule.pageRentPerNoteLamports
+  const effectiveAtaRent = estimateAtaRentLamports(
+    rentSchedule.ataRentLamports,
+    feeTokenProgram,
+    feeAtaByteLen ?? (hasTransferFeeExt || Boolean(transferFee)),
+  )
   const extraAtas =
-    BigInt(Math.max(0, Math.min(6, Math.trunc(missingAtaCount)))) * rentSchedule.ataRentLamports
+    extraAtaRentLamports !== undefined
+      ? extraAtaRentLamports > 0n
+        ? extraAtaRentLamports
+        : 0n
+      : BigInt(Math.max(0, Math.min(6, Math.trunc(missingAtaCount)))) * effectiveAtaRent
   const txBaseLamports = nullifierRent + noteRent + extraAtas + 20_000n
-  const withAtaLamports = txBaseLamports + rentSchedule.ataRentLamports
-  const marginMult = cfg.selfPayMarginBps / 10_000
+  const withAtaLamports = txBaseLamports + effectiveAtaRent
+  const marginBps = BigInt(Math.max(cfg.selfPayMarginBps, 10_000))
 
   const costUsd = (lamports: bigint) =>
     solPriceUsd && solPriceUsd > 0 ? (Number(lamports) / 1e9) * solPriceUsd : null
@@ -364,6 +561,7 @@ export function computeNativeFeeQuote(params: {
         feeSide: 'shielded_cm2',
         feeMint,
         feeTokenProgram,
+        feeDecimals,
         feeRecipient: null,
         feeShieldedAddress,
         feeRecipientExists: false,
@@ -383,18 +581,15 @@ export function computeNativeFeeQuote(params: {
       }
     }
 
-    const flatLamports = BigInt(Math.ceil(Number(txBaseLamports) * marginMult))
-
-    let flatTokenUnits: bigint | null = null
-    if (feeMint === WSOL_MINT_STR) {
-      flatTokenUnits = flatLamports
-    } else if (solPriceUsd && solPriceUsd > 0 && feeTokenPriceUsd && feeTokenPriceUsd > 0) {
-      const neededSol = (Number(txBaseLamports) / 1e9) * marginMult
-      const neededUi = (neededSol * solPriceUsd) / feeTokenPriceUsd
-      if (Number.isFinite(neededUi) && neededUi > 0) {
-        flatTokenUnits = BigInt(Math.max(1, Math.ceil(neededUi * Math.pow(10, feeDecimals))))
-      }
-    }
+    const flatTokenUnits = lamportsToGrossTokenUnits({
+      costLamports: txBaseLamports,
+      marginBps: cfg.selfPayMarginBps,
+      mint: feeMint,
+      decimals: feeDecimals,
+      solPriceUsd,
+      tokenPriceUsd: feeTokenPriceUsd,
+      transferFee,
+    })
 
     if (flatTokenUnits !== null) {
       return {
@@ -405,6 +600,7 @@ export function computeNativeFeeQuote(params: {
         feeSide: 'shielded_cm2',
         feeMint,
         feeTokenProgram,
+        feeDecimals,
         feeRecipient: null,
         feeShieldedAddress,
         feeRecipientExists: true,
@@ -431,6 +627,7 @@ export function computeNativeFeeQuote(params: {
       feeSide: 'shielded_cm2',
       feeMint,
       feeTokenProgram,
+      feeDecimals,
       feeRecipient: null,
       feeShieldedAddress,
       feeRecipientExists: true,
@@ -457,6 +654,7 @@ export function computeNativeFeeQuote(params: {
       feeSide,
       feeMint,
       feeTokenProgram: isDirectLamportPayout ? null : feeTokenProgram,
+      feeDecimals,
       feeRecipient: hasUnsafeSelfPayExt || !mintAllowedForSelfPay ? feeRecipient : null,
       feeShieldedAddress,
       feeRecipientExists: hasUnsafeSelfPayExt || !mintAllowedForSelfPay ? feeRecipientExists : false,
@@ -478,7 +676,7 @@ export function computeNativeFeeQuote(params: {
 
   // Atomic WSOL unwrap Withdraw (`WITHDRAW_FLAG_UNWRAP_WSOL`): relayer fee paid directly in SOL lamports to `relayerPubkey`
   if (isDirectLamportPayout) {
-    const neededLamports = BigInt(Math.ceil(Number(txBaseLamports) * marginMult))
+    const neededLamports = (txBaseLamports * marginBps + 9_999n) / 10_000n
     const pctFee = (amount * BigInt(cfg.baseSwapFeeBps)) / 10_000n
     const candidateFee = neededLamports > pctFee ? neededLamports : pctFee
     const effBps = Number((candidateFee * 10_000n) / amount)
@@ -491,6 +689,7 @@ export function computeNativeFeeQuote(params: {
         feeSide,
         feeMint,
         feeTokenProgram: null,
+        feeDecimals,
         feeRecipient,
         feeShieldedAddress: null,
         feeRecipientExists: true,
@@ -514,6 +713,7 @@ export function computeNativeFeeQuote(params: {
       feeSide,
       feeMint,
       feeTokenProgram: null,
+      feeDecimals,
       feeRecipient,
       feeShieldedAddress: null,
       feeRecipientExists: true,
@@ -532,16 +732,15 @@ export function computeNativeFeeQuote(params: {
   // SPL / Token-2022 fee mint (WSOL self-prices 1:1 with SOL; other mints use live USD price)
   const needsAta = !feeRecipientExists
   const effectiveLamports = needsAta ? withAtaLamports : txBaseLamports
-  const neededSol = (Number(effectiveLamports) / 1e9) * marginMult
-  let neededTokenUnits: bigint | null = null
-  if (feeMint === WSOL_MINT_STR) {
-    neededTokenUnits = BigInt(Math.ceil(Number(effectiveLamports) * marginMult))
-  } else if (solPriceUsd && solPriceUsd > 0 && feeTokenPriceUsd && feeTokenPriceUsd > 0) {
-    const neededUi = (neededSol * solPriceUsd) / feeTokenPriceUsd
-    if (Number.isFinite(neededUi) && neededUi > 0) {
-      neededTokenUnits = BigInt(Math.max(1, Math.ceil(neededUi * Math.pow(10, feeDecimals))))
-    }
-  }
+  const neededTokenUnits = lamportsToGrossTokenUnits({
+    costLamports: effectiveLamports,
+    marginBps: cfg.selfPayMarginBps,
+    mint: feeMint,
+    decimals: feeDecimals,
+    solPriceUsd,
+    tokenPriceUsd: feeTokenPriceUsd,
+    transferFee,
+  })
 
   if (neededTokenUnits !== null) {
     const pctFee = (amount * BigInt(cfg.baseSwapFeeBps)) / 10_000n
@@ -556,6 +755,7 @@ export function computeNativeFeeQuote(params: {
         feeSide,
         feeMint,
         feeTokenProgram,
+        feeDecimals,
         feeRecipient,
         feeShieldedAddress: null,
         feeRecipientExists,
@@ -582,6 +782,7 @@ export function computeNativeFeeQuote(params: {
     feeSide,
     feeMint,
     feeTokenProgram,
+    feeDecimals,
     feeRecipient,
     feeShieldedAddress: null,
     feeRecipientExists,

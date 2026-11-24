@@ -7,6 +7,7 @@
 //! Swift, Kotlin, Relayer, and Web layers by `idl/verify-idl.py`.
 
 #![no_std]
+#![allow(unexpected_cfgs)]
 
 pub mod instruction;
 pub mod layout;
@@ -19,18 +20,24 @@ pub const AUDREN_PROGRAM_ID: Bytes32 =
     decode_base58("AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3");
 
 /// Protocol version stored in `PoolState.version`, `LaneTreeState.version`, and
-/// `RootCheckpoint.version` (`1` = Audren v1 BN254 Groth16 4-ary Depth-20 global MASP).
+/// `GlobalRootHistory.version` (`1` = Audren v1 BN254 Groth16 4-ary Depth-20 global MASP).
 pub const PROTOCOL_VERSION: u8 = 1;
 
-/// Maximum number of concurrent append lanes supported by the frozen 4-ary Depth-20 circuit (`0..16`).
-/// Pools launch with `DEFAULT_INITIAL_LANES = 4` active lanes and expand monotonically
-/// (`4 -> 8 -> 16`) via `InitLane` with zero circuit changes.
+/// Maximum number of append lanes supported by the frozen 4-ary Depth-20 circuit (`0..16`).
+/// Note-appending transactions (`Deposit`, `Transact` with `output_mask != 0`, `ExecViaEscrow`)
+/// serialize on a single `GlobalRootHistory` write lock for instant inline root updates, while
+/// 16 lanes scale `4^20` global capacity, isolate per-lane page rollovers, and parallelize
+/// read-only full exits (`output_mask == 0`). Pools launch with `DEFAULT_INITIAL_LANES = 4`
+/// active lanes and expand monotonically (`4 -> 8 -> 16`) via `InitLane` with zero circuit changes.
 pub const NUM_LANES: usize = 16;
 
 /// Recommended initial active lane count at pool creation (`~0.78 SOL` lane bootstrap float).
 pub const DEFAULT_INITIAL_LANES: u8 = 4;
 
-/// Maximum number of sharded `swap_escrow` PDAs per pool (`0..16`) for lock-free parallel DeFi CPIs.
+/// Maximum number of sharded `swap_escrow` PDAs per pool (`0..16`) isolating per-swap DeFi CPI
+/// token accounts across shards (`ExecViaEscrow` acquires the single `GlobalRootHistory` write
+/// lock on output note append, while 16 lanes scale `4^20` capacity, isolate per-lane page
+/// rollovers, and parallelize read-only full exits).
 pub const NUM_ESCROW_SHARDS: usize = 16;
 
 /// Per-lane 4-ary Merkle tree depth (`4^18 = 68,719,476,736` notes per lane).
@@ -39,8 +46,40 @@ pub const LANE_DEPTH_4ARY: usize = 18;
 /// Global super-root depth (`18` lane levels + `2` super-root levels = `20`, `4^20` global capacity).
 pub const TOTAL_DEPTH_4ARY: usize = 20;
 
-/// Fixed cyclic `RootCheckpoint` ring slots (`256` PDAs permanently — zero unbounded checkpoint growth).
-pub const CHECKPOINT_RING_SLOTS: u64 = 256;
+/// Fixed-size recent per-slot ring length inside `GlobalRootHistory` (`128` entries = `5,120 B`).
+pub const SLOT_RING_LEN: usize = 128;
+
+/// Fixed-size stable epoch ring length inside `GlobalRootHistory` (`89` entries = `3,560 B`).
+pub const EPOCH_RING_LEN: usize = 89;
+
+/// Wire size of one ring entry inside `GlobalRootHistory`: `super_root[32] || slot[8]` (`40 B`).
+pub const ROOT_ENTRY_LEN: usize = 40;
+
+/// Default epoch snapshot interval in slots (`32` slots, `~6.9s` at 215ms slots).
+pub const DEFAULT_ROOT_EPOCH_INTERVAL: u64 = 32;
+
+/// Maximum allowed `root_epoch_interval` in slots (`256` slots).
+pub const MAX_ROOT_EPOCH_INTERVAL: u64 = 256;
+
+/// `GlobalRootHistory` ring selector: recent per-slot ring (`0..128`).
+pub const ROOT_RING_SLOT: u8 = 0;
+
+/// `GlobalRootHistory` ring selector: stable epoch ring (`0..89`).
+pub const ROOT_RING_EPOCH: u8 = 1;
+
+/// Canonical tight Compute Unit limits per Audren instruction (calibrated against
+/// empirical sBPFv3 LiteSVM measurements with ~15-20% worst-case rollover headroom).
+pub const CU_LIMIT_INIT_POOL: u32 = 45_000;
+pub const CU_LIMIT_INIT_LANE: u32 = 75_000;
+pub const CU_LIMIT_INIT_ROOT_HISTORY: u32 = 75_000;
+pub const CU_LIMIT_OPEN_PAGE: u32 = 40_000;
+pub const CU_LIMIT_DEPOSIT: u32 = 75_000;
+pub const CU_LIMIT_DEPOSIT_HOOK: u32 = 140_000;
+pub const CU_LIMIT_TRANSACT_PRIVATE: u32 = 235_000;
+pub const CU_LIMIT_TRANSACT_FULL_EXIT: u32 = 165_000;
+pub const CU_LIMIT_TRANSACT_WITHDRAW: u32 = 255_000;
+pub const CU_LIMIT_TRANSACT_WITHDRAW_HOOK: u32 = 295_000;
+pub const CU_LIMIT_EXEC_VIA_ESCROW_BASE: u32 = 285_000;
 
 /// Classic SPL Token program ID (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`).
 pub const CLASSIC_TOKEN_PROGRAM_ID: Bytes32 =
@@ -53,6 +92,12 @@ pub const TOKEN_2022_PROGRAM_ID: Bytes32 =
 /// Associated Token Account program ID (`ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`).
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: Bytes32 =
     decode_base58("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+/// SPL ElGamal Registry program ID (`regVYJW7tcT8zipN5YiBvHsvR5jXW1uLFxaHSbugABg`).
+/// Blocked in `ExecViaEscrow` to prevent two-stage `CreateRegistry` ->
+/// `ConfigureAccountWithRegistry` confidential-transfer poisoning of escrow ATAs.
+pub const ELGAMAL_REGISTRY_PROGRAM_ID: Bytes32 =
+    decode_base58("regVYJW7tcT8zipN5YiBvHsvR5jXW1uLFxaHSbugABg");
 
 /// System program ID (`11111111111111111111111111111111`).
 pub const SYSTEM_PROGRAM_ID: Bytes32 = [0u8; 32];
@@ -71,7 +116,7 @@ pub const SUBROOT_SEED: &[u8] = b"audren_subroot";
 pub const MEMO_SEED: &[u8] = b"audren_memo";
 pub const NF_PAGE_SEED: &[u8] = b"audren_nf_page";
 pub const NULLIFIER_SEED: &[u8] = b"audren_nf";
-pub const CKPT_SEED: &[u8] = b"audren_ckpt";
+pub const ROOTS_SEED: &[u8] = b"audren_roots";
 pub const ESCROW_SEED: &[u8] = b"audren_escrow";
 pub const UNWRAP_SEED: &[u8] = b"audren_unwrap";
 
@@ -131,9 +176,9 @@ pub enum AudrenError {
     SubtreePageFull = 6004,
     SubtreePageMismatch = 6005,
     SubrootPageMismatch = 6006,
-    CheckpointTooSoon = 6007,
-    CheckpointExpired = 6008,
-    CheckpointMismatch = 6009,
+    InvalidRootRing = 6007,
+    RootIndexOutOfBounds = 6008,
+    RootHistoryMismatch = 6009,
     ProofVerificationFailed = 6010,
     InvalidVkId = 6011,
     NullifierAlreadyUsed = 6012,
@@ -253,4 +298,19 @@ pub const fn decode_base58(input: &str) -> Bytes32 {
         i += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elgamal_registry_program_id_matches_canonical_bytes() {
+        let expected: Bytes32 = [
+            0x0c, 0xb8, 0x10, 0xc9, 0x4a, 0xd4, 0x14, 0x39, 0x7d, 0x37, 0xd0, 0x58, 0x81, 0x38,
+            0xd3, 0x23, 0x30, 0x60, 0x0b, 0x85, 0xde, 0xa0, 0x1b, 0xf0, 0xb6, 0xaa, 0xaa, 0x5c,
+            0xd6, 0x3a, 0xa6, 0x87,
+        ];
+        assert_eq!(ELGAMAL_REGISTRY_PROGRAM_ID, expected);
+    }
 }

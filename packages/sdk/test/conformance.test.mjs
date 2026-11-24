@@ -7,10 +7,18 @@ import path from 'node:path';
 import {
   ASSET_MODE_PRIVATE,
   ASSET_MODE_PUBLIC,
+  AUDREN_ERRORS,
   AUDREN_PROGRAM_ID,
+  DEFAULT_ROOT_EPOCH_INTERVAL,
+  EPOCH_RING_LEN,
   MEMO_VERSION_V1,
   NUM_LANES,
   PROTOCOL_VERSION,
+  ROOTS_MAGIC,
+  ROOT_HISTORY_LEN,
+  ROOT_RING_EPOCH,
+  SLOT_RING_LEN,
+  TAG_INIT_ROOT_HISTORY,
   WSOL_MINT,
   ZERO_HASHES_4ARY,
   base58Decode,
@@ -25,11 +33,10 @@ import {
   computeSubtree256Root,
   computeSuperRoot4Ary,
   computeTransactCtxHash,
+  decodeGlobalRootHistory,
   decodePoolState,
-  decodeRootCheckpoint,
   deriveAssetId,
   deriveAssetIdBytes,
-  deriveCheckpointPdaSync,
   deriveDefiSessionKeypair,
   deriveEscrowPdaSync,
   deriveKeysFromSeed,
@@ -39,6 +46,7 @@ import {
   deriveNfPagePdaSync,
   deriveNullifierPdaSync,
   derivePoolPdaSync,
+  deriveRootsPdaSync,
   deriveStealthOwner,
   deriveSubaccountKeys,
   deriveSubrootPdaSync,
@@ -52,6 +60,7 @@ import {
   poseidon2,
   poseidon4,
   prepareDynamicSwapMemo,
+  selectRootSnapshotForNotes,
   tryDecryptAndVerifyMemo,
   verifySelectiveDisclosureProof,
 } from '../dist/index.js';
@@ -205,7 +214,7 @@ test('TypeScript @audren/sdk & @audren/sdk/prover WASM match spec/test-vectors.j
   checkPda(deriveSubrootPdaSync(0, 2, 7n), vectors.pdas.subroot);
   checkPda(deriveMemoPdaSync(0, 2, 7n), vectors.pdas.memo);
   checkPda(deriveNfPagePdaSync(0, 2, 7n), vectors.pdas.nf_page);
-  checkPda(deriveCheckpointPdaSync(0, 13), vectors.pdas.checkpoint);
+  checkPda(deriveRootsPdaSync(0), vectors.pdas.roots);
   checkPda(deriveNullifierPdaSync(0, nfSample), vectors.pdas.nullifier);
   checkPda(deriveEscrowPdaSync(0, 5), vectors.pdas.escrow);
   checkPda(deriveUnwrapPdaSync(0, nfSample), vectors.pdas.unwrap);
@@ -268,13 +277,12 @@ test('TypeScript @audren/sdk & @audren/sdk/prover WASM match spec/test-vectors.j
   });
   assert.equal(toHex(frToBeBytes(ctxExec)), vectors.ctx_hashes.exec_fee_on_output_ctx_hash_hex);
 
-  // 8. PoolState (v1 with pendingAuthority) & RootCheckpoint decoding
+  // 8. PoolState (v1 with pendingAuthority) & GlobalRootHistory decoding
   const decodedPool = decodePoolState(fromHex(vectors.pool_state.raw_hex));
   assert.equal(decodedPool.version, PROTOCOL_VERSION);
   assert.equal(decodedPool.poolId, vectors.pool_state.pool_id);
   assert.equal(decodedPool.activeLanes, vectors.pool_state.active_lanes);
-  assert.equal(decodedPool.ckptInterval, BigInt(vectors.pool_state.ckpt_interval));
-  assert.equal(decodedPool.maxCkptAge, BigInt(vectors.pool_state.max_ckpt_age));
+  assert.equal(decodedPool.rootEpochInterval, BigInt(vectors.pool_state.root_epoch_interval));
   assert.equal(decodedPool.noteRentFee, BigInt(vectors.pool_state.note_rent_fee));
   assert.equal(decodedPool.nfRentFee, BigInt(vectors.pool_state.nf_rent_fee));
   assert.equal(decodedPool.paused, vectors.pool_state.paused);
@@ -282,9 +290,45 @@ test('TypeScript @audren/sdk & @audren/sdk/prover WASM match spec/test-vectors.j
     assert.equal(base58Encode(decodedPool.pendingAuthority), vectors.pool_state.pending_authority_b58);
   }
 
-  const decodedCkpt = decodeRootCheckpoint(fromHex(vectors.checkpoint_raw_hex));
-  assert.equal(toHex(decodedCkpt.superRoot), vectors.groth16.super_root_hex);
-  assert.equal(decodedCkpt.laneCounts[2], 6n);
+  const rhVec = vectors.root_history;
+  assert.equal(ROOT_HISTORY_LEN, rhVec.account_len);
+  assert.equal(ROOTS_MAGIC, rhVec.magic);
+  assert.equal(SLOT_RING_LEN, rhVec.slot_ring_len);
+  assert.equal(EPOCH_RING_LEN, rhVec.epoch_ring_len);
+  assert.equal(DEFAULT_ROOT_EPOCH_INTERVAL, BigInt(rhVec.default_epoch_interval));
+  assert.equal(TAG_INIT_ROOT_HISTORY, rhVec.tag_init_root_history);
+  assert.equal(AUDREN_ERRORS[rhVec.err_invalid_root_ring], 'InvalidRootRing');
+  assert.equal(AUDREN_ERRORS[rhVec.err_root_index_out_of_bounds], 'RootIndexOutOfBounds');
+  assert.equal(AUDREN_ERRORS[rhVec.err_root_history_mismatch], 'RootHistoryMismatch');
+
+  const decodedRoots = decodeGlobalRootHistory(fromHex(rhVec.raw_hex));
+  assert.equal(decodedRoots.version, PROTOCOL_VERSION);
+  assert.equal(decodedRoots.poolId, rhVec.pool_id);
+  assert.equal(decodedRoots.bump, rhVec.bump);
+  assert.equal(decodedRoots.slotCursor, rhVec.slot_cursor);
+  assert.equal(decodedRoots.epochCursor, rhVec.epoch_cursor);
+  assert.equal(decodedRoots.slotCount, rhVec.slot_count);
+  assert.equal(decodedRoots.epochCount, rhVec.epoch_count);
+  assert.equal(decodedRoots.latestSlot, BigInt(rhVec.latest_slot));
+  assert.equal(decodedRoots.stableEpochId, BigInt(rhVec.stable_epoch_id));
+  assert.equal(decodedRoots.stableSlot, BigInt(rhVec.stable_slot));
+  assert.equal(decodedRoots.epochInterval, BigInt(rhVec.epoch_interval));
+  assert.equal(toHex(decodedRoots.latestSuperRoot), rhVec.latest_super_root_hex);
+  assert.equal(toHex(decodedRoots.stableSuperRoot), rhVec.stable_super_root_hex);
+  assert.equal(toHex(decodedRoots.latestSuperRoot), vectors.groth16.super_root_hex);
+  assert.equal(decodedRoots.latestLaneCounts[2], BigInt(rhVec.lane2_leaf_count));
+  assert.equal(decodedRoots.stableLaneCounts[2], BigInt(rhVec.lane2_leaf_count));
+  assert.equal(toHex(decodedRoots.slotRing[0].superRoot), rhVec.latest_super_root_hex);
+  assert.equal(decodedRoots.slotRing[0].slot, BigInt(rhVec.latest_slot));
+  assert.equal(toHex(decodedRoots.epochRing[0].superRoot), rhVec.stable_super_root_hex);
+  assert.equal(decodedRoots.epochRing[0].slot, BigInt(rhVec.stable_slot));
+
+  const chosen = selectRootSnapshotForNotes(decodedRoots, [{ laneId: 2, leafIndex: 5n }]);
+  assert.ok(chosen);
+  assert.equal(chosen.ringKind, ROOT_RING_EPOCH);
+  assert.equal(chosen.ringIdx, rhVec.epoch_cursor);
+  assert.equal(chosen.slot, BigInt(rhVec.stable_slot));
+  assert.equal(toHex(chosen.superRoot), vectors.groth16.super_root_hex);
 
   // 9. Historical Merkle witness + LIVE WASM BN254 Groth16 proving byte-for-byte parity!
   const leaves = [0n, 0n, 0n, 0n, 0n, cm];
@@ -301,8 +345,8 @@ test('TypeScript @audren/sdk & @audren/sdk/prover WASM match spec/test-vectors.j
   const path5 = buildHistoricalWitness4Ary({
     laneId: 2,
     targetLeafIdx: 5n,
-    ckptLaneRoots: laneRoots,
-    ckptLaneLeafCount: 6n,
+    laneRoots,
+    laneLeafCount: 6n,
     finalizedSubtreeRoots: [],
     targetPageLeaves: leaves,
     frontierPageLeaves: leaves,

@@ -7,6 +7,7 @@
  */
 
 import {
+  BN254_FR_MODULUS,
   CANONICAL_PK_SHA256,
   PROVE_OUTPUT_BYTES,
   TOTAL_DEPTH_4ARY,
@@ -79,68 +80,126 @@ export function dummyOutputWitness(assetId: bigint, blinding: bigint): JoinSplit
   };
 }
 
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
+
 /**
  * Encode `JoinSplitWitness` into the exact `4,611 B` binary witness ABI consumed by
  * `audren_circuits.wasm` (`encode_joinsplit_witness_bytes` in `crates/audren-circuits`).
  */
 export function encodeJoinsplitWitness(w: JoinSplitWitness): Uint8Array {
+  if (!w || typeof w !== 'object') {
+    throw new RangeError('JoinSplitWitness must be an object');
+  }
+  if (!Array.isArray(w.inputs) || w.inputs.length !== 2) {
+    throw new RangeError(`Expected 2 inputs, got ${Array.isArray(w.inputs) ? w.inputs.length : String(w.inputs)}`);
+  }
+  if (!Array.isArray(w.outputs) || w.outputs.length !== 3) {
+    throw new RangeError(`Expected 3 outputs, got ${Array.isArray(w.outputs) ? w.outputs.length : String(w.outputs)}`);
+  }
   const buf = new Uint8Array(WITNESS_TOTAL_BYTES);
   const dv = new DataView(buf.buffer);
   let off = 0;
 
-  const pushBytes = (b: Uint8Array) => {
-    buf.set(b, off);
-    off += b.byteLength;
-  };
-  const pushFr = (v: bigint) => pushBytes(frToBeBytes(v));
-  const pushU64 = (v: bigint) => {
-    dv.setBigUint64(off, v, true);
-    off += 8;
-  };
-  const pushU8 = (v: number) => {
-    buf[off++] = v & 0xff;
-  };
+  try {
+    const pushBytes = (b: Uint8Array) => {
+      if (!(b instanceof Uint8Array)) {
+        throw new RangeError(`Expected Uint8Array, got ${String(b)}`);
+      }
+      buf.set(b, off);
+      off += b.byteLength;
+    };
+    const pushFr = (v: bigint, label: string) => {
+      if (typeof v !== 'bigint' || v < 0n || v >= BN254_FR_MODULUS) {
+        throw new RangeError(
+          `${label} must be a canonical BN254 Fr bigint in 0..r-1, got ${String(v)}`,
+        );
+      }
+      pushBytes(frToBeBytes(v));
+    };
+    const pushU64 = (v: bigint, label: string) => {
+      if (typeof v !== 'bigint' || v < 0n || v > U64_MAX) {
+        throw new RangeError(`${label} must be a u64 bigint in 0..=2^64-1, got ${String(v)}`);
+      }
+      dv.setBigUint64(off, v, true);
+      off += 8;
+    };
+    const pushU8 = (v: number, label: string) => {
+      if (!Number.isInteger(v) || v < 0 || v > 0xff) {
+        throw new RangeError(`${label} must be a u8 integer in 0..=255, got ${v}`);
+      }
+      buf[off++] = v;
+    };
 
-  pushFr(w.superRoot);
-  pushFr(w.txAssetId);
-  pushFr(w.publicAssetId);
-  pushU64(w.publicAmountOut);
-  pushU64(w.relayerFeeAmount);
-  pushFr(w.ctxHash);
-  pushU8(w.omitNf1 ? 1 : 0);
+    pushFr(w.superRoot, 'superRoot');
+    pushFr(w.txAssetId, 'txAssetId');
+    pushFr(w.publicAssetId, 'publicAssetId');
+    pushU64(w.publicAmountOut, 'publicAmountOut');
+    pushU64(w.relayerFeeAmount, 'relayerFeeAmount');
+    pushFr(w.ctxHash, 'ctxHash');
+    pushU8(w.omitNf1 ? 1 : 0, 'omitNf1');
 
-  for (const inp of w.inputs) {
-    pushFr(inp.spendSk);
-    pushFr(inp.tweak);
-    pushFr(inp.assetId);
-    pushU64(inp.amount);
-    pushFr(inp.blinding);
-    pushU8(inp.isDummy ? 1 : 0);
-    if (inp.merklePath.positions.length !== TOTAL_DEPTH_4ARY) {
-      throw new RangeError(`Expected ${TOTAL_DEPTH_4ARY} Merkle positions`);
-    }
-    for (let h = 0; h < TOTAL_DEPTH_4ARY; h++) {
-      pushU8(inp.merklePath.positions[h]!);
-    }
-    for (let h = 0; h < TOTAL_DEPTH_4ARY; h++) {
-      const sib = inp.merklePath.siblings[h]!;
-      for (let k = 0; k < 3; k++) {
-        pushFr(sib[k]!);
+    for (let i = 0; i < w.inputs.length; i++) {
+      const inp = w.inputs[i];
+      if (!inp || typeof inp !== 'object') {
+        throw new RangeError(`inputs[${i}] must be an object`);
+      }
+      pushFr(inp.spendSk, `inputs[${i}].spendSk`);
+      pushFr(inp.tweak, `inputs[${i}].tweak`);
+      pushFr(inp.assetId, `inputs[${i}].assetId`);
+      pushU64(inp.amount, `inputs[${i}].amount`);
+      pushFr(inp.blinding, `inputs[${i}].blinding`);
+      pushU8(inp.isDummy ? 1 : 0, `inputs[${i}].isDummy`);
+      if (
+        !inp.merklePath ||
+        typeof inp.merklePath !== 'object' ||
+        !Array.isArray(inp.merklePath.positions) ||
+        !Array.isArray(inp.merklePath.siblings)
+      ) {
+        throw new RangeError(`inputs[${i}].merklePath must provide positions and siblings arrays`);
+      }
+      if (inp.merklePath.positions.length !== TOTAL_DEPTH_4ARY) {
+        throw new RangeError(`Expected ${TOTAL_DEPTH_4ARY} Merkle positions`);
+      }
+      if (inp.merklePath.siblings.length !== TOTAL_DEPTH_4ARY) {
+        throw new RangeError(`Expected ${TOTAL_DEPTH_4ARY} Merkle sibling levels`);
+      }
+      for (let h = 0; h < TOTAL_DEPTH_4ARY; h++) {
+        const pos = inp.merklePath.positions[h]!;
+        if (!Number.isInteger(pos) || pos < 0 || pos > 3) {
+          throw new RangeError(`Invalid 4-ary Merkle position at depth ${h}: ${pos}`);
+        }
+        pushU8(pos, `inputs[${i}].merklePath.positions[${h}]`);
+      }
+      for (let h = 0; h < TOTAL_DEPTH_4ARY; h++) {
+        const sib = inp.merklePath.siblings[h];
+        if (!Array.isArray(sib) || sib.length !== 3) {
+          throw new RangeError(`Expected 3 siblings at depth ${h}, got ${Array.isArray(sib) ? sib.length : String(sib)}`);
+        }
+        for (let k = 0; k < 3; k++) {
+          pushFr(sib[k]!, `inputs[${i}].merklePath.siblings[${h}][${k}]`);
+        }
       }
     }
-  }
 
-  for (const out of w.outputs) {
-    pushFr(out.stealthOwner);
-    pushFr(out.assetId);
-    pushU64(out.amount);
-    pushFr(out.blinding);
-  }
+    for (let i = 0; i < w.outputs.length; i++) {
+      const out = w.outputs[i];
+      if (!out || typeof out !== 'object') {
+        throw new RangeError(`outputs[${i}] must be an object`);
+      }
+      pushFr(out.stealthOwner, `outputs[${i}].stealthOwner`);
+      pushFr(out.assetId, `outputs[${i}].assetId`);
+      pushU64(out.amount, `outputs[${i}].amount`);
+      pushFr(out.blinding, `outputs[${i}].blinding`);
+    }
 
-  if (off !== WITNESS_TOTAL_BYTES) {
-    throw new Error(`Witness encoding length mismatch: ${off} !== ${WITNESS_TOTAL_BYTES}`);
+    if (off !== WITNESS_TOTAL_BYTES) {
+      throw new Error(`Witness encoding length mismatch: ${off} !== ${WITNESS_TOTAL_BYTES}`);
+    }
+    return buf;
+  } catch (err) {
+    buf.fill(0);
+    throw err;
   }
-  return buf;
 }
 
 interface AudrenWasmExports {
@@ -181,10 +240,22 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new RangeError(`Expected Uint8Array for SHA-256, got ${String(bytes)}`);
+  }
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   const digest = await globalThis.crypto.subtle.digest('SHA-256', copy.buffer);
   return bytesToHex(new Uint8Array(digest));
+}
+
+function toStrictUint8ArrayOrArrayBuffer(
+  val: Uint8Array | ArrayBuffer,
+  label: string,
+): Uint8Array {
+  if (val instanceof Uint8Array) return val;
+  if (val instanceof ArrayBuffer) return new Uint8Array(val);
+  throw new RangeError(`${label} must be a Uint8Array or ArrayBuffer, got ${String(val)}`);
 }
 
 async function resolveDefaultAssetBytes(relPath: string, hint: string): Promise<Uint8Array> {
@@ -226,31 +297,38 @@ export class AudrenWasmProver {
   }
 
   static async init(options: AudrenWasmProverInitOptions = {}): Promise<AudrenWasmProver> {
-    const wasmPromise: Promise<Uint8Array> = options.wasmBytes
-      ? Promise.resolve(
-          options.wasmBytes instanceof Uint8Array
-            ? options.wasmBytes
-            : new Uint8Array(options.wasmBytes),
-        )
-      : options.wasmUrl
-        ? fetch(options.wasmUrl).then(async (res) => {
-            if (!res.ok) throw new Error(`Failed to fetch Audren WASM prover: HTTP ${res.status}`);
-            return new Uint8Array(await res.arrayBuffer());
-          })
-        : resolveDefaultAssetBytes(
-            '../wasm/audren_circuits.wasm',
-            'In browser environments pass { wasmUrl: "/wasm/audren_circuits.wasm", pkUrl: "/wasm/audren_joinsplit.pk" } to AudrenWasmProver.init()',
-          );
+    if (!options || typeof options !== 'object') {
+      throw new RangeError('AudrenWasmProver.init options must be an object');
+    }
+    // Validate caller-supplied byte buffers synchronously BEFORE initiating any async fetch/file
+    // I/O so invalid `pkCompressed` never abandons an in-flight `wasmPromise` (unhandled rejection).
+    const prevalidatedWasm =
+      options.wasmBytes !== undefined
+        ? toStrictUint8ArrayOrArrayBuffer(options.wasmBytes, 'wasmBytes')
+        : undefined;
+    const prevalidatedPk =
+      !options.deferPk && options.pkCompressed !== undefined
+        ? toStrictUint8ArrayOrArrayBuffer(options.pkCompressed, 'pkCompressed')
+        : undefined;
+
+    const wasmPromise: Promise<Uint8Array> =
+      prevalidatedWasm !== undefined
+        ? Promise.resolve(prevalidatedWasm)
+        : options.wasmUrl
+          ? fetch(options.wasmUrl).then(async (res) => {
+              if (!res.ok) throw new Error(`Failed to fetch Audren WASM prover: HTTP ${res.status}`);
+              return new Uint8Array(await res.arrayBuffer());
+            })
+          : resolveDefaultAssetBytes(
+              '../wasm/audren_circuits.wasm',
+              'In browser environments pass { wasmUrl: "/wasm/audren_circuits.wasm", pkUrl: "/wasm/audren_joinsplit.pk" } to AudrenWasmProver.init()',
+            );
 
     let pkPromise: Promise<Uint8Array | null>;
     if (options.deferPk) {
       pkPromise = Promise.resolve(null);
-    } else if (options.pkCompressed) {
-      pkPromise = Promise.resolve(
-        options.pkCompressed instanceof Uint8Array
-          ? options.pkCompressed
-          : new Uint8Array(options.pkCompressed),
-      );
+    } else if (prevalidatedPk !== undefined) {
+      pkPromise = Promise.resolve(prevalidatedPk);
     } else if (options.pkUrl) {
       pkPromise = fetch(options.pkUrl).then(async (res) => {
         if (!res.ok) throw new Error(`Failed to fetch Audren ceremony PK: HTTP ${res.status}`);
@@ -292,8 +370,14 @@ export class AudrenWasmProver {
 
   /** Load a compressed `ProvingKey<Bn254>` (`audren_joinsplit.pk`, curve-validated inside WASM). */
   loadProvingKeyCompressed(pkCompressed: Uint8Array): void {
-    const ptr = this.exports.wasm_alloc(pkCompressed.byteLength);
+    if (!(pkCompressed instanceof Uint8Array) || pkCompressed.byteLength === 0) {
+      throw new RangeError(
+        `pkCompressed must be a non-empty Uint8Array, got ${pkCompressed instanceof Uint8Array ? pkCompressed.byteLength : String(pkCompressed)}`,
+      );
+    }
+    let ptr = 0;
     try {
+      ptr = this.exports.wasm_alloc(pkCompressed.byteLength);
       new Uint8Array(this.exports.memory.buffer, ptr, pkCompressed.byteLength).set(pkCompressed);
       const rc = this.exports.wasm_load_pk_compressed(ptr, pkCompressed.byteLength);
       if (rc !== 0) {
@@ -301,28 +385,62 @@ export class AudrenWasmProver {
       }
       this.pkReady = true;
     } finally {
-      this.exports.wasm_dealloc(ptr, pkCompressed.byteLength);
+      if (ptr) {
+        try {
+          new Uint8Array(this.exports.memory.buffer, ptr, pkCompressed.byteLength).fill(0);
+          this.exports.wasm_dealloc(ptr, pkCompressed.byteLength);
+        } catch {
+          // Ignore cleanup failure if WASM instance trapped
+        }
+      }
     }
   }
 
   /** Compute canonical Circom / `sol_poseidon` BN254 hash directly inside WASM (1..=12 inputs). */
   poseidonHashWasm(inputsBe32: readonly Uint8Array[]): Uint8Array {
+    if (!Array.isArray(inputsBe32)) {
+      throw new RangeError('inputsBe32 must be an array of 32-byte Uint8Arrays');
+    }
     const arity = inputsBe32.length;
     if (arity < 1 || arity > 12) {
       throw new RangeError(`Expected 1..=12 inputs, got ${arity}`);
     }
+    for (let i = 0; i < arity; i++) {
+      const inp = inputsBe32[i];
+      if (!(inp instanceof Uint8Array) || inp.byteLength !== 32) {
+        throw new RangeError(
+          `inputsBe32[${i}] must be a 32-byte Uint8Array, got ${inp instanceof Uint8Array ? inp.byteLength : String(inp)}`,
+        );
+      }
+    }
     const inLen = arity * 32;
-    const inPtr = this.exports.wasm_alloc(inLen);
-    const outPtr = this.exports.wasm_alloc(32);
+    let inPtr = 0;
+    let outPtr = 0;
     try {
+      inPtr = this.exports.wasm_alloc(inLen);
+      outPtr = this.exports.wasm_alloc(32);
       const memIn = new Uint8Array(this.exports.memory.buffer, inPtr, inLen);
       for (let i = 0; i < arity; i++) memIn.set(inputsBe32[i]!, i * 32);
       const rc = this.exports.wasm_poseidon_hash(arity, inPtr, outPtr);
       if (rc !== 0) throw new Error(`wasm_poseidon_hash failed with code ${rc}`);
       return new Uint8Array(this.exports.memory.buffer, outPtr, 32).slice();
     } finally {
-      this.exports.wasm_dealloc(inPtr, inLen);
-      this.exports.wasm_dealloc(outPtr, 32);
+      if (outPtr) {
+        try {
+          new Uint8Array(this.exports.memory.buffer, outPtr, 32).fill(0);
+          this.exports.wasm_dealloc(outPtr, 32);
+        } catch {
+          // Ignore cleanup failure if WASM instance trapped
+        }
+      }
+      if (inPtr) {
+        try {
+          new Uint8Array(this.exports.memory.buffer, inPtr, inLen).fill(0);
+          this.exports.wasm_dealloc(inPtr, inLen);
+        } catch {
+          // Ignore cleanup failure if WASM instance trapped
+        }
+      }
     }
   }
 
@@ -334,25 +452,33 @@ export class AudrenWasmProver {
     if (!this.pkReady) {
       throw new Error('Proving key not initialized — pass pkUrl/pkCompressed or call loadProvingKeyCompressed()');
     }
+    if (seed32 !== undefined && (!(seed32 instanceof Uint8Array) || seed32.byteLength !== 32)) {
+      throw new RangeError(
+        `seed32 must be a 32-byte Uint8Array, got ${seed32 instanceof Uint8Array ? seed32.byteLength : String(seed32)}`,
+      );
+    }
     const witnessBytes = encodeJoinsplitWitness(witness);
-    const seed =
-      seed32 ??
-      (() => {
+    const generatedSeed = seed32 === undefined;
+    let seed: Uint8Array | null = seed32 ?? null;
+
+    let wPtr = 0;
+    let sPtr = 0;
+    let oPtr = 0;
+    try {
+      if (seed === null) {
         const s = new Uint8Array(32);
         globalThis.crypto.getRandomValues(s);
-        return s;
-      })();
-    if (seed.byteLength !== 32) {
-      throw new RangeError(`seed32 must be 32 bytes, got ${seed.byteLength}`);
-    }
-
-    const wPtr = this.exports.wasm_alloc(WITNESS_TOTAL_BYTES);
-    const sPtr = this.exports.wasm_alloc(32);
-    const oPtr = this.exports.wasm_alloc(PROVE_OUTPUT_BYTES);
-    try {
+        seed = s;
+      }
+      wPtr = this.exports.wasm_alloc(WITNESS_TOTAL_BYTES);
+      sPtr = this.exports.wasm_alloc(32);
+      oPtr = this.exports.wasm_alloc(PROVE_OUTPUT_BYTES);
       new Uint8Array(this.exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).set(witnessBytes);
       new Uint8Array(this.exports.memory.buffer, sPtr, 32).set(seed);
       const rc = this.exports.wasm_prove_joinsplit(wPtr, WITNESS_TOTAL_BYTES, sPtr, oPtr);
+      if (rc === -6) {
+        throw new Error('Groth16 witness failed off-chain R1CS verification (rc=-6)');
+      }
       if (rc !== 0) {
         throw new Error(`wasm_prove_joinsplit failed with code ${rc}`);
       }
@@ -367,9 +493,32 @@ export class AudrenWasmProver {
         publicInputHash: raw.slice(352, 384),
       };
     } finally {
-      this.exports.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES);
-      this.exports.wasm_dealloc(sPtr, 32);
-      this.exports.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES);
+      witnessBytes.fill(0);
+      if (generatedSeed && seed) seed.fill(0);
+      if (oPtr) {
+        try {
+          new Uint8Array(this.exports.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).fill(0);
+          this.exports.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES);
+        } catch {
+          // Ignore cleanup failure if WASM instance trapped
+        }
+      }
+      if (sPtr) {
+        try {
+          new Uint8Array(this.exports.memory.buffer, sPtr, 32).fill(0);
+          this.exports.wasm_dealloc(sPtr, 32);
+        } catch {
+          // Ignore cleanup failure if WASM instance trapped
+        }
+      }
+      if (wPtr) {
+        try {
+          new Uint8Array(this.exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).fill(0);
+          this.exports.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES);
+        } catch {
+          // Ignore cleanup failure if WASM instance trapped
+        }
+      }
     }
   }
 }

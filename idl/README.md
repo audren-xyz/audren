@@ -19,7 +19,7 @@ import { AUDREN_CODAMA_IDL, AUDREN_ANCHOR_IDL } from "@audren/sdk";
 
 ## Regenerating & Verifying Against Rust Source
 
-IDLs are deterministically derived from `crates/audren-core/src/{lib.rs,instruction.rs,layout.rs}` so all 9 instruction tags (`0..=8`: `InitPool`, `InitLane`, `OpenPage`, `Deposit`, `PublishCheckpoint`, `Transact`, `ExecViaEscrow`, `SetPaused`, `UpdatePool`), 8 account byte layouts (`PoolState` 128 B, `LaneRentVault` 16 B, `LaneTreeState` 1,824 B, `SubtreePage` 8,256 B, `SubtreeRootPage` 9,664 B, `MemoPage` 10,240 B, `NullifierPage` 9,664 B, `RootCheckpoint` 704 B), 12 PDA seeds (`audren_*`), and 33 error codes (`6000..=6032`) remain strictly synchronized with the on-chain sBPFv3 program:
+IDLs are deterministically derived from `crates/audren-core/src/{lib.rs,instruction.rs,layout.rs}` so all 9 instruction tags (`0..=8`: `InitPool`, `InitLane`, `OpenPage`, `Deposit`, `InitRootHistory`, `Transact`, `ExecViaEscrow`, `SetPaused`, `UpdatePool`), 8 account byte layouts (`PoolState` 128 B, `LaneRentVault` 16 B, `LaneTreeState` 1,824 B, `SubtreePage` 8,256 B, `SubtreeRootPage` 9,664 B, `MemoPage` 10,240 B, `NullifierPage` 9,664 B, `GlobalRootHistory` 10,216 B), 12 PDA seeds (`audren_*`, including `audren_roots` -> `249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7`), and 33 error codes (`6000..=6032`, including `6007 = InvalidRootRing`, `6008 = RootIndexOutOfBounds`, `6009 = RootHistoryMismatch`) remain strictly synchronized with the on-chain sBPFv3 program:
 
 ```bash
 python3 idl/generate-idl.py

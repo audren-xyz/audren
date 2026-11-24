@@ -20,8 +20,9 @@
   min-width: 0;
   min-height: 176px;
   padding: 12px 12px 0;
-  border-radius: 5px;
-  border: 1px solid var(--rule);
+  border-radius: 4px;
+  border: 0;
+  border-top: 1px solid var(--rule);
   background: var(--sheet);
 }
 
@@ -41,12 +42,12 @@
 
 .zonePool {
   background: var(--vault-tint);
-  border-color: var(--vault-rule);
+  border-top-color: var(--vault-rule);
 }
 
 .zoneOut {
   padding: 0;
-  border: 0;
+  border-top: 0;
   background: transparent;
   gap: 10px;
 }
@@ -239,13 +240,14 @@
   width: 100%;
   min-width: 0;
   padding: 12px 12px 0;
-  border-radius: 5px;
-  border: 1px solid var(--rule);
+  border-radius: 4px;
+  border: 0;
+  border-top: 1px solid var(--rule);
   background: var(--sheet);
 }
 
 .outBox[data-tone='public'] {
-  border: 1px dashed #d9c39a;
+  border-top: 1px dashed #d9c39a;
   background: #fbf4e6;
 }
 

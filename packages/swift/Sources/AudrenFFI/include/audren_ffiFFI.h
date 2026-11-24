@@ -260,17 +260,17 @@ RustBuffer uniffi_audren_ffi_fn_func_build_init_lane_ix(RustBuffer program_id, R
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_INIT_POOL_IX
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_INIT_POOL_IX
-RustBuffer uniffi_audren_ffi_fn_func_build_init_pool_ix(RustBuffer program_id, RustBuffer payer, uint32_t pool_id, uint64_t ckpt_interval, uint64_t max_ckpt_age, uint64_t note_rent_fee, uint64_t nf_rent_fee, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_audren_ffi_fn_func_build_init_pool_ix(RustBuffer program_id, RustBuffer payer, uint32_t pool_id, uint64_t root_epoch_interval, uint64_t note_rent_fee, uint64_t nf_rent_fee, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_INIT_ROOT_HISTORY_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_INIT_ROOT_HISTORY_IX
+RustBuffer uniffi_audren_ffi_fn_func_build_init_root_history_ix(RustBuffer program_id, RustBuffer authority, uint32_t pool_id, uint64_t root_epoch_interval, uint8_t active_lanes, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_IX
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_IX
 RustBuffer uniffi_audren_ffi_fn_func_build_open_page_ix(RustBuffer program_id, RustBuffer payer, uint8_t page_kind, uint32_t pool_id, uint8_t lane_id, uint64_t page_seq, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_PUBLISH_CHECKPOINT_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_PUBLISH_CHECKPOINT_IX
-RustBuffer uniffi_audren_ffi_fn_func_build_publish_checkpoint_ix(RustBuffer program_id, RustBuffer payer, uint32_t pool_id, uint16_t slot_idx, uint8_t active_lanes, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_SET_PAUSED_IX
@@ -324,6 +324,11 @@ RustBuffer uniffi_audren_ffi_fn_func_compute_transact_ctx_hash_ffi(RustBuffer pa
 RustBuffer uniffi_audren_ffi_fn_func_decode_audren_address(RustBuffer encoded, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_GLOBAL_ROOT_HISTORY_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_GLOBAL_ROOT_HISTORY_ACCOUNT
+RustBuffer uniffi_audren_ffi_fn_func_decode_global_root_history_account(RustBuffer data, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_LANE_HEADER_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_LANE_HEADER_ACCOUNT
 RustBuffer uniffi_audren_ffi_fn_func_decode_lane_header_account(RustBuffer data, RustCallStatus *_Nonnull out_status
@@ -332,11 +337,6 @@ RustBuffer uniffi_audren_ffi_fn_func_decode_lane_header_account(RustBuffer data,
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_POOL_STATE_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_POOL_STATE_ACCOUNT
 RustBuffer uniffi_audren_ffi_fn_func_decode_pool_state_account(RustBuffer data, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_ROOT_CHECKPOINT_ACCOUNT
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECODE_ROOT_CHECKPOINT_ACCOUNT
-RustBuffer uniffi_audren_ffi_fn_func_decode_root_checkpoint_account(RustBuffer data, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DECRYPT_AND_VERIFY_MEMO_ENTRY
@@ -358,11 +358,6 @@ RustBuffer uniffi_audren_ffi_fn_func_derive_asset_id_bytes(RustBuffer mint_bytes
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ATA
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ATA
 RustBuffer uniffi_audren_ffi_fn_func_derive_ata(RustBuffer owner, RustBuffer token_program, RustBuffer mint, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_CHECKPOINT_PDA
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_CHECKPOINT_PDA
-RustBuffer uniffi_audren_ffi_fn_func_derive_checkpoint_pda(RustBuffer program_id, uint32_t pool_id, uint16_t slot_idx, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_DEFI_SESSION_KEYPAIR
@@ -408,6 +403,11 @@ RustBuffer uniffi_audren_ffi_fn_func_derive_nullifier_pda(RustBuffer program_id,
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_POOL_PDA
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_POOL_PDA
 RustBuffer uniffi_audren_ffi_fn_func_derive_pool_pda(RustBuffer program_id, uint32_t pool_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ROOTS_PDA
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_ROOTS_PDA
+RustBuffer uniffi_audren_ffi_fn_func_derive_roots_pda(RustBuffer program_id, uint32_t pool_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_DERIVE_SUBACCOUNT_KEYS
@@ -456,6 +456,11 @@ RustBuffer uniffi_audren_ffi_fn_func_jupiter_cpi_excluded_dexes(RustCallStatus *
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PLAN_AUTO_OPEN_PAGES
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PLAN_AUTO_OPEN_PAGES
+RustBuffer uniffi_audren_ffi_fn_func_plan_auto_open_pages(RustBuffer program_id, uint32_t pool_id, uint8_t lane_id, uint64_t next_leaf, uint64_t nf_count, uint8_t num_outputs, uint8_t num_nfs, RustBuffer existing_pages, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PREPARE_DYNAMIC_SWAP_MEMO
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PREPARE_DYNAMIC_SWAP_MEMO
 RustBuffer uniffi_audren_ffi_fn_func_prepare_dynamic_swap_memo(RustBuffer recipient_view_pk, RustBuffer eph_secret, RustCallStatus *_Nonnull out_status
@@ -470,6 +475,31 @@ uint8_t uniffi_audren_ffi_fn_func_protocol_version(RustCallStatus *_Nonnull out_
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PROVE_JOINSPLIT_WITNESS_BYTES
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_PROVE_JOINSPLIT_WITNESS_BYTES
 RustBuffer uniffi_audren_ffi_fn_func_prove_joinsplit_witness_bytes(RustBuffer witness_4611, RustBuffer seed_32, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_DEPOSIT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_DEPOSIT
+uint32_t uniffi_audren_ffi_fn_func_recommended_cu_limit_deposit(int8_t has_transfer_hook, uint32_t open_page_count, uint32_t create_ata_count, uint32_t create_token_2022_ata_count, RustBuffer bumps, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_EXEC_VIA_ESCROW
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_EXEC_VIA_ESCROW
+uint32_t uniffi_audren_ffi_fn_func_recommended_cu_limit_exec_via_escrow(uint32_t router_cu_limit, int8_t has_token2022_leg, uint32_t open_page_count, uint32_t create_ata_count, uint32_t create_token_2022_ata_count, RustBuffer bumps, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_OPEN_PAGE
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_OPEN_PAGE
+uint32_t uniffi_audren_ffi_fn_func_recommended_cu_limit_open_page(uint32_t open_page_count, RustBuffer bumps, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_TRANSACT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_RECOMMENDED_CU_LIMIT_TRANSACT
+uint32_t uniffi_audren_ffi_fn_func_recommended_cu_limit_transact(int8_t is_public_withdraw, int8_t has_transfer_hook, uint8_t output_mask, uint32_t open_page_count, uint32_t create_ata_count, uint32_t create_token_2022_ata_count, RustBuffer bumps, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_SELECT_ROOT_SNAPSHOT_FOR_NOTES
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_SELECT_ROOT_SNAPSHOT_FOR_NOTES
+RustBuffer uniffi_audren_ffi_fn_func_select_root_snapshot_for_notes(RustBuffer root_history_data, uint32_t expected_pool_id, RustBuffer notes, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_VERIFY_SELECTIVE_DISCLOSURE_PROOF
@@ -761,15 +791,15 @@ uint16_t uniffi_audren_ffi_checksum_func_build_init_pool_ix(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_IX
-uint16_t uniffi_audren_ffi_checksum_func_build_open_page_ix(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_INIT_ROOT_HISTORY_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_INIT_ROOT_HISTORY_IX
+uint16_t uniffi_audren_ffi_checksum_func_build_init_root_history_ix(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_PUBLISH_CHECKPOINT_IX
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_PUBLISH_CHECKPOINT_IX
-uint16_t uniffi_audren_ffi_checksum_func_build_publish_checkpoint_ix(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_IX
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_BUILD_OPEN_PAGE_IX
+uint16_t uniffi_audren_ffi_checksum_func_build_open_page_ix(void
     
 );
 #endif
@@ -833,6 +863,12 @@ uint16_t uniffi_audren_ffi_checksum_func_decode_audren_address(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_GLOBAL_ROOT_HISTORY_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_GLOBAL_ROOT_HISTORY_ACCOUNT
+uint16_t uniffi_audren_ffi_checksum_func_decode_global_root_history_account(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_LANE_HEADER_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_LANE_HEADER_ACCOUNT
 uint16_t uniffi_audren_ffi_checksum_func_decode_lane_header_account(void
@@ -842,12 +878,6 @@ uint16_t uniffi_audren_ffi_checksum_func_decode_lane_header_account(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_POOL_STATE_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_POOL_STATE_ACCOUNT
 uint16_t uniffi_audren_ffi_checksum_func_decode_pool_state_account(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_ROOT_CHECKPOINT_ACCOUNT
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DECODE_ROOT_CHECKPOINT_ACCOUNT
-uint16_t uniffi_audren_ffi_checksum_func_decode_root_checkpoint_account(void
     
 );
 #endif
@@ -872,12 +902,6 @@ uint16_t uniffi_audren_ffi_checksum_func_derive_asset_id_bytes(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ATA
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ATA
 uint16_t uniffi_audren_ffi_checksum_func_derive_ata(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_CHECKPOINT_PDA
-#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_CHECKPOINT_PDA
-uint16_t uniffi_audren_ffi_checksum_func_derive_checkpoint_pda(void
     
 );
 #endif
@@ -935,6 +959,12 @@ uint16_t uniffi_audren_ffi_checksum_func_derive_pool_pda(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ROOTS_PDA
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_ROOTS_PDA
+uint16_t uniffi_audren_ffi_checksum_func_derive_roots_pda(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_SUBACCOUNT_KEYS
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_DERIVE_SUBACCOUNT_KEYS
 uint16_t uniffi_audren_ffi_checksum_func_derive_subaccount_keys(void
@@ -989,6 +1019,12 @@ uint16_t uniffi_audren_ffi_checksum_func_jupiter_cpi_excluded_dexes(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PLAN_AUTO_OPEN_PAGES
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PLAN_AUTO_OPEN_PAGES
+uint16_t uniffi_audren_ffi_checksum_func_plan_auto_open_pages(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PREPARE_DYNAMIC_SWAP_MEMO
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PREPARE_DYNAMIC_SWAP_MEMO
 uint16_t uniffi_audren_ffi_checksum_func_prepare_dynamic_swap_memo(void
@@ -1004,6 +1040,36 @@ uint16_t uniffi_audren_ffi_checksum_func_protocol_version(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PROVE_JOINSPLIT_WITNESS_BYTES
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_PROVE_JOINSPLIT_WITNESS_BYTES
 uint16_t uniffi_audren_ffi_checksum_func_prove_joinsplit_witness_bytes(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_DEPOSIT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_DEPOSIT
+uint16_t uniffi_audren_ffi_checksum_func_recommended_cu_limit_deposit(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_EXEC_VIA_ESCROW
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_EXEC_VIA_ESCROW
+uint16_t uniffi_audren_ffi_checksum_func_recommended_cu_limit_exec_via_escrow(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_OPEN_PAGE
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_OPEN_PAGE
+uint16_t uniffi_audren_ffi_checksum_func_recommended_cu_limit_open_page(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_TRANSACT
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_RECOMMENDED_CU_LIMIT_TRANSACT
+uint16_t uniffi_audren_ffi_checksum_func_recommended_cu_limit_transact(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_SELECT_ROOT_SNAPSHOT_FOR_NOTES
+#define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_CHECKSUM_FUNC_SELECT_ROOT_SNAPSHOT_FOR_NOTES
+uint16_t uniffi_audren_ffi_checksum_func_select_root_snapshot_for_notes(void
     
 );
 #endif

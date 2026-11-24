@@ -25,9 +25,9 @@ use audren_circuits::{
 use audren_client::{keys::AudrenKeys, store::CompactWalletStore};
 use audren_core::{
     instruction::{ASSET_MODE_PUBLIC, VK_ID_DEFAULT},
-    layout::{LaneTreeHeader, RootCheckpoint},
-    ASSOCIATED_TOKEN_PROGRAM_ID, AUDREN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID, SYSTEM_PROGRAM_ID,
-    WSOL_MINT,
+    layout::{GlobalRootHistory, LaneTreeHeader},
+    ASSOCIATED_TOKEN_PROGRAM_ID, AUDREN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID,
+    DEFAULT_ROOT_EPOCH_INTERVAL, SYSTEM_PROGRAM_ID, WSOL_MINT,
 };
 use audren_ffi::*;
 use litesvm::{types::TransactionResult, LiteSVM};
@@ -204,14 +204,13 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         svm.airdrop(&kp.pubkey(), 20_000_000_000).unwrap();
     }
 
-    // 1. InitPool + InitLane(0..4) + canonical WSOL vault ATA using audren-ffi (exact Swift/Kotlin path)
+    // 1. InitPool (with GlobalRootHistory) + InitLane(0..4) + canonical WSOL vault ATA using audren-ffi
     let init_pool = ffi_ix_to_solana(
         build_init_pool_ix(
             program_id_str.clone(),
             authority.pubkey().to_string(),
             0,
-            8,
-            1_536,
+            DEFAULT_ROOT_EPOCH_INTERVAL,
             1_500_000,
             500_000,
         )
@@ -281,21 +280,8 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         dep_meta.compute_units_consumed
     );
 
-    // 3. PublishCheckpoint slot 1 (warp slot to 8 = epoch 1)
-    svm.warp_to_slot(8);
-    let ck1_ix = ffi_ix_to_solana(
-        build_publish_checkpoint_ix(
-            program_id_str.clone(),
-            relayer.pubkey().to_string(),
-            0,
-            1,
-            4,
-        )
-        .unwrap(),
-    );
-    send_v1(&mut svm, &relayer, &[&relayer], &[ck1_ix], 150_000).expect("ckpt 1");
-
-    // 4. TypeScript @audren/sdk + @audren/sdk/prover WASM scans lane 0 and proves private Transact:
+    // 3. Instant spendability via GlobalRootHistory (zero external checkpoint crank!):
+    //    TypeScript @audren/sdk + @audren/sdk/prover WASM scans lane 0 and proves private Transact:
     //    Alice sends 1.2 SOL to Bob + 0.8 SOL change to Alice on lane 1!
     let sub0_addr: Address = derive_subtree_pda(program_id_str.clone(), 0, 0, 0)
         .unwrap()
@@ -307,7 +293,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         .address
         .parse()
         .unwrap();
-    let ck1_addr: Address = derive_checkpoint_pda(program_id_str.clone(), 0, 1)
+    let roots_addr: Address = derive_roots_pda(program_id_str.clone(), 0)
         .unwrap()
         .address
         .parse()
@@ -318,7 +304,6 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         "program_id": program_id_str,
         "payer": relayer.pubkey().to_string(),
         "pool_id": 0,
-        "ckpt_slot_idx": 1,
         "in_lane_id": 0,
         "in_sub_seq": 0,
         "in_memo_seq": 0,
@@ -334,9 +319,13 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         "eph1_hex": to_hex(&[0x55u8; 32]),
         "subtree_raw_hex": to_hex(&svm.get_account(&sub0_addr).unwrap().data),
         "memo_raw_hex": to_hex(&svm.get_account(&memo0_addr).unwrap().data),
-        "checkpoint_raw_hex": to_hex(&svm.get_account(&ck1_addr).unwrap().data),
+        "roots_raw_hex": to_hex(&svm.get_account(&roots_addr).unwrap().data),
     }));
     let xfer_ix = json_ix_to_solana(&ts_xfer);
+    assert!(
+        xfer_ix.accounts[2].is_writable,
+        "Transact with outputs must mark GlobalRootHistory writable"
+    );
     let xfer_meta = send_v1(&mut svm, &relayer, &[&relayer], &[xfer_ix], 350_000)
         .expect("TS WASM Transact private transfer on-chain");
     println!(
@@ -344,23 +333,9 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         xfer_meta.compute_units_consumed
     );
 
-    // 5. PublishCheckpoint slot 2 (warp slot to 16 = epoch 2)
-    svm.warp_to_slot(16);
-    let ck2_ix = ffi_ix_to_solana(
-        build_publish_checkpoint_ix(
-            program_id_str.clone(),
-            relayer.pubkey().to_string(),
-            0,
-            2,
-            4,
-        )
-        .unwrap(),
-    );
-    send_v1(&mut svm, &relayer, &[&relayer], &[ck2_ix], 150_000).expect("ckpt 2");
-
-    // 6. Rust UniFFI (Swift/Kotlin backend) ingests lane 1 pages created by TypeScript,
-    //    decrypts Bob's 1.2 SOL note, proves Transact WSOL unwrap withdrawal (1.15 SOL + 0.05 SOL relayer fee),
-    //    and executes on-chain!
+    // 4. Rust UniFFI (Swift/Kotlin backend) ingests lane 1 pages created by TypeScript immediately
+    //    (zero checkpoint crank!), decrypts Bob's 1.2 SOL note, proves Transact WSOL unwrap
+    //    withdrawal (1.15 SOL + 0.05 SOL relayer fee) with READ-ONLY GlobalRootHistory, and executes on-chain!
     let sub1_addr: Address = derive_subtree_pda(program_id_str.clone(), 0, 1, 0)
         .unwrap()
         .address
@@ -371,15 +346,10 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         .address
         .parse()
         .unwrap();
-    let ck2_addr: Address = derive_checkpoint_pda(program_id_str.clone(), 0, 2)
-        .unwrap()
-        .address
-        .parse()
-        .unwrap();
 
     let sub1_raw = svm.get_account(&sub1_addr).unwrap().data.clone();
     let memo1_raw = svm.get_account(&memo1_addr).unwrap().data.clone();
-    let ck2_raw = svm.get_account(&ck2_addr).unwrap().data.clone();
+    let roots_raw = svm.get_account(&roots_addr).unwrap().data.clone();
 
     let bob_keys = AudrenKeys::from_seed(&bob_seed);
     let bob_fvk = bob_keys.full_viewing_key();
@@ -394,8 +364,11 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
     let bob_note = bob_store.unspent_notes(None)[0].clone();
     assert_eq!(bob_note.amount, 1_200_000_000);
 
-    let ck2 = RootCheckpoint::decode(&ck2_raw).unwrap();
-    let (super_root, path) = bob_store.build_witness_for_note(&bob_note, &ck2).unwrap();
+    let roots = GlobalRootHistory::decode(&roots_raw).unwrap();
+    let (bob_choice, super_root, path) = bob_store
+        .build_witness_from_root_history(&bob_note, &roots)
+        .unwrap();
+    let (bob_ring_kind, bob_ring_idx) = (bob_choice.ring_kind, bob_choice.ring_idx);
     let wsol_asset_bytes = derive_asset_id_bytes(WSOL_MINT.to_vec()).unwrap();
     let wsol_asset = derive_asset_id(&WSOL_MINT);
     let bob_fee = 50_000_000u64;
@@ -461,7 +434,8 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
             payer: relayer.pubkey().to_string(),
             pool_id: 0,
             vk_id: VK_ID_DEFAULT,
-            ckpt_slot_idx: 2,
+            root_ring_kind: bob_ring_kind,
+            root_ring_idx: bob_ring_idx,
             out_lane_id: 2,
             out_sub_seq: 0,
             out_root_seq: 0,
@@ -491,6 +465,10 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         })
         .unwrap(),
     );
+    assert!(
+        !bob_wd_ix.accounts[2].is_writable,
+        "Full exit (output_mask == 0) must pass GlobalRootHistory as READ-ONLY"
+    );
     let bob_meta = send_v1(&mut svm, &relayer, &[&relayer], &[bob_wd_ix], 350_000)
         .expect("FFI Transact WSOL Unwrap Withdraw on-chain");
     assert_eq!(svm.get_balance(&recipient_bob.pubkey()).unwrap(), bob_out);
@@ -499,13 +477,13 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         bob_meta.compute_units_consumed
     );
 
-    // 7. TypeScript @audren/sdk/prover WASM spends Alice's 0.8 SOL change note from lane 1!
+    // 5. TypeScript @audren/sdk/prover WASM spends Alice's 0.8 SOL change note from lane 1
+    //    with READ-ONLY GlobalRootHistory!
     let ts_wd = run_ts_driver(&json!({
         "action": "transact_withdraw_sol",
         "program_id": program_id_str,
         "payer": relayer.pubkey().to_string(),
         "pool_id": 0,
-        "ckpt_slot_idx": 2,
         "in_lane_id": 1,
         "in_sub_seq": 0,
         "in_memo_seq": 0,
@@ -520,9 +498,13 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         "relayer_fee_amount": 25_000_000u64,
         "subtree_raw_hex": to_hex(&sub1_raw),
         "memo_raw_hex": to_hex(&memo1_raw),
-        "checkpoint_raw_hex": to_hex(&ck2_raw),
+        "roots_raw_hex": to_hex(&svm.get_account(&roots_addr).unwrap().data),
     }));
     let alice_wd_ix = json_ix_to_solana(&ts_wd);
+    assert!(
+        !alice_wd_ix.accounts[2].is_writable,
+        "TS full exit (output_mask == 0) must pass GlobalRootHistory as READ-ONLY"
+    );
     let alice_meta = send_v1(&mut svm, &relayer, &[&relayer], &[alice_wd_ix], 350_000)
         .expect("TS WASM Transact WSOL Unwrap Withdraw on-chain");
     assert_eq!(
@@ -534,7 +516,7 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         alice_meta.compute_units_consumed
     );
 
-    // Confirm on-chain lane state & checkpoint integrity
+    // Confirm on-chain lane state & GlobalRootHistory integrity
     let lane1_addr: Address = derive_lane_pda(program_id_str.clone(), 0, 1)
         .unwrap()
         .address
@@ -542,5 +524,6 @@ fn cross_sdk_typescript_wasm_and_uniffi_execute_onchain() {
         .unwrap();
     let l1 = LaneTreeHeader::decode(&svm.get_account(&lane1_addr).unwrap().data).unwrap();
     assert_eq!(l1.next_leaf, 2);
-    assert_eq!(ck2.lane_counts[1], 2);
+    let roots_final = GlobalRootHistory::decode(&svm.get_account(&roots_addr).unwrap().data).unwrap();
+    assert_eq!(roots_final.latest_lane_counts[1], 2);
 }

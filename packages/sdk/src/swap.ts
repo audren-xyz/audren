@@ -120,6 +120,9 @@ export function resolveEscrowIndices(
   escrowInAta: string,
   escrowOutAta: string,
 ): ResolvedEscrowIndices {
+  if (!Array.isArray(actionAccounts)) {
+    throw new RangeError('actionAccounts must be an array');
+  }
   const escrowIdx = actionAccounts.findIndex((m) => m.pubkey === escrowAddress);
   const escrowInIdx = actionAccounts.findIndex((m) => m.pubkey === escrowInAta);
   const escrowOutIdx = actionAccounts.findIndex((m) => m.pubkey === escrowOutAta);
@@ -142,6 +145,9 @@ export function prepareEscrowAccountsForAudren(
   escrowAddress: string,
   extraWritablePubkeys?: readonly string[],
 ): RouterAccountMeta[] {
+  if (!Array.isArray(actionAccounts)) {
+    throw new RangeError('actionAccounts must be an array');
+  }
   const writableSet = new Set<string>([escrowAddress]);
   if (extraWritablePubkeys) {
     for (const pk of extraWritablePubkeys) writableSet.add(pk);

@@ -8,7 +8,7 @@ Standalone, open-source, router-agnostic Cloudflare Worker Privacy Relayer for t
 
 Anyone can operate a compatible relay; users can choose a provider or submit directly. A relay supplies the network fee payer without receiving user spending keys. Public deposits, withdrawals, and external DeFi details remain observable by design. Relaying separates the user wallet from the fee-payer field; it does not guarantee that other evidence cannot link activity.
 
-The service sees connection metadata and public instruction/quote parameters. `src/policy/guard-do.ts` generates a random 32-byte secret salt rotated and purged daily inside `RelayGuard` Durable Object storage (never derived from any public key or environment variable) and hashes client IPs strictly inside the Durable Object. `inflight_nullifiers` stores only `(nullifier, expires_at)` with zero IP-hash linkage. Its `prune` method removes expired entries during guard operations (`DAY_MS`, `HOUR_MS`, `INFLIGHT_TTL_MS`). Hashing is not anonymization, and infrastructure logs are a separate operator responsibility.
+The service sees connection metadata and public instruction/quote parameters. `src/policy/guard-do.ts` generates a random 32-byte secret salt rotated and purged daily strictly in memory inside the `RelayGuard` Durable Object (never persisted to SQLite storage), never derived from any public key or environment variable, and hashes client IPs strictly inside the Durable Object. `inflight_nullifiers` stores only `(nullifier, expires_at)` with zero IP-hash linkage. Its `prune` method removes expired entries during guard operations (`DAY_MS`, `HOUR_MS`, `INFLIGHT_TTL_MS`). Hashing is not anonymization, and infrastructure logs are a separate operator responsibility.
 
 ## How it fits together
 
@@ -19,11 +19,12 @@ The service sees connection metadata and public instruction/quote parameters. `s
     │  3. POST /v1/relay/submit (unsigned Audren Tag 5 / 1..=4 private Tag 5 batch / Tag 6 wire payload)
     ▼
   audren-relay (Cloudflare Worker + SQLite Durable Object `RelayGuard`)
-    │  • Firewall: allows ONLY Audren Tag 5 (`Transact`, vk_id=0) & Tag 6 (`ExecViaEscrow`, vk_id=0), canonical ATAs, accounts[0] == relayer, 0 extra signers
+    │  • Firewall: allows ONLY Audren Tag 5 (`Transact`, vk_id=0, 380 B fixed) & Tag 6 (`ExecViaEscrow`, vk_id=0, 560 B fixed), canonical `GlobalRootHistory` (`audren_roots`) at [2] (read-only on full exits), canonical ATAs, accounts[0] == relayer, 0 extra signers
+    │  • Zero-crank Auto-OpenPage: inline idempotent `OpenPage` (Tag 2) at exact rollover boundaries & `>= 90%` lane occupancy when `LaneRentVault` covers rent
     │  • Live RPC pricing: fetches mint decimals/program & live rent schedule (`MemoPage` 10,240 B / 96 notes) via Solana RPC
     │  • Pre-flight simulation: verifies exact lamport outflow, Mode 1 shielded cm2 fee(s) (via read-only FVK), or Mode 2/3 fee inflow
-    │  • Atomic RelayGuard reservation: ephemeral daily-salted IP rate limits, daily SOL budget & IP-unlinked nullifier locks
-    │  • Signs & broadcasts single Solana Transaction v1 (`0x81`, <= 4,096 B, with deduplicated `OpenPage` / validated `setupAtas` / allowlisted `preInstructions`)
+    │  • Atomic RelayGuard reservation: ephemeral daily-salted IP rate limits, daily SOL budget, per-lane `open_page_locks` & IP-unlinked nullifier locks
+    │  • Signs & broadcasts single Solana Transaction v1 (`0x81`, <= 4,096 B) with calibrated tight CU limits
     ▼
   Solana Mainnet & Devnet RPC
 ```
@@ -31,18 +32,17 @@ The service sees connection metadata and public instruction/quote parameters. `s
 ## Layout
 
 ```text
-src/index.ts                  HTTP router, relayer rotation, Solana v1 tx assembly (single + 1..=4 batch), simulation accounting, broadcast
+src/index.ts                  HTTP router, relayer rotation, inline auto-OpenPage, tight CU compilation, simulation accounting, broadcast
 src/env.ts                    Environment & Wrangler var parser (`RelayPolicyConfig`, multi-payer & FVK config)
 src/types.ts                  Wire & internal request/response types
-src/policy/firewall.ts        Zero-trust Audren v1 Tag 5 / Tag 6 / batch & allowlisted preInstruction firewall
+src/policy/firewall.ts        Zero-trust Audren v1.3.0 Tag 5 / Tag 6 / batch, GlobalRootHistory & allowlisted preInstruction firewall
 src/policy/pricing.ts         Dynamic SwapFeePlan & native fee-quote calculation from live rent (default omitNf1=false)
-src/policy/guard-do.ts        SQLite Durable Object (`RelayGuard`) ephemeral daily IP salt, IP-unlinked nullifier locks & budget ledger
+src/policy/guard-do.ts        SQLite Durable Object (`RelayGuard`) ephemeral daily IP salt, IP-unlinked nullifier locks, open_page_locks & budget ledger
 src/solana/codec.ts           Base58, ATA builder, Solana Transaction v1 (`0x81`) serializer
-src/solana/audren.ts          Audren v1 PoolState / LaneTreeState / Page decoders, canonical ATA checks & batch rollover helpers (via `@audren/sdk`)
-src/solana/checkpoint.ts      Permissionless on-demand `PublishCheckpoint` (`Tag 4`) evaluator & publisher
+src/solana/audren.ts          Audren v1.3.0 PoolState / LaneTreeState / GlobalRootHistory / Page decoders, canonical ATA checks & rollover/lookahead helpers (via `@audren/sdk`)
 src/solana/rpc.ts             Solana JSON-RPC client (`fetchMintMetasWithData`, `fetchLiveRentSchedule`, Token-2022 fee deduction, `simulateV1Transaction`)
 src/aggregators/              Pluggable DEX adapters: `jupiter.ts`, `bedrock.ts`, `dflow.ts`, `titan.ts`, `okx.ts`, `registry.ts`
-src/cron/refill.ts            `*/2 * * * *` scheduled treasury refill & permissionless `PublishCheckpoint`/`OpenPage` crank
+src/cron/refill.ts            `*/2 * * * *` scheduled treasury SOL auto-refill from collected fee tokens (100% zero-crank)
 scripts/bootstrap-relayer.ts  Idempotent keypair creation, funding & common ATA pre-opening
 scripts/e2e-relay.ts          Live empirical E2E suite (health, info, multi-aggregator quotes, firewall rejections)
 wrangler.jsonc                Self-hostable open-source Cloudflare Worker configuration
@@ -53,24 +53,23 @@ wrangler.jsonc                Self-hostable open-source Cloudflare Worker config
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Service liveness check |
-| `GET` | `/v1/info?cluster=mainnet\|devnet` | Rotated relayer pubkey + full `relayerPubkeys`, live SOL balance, live on-chain rent schedule, optional shielded fee address (`FullViewingKey`), active aggregators, and policy limits |
+| `GET` | `/health` | Service liveness check (`version`, `programId`, `rootsPda`) |
+| `GET` | `/v1/info?cluster=mainnet\|devnet` | Service `version`, canonical Pool #0 `rootsPda` (`249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7`), rotated relayer pubkey + full `relayerPubkeys`, live SOL balance, live on-chain rent schedule, optional shielded fee address (`FullViewingKey`), active aggregators, and policy limits |
 | `GET` | `/v1/aggregators` | Configured DEX aggregators and per-adapter capabilities |
 | `GET` | `/v1/stats` | Daily aggregate relay counts and remaining sponsor budget (zero PII) |
 | `GET` | `/v1/fee-quote` | Dynamic `relayer_fee` quote (default `omitNf1=false` across all ops, random `shardId` for `exec_escrow`): flat per-mint shielded `cm2` fee for `transfer` (`amount` omitted/ignored) and self-paying quotes for `withdraw` (`WITHDRAW_FLAG_UNWRAP_WSOL`) & `ExecViaEscrow` (`EXEC_FLAG_FEE_ON_OUTPUT`) |
 | `GET` / `POST` | `/v1/swap/quote` | Multi-aggregator swap quote (`jupiter`, `bedrock`, `dflow`, `titan`, `okx`, or `auto` parallel race; random `shardId` when omitted) with Token-2022 `TransferFeeConfig` net input deduction + dynamic `SwapFeePlan` |
-| `POST` | `/v1/swap/instructions` | Normalized `swapInstruction`, `missingAtas`, `lookupTables`, and fee-account wiring for `ExecViaEscrow` |
-| `POST` | `/v1/checkpoint` | Permissionless on-demand `PublishCheckpoint` (`Tag 4`) signed by the relayer when uncheckpointed leaves exist and cooldown has elapsed (`up_to_date` / `cooldown` / `published`) |
-| `POST` | `/v1/relay/submit` | Firewall (single Tag 5 / 1..=4 private Tag 5 batch / Tag 6 + allowlisted zero-signer `preInstructions`) -> deduplicated `OpenPage` prepending -> `simulateV1Transaction` -> atomic `RelayGuard` reserve -> Solana Transaction v1 (`0x81`, `<= 4,096 B`) sign, send & confirm |
-| `POST` | `/v1/admin/refill` | Manual treasury auto-refill & maintenance crank trigger (authenticated via constant-time `x-admin-token`) |
+| `POST` | `/v1/swap/instructions` | Normalized `swapInstruction`, `missingAtas`, `lookupTables`, tight `computeUnitLimit`, and fee-account wiring for `ExecViaEscrow` |
+| `POST` | `/v1/relay/submit` | Firewall (single Tag 5 / 1..=4 private Tag 5 batch / Tag 6 + allowlisted zero-signer `preInstructions`) -> inline exact & `>= 90%` lookahead `OpenPage` prepending -> tight CU compilation -> `simulateV1Transaction` -> atomic `RelayGuard` reserve -> Solana Transaction v1 (`0x81`, `<= 4,096 B`) sign, send & confirm |
+| `POST` | `/v1/admin/refill` | Manual treasury auto-refill trigger (authenticated via constant-time `x-admin-token`) |
 
 ## Pluggable aggregators & 3-mode fee economics
 
 - **Standardized multi-aggregator routing:** Every DEX adapter (`jupiter`, `bedrock`, `dflow`, `titan`, `okx`) uses the same credential convention (`<PROVIDER>_API_KEY` and optional `<PROVIDER>_API_URL`). Select `provider` per request or pass `auto` to race all configured adapters in parallel for the highest `outAmount`.
 - **Mode 1 — Shielded private transfer & merge batch fee (`Tag 5`, `ASSET_MODE_PRIVATE`):** When `MAINNET_RELAYER_FVK_JSON` / `DEVNET_RELAYER_FVK_JSON` is configured, the hot Worker decrypts `106 B` output memo `cm2` (across single or 1..=4 batched `2 -> 1` merge instructions) using its read-only `FullViewingKey` (zero spend key on the Worker) and verifies `cm2 == Poseidon5(owner, asset_id, fee_amount, blinding)` before relaying.
-- **Mode 2 — Public withdraw & atomic WSOL unwrap (`Tag 5`, `ASSET_MODE_PUBLIC`):** Reimburses the relayer via `relayer_fee` (quoted by `/v1/fee-quote`, covering 100% of live gas, rent, and any ATA creation) or atomic `WITHDRAW_FLAG_UNWRAP_WSOL` when funding a 0-SOL wallet or DeFi session keypair.
-- **Mode 3 — Self-paying DeFi swaps (`Tag 6`, `ExecViaEscrow`):** SPL/Token-2022 only; supports both input-asset and output-asset (`EXEC_FLAG_FEE_ON_OUTPUT`) relayer fees deducted atomically from swap proceeds after CPI.
-- **Self-refill & maintenance cron (`*/2 * * * *`):** Refills native SOL from accumulated fee tokens when below `REFILL_MIN_SOL` and executes permissionless `PublishCheckpoint` (`Tag 4`) + `LaneRentVault`-subsidized `OpenPage` (`Tag 2`) lookahead cranks.
+- **Mode 2 — Public withdraw & atomic WSOL unwrap (`Tag 5`, `ASSET_MODE_PUBLIC`):** Reimburses the relayer via `relayer_fee` (quoted by `/v1/fee-quote`, covering 100% of live gas, rent, and any ATA creation) or atomic `WITHDRAW_FLAG_UNWRAP_WSOL` when funding a 0-SOL wallet or DeFi session keypair. Full exits (`outputMask === 0`) lock `GlobalRootHistory` read-only (`165,000` CU budget).
+- **Mode 3 — Self-paying DeFi swaps (`Tag 6`, `ExecViaEscrow`):** SPL/Token-2022 only; supports both input-asset and output-asset (`EXEC_FLAG_FEE_ON_OUTPUT`) relayer fees deducted atomically from swap proceeds after CPI (`285,000` CU base, `+25,000` for Token-2022 legs, plus `350,000` single-hop or `550,000` multi-hop / unknown-CU router headroom).
+- **Zero-crank architecture & treasury auto-refill cron (`*/2 * * * *`):** `GlobalRootHistory` updates inline on every state mutation and `planRolloverOpenPages` auto-prepends idempotent `OpenPage` (`Tag 2`) inline at exact rollover boundaries and opportunistically at `>= 90%` lookahead (`subRem <= 26`, `memoRem <= 10`, `nfRem <= 60`, `subrootSlot >= 280`) whenever live rent is known, `LaneRentVault` covers 100% of rent with zero post-pin deficit, and account/wire/CU limits permit. The scheduled cron runs exclusively `runAutoRefill` to convert accumulated fee tokens back into native SOL gas float when below `REFILL_MIN_SOL`.
 
 ## Secrets & deployment
 

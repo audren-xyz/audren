@@ -17,7 +17,29 @@ export const NUM_ESCROW_SHARDS = 16;
 export const LANE_DEPTH_4ARY = 18;
 export const TOTAL_DEPTH_4ARY = 20;
 export const SUBTREE_LEVELS_4ARY = 4;
-export const CHECKPOINT_RING_SLOTS = 256;
+
+// GlobalRootHistory dual-ring parameters (10,216 B <= 10,240 B CPI cap)
+export const SLOT_RING_LEN = 128;
+export const EPOCH_RING_LEN = 89;
+export const ROOT_ENTRY_LEN = 40;
+export const DEFAULT_ROOT_EPOCH_INTERVAL = 32n;
+export const MAX_ROOT_EPOCH_INTERVAL = 256n;
+export const ROOT_RING_SLOT = 0;
+export const ROOT_RING_EPOCH = 1;
+
+// Canonical tight Compute Unit limits per Audren instruction (calibrated against
+// empirical sBPFv3 LiteSVM measurements with ~15-20% worst-case rollover headroom)
+export const CU_LIMIT_INIT_POOL = 45_000;
+export const CU_LIMIT_INIT_LANE = 75_000;
+export const CU_LIMIT_INIT_ROOT_HISTORY = 75_000;
+export const CU_LIMIT_OPEN_PAGE = 40_000;
+export const CU_LIMIT_DEPOSIT = 75_000;
+export const CU_LIMIT_DEPOSIT_HOOK = 140_000;
+export const CU_LIMIT_TRANSACT_PRIVATE = 235_000;
+export const CU_LIMIT_TRANSACT_FULL_EXIT = 165_000;
+export const CU_LIMIT_TRANSACT_WITHDRAW = 255_000;
+export const CU_LIMIT_TRANSACT_WITHDRAW_HOOK = 295_000;
+export const CU_LIMIT_EXEC_VIA_ESCROW_BASE = 285_000;
 
 // Canonical 12 PDA seed prefixes (`audren_*`)
 export const POOL_SEED = 'audren_pool';
@@ -29,7 +51,7 @@ export const SUBROOT_SEED = 'audren_subroot';
 export const MEMO_SEED = 'audren_memo';
 export const NF_PAGE_SEED = 'audren_nf_page';
 export const NULLIFIER_SEED = 'audren_nf';
-export const CKPT_SEED = 'audren_ckpt';
+export const ROOTS_SEED = 'audren_roots';
 export const ESCROW_SEED = 'audren_escrow';
 export const UNWRAP_SEED = 'audren_unwrap';
 
@@ -38,7 +60,7 @@ export const TAG_INIT_POOL = 0x00;
 export const TAG_INIT_LANE = 0x01;
 export const TAG_OPEN_PAGE = 0x02;
 export const TAG_DEPOSIT = 0x03;
-export const TAG_PUBLISH_CHECKPOINT = 0x04;
+export const TAG_INIT_ROOT_HISTORY = 0x04;
 export const TAG_TRANSACT = 0x05;
 export const TAG_EXEC_VIA_ESCROW = 0x06;
 export const TAG_SET_PAUSED = 0x07;
@@ -116,7 +138,7 @@ export const SUBTREE_MAGIC = 'AUD1SB01';
 export const SUBROOT_MAGIC = 'AUD1SR01';
 export const MEMO_MAGIC = 'AUD1MM01';
 export const NF_PAGE_MAGIC = 'AUD1NF01';
-export const CKPT_MAGIC = 'AUD1CK01';
+export const ROOTS_MAGIC = 'AUD1RT01';
 export const DYN_MEMO_MAGIC = 'AUD1DYN1';
 
 export const POOL_STATE_LEN = 128;
@@ -126,7 +148,8 @@ export const SUBTREE_PAGE_LEN = 8_256;
 export const SUBROOT_PAGE_LEN = 9_664;
 export const MEMO_PAGE_LEN = 10_240;
 export const NF_PAGE_LEN = 9_664;
-export const CKPT_LEN = 704;
+export const ROOT_SNAPSHOT_LEN = 672;
+export const ROOT_HISTORY_LEN = 10_216;
 
 // PoolState offsets (128 B)
 export const PL_OFF_MAGIC = 0;
@@ -135,8 +158,8 @@ export const PL_OFF_BUMP = 9;
 export const PL_OFF_PAUSED = 10;
 export const PL_OFF_ACTIVE_LANES = 11;
 export const PL_OFF_POOL_ID = 12;
-export const PL_OFF_CKPT_INTERVAL = 16;
-export const PL_OFF_MAX_CKPT_AGE = 24;
+export const PL_OFF_ROOT_EPOCH_INTERVAL = 16;
+export const PL_OFF_RESERVED_24 = 24;
 export const PL_OFF_AUTHORITY = 32;
 export const PL_OFF_VAULT_AUTH_BUMP = 64;
 export const PL_OFF_NOTE_RENT_FEE = 72;
@@ -200,17 +223,29 @@ export const NF_OFF_CLOSED_SLOT = 32;
 export const NF_OFF_PREFIXES = 64;
 export const NF_PAGE_HEADER_LEN = 64;
 
-// RootCheckpoint offsets (704 B)
-export const CK_OFF_MAGIC = 0;
-export const CK_OFF_VERSION = 8;
-export const CK_OFF_BUMP = 9;
-export const CK_OFF_SLOT_IDX = 10;
-export const CK_OFF_POOL_ID = 12;
-export const CK_OFF_EPOCH_ID = 16;
-export const CK_OFF_PUBLISHED_SLOT = 24;
-export const CK_OFF_SUPER_ROOT = 32;
-export const CK_OFF_LANE_ROOTS = 64;
-export const CK_OFF_LANE_COUNTS = 576;
+// GlobalRootHistory offsets (10,216 B <= 10,240 B CPI cap)
+export const RT_OFF_MAGIC = 0;
+export const RT_OFF_VERSION = 8;
+export const RT_OFF_BUMP = 9;
+export const RT_OFF_SLOT_CURSOR = 10;
+export const RT_OFF_POOL_ID = 12;
+export const RT_OFF_EPOCH_CURSOR = 16;
+export const RT_OFF_SLOT_COUNT = 18;
+export const RT_OFF_EPOCH_COUNT = 20;
+export const RT_OFF_SAME_SLOT_BUMPED = 22;
+export const RT_OFF_LATEST_SLOT = 24;
+export const RT_OFF_STABLE_EPOCH_ID = 32;
+export const RT_OFF_STABLE_SLOT = 40;
+export const RT_OFF_EPOCH_INTERVAL = 48;
+export const RT_OFF_GROUP_ROOTS = 64;
+export const RT_OFF_LATEST_SUPER_ROOT = 192;
+export const RT_OFF_LATEST_LANE_ROOTS = 224;
+export const RT_OFF_LATEST_LANE_COUNTS = 736;
+export const RT_OFF_STABLE_SUPER_ROOT = 864;
+export const RT_OFF_STABLE_LANE_ROOTS = 896;
+export const RT_OFF_STABLE_LANE_COUNTS = 1_408;
+export const RT_OFF_SLOT_RING = 1_536;
+export const RT_OFF_EPOCH_RING = 6_656;
 
 /** BN254 scalar field modulus r */
 export const BN254_FR_MODULUS =
@@ -248,9 +283,9 @@ export const AUDREN_ERRORS: Record<number, string> = {
   6004: 'SubtreePageFull',
   6005: 'SubtreePageMismatch',
   6006: 'SubrootPageMismatch',
-  6007: 'CheckpointTooSoon',
-  6008: 'CheckpointExpired',
-  6009: 'CheckpointMismatch',
+  6007: 'InvalidRootRing',
+  6008: 'RootIndexOutOfBounds',
+  6009: 'RootHistoryMismatch',
   6010: 'ProofVerificationFailed',
   6011: 'InvalidVkId',
   6012: 'NullifierAlreadyUsed',

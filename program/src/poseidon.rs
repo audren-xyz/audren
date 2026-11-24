@@ -1,5 +1,5 @@
 //! On-chain `sol_poseidon` BN254 x^5 hashing, 4-ary Depth-18 incremental frontier append,
-//! Depth-2 super-root aggregation, and canonical note / public-input hashing.
+//! and canonical note / public-input hashing.
 
 use audren_core::{
     is_canonical_fr, mask_to_fr_be as core_mask_to_fr_be, pack_u64_pair_be32, u64_to_be32,
@@ -10,7 +10,7 @@ use solana_poseidon::{hashv, Endianness, Parameters};
 
 use crate::state::{
     err, read_u64, AudrenError, LANE_DEPTH_4ARY, LN_OFF_CURRENT_ROOT, LN_OFF_FRONTIER,
-    LN_OFF_NEXT_LEAF, NUM_LANES,
+    LN_OFF_NEXT_LEAF,
 };
 
 #[inline(always)]
@@ -91,52 +91,6 @@ pub fn compute_public_input_hash(
     let h_a = poseidon5(&dom_a, super_root, nf0, nf1, cm0)?;
     let h_b = poseidon5(&dom_b, cm1, cm2, public_asset_id, &packed)?;
     poseidon4(&dom_f, &h_a, &h_b, ctx_hash)
-}
-
-/// Compute 4-ary depth-2 `super_root` across 16 lane slots (2x `sol_poseidon(4)` at 4 active lanes,
-/// 3x at 8 active lanes, 5x at 16 active lanes). Inactive 4-lane groups fold directly to
-/// `ZERO_HASHES_4ARY[19]`, guaranteeing bit-for-bit identical `super_root` before & after expansion.
-pub fn compute_super_root_4ary(
-    lane_roots: &[[u8; 32]; NUM_LANES],
-    active_lanes: usize,
-) -> Result<[u8; 32], ProgramError> {
-    let g0 = poseidon4(
-        &lane_roots[0],
-        &lane_roots[1],
-        &lane_roots[2],
-        &lane_roots[3],
-    )?;
-    let g1 = if active_lanes > 4 {
-        poseidon4(
-            &lane_roots[4],
-            &lane_roots[5],
-            &lane_roots[6],
-            &lane_roots[7],
-        )?
-    } else {
-        ZERO_HASHES_4ARY[19]
-    };
-    let g2 = if active_lanes > 8 {
-        poseidon4(
-            &lane_roots[8],
-            &lane_roots[9],
-            &lane_roots[10],
-            &lane_roots[11],
-        )?
-    } else {
-        ZERO_HASHES_4ARY[19]
-    };
-    let g3 = if active_lanes > 12 {
-        poseidon4(
-            &lane_roots[12],
-            &lane_roots[13],
-            &lane_roots[14],
-            &lane_roots[15],
-        )?
-    } else {
-        ZERO_HASHES_4ARY[19]
-    };
-    poseidon4(&g0, &g1, &g2, &g3)
 }
 
 #[inline(always)]

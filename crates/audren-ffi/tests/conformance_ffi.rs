@@ -3,17 +3,21 @@
 use std::path::PathBuf;
 
 use audren_ffi::{
-    build_exec_via_escrow_ix, build_open_page_ix, build_transact_ix, build_update_pool_ix,
-    canonical_program_id, check_memo_view_tag, compute_exec_ctx_hash_ffi,
-    compute_page_rollovers_ffi, compute_transact_ctx_hash_ffi, decode_audren_address,
-    decode_pool_state_account, decode_root_checkpoint_account, decrypt_and_verify_memo_entry,
-    derive_asset_id_bytes, derive_checkpoint_pda, derive_defi_session_keypair, derive_escrow_pda,
-    derive_keys_from_seed, derive_lane_pda, derive_lane_rent_pda, derive_memo_pda,
-    derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda, derive_subaccount_keys,
-    derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda,
-    encrypt_note_memo, export_full_viewing_key, prepare_dynamic_swap_memo, protocol_version,
-    prove_joinsplit_witness_bytes, verify_selective_disclosure_proof, FfiAccountMeta,
-    FfiExecCtxHashParams, FfiExecViaEscrowParams, FfiSelectiveDisclosureProof,
+    build_exec_via_escrow_ix, build_init_pool_ix, build_init_root_history_ix, build_open_page_ix,
+    build_transact_ix, build_update_pool_ix, canonical_program_id, check_memo_view_tag,
+    compute_exec_ctx_hash_ffi, compute_page_rollovers_ffi, compute_transact_ctx_hash_ffi,
+    decode_audren_address, decode_global_root_history_account, decode_pool_state_account,
+    decrypt_and_verify_memo_entry, derive_asset_id_bytes, derive_defi_session_keypair,
+    derive_escrow_pda, derive_keys_from_seed, derive_lane_pda, derive_lane_rent_pda,
+    derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda, derive_roots_pda,
+    derive_subaccount_keys, derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda,
+    derive_vault_auth_pda, deterministic_note_rent_fee_ffi, encrypt_note_memo,
+    export_full_viewing_key, plan_auto_open_pages,
+    prepare_dynamic_swap_memo, protocol_version, prove_joinsplit_witness_bytes,
+    recommended_cu_limit_deposit, recommended_cu_limit_exec_via_escrow,
+    recommended_cu_limit_open_page, recommended_cu_limit_transact, select_root_snapshot_for_notes,
+    verify_selective_disclosure_proof, FfiAccountMeta, FfiExecCtxHashParams,
+    FfiExecViaEscrowParams, FfiNoteCoord, FfiOpenPageSpec, FfiSelectiveDisclosureProof,
     FfiTransactCtxHashParams, FfiTransactParams, FfiUpdatePoolAction,
 };
 use serde_json::Value;
@@ -89,7 +93,6 @@ fn ffi_conformance_matches_spec_vectors() {
     let pool_id = p["pool_id"].as_u64().unwrap() as u32;
     let lane_id = p["lane_id"].as_u64().unwrap() as u8;
     let page_seq = p["page_seq"].as_u64().unwrap();
-    let slot_idx = p["slot_idx"].as_u64().unwrap() as u16;
     let shard_id = p["shard_id"].as_u64().unwrap() as u8;
     let nf = from_hex(p["nullifier_hex"].as_str().unwrap());
 
@@ -101,7 +104,9 @@ fn ffi_conformance_matches_spec_vectors() {
     assert_eq!(derive_subroot_pda(pid.clone(), pool_id, lane_id, page_seq).unwrap().address, p["subroot"]["address"].as_str().unwrap());
     assert_eq!(derive_memo_pda(pid.clone(), pool_id, lane_id, page_seq).unwrap().address, p["memo"]["address"].as_str().unwrap());
     assert_eq!(derive_nf_page_pda(pid.clone(), pool_id, lane_id, page_seq).unwrap().address, p["nf_page"]["address"].as_str().unwrap());
-    assert_eq!(derive_checkpoint_pda(pid.clone(), pool_id, slot_idx).unwrap().address, p["checkpoint"]["address"].as_str().unwrap());
+    let roots_pda = derive_roots_pda(pid.clone(), pool_id).unwrap();
+    assert_eq!(roots_pda.address, p["roots"]["address"].as_str().unwrap());
+    assert_eq!(roots_pda.bump, p["roots"]["bump"].as_u64().unwrap() as u8);
     assert_eq!(derive_nullifier_pda(pid.clone(), pool_id, nf.clone()).unwrap().address, p["nullifier"]["address"].as_str().unwrap());
     assert_eq!(derive_escrow_pda(pid.clone(), pool_id, shard_id).unwrap().address, p["escrow"]["address"].as_str().unwrap());
     assert_eq!(derive_unwrap_pda(pid.clone(), pool_id, nf).unwrap().address, p["unwrap"]["address"].as_str().unwrap());
@@ -234,15 +239,45 @@ fn ffi_conformance_matches_spec_vectors() {
     .unwrap();
     assert_eq!(to_hex(&ctx_exec), v["ctx_hashes"]["exec_fee_on_output_ctx_hash_hex"]);
 
-    // 7. Account decoders + rollover planner + UpdatePool builder
+    // 7. Account decoders + rollover planner + InitPool/InitRootHistory/UpdatePool builders
     let ps = decode_pool_state_account(from_hex(v["pool_state"]["raw_hex"].as_str().unwrap())).unwrap();
     assert_eq!(ps.active_lanes, 4);
-    assert_eq!(ps.ckpt_interval, 8);
+    assert_eq!(ps.root_epoch_interval, v["pool_state"]["root_epoch_interval"].as_u64().unwrap());
     assert_eq!(ps.pending_authority_b58, v["pool_state"]["pending_authority_b58"].as_str().unwrap());
-    let ck = decode_root_checkpoint_account(from_hex(v["checkpoint_raw_hex"].as_str().unwrap())).unwrap();
-    assert_eq!(ck.slot_idx, 13);
-    assert_eq!(ck.lane_counts[2], 6);
+
+    let rh = decode_global_root_history_account(
+        from_hex(v["root_history"]["raw_hex"].as_str().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(rh.pool_id, 0);
+    assert_eq!(rh.bump, 254);
+    assert_eq!(rh.slot_count, 1);
+    assert_eq!(rh.epoch_count, 1);
+    assert_eq!(rh.epoch_interval, 32);
+    assert_eq!(to_hex(&rh.latest_super_root), v["root_history"]["latest_super_root_hex"]);
+    assert_eq!(to_hex(&rh.stable_super_root), v["root_history"]["stable_super_root_hex"]);
+    assert_eq!(rh.latest_lane_counts[2], 6);
+    assert_eq!(rh.stable_lane_counts[2], 6);
+
     assert_eq!(compute_page_rollovers_ffi(95, 2, 0, 1).next_memo_seq, Some(1));
+    let init_pool_ix = build_init_pool_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 32, 1_500_000, 500_000).unwrap();
+    assert_eq!(init_pool_ix.accounts.len(), 4);
+    assert_eq!(init_pool_ix.data.len(), 29);
+    let init_rh_ix = build_init_root_history_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 32, 4).unwrap();
+    assert_eq!(init_rh_ix.accounts.len(), 8);
+    assert_eq!(init_rh_ix.data.len(), 13);
+    assert_eq!(init_rh_ix.data[0], 4);
+    let up_params_ix = build_update_pool_ix(
+        pid.clone(),
+        s0.pubkey_b58.clone(),
+        0,
+        FfiUpdatePoolAction::UpdateParams {
+            note_rent_fee: 1_500_000,
+            nf_rent_fee: 500_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(up_params_ix.data.len(), 22);
     let up_ix = build_update_pool_ix(pid.clone(), s0.pubkey_b58.clone(), 0, FfiUpdatePoolAction::RenounceAuthority).unwrap();
     assert_eq!(up_ix.data, vec![8, 0, 0, 0, 0, 3]);
 
@@ -344,7 +379,8 @@ fn ffi_conformance_matches_spec_vectors() {
         payer: s0.pubkey_b58.clone(),
         pool_id: 0,
         vk_id: 0,
-        ckpt_slot_idx: 13,
+        root_ring_kind: 1,
+        root_ring_idx: 0,
         out_lane_id: 2,
         out_sub_seq: 0,
         out_root_seq: 0,
@@ -380,7 +416,8 @@ fn ffi_conformance_matches_spec_vectors() {
         payer: s0.pubkey_b58.clone(),
         pool_id: 0,
         vk_id: 0,
-        ckpt_slot_idx: 13,
+        root_ring_kind: 1,
+        root_ring_idx: 0,
         out_lane_id: 2,
         out_sub_seq: 0,
         out_root_seq: 0,
@@ -410,11 +447,12 @@ fn ffi_conformance_matches_spec_vectors() {
     });
     assert!(all_none_public_err.is_err(), "ASSET_MODE_PUBLIC with None accs must not panic");
 
-    // page_kind > 3 & out-of-range PDA indices MUST return Err (zero panic!)
+    // page_kind > 3 & out-of-range PDA / interval indices MUST return Err (zero panic!)
     assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 4, 0, 0, 0).is_err());
     assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 0, 16, 0).is_err());
+    assert!(build_init_pool_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 0, 0, 0).is_err());
+    assert!(build_init_root_history_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 257, 4).is_err());
     assert!(derive_lane_pda(pid.clone(), 0, 16).is_err());
-    assert!(derive_checkpoint_pda(pid.clone(), 0, 256).is_err());
     assert!(derive_escrow_pda(pid.clone(), 0, 16).is_err());
 
     // Missing recipient / relayer_fee_recipient in ctx_hash MUST return Err (zero panic!)
@@ -526,7 +564,8 @@ fn ffi_conformance_matches_spec_vectors() {
         payer: s0.pubkey_b58.clone(),
         pool_id: 0,
         vk_id: 0,
-        ckpt_slot_idx: 13,
+        root_ring_kind: 1,
+        root_ring_idx: 0,
         out_lane_id: 1,
         out_sub_seq: 0,
         out_root_seq: 0,
@@ -574,4 +613,368 @@ fn ffi_conformance_matches_spec_vectors() {
     // Unsatisfied Groth16 witness returns Err cleanly instead of panicking!
     let bad_witness = vec![0u8; 4_611];
     assert!(prove_joinsplit_witness_bytes(bad_witness, vec![0x99u8; 32]).is_err());
+}
+
+#[test]
+fn decode_global_root_history_rejects_tampered_rings_and_forged_super_roots() {
+    use audren_core::layout::{
+        RT_OFF_EPOCH_RING, RT_OFF_LATEST_LANE_COUNTS, RT_OFF_LATEST_LANE_ROOTS,
+        RT_OFF_LATEST_SUPER_ROOT, RT_OFF_SLOT_RING, RT_OFF_STABLE_EPOCH_ID,
+        RT_OFF_STABLE_LANE_COUNTS, RT_OFF_STABLE_LANE_ROOTS, RT_OFF_STABLE_SLOT,
+        RT_OFF_STABLE_SUPER_ROOT,
+    };
+
+    let raw_json = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/test-vectors.json"),
+    )
+    .expect("read spec/test-vectors.json");
+    let v: serde_json::Value = serde_json::from_str(&raw_json).expect("parse JSON");
+    let valid_rh = from_hex(v["root_history"]["raw_hex"].as_str().unwrap());
+
+    // Baseline passes
+    assert!(decode_global_root_history_account(valid_rh.clone()).is_ok());
+
+    // 1. Tampered slot_ring cursor entry (desynced from latest_super_root)
+    let mut bad_slot_ring = valid_rh.clone();
+    bad_slot_ring[RT_OFF_SLOT_RING] ^= 0x01;
+    assert!(decode_global_root_history_account(bad_slot_ring).is_err());
+
+    // 2. Tampered epoch_ring cursor entry (desynced from stable_super_root)
+    let mut bad_epoch_ring = valid_rh.clone();
+    bad_epoch_ring[RT_OFF_EPOCH_RING] ^= 0x01;
+    assert!(decode_global_root_history_account(bad_epoch_ring).is_err());
+
+    // 3. All-zero latest_super_root echoed into slot_ring
+    let mut zero_latest = valid_rh.clone();
+    zero_latest[RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32].fill(0);
+    zero_latest[RT_OFF_SLOT_RING..RT_OFF_SLOT_RING + 32].fill(0);
+    assert!(decode_global_root_history_account(zero_latest).is_err());
+
+    // 4. All-zero stable_super_root echoed into epoch_ring
+    let mut zero_stable = valid_rh.clone();
+    zero_stable[RT_OFF_STABLE_SUPER_ROOT..RT_OFF_STABLE_SUPER_ROOT + 32].fill(0);
+    zero_stable[RT_OFF_EPOCH_RING..RT_OFF_EPOCH_RING + 32].fill(0);
+    assert!(decode_global_root_history_account(zero_stable).is_err());
+
+    // 5. Forged canonical Fr latest_super_root ( != compute_super_root_4ary(latest_lane_roots) ) echoed into slot_ring
+    let mut forged_latest = valid_rh.clone();
+    let mut fake_fr = [0u8; 32];
+    fake_fr[31] = 0x42;
+    forged_latest[RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32]
+        .copy_from_slice(&fake_fr);
+    forged_latest[RT_OFF_SLOT_RING..RT_OFF_SLOT_RING + 32].copy_from_slice(&fake_fr);
+    assert!(decode_global_root_history_account(forged_latest).is_err());
+
+    // 6. Forged canonical Fr stable_super_root echoed into epoch_ring
+    let mut forged_stable = valid_rh.clone();
+    forged_stable[RT_OFF_STABLE_SUPER_ROOT..RT_OFF_STABLE_SUPER_ROOT + 32]
+        .copy_from_slice(&fake_fr);
+    forged_stable[RT_OFF_EPOCH_RING..RT_OFF_EPOCH_RING + 32].copy_from_slice(&fake_fr);
+    assert!(decode_global_root_history_account(forged_stable).is_err());
+
+    // 7. Non-canonical BN254 Fr in latest_super_root / latest_lane_roots / stable_lane_roots
+    let mut non_canon_latest = valid_rh.clone();
+    non_canon_latest[RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32].fill(0xff);
+    non_canon_latest[RT_OFF_SLOT_RING..RT_OFF_SLOT_RING + 32].fill(0xff);
+    assert!(decode_global_root_history_account(non_canon_latest).is_err());
+
+    let mut bad_latest_lane = valid_rh.clone();
+    bad_latest_lane[RT_OFF_LATEST_LANE_ROOTS] ^= 0x01;
+    assert!(decode_global_root_history_account(bad_latest_lane).is_err());
+
+    let mut bad_stable_lane = valid_rh.clone();
+    bad_stable_lane[RT_OFF_STABLE_LANE_ROOTS..RT_OFF_STABLE_LANE_ROOTS + 32].fill(0xff);
+    assert!(decode_global_root_history_account(bad_stable_lane).is_err());
+
+    // 8. Round-3: 8-byte stable_lane_counts[2]=0 downgrade, 16-byte both counts=0, monotonicity,
+    //    slot/epoch ring slot mismatches, stable_slot > latest_slot, and wrong stable_epoch_id!
+    let mut eight_byte_downgrade = valid_rh.clone();
+    eight_byte_downgrade[RT_OFF_STABLE_LANE_COUNTS + 2 * 8..RT_OFF_STABLE_LANE_COUNTS + 3 * 8]
+        .copy_from_slice(&0u64.to_le_bytes());
+    assert!(decode_global_root_history_account(eight_byte_downgrade.clone()).is_err());
+
+    let mut sixteen_byte_zero = eight_byte_downgrade;
+    sixteen_byte_zero[RT_OFF_LATEST_LANE_COUNTS + 2 * 8..RT_OFF_LATEST_LANE_COUNTS + 3 * 8]
+        .copy_from_slice(&0u64.to_le_bytes());
+    assert!(decode_global_root_history_account(sixteen_byte_zero).is_err());
+
+    let mut stable_gt_latest_cnt = valid_rh.clone();
+    stable_gt_latest_cnt[RT_OFF_STABLE_LANE_COUNTS + 2 * 8..RT_OFF_STABLE_LANE_COUNTS + 3 * 8]
+        .copy_from_slice(&999u64.to_le_bytes());
+    assert!(decode_global_root_history_account(stable_gt_latest_cnt).is_err());
+
+    let mut stable_gt_latest_slot = valid_rh.clone();
+    stable_gt_latest_slot[RT_OFF_STABLE_SLOT..RT_OFF_STABLE_SLOT + 8]
+        .copy_from_slice(&200u64.to_le_bytes());
+    stable_gt_latest_slot[RT_OFF_EPOCH_RING + 32..RT_OFF_EPOCH_RING + 40]
+        .copy_from_slice(&200u64.to_le_bytes());
+    stable_gt_latest_slot[RT_OFF_STABLE_EPOCH_ID..RT_OFF_STABLE_EPOCH_ID + 8]
+        .copy_from_slice(&(200u64 / 32).to_le_bytes());
+    assert!(decode_global_root_history_account(stable_gt_latest_slot).is_err());
+
+    let mut bad_slot_ring_slot = valid_rh.clone();
+    bad_slot_ring_slot[RT_OFF_SLOT_RING + 32..RT_OFF_SLOT_RING + 40]
+        .copy_from_slice(&103u64.to_le_bytes());
+    assert!(decode_global_root_history_account(bad_slot_ring_slot).is_err());
+
+    let mut bad_epoch_ring_slot = valid_rh.clone();
+    bad_epoch_ring_slot[RT_OFF_EPOCH_RING + 32..RT_OFF_EPOCH_RING + 40]
+        .copy_from_slice(&103u64.to_le_bytes());
+    assert!(decode_global_root_history_account(bad_epoch_ring_slot).is_err());
+
+    let mut bad_epoch_id = valid_rh;
+    bad_epoch_id[RT_OFF_STABLE_EPOCH_ID..RT_OFF_STABLE_EPOCH_ID + 8]
+        .copy_from_slice(&99u64.to_le_bytes());
+    assert!(decode_global_root_history_account(bad_epoch_id).is_err());
+}
+
+#[test]
+fn ffi_wave2_root_snapshot_auto_open_pages_and_bump_aware_cu_exports() {
+    let raw_json = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/test-vectors.json"),
+    )
+    .expect("read spec/test-vectors.json");
+    let v: serde_json::Value = serde_json::from_str(&raw_json).expect("parse JSON");
+    let valid_rh = from_hex(v["root_history"]["raw_hex"].as_str().unwrap());
+    let pid = canonical_program_id();
+
+    // 1. select_root_snapshot_for_notes: covered note selects ROOT_RING_EPOCH, uncovered / wrong pool / OOB lane returns Err
+    let choice = select_root_snapshot_for_notes(
+        valid_rh.clone(),
+        0,
+        vec![FfiNoteCoord {
+            lane_id: 2,
+            leaf_index: 5,
+        }],
+    )
+    .unwrap();
+    assert_eq!(choice.ring_kind, audren_core::ROOT_RING_EPOCH);
+    assert_eq!(choice.ring_idx, 0);
+    assert_eq!(
+        to_hex(&choice.super_root),
+        v["root_history"]["stable_super_root_hex"]
+    );
+    assert_eq!(choice.lane_roots.len(), audren_core::NUM_LANES);
+    assert_eq!(choice.lane_counts[2], 6);
+
+    // Wrong expected_pool_id, uncovered leaf_index, invalid lane_id, and tampered bytes all return Err (zero panic)
+    assert!(select_root_snapshot_for_notes(
+        valid_rh.clone(),
+        1,
+        vec![FfiNoteCoord {
+            lane_id: 2,
+            leaf_index: 5
+        }]
+    )
+    .is_err());
+    assert!(select_root_snapshot_for_notes(
+        valid_rh.clone(),
+        0,
+        vec![FfiNoteCoord {
+            lane_id: 2,
+            leaf_index: 6
+        }]
+    )
+    .is_err());
+    assert!(select_root_snapshot_for_notes(
+        valid_rh.clone(),
+        0,
+        vec![FfiNoteCoord {
+            lane_id: 16,
+            leaf_index: 0
+        }]
+    )
+    .is_err());
+    let mut bad_rh = valid_rh;
+    bad_rh[0] ^= 0xff;
+    assert!(select_root_snapshot_for_notes(bad_rh, 0, vec![]).is_err());
+
+    // 2. plan_auto_open_pages: lookahead & exact rollover + custom program_id + existing_pages filtering + invalid input errors
+    assert!(
+        plan_auto_open_pages(pid.clone(), 0, 0, 10, 10, 1, 1, vec![])
+            .unwrap()
+            .is_empty()
+    );
+
+    let planned = plan_auto_open_pages(pid.clone(), 0, 0, 86, 540, 1, 1, vec![]).unwrap();
+    assert_eq!(planned.len(), 2);
+    assert_eq!(planned[0].page_kind, 2); // OPEN_PAGE_KIND_MEMO
+    assert_eq!(planned[0].page_seq, 1);
+    assert_eq!(
+        planned[0].pda_b58,
+        derive_memo_pda(pid.clone(), 0, 0, 1).unwrap().address
+    );
+    assert_eq!(planned[1].page_kind, 3); // OPEN_PAGE_KIND_NULLIFIER
+    assert_eq!(planned[1].page_seq, 1);
+    assert_eq!(
+        planned[1].pda_b58,
+        derive_nf_page_pda(pid.clone(), 0, 0, 1).unwrap().address
+    );
+
+    // Passing planned[0] in existing_pages filters out Memo page 1 (both by pda_b58 and by empty pda_b58 fallback)
+    let filtered =
+        plan_auto_open_pages(pid.clone(), 0, 0, 86, 540, 1, 1, vec![planned[0].clone()]).unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].page_kind, 3);
+
+    let filtered_by_coord = plan_auto_open_pages(
+        pid.clone(),
+        0,
+        0,
+        86,
+        540,
+        1,
+        1,
+        vec![FfiOpenPageSpec {
+            page_kind: 2,
+            page_seq: 1,
+            pda_b58: String::new(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(filtered_by_coord.len(), 1);
+    assert_eq!(filtered_by_coord[0].page_kind, 3);
+
+    // Custom staging/localnet program_id derives custom-program PDAs and filters against them
+    let custom_pid = solana_address::Address::new_from_array([0x42u8; 32]).to_string();
+    let custom_planned =
+        plan_auto_open_pages(custom_pid.clone(), 0, 0, 86, 540, 1, 1, vec![]).unwrap();
+    assert_eq!(custom_planned.len(), 2);
+    assert_eq!(
+        custom_planned[0].pda_b58,
+        derive_memo_pda(custom_pid.clone(), 0, 0, 1)
+            .unwrap()
+            .address
+    );
+    assert_ne!(custom_planned[0].pda_b58, planned[0].pda_b58);
+    assert_eq!(
+        custom_planned[1].pda_b58,
+        derive_nf_page_pda(custom_pid.clone(), 0, 0, 1)
+            .unwrap()
+            .address
+    );
+    let custom_filtered = plan_auto_open_pages(
+        custom_pid.clone(),
+        0,
+        0,
+        86,
+        540,
+        1,
+        1,
+        vec![custom_planned[0].clone()],
+    )
+    .unwrap();
+    assert_eq!(custom_filtered.len(), 1);
+    assert_eq!(custom_filtered[0].pda_b58, custom_planned[1].pda_b58);
+    let custom_filtered_coord = plan_auto_open_pages(
+        custom_pid,
+        0,
+        0,
+        86,
+        540,
+        1,
+        1,
+        vec![FfiOpenPageSpec {
+            page_kind: 2,
+            page_seq: 1,
+            pda_b58: String::new(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(custom_filtered_coord.len(), 1);
+    assert_eq!(custom_filtered_coord[0].pda_b58, custom_planned[1].pda_b58);
+
+    // Invalid program_id, lane_id, page_kind, or base58 PDA return Err cleanly
+    assert!(
+        plan_auto_open_pages("not-valid-pid!!!".to_string(), 0, 0, 86, 0, 1, 0, vec![]).is_err()
+    );
+    assert!(plan_auto_open_pages(pid.clone(), 0, 16, 86, 0, 1, 0, vec![]).is_err());
+    assert!(plan_auto_open_pages(
+        pid.clone(),
+        0,
+        0,
+        86,
+        0,
+        1,
+        0,
+        vec![FfiOpenPageSpec {
+            page_kind: 4,
+            page_seq: 1,
+            pda_b58: String::new(),
+        }]
+    )
+    .is_err());
+    assert!(plan_auto_open_pages(
+        pid,
+        0,
+        0,
+        86,
+        0,
+        1,
+        0,
+        vec![FfiOpenPageSpec {
+            page_kind: 2,
+            page_seq: 1,
+            pda_b58: "not-valid-base58!!!".to_string(),
+        }]
+    )
+    .is_err());
+
+    // Zero-rent `.max(1)` clamp parity through FFI
+    assert_eq!(deterministic_note_rent_fee_ffi(10_000_000, 0, 0, 0), 3);
+    assert_eq!(deterministic_note_rent_fee_ffi(2, 0, 0, 0), 2);
+    assert_eq!(deterministic_note_rent_fee_ffi(0, 0, 0, 0), 0);
+
+    // 3-6. Bump-aware CU limit exports match calibrated v1.3.0 constants (incl. 45k Token-2022 ATA vs 30k classic ATA) & clamp safely at 1.4M
+    assert_eq!(recommended_cu_limit_open_page(1, vec![]), 40_000);
+    assert_eq!(recommended_cu_limit_open_page(2, vec![250]), 87_500);
+    assert_eq!(recommended_cu_limit_open_page(u32::MAX, vec![0]), 1_400_000);
+
+    assert_eq!(recommended_cu_limit_deposit(false, 0, 0, 0, vec![]), 75_000);
+    assert_eq!(
+        recommended_cu_limit_deposit(true, 1, 1, 0, vec![253, 252]),
+        140_000 + 40_000 + 30_000 + 7_500
+    );
+    assert_eq!(
+        recommended_cu_limit_deposit(true, 1, 1, 2, vec![253, 252]),
+        140_000 + 40_000 + 30_000 + 2 * 45_000 + 7_500
+    );
+
+    assert_eq!(
+        recommended_cu_limit_transact(false, false, 0b111, 0, 0, 0, vec![]),
+        235_000
+    );
+    assert_eq!(
+        recommended_cu_limit_transact(true, false, 0, 0, 0, 0, vec![245]),
+        165_000 + 15_000
+    );
+    assert_eq!(
+        recommended_cu_limit_transact(true, false, 0b001, 1, 1, 0, vec![254]),
+        255_000 + 40_000 + 30_000 + 1_500
+    );
+    assert_eq!(
+        recommended_cu_limit_transact(true, true, 0b001, 1, 0, 2, vec![254]),
+        295_000 + 40_000 + 2 * 45_000 + 1_500
+    );
+    assert_eq!(
+        recommended_cu_limit_transact(true, true, 0, 0, 0, 0, vec![]),
+        295_000
+    );
+
+    assert_eq!(
+        recommended_cu_limit_exec_via_escrow(300_000, false, 2, 0, 0, vec![]),
+        285_000 + 300_000 + 80_000
+    );
+    assert_eq!(
+        recommended_cu_limit_exec_via_escrow(300_000, true, 1, 1, 0, vec![240, 255]),
+        285_000 + 25_000 + 300_000 + 40_000 + 30_000 + 22_500
+    );
+    assert_eq!(
+        recommended_cu_limit_exec_via_escrow(300_000, true, 1, 1, 2, vec![240, 255]),
+        285_000 + 25_000 + 300_000 + 40_000 + 30_000 + 2 * 45_000 + 22_500
+    );
+    assert_eq!(
+        recommended_cu_limit_exec_via_escrow(1_300_000, true, 2, 1, 2, vec![0, 0]),
+        1_400_000
+    );
 }

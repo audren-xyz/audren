@@ -89,7 +89,7 @@ def parse_core_constants() -> dict:
         "SUBROOT_PAGE_LEN",
         "MEMO_PAGE_LEN",
         "NF_PAGE_LEN",
-        "CKPT_LEN",
+        "ROOT_HISTORY_LEN",
     )
     missing_lengths = [k for k in required_lengths if k not in lengths]
     if missing_lengths:
@@ -113,9 +113,9 @@ ERROR_DOCS: dict[str, str] = {
     "SubtreePageFull": "Active SubtreePage has reached 256 note commitments.",
     "SubtreePageMismatch": "Provided SubtreePage sequence does not match active lane leaf index.",
     "SubrootPageMismatch": "Provided SubtreeRootPage sequence does not match finalized subtree index.",
-    "CheckpointTooSoon": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots.",
-    "CheckpointExpired": "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots.",
-    "CheckpointMismatch": "Referenced RootCheckpoint account is uninitialized or belongs to another pool.",
+    "InvalidRootRing": "Root ring selector must be 0 (slot ring) or 1 (epoch ring).",
+    "RootIndexOutOfBounds": "Referenced GlobalRootHistory ring index is out of bounds or unpopulated.",
+    "RootHistoryMismatch": "Referenced GlobalRootHistory account is uninitialized, corrupted, or belongs to another pool.",
     "ProofVerificationFailed": "BN254 Groth16 proof verification or ctx_hash binding failed.",
     "InvalidVkId": "Verifying key identifier is unsupported.",
     "NullifierAlreadyUsed": "NullifierPDA already exists (note already spent).",
@@ -133,10 +133,10 @@ ERROR_DOCS: dict[str, str] = {
     "NullifierPageMismatch": "Provided NullifierPage sequence does not match active lane nf_count.",
     "InvalidEscrowShard": "Escrow shard index must be in 0..16.",
     "InvalidFieldElement": "32-byte input is not a canonical BN254 scalar (< Fr modulus).",
-    "PoolPaused": "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open).",
+    "PoolPaused": "Pool is paused by authority (full exits and OpenPage remain open).",
     "Unauthorized": "Required authority signer is missing, renounced, or mismatched.",
     "PageSeqOutOfRange": "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage).",
-    "InvalidTargetProgram": "Target program must be executable and cannot be Audren, System, Token, or ATA.",
+    "InvalidTargetProgram": "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry.",
     "EscrowAuthorityAltered": "Target CPI altered swap_escrow owner, data length, or drained lamports.",
     "EscrowAccountAltered": "Target CPI altered an escrow token account owner, delegate, close_authority, TLV, or size.",
 }
@@ -288,7 +288,7 @@ def build_audren_codama(core: dict) -> dict:
         pda_node("subtreeRootPage", [const_seed(seeds["SUBROOT_SEED"]), var_seed("poolId", num_t("u32")), var_seed("laneId", num_t("u8")), var_seed("rootPageSeq", num_t("u64"))], ["300 finalized 256-leaf subtree roots PDA (9,664 B)."]),
         pda_node("memoPage", [const_seed(seeds["MEMO_SEED"]), var_seed("poolId", num_t("u32")), var_seed("laneId", num_t("u8")), var_seed("pageSeq", num_t("u64"))], ["96 x 106 B versioned SoA encrypted note memos PDA (10,240 B)."]),
         pda_node("nullifierPage", [const_seed(seeds["NF_PAGE_SEED"]), var_seed("poolId", num_t("u32")), var_seed("laneId", num_t("u8")), var_seed("pageSeq", num_t("u64"))], ["600 x 16 B nullifier prefixes PDA for ordinary-RPC spent sync (9,664 B)."]),
-        pda_node("rootCheckpoint", [const_seed(seeds["CKPT_SEED"]), var_seed("poolId", num_t("u32")), var_seed("slotIdx", num_t("u16"))], ["Cyclic 256-slot global super_root checkpoint ring PDA (704 B)."]),
+        pda_node("globalRootHistory", [const_seed(seeds["ROOTS_SEED"]), var_seed("poolId", num_t("u32"))], ["Protocol-automated dual-ring global super_root history PDA (10,216 B)."]),
         pda_node("nullifier", [const_seed(seeds["NULLIFIER_SEED"]), var_seed("poolId", num_t("u32")), var_seed("nullifier", fixed_bytes_t(32))], ["Canonical 0-byte global spent-nullifier replay guard PDA."]),
         pda_node("swapEscrow", [const_seed(seeds["ESCROW_SEED"]), var_seed("poolId", num_t("u32")), var_seed("shardId", num_t("u8"))], ["Isolated DeFi CPI signer shard PDA (0..16)."]),
         pda_node("unwrapAccount", [const_seed(seeds["UNWRAP_SEED"]), var_seed("poolId", num_t("u32")), var_seed("nf0", fixed_bytes_t(32))], ["Ephemeral 1-shot WSOL unwrap token account PDA."]),
@@ -306,8 +306,8 @@ def build_audren_codama(core: dict) -> dict:
                 field("paused", num_t("u8")),
                 field("activeLanes", num_t("u8")),
                 field("poolId", num_t("u32")),
-                field("ckptInterval", num_t("u64")),
-                field("maxCkptAge", num_t("u64")),
+                field("rootEpochInterval", num_t("u64")),
+                field("reserved24", fixed_bytes_t(8)),
                 field("authority", pubkey_t()),
                 field("vaultAuthBump", num_t("u8")),
                 field("reserved1", fixed_bytes_t(7)),
@@ -316,7 +316,7 @@ def build_audren_codama(core: dict) -> dict:
                 field("pendingAuthority", pubkey_t()),
                 field("reserved2", fixed_bytes_t(8)),
             ],
-            ["Global pool configuration (128 B; read-only on all deposits, spends, checkpoints, and DeFi swaps)."],
+            ["Global pool configuration (128 B; read-only on all deposits, spends, and DeFi swaps)."],
         ),
         account_node(
             "laneRentVault",
@@ -421,41 +421,68 @@ def build_audren_codama(core: dict) -> dict:
             ["Append-only 600 x 16 B nullifier prefix page for zero-leakage wallet sync (9,664 B <= 10 KiB)."],
         ),
         account_node(
-            "rootCheckpoint",
-            magics["CKPT_MAGIC"],
-            704,
+            "globalRootHistory",
+            magics["ROOTS_MAGIC"],
+            10216,
             [
                 field("magic", fixed_bytes_t(8)),
                 field("version", num_t("u8")),
                 field("bump", num_t("u8")),
-                field("slotIdx", num_t("u16")),
+                field("slotCursor", num_t("u16")),
                 field("poolId", num_t("u32")),
-                field("epochId", num_t("u64")),
-                field("publishedSlot", num_t("u64")),
-                field("superRoot", fixed_bytes_t(32)),
-                field("laneRoots", fixed_array_t(fixed_bytes_t(32), 16)),
-                field("laneCounts", fixed_array_t(num_t("u64"), 16)),
+                field("epochCursor", num_t("u16")),
+                field("slotCount", num_t("u16")),
+                field("epochCount", num_t("u16")),
+                field("sameSlotBumped", num_t("u8")),
+                field("pad", num_t("u8")),
+                field("latestSlot", num_t("u64")),
+                field("stableEpochId", num_t("u64")),
+                field("stableSlot", num_t("u64")),
+                field("epochInterval", num_t("u64")),
+                field("reserved", fixed_bytes_t(8)),
+                field("groupRoots", fixed_array_t(fixed_bytes_t(32), 4)),
+                field("latestSuperRoot", fixed_bytes_t(32)),
+                field("latestLaneRoots", fixed_array_t(fixed_bytes_t(32), 16)),
+                field("latestLaneCounts", fixed_array_t(num_t("u64"), 16)),
+                field("stableSuperRoot", fixed_bytes_t(32)),
+                field("stableLaneRoots", fixed_array_t(fixed_bytes_t(32), 16)),
+                field("stableLaneCounts", fixed_array_t(num_t("u64"), 16)),
+                field("slotRing", fixed_array_t({"kind": "definedTypeLinkNode", "name": "rootEntry"}, 128)),
+                field("epochRing", fixed_array_t({"kind": "definedTypeLinkNode", "name": "rootEntry"}, 89)),
             ],
-            ["Fixed-size cyclic global checkpoint ring slot (704 B, 256 slots max)."],
+            ["Protocol-automated dual-ring global super_root history (10,216 B <= 10 KiB CPI cap; 128-entry slot ring + 89-entry epoch ring, updated atomically inline on every note commitment)."],
         ),
     ]
 
-    defined_types: list[dict] = []
+    defined_types: list[dict] = [
+        {
+            "kind": "definedTypeNode",
+            "name": "rootEntry",
+            "docs": ["Single ring entry inside GlobalRootHistory (40 B: super_root[32] || slot[8])."],
+            "type": {
+                "kind": "structTypeNode",
+                "fields": [
+                    field("superRoot", fixed_bytes_t(32)),
+                    field("slot", num_t("u64")),
+                ],
+            },
+        }
+    ]
 
     instructions = [
         ix_node(
             "initPool",
             tags["TAG_INIT_POOL"],
-            ["Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0)."],
+            ["Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0) and empty GlobalRootHistory (10,216 B) atomically."],
             [
                 ix_acc("payer", True, True, ["Initial pool authority and rent payer."]),
                 ix_acc("poolState", True, False, ["PoolState PDA."]),
+                ix_acc("roots", True, False, ["GlobalRootHistory PDA."]),
                 ix_acc("systemProgram", False, False, ["System Program."]),
             ],
             [
                 ix_arg("poolId", num_t("u32")),
-                ix_arg("ckptInterval", num_t("u64")),
-                ix_arg("maxCkptAge", num_t("u64")),
+                ix_arg("rootEpochInterval", num_t("u64")),
                 ix_arg("noteRentFee", num_t("u64")),
                 ix_arg("nfRentFee", num_t("u64")),
             ],
@@ -502,10 +529,11 @@ def build_audren_codama(core: dict) -> dict:
         ix_node(
             "deposit",
             tags["TAG_DEPOSIT"],
-            ["Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA."],
+            ["Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA, updating GlobalRootHistory atomically inline."],
             [
                 ix_acc("depositor", True, True, ["Depositor signer."]),
                 ix_acc("poolState", False, False, ["PoolState PDA (read-only)."]),
+                ix_acc("roots", True, False, ["GlobalRootHistory PDA (updated atomically on deposit)."]),
                 ix_acc("vaultAuthority", False, False, ["Unified vault_auth PDA."]),
                 ix_acc("mint", False, False, ["WSOL, Classic SPL, or Token-2022 Mint."]),
                 ix_acc("sourceAccount", True, False, ["Depositor signer pubkey (when DEPOSIT_FLAG_NATIVE_SOL) or depositor token account."]),
@@ -531,25 +559,28 @@ def build_audren_codama(core: dict) -> dict:
             ],
         ),
         ix_node(
-            "publishCheckpoint",
-            tags["TAG_PUBLISH_CHECKPOINT"],
-            ["Permissionless, pause-exempt global super_root checkpoint publisher over active_lanes read-only lanes."],
+            "initRootHistory",
+            tags["TAG_INIT_ROOT_HISTORY"],
+            ["Authority-gated one-shot initializer creating GlobalRootHistory (10,216 B) from existing active lanes (passed as trailing read-only accounts) and updating PoolState.root_epoch_interval."],
             [
-                ix_acc("payer", True, True, ["Permissionless cranker."]),
-                ix_acc("poolState", False, False, ["PoolState PDA (read-only)."]),
-                ix_acc("checkpoint", True, False, ["Cyclic RootCheckpoint(slot_idx) PDA."]),
+                ix_acc("authority", True, True, ["Pool authority signer and rent payer."]),
+                ix_acc("poolState", True, False, ["PoolState PDA."]),
+                ix_acc("roots", True, False, ["GlobalRootHistory PDA."]),
                 ix_acc("systemProgram", False, False, ["System Program."]),
             ],
-            [ix_arg("poolId", num_t("u32"))],
+            [
+                ix_arg("poolId", num_t("u32")),
+                ix_arg("rootEpochInterval", num_t("u64")),
+            ],
         ),
         ix_node(
             "transact",
             tags["TAG_TRANSACT"],
-            ["Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit)."],
+            ["Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit) with GlobalRootHistory verification and inline root update."],
             [
                 ix_acc("payer", True, True, ["Transaction fee & nullifier rent payer (relayer or user)."]),
                 ix_acc("poolState", False, False, ["PoolState PDA (read-only)."]),
-                ix_acc("checkpoint", False, False, ["Referenced RootCheckpoint PDA."]),
+                ix_acc("roots", True, False, ["GlobalRootHistory PDA (writable when output_mask != 0; may be read-only on full exits with output_mask == 0)."]),
                 ix_acc("nullifier0", True, False, ["Primary NullifierPDA (always created before outflow)."]),
                 ix_acc("nullifier1", True, False, ["Secondary NullifierPDA (or System Program when economy nf1 == 0)."]),
                 ix_acc("laneState", True, False, ["Target active output LaneTreeState PDA."]),
@@ -567,6 +598,8 @@ def build_audren_codama(core: dict) -> dict:
                 ix_arg("outputMask", num_t("u8")),
                 ix_arg("assetMode", num_t("u8"), ["0=Private, 1=Public (canonical SPL/Token-2022/WSOL vault ATA)."]),
                 ix_arg("flags", num_t("u8"), ["bit0..2=rollover, bit3=WITHDRAW_FLAG_UNWRAP_WSOL."]),
+                ix_arg("rootRingKind", num_t("u8"), ["0=slot ring (0..128), 1=epoch ring (0..89)."]),
+                ix_arg("rootRingIdx", num_t("u8"), ["Entry index inside the selected GlobalRootHistory ring."]),
                 ix_arg("proof192", fixed_bytes_t(192)),
                 ix_arg("nf0", fixed_bytes_t(32)),
                 ix_arg("nf1", fixed_bytes_t(32)),
@@ -581,11 +614,11 @@ def build_audren_codama(core: dict) -> dict:
         ix_node(
             "execViaEscrow",
             tags["TAG_EXEC_VIA_ESCROW"],
-            ["Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, and XOR-masked 72 B dynamic output memo."],
+            ["Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, XOR-masked 72 B dynamic output memo, and inline GlobalRootHistory update."],
             [
                 ix_acc("payer", True, True, ["Transaction fee & nullifier rent payer (never signs router CPI)."]),
                 ix_acc("poolState", False, False, ["PoolState PDA (read-only)."]),
-                ix_acc("checkpoint", False, False, ["Referenced RootCheckpoint PDA."]),
+                ix_acc("roots", True, False, ["GlobalRootHistory PDA (verified and updated atomically after output append)."]),
                 ix_acc("nullifier0", True, False, ["Primary NullifierPDA (created before router CPI)."]),
                 ix_acc("nullifier1", True, False, ["Secondary NullifierPDA (or System Program when economy nf1 == 0)."]),
                 ix_acc("laneState", True, False, ["Target active output LaneTreeState PDA."]),
@@ -605,6 +638,8 @@ def build_audren_codama(core: dict) -> dict:
                 ix_arg("escrowShard", num_t("u8")),
                 ix_arg("changeMask", num_t("u8")),
                 ix_arg("flags", num_t("u8"), ["bit0..2=rollover, bit3=EXEC_FLAG_FEE_ON_OUTPUT."]),
+                ix_arg("rootRingKind", num_t("u8"), ["0=slot ring (0..128), 1=epoch ring (0..89)."]),
+                ix_arg("rootRingIdx", num_t("u8"), ["Entry index inside the selected GlobalRootHistory ring."]),
                 ix_arg("proof192", fixed_bytes_t(192)),
                 ix_arg("nf0", fixed_bytes_t(32)),
                 ix_arg("nf1", fixed_bytes_t(32)),
@@ -624,7 +659,7 @@ def build_audren_codama(core: dict) -> dict:
         ix_node(
             "setPaused",
             tags["TAG_SET_PAUSED"],
-            ["Authority-only emergency pause toggle (full withdrawals, PublishCheckpoint, and OpenPage remain permanently open)."],
+            ["Authority-only emergency pause toggle (full withdrawals and OpenPage remain permanently open)."],
             [
                 ix_acc("authority", False, True, ["Pool authority signer."]),
                 ix_acc("poolState", True, False, ["PoolState PDA."]),
@@ -637,7 +672,7 @@ def build_audren_codama(core: dict) -> dict:
         ix_node(
             "updatePool",
             tags["TAG_UPDATE_POOL"],
-            ["Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."],
+            ["Update pool governance parameters (note_rent_fee, nf_rent_fee; root_epoch_interval is immutable after InitPool / InitRootHistory) or execute two-step authority transfer / renounce (renounce requires !paused)."],
             [
                 ix_acc("signer", False, True, ["Pool authority (or pending_authority for AcceptAuthority)."]),
                 ix_acc("poolState", True, False, ["PoolState PDA."]),
@@ -645,7 +680,7 @@ def build_audren_codama(core: dict) -> dict:
             [
                 ix_arg("poolId", num_t("u32")),
                 ix_arg("action", num_t("u8"), ["0=UpdateParams, 1=ProposeAuthority, 2=AcceptAuthority, 3=RenounceAuthority."]),
-                ix_arg("payload", bytes_t(), ["UpdateParams: ckpt_interval(8, immutable — must equal PoolState.ckpt_interval)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."]),
+                ix_arg("payload", bytes_t(), ["UpdateParams: note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."]),
             ],
         ),
     ]
@@ -737,6 +772,15 @@ def build_audren_anchor(core: dict, codama: dict) -> dict:
                 "type": {
                     "kind": "enum",
                     "variants": [{"name": pascal(v["name"])} for v in t["variants"]],
+                },
+            })
+        elif t["kind"] == "structTypeNode":
+            anchor_types.append({
+                "name": pascal(dt["name"]),
+                "docs": dt.get("docs", []),
+                "type": {
+                    "kind": "struct",
+                    "fields": [{"name": snake(f["name"]), "type": map_type(f["type"])} for f in t["fields"]],
                 },
             })
     for acc in prog["accounts"]:

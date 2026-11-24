@@ -10,7 +10,7 @@
 //! 5. Mode 1 `SelectiveDisclosureProof` verification (1 Poseidon check, zero keys revealed)
 //! 6. Relayer & Jupiter CPI exclusion constants
 
-use std::sync::OnceLock;
+use std::{collections::BTreeSet, sync::OnceLock};
 
 use audren_circuits::{
     note::{compute_note_commitment, derive_asset_id, derive_stealth_owner},
@@ -18,9 +18,14 @@ use audren_circuits::{
 };
 use audren_client::{
     instructions::{
-        build_init_pool, build_set_paused, build_update_pool, compute_page_rollovers,
-        deterministic_note_rent_fee, try_build_deposit, try_build_exec_via_escrow,
-        try_build_init_lane, try_build_open_page, try_build_publish_checkpoint, try_build_transact,
+        build_set_paused, build_update_pool, compute_page_rollovers, deterministic_note_rent_fee,
+        plan_auto_open_pages as rust_plan_auto_open_pages,
+        recommended_cu_limit_deposit_with_bumps as rust_recommended_cu_limit_deposit_with_bumps,
+        recommended_cu_limit_exec_via_escrow_with_bumps as rust_recommended_cu_limit_exec_via_escrow_with_bumps,
+        recommended_cu_limit_open_page_with_bumps as rust_recommended_cu_limit_open_page_with_bumps,
+        recommended_cu_limit_transact_with_bumps as rust_recommended_cu_limit_transact_with_bumps,
+        try_build_deposit, try_build_exec_via_escrow, try_build_init_lane, try_build_init_pool,
+        try_build_init_root_history, try_build_open_page, try_build_transact,
         try_compute_exec_ctx_hash, try_compute_transact_ctx_hash, AudrenAccountMeta,
         AudrenInstruction, UpdatePoolAction,
     },
@@ -32,24 +37,31 @@ use audren_client::{
         FullViewingKey, SelectiveDisclosureProof,
     },
     pda::{
-        derive_ata as rust_derive_ata, derive_checkpoint_pda as rust_derive_checkpoint_pda,
-        derive_escrow_pda as rust_derive_escrow_pda, derive_lane_pda as rust_derive_lane_pda,
-        derive_lane_rent_pda as rust_derive_lane_rent_pda,
+        derive_ata as rust_derive_ata, derive_escrow_pda as rust_derive_escrow_pda,
+        derive_lane_pda as rust_derive_lane_pda, derive_lane_rent_pda as rust_derive_lane_rent_pda,
         derive_memo_pda as rust_derive_memo_pda, derive_nf_page_pda as rust_derive_nf_page_pda,
         derive_nullifier_pda as rust_derive_nullifier_pda,
-        derive_pool_pda as rust_derive_pool_pda, derive_subroot_pda as rust_derive_subroot_pda,
+        derive_pool_pda as rust_derive_pool_pda, derive_roots_pda as rust_derive_roots_pda,
+        derive_subroot_pda as rust_derive_subroot_pda,
         derive_subtree_pda as rust_derive_subtree_pda, derive_unwrap_pda as rust_derive_unwrap_pda,
         derive_vault_auth_pda as rust_derive_vault_auth_pda,
     },
     prover::AudrenProver,
     router::{DEFAULT_RELAY_URL, JUPITER_CPI_EXCLUDED_DEXES},
-    scanner::{decode_lane_header, decode_pool_state, decode_root_checkpoint},
+    scanner::{
+        decode_global_root_history, decode_lane_header, decode_pool_state,
+        validate_global_root_history,
+    },
     store::CompactWalletStore,
     ClientError,
 };
 use audren_core::{
+    instruction::{
+        OPEN_PAGE_KIND_MEMO, OPEN_PAGE_KIND_NULLIFIER, OPEN_PAGE_KIND_SUBROOT,
+        OPEN_PAGE_KIND_SUBTREE,
+    },
     layout::{DYN_MEMO_HEAD_LEN, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_PAYMENT_ID_LEN},
-    AUDREN_PROGRAM_ID, CHECKPOINT_RING_SLOTS, NUM_ESCROW_SHARDS, NUM_LANES, PROTOCOL_VERSION,
+    AUDREN_PROGRAM_ID, NUM_ESCROW_SHARDS, NUM_LANES, PROTOCOL_VERSION,
 };
 use solana_address::Address;
 
@@ -113,18 +125,6 @@ fn validate_lane_id(lane_id: u8) -> Result<(), AudrenFfiError> {
     Ok(())
 }
 
-fn validate_slot_idx(slot_idx: u16) -> Result<(), AudrenFfiError> {
-    if u64::from(slot_idx) >= CHECKPOINT_RING_SLOTS {
-        return Err(AudrenFfiError::InvalidInput {
-            reason: format!(
-                "slot_idx must be 0..{}, got {slot_idx}",
-                CHECKPOINT_RING_SLOTS - 1
-            ),
-        });
-    }
-    Ok(())
-}
-
 fn validate_shard_id(shard_id: u8) -> Result<(), AudrenFfiError> {
     if (shard_id as usize) >= NUM_ESCROW_SHARDS {
         return Err(AudrenFfiError::InvalidInput {
@@ -175,8 +175,7 @@ pub struct FfiPoolState {
     pub paused: bool,
     pub active_lanes: u8,
     pub pool_id: u32,
-    pub ckpt_interval: u64,
-    pub max_ckpt_age: u64,
+    pub root_epoch_interval: u64,
     pub authority_b58: String,
     pub vault_auth_bump: u8,
     pub note_rent_fee: u64,
@@ -197,16 +196,48 @@ pub struct FfiLaneHeader {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct FfiRootCheckpoint {
+pub struct FfiGlobalRootHistory {
     pub version: u8,
     pub bump: u8,
-    pub slot_idx: u16,
     pub pool_id: u32,
-    pub epoch_id: u64,
-    pub published_slot: u64,
+    pub slot_cursor: u16,
+    pub epoch_cursor: u16,
+    pub slot_count: u16,
+    pub epoch_count: u16,
+    pub same_slot_bumped: bool,
+    pub latest_slot: u64,
+    pub stable_epoch_id: u64,
+    pub stable_slot: u64,
+    pub epoch_interval: u64,
+    pub latest_super_root: Vec<u8>,
+    pub latest_lane_roots: Vec<Vec<u8>>,
+    pub latest_lane_counts: Vec<u64>,
+    pub stable_super_root: Vec<u8>,
+    pub stable_lane_roots: Vec<Vec<u8>>,
+    pub stable_lane_counts: Vec<u64>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FfiNoteCoord {
+    pub lane_id: u8,
+    pub leaf_index: u64,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FfiRootSnapshotChoice {
+    pub ring_kind: u8,
+    pub ring_idx: u8,
+    pub slot: u64,
     pub super_root: Vec<u8>,
     pub lane_roots: Vec<Vec<u8>>,
     pub lane_counts: Vec<u64>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FfiOpenPageSpec {
+    pub page_kind: u8,
+    pub page_seq: u64,
+    pub pda_b58: String,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -290,8 +321,6 @@ pub struct FfiGroth16ProofBundle {
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum FfiUpdatePoolAction {
     UpdateParams {
-        ckpt_interval: u64,
-        max_ckpt_age: u64,
         note_rent_fee: u64,
         nf_rent_fee: u64,
     },
@@ -559,14 +588,8 @@ pub fn derive_nf_page_pda(
 }
 
 #[uniffi::export]
-pub fn derive_checkpoint_pda(
-    program_id: String,
-    pool_id: u32,
-    slot_idx: u16,
-) -> Result<FfiPdaResult, AudrenFfiError> {
-    validate_slot_idx(slot_idx)?;
-    let (a, b) =
-        rust_derive_checkpoint_pda(&parse_addr(&program_id, "program_id")?, pool_id, slot_idx);
+pub fn derive_roots_pda(program_id: String, pool_id: u32) -> Result<FfiPdaResult, AudrenFfiError> {
+    let (a, b) = rust_derive_roots_pda(&parse_addr(&program_id, "program_id")?, pool_id);
     Ok(FfiPdaResult {
         address: a.to_string(),
         bump: b,
@@ -639,8 +662,7 @@ pub fn decode_pool_state_account(data: Vec<u8>) -> Result<FfiPoolState, AudrenFf
         paused: p.paused,
         active_lanes: p.active_lanes,
         pool_id: p.pool_id,
-        ckpt_interval: p.ckpt_interval,
-        max_ckpt_age: p.max_ckpt_age,
+        root_epoch_interval: p.root_epoch_interval,
         authority_b58: Address::new_from_array(p.authority).to_string(),
         vault_auth_bump: p.vault_auth_bump,
         note_rent_fee: p.note_rent_fee,
@@ -665,18 +687,30 @@ pub fn decode_lane_header_account(data: Vec<u8>) -> Result<FfiLaneHeader, Audren
 }
 
 #[uniffi::export]
-pub fn decode_root_checkpoint_account(data: Vec<u8>) -> Result<FfiRootCheckpoint, AudrenFfiError> {
-    let c = decode_root_checkpoint(&data)?;
-    Ok(FfiRootCheckpoint {
-        version: c.version,
-        bump: c.bump,
-        slot_idx: c.slot_idx,
-        pool_id: c.pool_id,
-        epoch_id: c.epoch_id,
-        published_slot: c.published_slot,
-        super_root: c.super_root.to_vec(),
-        lane_roots: c.lane_roots.iter().map(|r| r.to_vec()).collect(),
-        lane_counts: c.lane_counts.to_vec(),
+pub fn decode_global_root_history_account(
+    data: Vec<u8>,
+) -> Result<FfiGlobalRootHistory, AudrenFfiError> {
+    let r = decode_global_root_history(&data)?;
+    validate_global_root_history(&r, r.pool_id)?;
+    Ok(FfiGlobalRootHistory {
+        version: r.version,
+        bump: r.bump,
+        pool_id: r.pool_id,
+        slot_cursor: r.slot_cursor,
+        epoch_cursor: r.epoch_cursor,
+        slot_count: r.slot_count,
+        epoch_count: r.epoch_count,
+        same_slot_bumped: r.same_slot_bumped,
+        latest_slot: r.latest_slot,
+        stable_epoch_id: r.stable_epoch_id,
+        stable_slot: r.stable_slot,
+        epoch_interval: r.epoch_interval,
+        latest_super_root: r.latest_super_root.to_vec(),
+        latest_lane_roots: r.latest_lane_roots.iter().map(|x| x.to_vec()).collect(),
+        latest_lane_counts: r.latest_lane_counts.to_vec(),
+        stable_super_root: r.stable_super_root.to_vec(),
+        stable_lane_roots: r.stable_lane_roots.iter().map(|x| x.to_vec()).collect(),
+        stable_lane_counts: r.stable_lane_counts.to_vec(),
     })
 }
 
@@ -975,20 +1009,18 @@ pub fn build_init_pool_ix(
     program_id: String,
     payer: String,
     pool_id: u32,
-    ckpt_interval: u64,
-    max_ckpt_age: u64,
+    root_epoch_interval: u64,
     note_rent_fee: u64,
     nf_rent_fee: u64,
 ) -> Result<FfiInstruction, AudrenFfiError> {
-    Ok(from_audren_ix(build_init_pool(
+    Ok(from_audren_ix(try_build_init_pool(
         parse_addr(&program_id, "program_id")?,
         parse_addr(&payer, "payer")?,
         pool_id,
-        ckpt_interval,
-        max_ckpt_age,
+        root_epoch_interval,
         note_rent_fee,
         nf_rent_fee,
-    )))
+    )?))
 }
 
 #[uniffi::export]
@@ -1082,18 +1114,18 @@ pub fn build_deposit_ix(params: FfiDepositParams) -> Result<FfiInstruction, Audr
 }
 
 #[uniffi::export]
-pub fn build_publish_checkpoint_ix(
+pub fn build_init_root_history_ix(
     program_id: String,
-    payer: String,
+    authority: String,
     pool_id: u32,
-    slot_idx: u16,
+    root_epoch_interval: u64,
     active_lanes: u8,
 ) -> Result<FfiInstruction, AudrenFfiError> {
-    Ok(from_audren_ix(try_build_publish_checkpoint(
+    Ok(from_audren_ix(try_build_init_root_history(
         parse_addr(&program_id, "program_id")?,
-        parse_addr(&payer, "payer")?,
+        parse_addr(&authority, "authority")?,
         pool_id,
-        slot_idx,
+        root_epoch_interval,
         active_lanes,
     )?))
 }
@@ -1104,7 +1136,8 @@ pub struct FfiTransactParams {
     pub payer: String,
     pub pool_id: u32,
     pub vk_id: u8,
-    pub ckpt_slot_idx: u16,
+    pub root_ring_kind: u8,
+    pub root_ring_idx: u8,
     pub out_lane_id: u8,
     pub out_sub_seq: u64,
     pub out_root_seq: u64,
@@ -1158,7 +1191,8 @@ pub fn build_transact_ix(params: FfiTransactParams) -> Result<FfiInstruction, Au
         parse_addr(&params.payer, "payer")?,
         params.pool_id,
         params.vk_id,
-        params.ckpt_slot_idx,
+        params.root_ring_kind,
+        params.root_ring_idx,
         params.out_lane_id,
         params.out_sub_seq,
         params.out_root_seq,
@@ -1190,7 +1224,8 @@ pub struct FfiExecViaEscrowParams {
     pub payer: String,
     pub pool_id: u32,
     pub vk_id: u8,
-    pub ckpt_slot_idx: u16,
+    pub root_ring_kind: u8,
+    pub root_ring_idx: u8,
     pub out_lane_id: u8,
     pub out_sub_seq: u64,
     pub out_root_seq: u64,
@@ -1258,7 +1293,8 @@ pub fn build_exec_via_escrow_ix(
         parse_addr(&params.payer, "payer")?,
         params.pool_id,
         params.vk_id,
-        params.ckpt_slot_idx,
+        params.root_ring_kind,
+        params.root_ring_idx,
         params.out_lane_id,
         params.out_sub_seq,
         params.out_root_seq,
@@ -1316,13 +1352,9 @@ pub fn build_update_pool_ix(
 ) -> Result<FfiInstruction, AudrenFfiError> {
     let rust_action = match action {
         FfiUpdatePoolAction::UpdateParams {
-            ckpt_interval,
-            max_ckpt_age,
             note_rent_fee,
             nf_rent_fee,
         } => UpdatePoolAction::UpdateParams {
-            ckpt_interval,
-            max_ckpt_age,
             note_rent_fee,
             nf_rent_fee,
         },
@@ -1340,4 +1372,159 @@ pub fn build_update_pool_ix(
         pool_id,
         rust_action,
     )))
+}
+
+#[uniffi::export]
+pub fn select_root_snapshot_for_notes(
+    root_history_data: Vec<u8>,
+    expected_pool_id: u32,
+    notes: Vec<FfiNoteCoord>,
+) -> Result<FfiRootSnapshotChoice, AudrenFfiError> {
+    let roots = decode_global_root_history(&root_history_data)?;
+    validate_global_root_history(&roots, expected_pool_id)?;
+    let mut coords = Vec::with_capacity(notes.len());
+    for n in notes {
+        validate_lane_id(n.lane_id)?;
+        coords.push((n.lane_id, n.leaf_index));
+    }
+    let choice = roots
+        .select_snapshot_for_notes(&coords)
+        .ok_or(ClientError::WitnessNotFound(
+            "notes not yet included in GlobalRootHistory",
+        ))?;
+    Ok(FfiRootSnapshotChoice {
+        ring_kind: choice.ring_kind,
+        ring_idx: choice.ring_idx,
+        slot: choice.slot,
+        super_root: choice.super_root.to_vec(),
+        lane_roots: choice.lane_roots.iter().map(|r| r.to_vec()).collect(),
+        lane_counts: choice.lane_counts.to_vec(),
+    })
+}
+
+#[uniffi::export]
+pub fn plan_auto_open_pages(
+    program_id: String,
+    pool_id: u32,
+    lane_id: u8,
+    next_leaf: u64,
+    nf_count: u64,
+    num_outputs: u8,
+    num_nfs: u8,
+    existing_pages: Vec<FfiOpenPageSpec>,
+) -> Result<Vec<FfiOpenPageSpec>, AudrenFfiError> {
+    validate_lane_id(lane_id)?;
+    let pid = parse_addr(&program_id, "program_id")?;
+    let mut existing = BTreeSet::new();
+    for spec in existing_pages {
+        if spec.page_kind > OPEN_PAGE_KIND_NULLIFIER {
+            return Err(AudrenFfiError::InvalidInput {
+                reason: format!("page_kind must be 0..=3, got {}", spec.page_kind),
+            });
+        }
+        let addr = if spec.pda_b58.is_empty() {
+            match spec.page_kind {
+                OPEN_PAGE_KIND_SUBTREE => {
+                    rust_derive_subtree_pda(&pid, pool_id, lane_id, spec.page_seq).0
+                }
+                OPEN_PAGE_KIND_SUBROOT => {
+                    rust_derive_subroot_pda(&pid, pool_id, lane_id, spec.page_seq).0
+                }
+                OPEN_PAGE_KIND_MEMO => {
+                    rust_derive_memo_pda(&pid, pool_id, lane_id, spec.page_seq).0
+                }
+                OPEN_PAGE_KIND_NULLIFIER => {
+                    rust_derive_nf_page_pda(&pid, pool_id, lane_id, spec.page_seq).0
+                }
+                _ => {
+                    return Err(AudrenFfiError::InvalidInput {
+                        reason: format!("page_kind must be 0..=3, got {}", spec.page_kind),
+                    });
+                }
+            }
+        } else {
+            parse_addr(&spec.pda_b58, "existing_pages.pda_b58")?
+        };
+        existing.insert(addr);
+    }
+    let specs = rust_plan_auto_open_pages(
+        &pid,
+        pool_id,
+        lane_id,
+        next_leaf,
+        nf_count,
+        num_outputs as usize,
+        num_nfs as usize,
+        &existing,
+    )?;
+    Ok(specs
+        .into_iter()
+        .map(|s| FfiOpenPageSpec {
+            page_kind: s.page_kind,
+            page_seq: s.page_seq,
+            pda_b58: s.pda.to_string(),
+        })
+        .collect())
+}
+
+#[uniffi::export]
+pub fn recommended_cu_limit_open_page(open_page_count: u32, bumps: Vec<u8>) -> u32 {
+    rust_recommended_cu_limit_open_page_with_bumps(open_page_count as usize, &bumps)
+}
+
+#[uniffi::export]
+pub fn recommended_cu_limit_deposit(
+    has_transfer_hook: bool,
+    open_page_count: u32,
+    create_ata_count: u32,
+    create_token_2022_ata_count: u32,
+    bumps: Vec<u8>,
+) -> u32 {
+    rust_recommended_cu_limit_deposit_with_bumps(
+        has_transfer_hook,
+        open_page_count as usize,
+        create_ata_count as usize,
+        create_token_2022_ata_count as usize,
+        &bumps,
+    )
+}
+
+#[uniffi::export]
+pub fn recommended_cu_limit_transact(
+    is_public_withdraw: bool,
+    has_transfer_hook: bool,
+    output_mask: u8,
+    open_page_count: u32,
+    create_ata_count: u32,
+    create_token_2022_ata_count: u32,
+    bumps: Vec<u8>,
+) -> u32 {
+    rust_recommended_cu_limit_transact_with_bumps(
+        is_public_withdraw,
+        output_mask,
+        has_transfer_hook,
+        open_page_count as usize,
+        create_ata_count as usize,
+        create_token_2022_ata_count as usize,
+        &bumps,
+    )
+}
+
+#[uniffi::export]
+pub fn recommended_cu_limit_exec_via_escrow(
+    router_cu_limit: u32,
+    has_token2022_leg: bool,
+    open_page_count: u32,
+    create_ata_count: u32,
+    create_token_2022_ata_count: u32,
+    bumps: Vec<u8>,
+) -> u32 {
+    rust_recommended_cu_limit_exec_via_escrow_with_bumps(
+        router_cu_limit,
+        has_token2022_leg,
+        open_page_count as usize,
+        create_ata_count as usize,
+        create_token_2022_ata_count as usize,
+        &bumps,
+    )
 }

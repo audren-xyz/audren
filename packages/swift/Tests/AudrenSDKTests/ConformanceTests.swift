@@ -27,7 +27,6 @@ private struct PdaVectors: Decodable {
     let pool_id: UInt32
     let lane_id: UInt8
     let page_seq: UInt64
-    let slot_idx: UInt16
     let shard_id: UInt8
     let nullifier_hex: String
     let pool: PdaEntry
@@ -38,7 +37,7 @@ private struct PdaVectors: Decodable {
     let subroot: PdaEntry
     let memo: PdaEntry
     let nf_page: PdaEntry
-    let checkpoint: PdaEntry
+    let roots: PdaEntry
     let nullifier: PdaEntry
     let escrow: PdaEntry
     let unwrap: PdaEntry
@@ -111,12 +110,37 @@ private struct PoolStateVector: Decodable {
     let raw_hex: String
     let pool_id: UInt32
     let active_lanes: UInt8
-    let ckpt_interval: UInt64
-    let max_ckpt_age: UInt64
+    let root_epoch_interval: UInt64
     let note_rent_fee: UInt64
     let nf_rent_fee: UInt64
     let paused: Bool
     let pending_authority_b58: String
+}
+
+private struct RootHistoryVector: Decodable {
+    let raw_hex: String
+    let account_len: Int
+    let magic: String
+    let slot_ring_len: Int
+    let epoch_ring_len: Int
+    let default_epoch_interval: UInt64
+    let tag_init_root_history: UInt8
+    let err_invalid_root_ring: UInt32
+    let err_root_index_out_of_bounds: UInt32
+    let err_root_history_mismatch: UInt32
+    let pool_id: UInt32
+    let bump: UInt8
+    let slot_cursor: UInt16
+    let epoch_cursor: UInt16
+    let slot_count: UInt16
+    let epoch_count: UInt16
+    let latest_slot: UInt64
+    let stable_epoch_id: UInt64
+    let stable_slot: UInt64
+    let epoch_interval: UInt64
+    let latest_super_root_hex: String
+    let stable_super_root_hex: String
+    let lane2_leaf_count: UInt64
 }
 
 private struct ConformanceVectors: Decodable {
@@ -135,7 +159,7 @@ private struct ConformanceVectors: Decodable {
     let ctx_hashes: CtxHashVectors
     let groth16: Groth16Vector
     let pool_state: PoolStateVector
-    let checkpoint_raw_hex: String
+    let root_history: RootHistoryVector
 }
 
 private func hexToData(_ hex: String) -> Data {
@@ -213,7 +237,9 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(try deriveSubrootPda(programId: pid, poolId: v.pdas.pool_id, laneId: v.pdas.lane_id, rootPageSeq: v.pdas.page_seq).address, v.pdas.subroot.address)
         XCTAssertEqual(try deriveMemoPda(programId: pid, poolId: v.pdas.pool_id, laneId: v.pdas.lane_id, pageSeq: v.pdas.page_seq).address, v.pdas.memo.address)
         XCTAssertEqual(try deriveNfPagePda(programId: pid, poolId: v.pdas.pool_id, laneId: v.pdas.lane_id, pageSeq: v.pdas.page_seq).address, v.pdas.nf_page.address)
-        XCTAssertEqual(try deriveCheckpointPda(programId: pid, poolId: v.pdas.pool_id, slotIdx: v.pdas.slot_idx).address, v.pdas.checkpoint.address)
+        let rootsPda = try deriveRootsPda(programId: pid, poolId: v.pdas.pool_id)
+        XCTAssertEqual(rootsPda.address, v.pdas.roots.address)
+        XCTAssertEqual(rootsPda.bump, v.pdas.roots.bump)
         XCTAssertEqual(try deriveNullifierPda(programId: pid, poolId: v.pdas.pool_id, nullifier: nf).address, v.pdas.nullifier.address)
         XCTAssertEqual(try deriveEscrowPda(programId: pid, poolId: v.pdas.pool_id, shardId: v.pdas.shard_id).address, v.pdas.escrow.address)
         XCTAssertEqual(try deriveUnwrapPda(programId: pid, poolId: v.pdas.pool_id, nf0: nf).address, v.pdas.unwrap.address)
@@ -278,12 +304,26 @@ final class ConformanceTests: XCTestCase {
 
         let ps = try decodePoolStateAccount(data: hexToData(v.pool_state.raw_hex))
         XCTAssertEqual(ps.activeLanes, v.pool_state.active_lanes)
-        XCTAssertEqual(ps.ckptInterval, v.pool_state.ckpt_interval)
+        XCTAssertEqual(ps.rootEpochInterval, v.pool_state.root_epoch_interval)
         XCTAssertEqual(ps.pendingAuthorityB58, v.pool_state.pending_authority_b58)
 
-        let ck = try decodeRootCheckpointAccount(data: hexToData(v.checkpoint_raw_hex))
-        XCTAssertEqual(ck.slotIdx, 13)
-        XCTAssertEqual(ck.laneCounts[2], 6)
+        let rhRaw = hexToData(v.root_history.raw_hex)
+        XCTAssertEqual(rhRaw.count, v.root_history.account_len)
+        let rh = try decodeGlobalRootHistoryAccount(data: rhRaw)
+        XCTAssertEqual(rh.poolId, v.root_history.pool_id)
+        XCTAssertEqual(rh.bump, v.root_history.bump)
+        XCTAssertEqual(rh.slotCursor, v.root_history.slot_cursor)
+        XCTAssertEqual(rh.epochCursor, v.root_history.epoch_cursor)
+        XCTAssertEqual(rh.slotCount, v.root_history.slot_count)
+        XCTAssertEqual(rh.epochCount, v.root_history.epoch_count)
+        XCTAssertEqual(rh.latestSlot, v.root_history.latest_slot)
+        XCTAssertEqual(rh.stableEpochId, v.root_history.stable_epoch_id)
+        XCTAssertEqual(rh.stableSlot, v.root_history.stable_slot)
+        XCTAssertEqual(rh.epochInterval, v.root_history.epoch_interval)
+        XCTAssertEqual(dataToHex(rh.latestSuperRoot), v.root_history.latest_super_root_hex)
+        XCTAssertEqual(dataToHex(rh.stableSuperRoot), v.root_history.stable_super_root_hex)
+        XCTAssertEqual(rh.latestLaneCounts[2], v.root_history.lane2_leaf_count)
+        XCTAssertEqual(rh.stableLaneCounts[2], v.root_history.lane2_leaf_count)
         XCTAssertEqual(defaultRelayUrl(), "https://relay.audren.xyz")
         XCTAssertFalse(jupiterCpiExcludedDexes().isEmpty)
 
@@ -382,16 +422,21 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(dataToHex(proved.publicInputHash), v.groth16.public_input_hash_hex)
         XCTAssertEqual(dataToHex(proved.proof192), v.groth16.proof_192_hex)
 
-        // 6. v1.2.1 UniFFI zero-panic & extraWritablePubkeys & strict address/bounds checks
+        // 6. UniFFI zero-panic & extraWritablePubkeys & strict address/bounds checks
         XCTAssertThrowsError(try decodeAudrenAddress(encoded: " " + alice.address))
         XCTAssertThrowsError(try buildOpenPageIx(programId: pid, payer: sess0.pubkeyB58, pageKind: 4, poolId: 0, laneId: 0, pageSeq: 0))
         XCTAssertThrowsError(try deriveLanePda(programId: pid, poolId: 0, laneId: 16))
+        XCTAssertThrowsError(try buildInitRootHistoryIx(programId: pid, authority: sess0.pubkeyB58, poolId: 0, rootEpochInterval: 0, activeLanes: 4))
+        let initRhIx = try buildInitRootHistoryIx(programId: pid, authority: sess0.pubkeyB58, poolId: 0, rootEpochInterval: 32, activeLanes: 4)
+        XCTAssertEqual(initRhIx.data[0], v.root_history.tag_init_root_history)
+        XCTAssertEqual(initRhIx.accounts.count, 8)
         XCTAssertThrowsError(try buildTransactIx(params: FfiTransactParams(
             programId: pid,
             payer: sess0.pubkeyB58,
             poolId: 0,
             vkId: 0,
-            ckptSlotIdx: 13,
+            rootRingKind: 0,
+            rootRingIdx: 0,
             outLaneId: 2,
             outSubSeq: 0,
             outRootSeq: 0,
@@ -481,5 +526,124 @@ final class ConformanceTests: XCTestCase {
             changeMemos: Data()
         ))
         XCTAssertEqual(hPromoted, hExplicit)
+
+        // 7. v1.3.0 Auto-OpenPage custom programId, Token-2022 ATA CU limits, and zero-rent parity
+        let plannedDefault = try planAutoOpenPages(
+            programId: pid,
+            poolId: 0,
+            laneId: 0,
+            nextLeaf: 86,
+            nfCount: 540,
+            numOutputs: 1,
+            numNfs: 1,
+            existingPages: []
+        )
+        XCTAssertEqual(plannedDefault.count, 2)
+        XCTAssertEqual(plannedDefault[0].pageKind, 2)
+        XCTAssertEqual(plannedDefault[0].pdaB58, try deriveMemoPda(programId: pid, poolId: 0, laneId: 0, pageSeq: 1).address)
+        XCTAssertEqual(plannedDefault[1].pageKind, 3)
+        XCTAssertEqual(plannedDefault[1].pdaB58, try deriveNfPagePda(programId: pid, poolId: 0, laneId: 0, pageSeq: 1).address)
+
+        let customPid = sess0.pubkeyB58
+        let plannedCustom = try planAutoOpenPages(
+            programId: customPid,
+            poolId: 0,
+            laneId: 0,
+            nextLeaf: 86,
+            nfCount: 540,
+            numOutputs: 1,
+            numNfs: 1,
+            existingPages: []
+        )
+        XCTAssertEqual(plannedCustom.count, 2)
+        XCTAssertEqual(plannedCustom[0].pdaB58, try deriveMemoPda(programId: customPid, poolId: 0, laneId: 0, pageSeq: 1).address)
+        XCTAssertNotEqual(plannedCustom[0].pdaB58, plannedDefault[0].pdaB58)
+        let filteredCustom = try planAutoOpenPages(
+            programId: customPid,
+            poolId: 0,
+            laneId: 0,
+            nextLeaf: 86,
+            nfCount: 540,
+            numOutputs: 1,
+            numNfs: 1,
+            existingPages: [plannedCustom[0]]
+        )
+        XCTAssertEqual(filteredCustom.count, 1)
+        XCTAssertEqual(filteredCustom[0].pdaB58, plannedCustom[1].pdaB58)
+        let filteredCustomCoord = try planAutoOpenPages(
+            programId: customPid,
+            poolId: 0,
+            laneId: 0,
+            nextLeaf: 86,
+            nfCount: 540,
+            numOutputs: 1,
+            numNfs: 1,
+            existingPages: [FfiOpenPageSpec(pageKind: 2, pageSeq: 1, pdaB58: "")]
+        )
+        XCTAssertEqual(filteredCustomCoord.count, 1)
+        XCTAssertEqual(filteredCustomCoord[0].pdaB58, plannedCustom[1].pdaB58)
+        XCTAssertThrowsError(try planAutoOpenPages(
+            programId: "not-valid-pid!!!",
+            poolId: 0,
+            laneId: 0,
+            nextLeaf: 86,
+            nfCount: 0,
+            numOutputs: 1,
+            numNfs: 0,
+            existingPages: []
+        ))
+
+        let expectedDepositCu: UInt32 = 307_500 // 140k + 40k + 30k + 2*45k + 7.5k
+        let expectedTransactCu: UInt32 = 456_500 // 295k + 40k + 30k + 2*45k + 1.5k
+        let expectedExecCu: UInt32 = 792_500 // 285k + 25k + 300k + 40k + 30k + 2*45k + 22.5k
+        XCTAssertEqual(recommendedCuLimitOpenPage(openPageCount: 2, bumps: Data([250])), 87_500)
+        XCTAssertEqual(
+            recommendedCuLimitDeposit(
+                hasTransferHook: true,
+                openPageCount: 1,
+                createAtaCount: 1,
+                createToken2022AtaCount: 2,
+                bumps: Data([253, 252])
+            ),
+            expectedDepositCu
+        )
+        XCTAssertEqual(
+            recommendedCuLimitTransact(
+                isPublicWithdraw: true,
+                hasTransferHook: true,
+                outputMask: 0b001,
+                openPageCount: 1,
+                createAtaCount: 1,
+                createToken2022AtaCount: 2,
+                bumps: Data([254])
+            ),
+            expectedTransactCu
+        )
+        XCTAssertEqual(
+            recommendedCuLimitExecViaEscrow(
+                routerCuLimit: 300_000,
+                hasToken2022Leg: true,
+                openPageCount: 1,
+                createAtaCount: 1,
+                createToken2022AtaCount: 2,
+                bumps: Data([240, 255])
+            ),
+            expectedExecCu
+        )
+        XCTAssertEqual(
+            recommendedCuLimitExecViaEscrow(
+                routerCuLimit: 1_300_000,
+                hasToken2022Leg: true,
+                openPageCount: 2,
+                createAtaCount: 1,
+                createToken2022AtaCount: 2,
+                bumps: Data([0, 0])
+            ),
+            1_400_000
+        )
+
+        XCTAssertEqual(deterministicNoteRentFeeFfi(poolNoteRentFeeCap: 10_000_000, subRent: 0, srRent: 0, memoRent: 0), 3)
+        XCTAssertEqual(deterministicNoteRentFeeFfi(poolNoteRentFeeCap: 2, subRent: 0, srRent: 0, memoRent: 0), 2)
+        XCTAssertEqual(deterministicNoteRentFeeFfi(poolNoteRentFeeCap: 0, subRent: 0, srRent: 0, memoRent: 0), 0)
     }
 }

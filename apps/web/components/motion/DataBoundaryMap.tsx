@@ -40,7 +40,7 @@ const ZONES = [
       'Private transfer: hidden mint, amount & key',
       'Deposit / Exit: public amounts',
       'DeFi CPI & Bᵢ: public protocol legs',
-      'Checkpoint, lane, fee payer & timing',
+      'Root ring index, lane, fee payer & timing',
     ],
     foot: 'Permanent public blockchain record',
   },

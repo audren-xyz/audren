@@ -3,10 +3,12 @@
 pub use audren_core::{
     instruction::*,
     layout::*,
-    AudrenError, ASSOCIATED_TOKEN_PROGRAM_ID, CHECKPOINT_RING_SLOTS, CLASSIC_TOKEN_PROGRAM_ID,
-    CKPT_SEED, ESCROW_SEED, LANE_DEPTH_4ARY, LANE_RENT_SEED, LANE_SEED, MEMO_SEED, NF_PAGE_SEED,
-    NULLIFIER_SEED, NUM_ESCROW_SHARDS, NUM_LANES, POOL_SEED, PROTOCOL_VERSION, SUBROOT_SEED,
-    SUBTREE_SEED, SYSTEM_PROGRAM_ID as SYSTEM_PROGRAM_BYTES, TOKEN_2022_PROGRAM_ID, UNWRAP_SEED,
+    AudrenError, ASSOCIATED_TOKEN_PROGRAM_ID, CLASSIC_TOKEN_PROGRAM_ID,
+    ELGAMAL_REGISTRY_PROGRAM_ID, EPOCH_RING_LEN, ESCROW_SEED, LANE_DEPTH_4ARY, LANE_RENT_SEED,
+    LANE_SEED, MAX_ROOT_EPOCH_INTERVAL, MEMO_SEED, NF_PAGE_SEED, NULLIFIER_SEED, NUM_ESCROW_SHARDS,
+    NUM_LANES, POOL_SEED, PROTOCOL_VERSION, ROOTS_SEED, ROOT_ENTRY_LEN, ROOT_RING_EPOCH,
+    ROOT_RING_SLOT, SLOT_RING_LEN, SUBROOT_SEED, SUBTREE_SEED,
+    SYSTEM_PROGRAM_ID as SYSTEM_PROGRAM_BYTES, TOKEN_2022_PROGRAM_ID, UNWRAP_SEED,
     VAULT_AUTH_SEED, WSOL_MINT as WSOL_MINT_BYTES, ZERO_HASHES_4ARY,
 };
 use pinocchio::{error::ProgramError, AccountView, Address};
@@ -22,6 +24,9 @@ pub const TOKEN_2022_ID: Address = Address::new_from_array(TOKEN_2022_PROGRAM_ID
 
 /// Associated Token Account Program (`ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`)
 pub const ATA_PROGRAM_ID: Address = Address::new_from_array(ASSOCIATED_TOKEN_PROGRAM_ID);
+
+/// SPL ElGamal Registry Program (`regVYJW7tcT8zipN5YiBvHsvR5jXW1uLFxaHSbugABg`)
+pub const ELGAMAL_REGISTRY_ID: Address = Address::new_from_array(ELGAMAL_REGISTRY_PROGRAM_ID);
 
 /// Classic SPL Wrapped SOL Mint (`So11111111111111111111111111111111111111112`)
 pub const WSOL_MINT: Address = Address::new_from_array(WSOL_MINT_BYTES);
@@ -136,11 +141,8 @@ pub fn memo_pda(program_id: &Address, pool_id: u32, lane_id: u8, page_seq: u64) 
     )
 }
 
-pub fn checkpoint_pda(program_id: &Address, pool_id: u32, slot_idx: u16) -> (Address, u8) {
-    Address::find_program_address(
-        &[CKPT_SEED, &pool_id.to_le_bytes(), &slot_idx.to_le_bytes()],
-        program_id,
-    )
+pub fn roots_pda(program_id: &Address, pool_id: u32) -> (Address, u8) {
+    Address::find_program_address(&[ROOTS_SEED, &pool_id.to_le_bytes()], program_id)
 }
 
 pub fn nullifier_pda(program_id: &Address, pool_id: u32, nf: &[u8; 32]) -> (Address, u8) {

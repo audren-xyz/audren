@@ -37,21 +37,21 @@ const FAQS: readonly FaqItem[] = [
     category: 'privacy',
     catLabel: 'Privacy',
     q: 'What appears on Solscan for a private transfer?',
-    a: 'A default private Transact (Tag 5) shows the checkpoint root it proves against, a randomly chosen append lane, 2 nullifiers, 3 opaque 32-byte commitments, 3 encrypted 106-byte memos, the 192-byte proof, and the fee payer. The sender, recipient, token, and amount are not shown. The relayer you use is not blind: it learns the token (from the fee quote), sees your IP address, and checks any fee note owed to it, but it never learns the amount sent or the recipient.',
+    a: 'A default private Transact (Tag 5) shows the GlobalRootHistory ring index it proves against, a randomly chosen append lane, 2 nullifiers, 3 opaque 32-byte commitments, 3 encrypted 106-byte memos, the 192-byte proof, and the fee payer. The sender, recipient, token, and amount are not shown. The relayer you use is not blind: it learns the token (from the fee quote), sees your IP address, and checks any fee note owed to it, but it never learns the amount sent or the recipient.',
   },
   {
     id: 'relayer-down',
     category: 'privacy',
     catLabel: 'Privacy',
     q: 'What if the relayer is down or out of funds?',
-    a: 'Relayers are optional and replaceable. You can point the wallet at any compatible relay, self-host the open-source relay in apps/relay, or submit with your own wallet as fee payer (Direct Self-Pay), which publicly shows your wallet as the fee payer. Checkpoints are permissionless, so anyone can publish one. Direct wallet transactions use Solana’s smaller v0 format (1,232 B), so very large swap routes or merge batches may need a relay, which submits Transaction v1 (4,096 B).',
+    a: 'Relayers are optional and replaceable. You can point the wallet at any compatible relay, self-host the open-source relay in apps/relay, or submit with your own wallet as fee payer (Direct Self-Pay), which publicly shows your wallet as the fee payer. GlobalRootHistory updates inline on every deposit and spend, and wallets auto-prepend idempotent OpenPage instructions on Direct Self-Pay, so zero external cranks are required. Direct wallet transactions use Solana’s smaller v0 format (1,232 B), so very large swap routes or merge batches may need a relay, which submits Transaction v1 (4,096 B).',
   },
   {
     id: 'authority',
     category: 'custody',
     catLabel: 'Custody, setup & audits',
     q: 'What can the pool authority and the upgrade authority do?',
-    a: 'Today both roles are held by one operator key (3WzAUV…67bV; full address on the Terms page), not a multisig. Neither authority can spend your notes under the deployed program. The pool authority can pause the pool, which blocks deposits, private transfers, partial withdrawals, and ExecViaEscrow; full withdrawals (output_mask == 0, including WSOL unwrap; the app drops its padding note while paused), checkpoints, and page openings keep working. It can also change checkpoint timing (interval and age limit) and rent-fee caps within fixed bounds, activate lanes, transfer authority in two steps, or renounce it (only while unpaused). Because every spend, including a full exit, needs a recent checkpoint, extreme checkpoint settings could delay or block exits; a change that freezes the interval after InitPool is written but not yet deployed. The program upgrade authority is stronger: it can replace the program code, including its custody logic. It stays mutable during pre-audit releases; any decision to revoke it will be announced separately. You can check the deployed build hash on the Terms page.',
+    a: 'Today both roles are held by one operator key (3WzAUV…67bV; full address on the Terms page), not a multisig. Neither authority can spend your notes under the deployed program. The pool authority can pause the pool, which blocks deposits, private transfers, partial withdrawals, and ExecViaEscrow; full withdrawals (output_mask == 0, read-only GlobalRootHistory, including WSOL unwrap; the app drops its padding note while paused) and page openings keep working. Because GlobalRootHistory updates inline with zero idle wall-clock expiry and root_epoch_interval is immutable after initialization, no authority can delay or block full exits. The authority can update rent-fee caps within fixed bounds, activate lanes, transfer authority in two steps, or renounce it (only while unpaused). The program upgrade authority is stronger: it can replace the program code, including its custody logic. It stays mutable during pre-audit releases; any decision to revoke it will be announced separately. You can check the deployed build hash on the Terms page.',
   },
   {
     id: 'pause-mpc',
@@ -93,7 +93,7 @@ const FAQS: readonly FaqItem[] = [
     category: 'swaps',
     catLabel: 'DeFi & tokens',
     q: 'Which DeFi protocols work with ExecViaEscrow (Tag 6)?',
-    a: 'Today the hosted relay routes swaps through DEX aggregators (Jupiter, DFlow, and OKX), direct self-pay in the app uses Jupiter, and self-hosted relays can also enable Titan or Bedrock. Those aggregators reach AMMs such as Raydium, Orca, and Meteora and can buy LSTs or JLP. The instruction itself is protocol-agnostic: any program that takes Token A from the shared escrow and returns Token B in one escrow-signed call can be targeted with the SDK’s generic ExecViaEscrow builder, such as a lending-reserve deposit or a vault that mints shares. Those flows are not in the app and have not yet been exercised on Mainnet. The program binds the router program, every router account, the minimum output, and the relayer fee into ctx_hash, checks that the escrow accounts were not altered, and reshields exactly what arrived (~158k CU of Audren overhead, leaving >1.2M CU for the route).',
+    a: 'Today the hosted relay routes swaps through DEX aggregators (Jupiter, DFlow, and OKX), direct self-pay in the app uses Jupiter, and self-hosted relays can also enable Titan or Bedrock. Those aggregators reach AMMs such as Raydium, Orca, and Meteora and can buy LSTs or JLP. The instruction itself is protocol-agnostic: any program that takes Token A from the shared escrow and returns Token B in one escrow-signed call can be targeted with the SDK’s generic ExecViaEscrow builder, such as a lending-reserve deposit or a vault that mints shares. Those flows are not in the app and have not yet been exercised on Mainnet. The program binds the router program, every router account, the minimum output, and the relayer fee into ctx_hash, checks that the escrow accounts were not altered, and reshields exactly what arrived (~165k–238k CU base / 285k budget, leaving >1.11M CU for the route).',
   },
   {
     id: 'defi-sessions',
@@ -117,11 +117,11 @@ const FAQS: readonly FaqItem[] = [
     a: 'Your device reads the pool’s pages directly with ordinary Solana RPC getMultipleAccounts. It downloads full 10,240 B MemoPages (96 encrypted memos each), checks each memo’s 2-byte view tag, decrypts only the matches, and re-hashes every decrypted note against the commitment on-chain so a forged memo cannot add balance. It then streams NullifierPages to see which of its notes were spent. In the default strict mode, full pages hide which memo is yours, and on large catch-ups the tree page you need is fetched inside a fixed batch of 16 pages (or every sealed page, while fewer than 16 exist). Local storage stays small (~1.28 MB at 10M notes), but a cold sync from the beginning downloads every memo and nullifier page; a birthday slot skips pages older than your wallet. Opt-in fast mode reads only the first 3,328 B of each page on catch-ups over 25 pages, at the cost of revealing which pages matched to the RPC. In the web app, those RPC requests pass through the audren.xyz worker.',
   },
   {
-    id: 'rent-checkpoints',
+    id: 'spendability-rent',
     category: 'crypto',
     catLabel: 'Proofs, sync & costs',
     q: 'When does a new note become spendable, and what does each spend cost in rent?',
-    a: 'A new note becomes spendable once a RootCheckpoint covering it is published. Pool #0 currently uses ckpt_interval = 8 slots (under 2 seconds at Mainnet’s current ~210 ms slots). Checkpoints are published on demand, not every 8 slots: the open-source relayer publishes one through permissionless POST /v1/checkpoint (plus a 2-minute maintenance crank), which usually takes seconds while the relay is funded. If it is not, any wallet can publish a checkpoint itself for a transaction fee (plus one-time rent if that ring entry does not exist yet). A spend must reference a checkpoint at most 1,800 slots (about 6–7 minutes at current slot times) old; if yours has expired, publish or request a fresh one and prove again. Each spend also pays permanent rent: 0-byte NullifierPDAs plus amortized page rent, roughly 0.0007 SOL for a 1-nullifier full exit up to about 0.0036 SOL for a default 2-nullifier, 3-output transfer at current Mainnet rent. The program reads SysvarRent live, so the cost follows Solana’s rent.',
+    a: 'Immediately upon confirmation (~400ms today; ~150ms under Alpenglow), with zero checkpoint wait, zero cranks, and zero checkpoint fees. Every note-appending Deposit, Transact, and ExecViaEscrow updates the pool’s inline GlobalRootHistory (AUD1RT01, 10,216 B PDA) in the same instruction. Its dual ring holds a 128-entry recent slot_ring (retaining 64–128 active slots / ~13.8s–27.5s under saturation, since same_slot_bumped allows up to two advances per slot) for instant spends plus an 89-entry stable epoch_ring (>= 2,848 slots / >= 10.2m under saturation) with zero idle wall-clock expiry. Clients read finalized state first and fall back to confirmed only for brand-new notes. Each spend also pays permanent rent: 0-byte NullifierPDAs plus amortized page rent (auto-prepended idempotent OpenPage draws from LaneRentVault), roughly 0.0007 SOL for a 1-nullifier full exit up to about 0.0036 SOL for a default 2-nullifier, 3-output transfer at current Mainnet rent. The program reads SysvarRent live, so the cost follows Solana’s rent.',
   },
   {
     id: 'costs',
@@ -135,14 +135,14 @@ const FAQS: readonly FaqItem[] = [
     category: 'crypto',
     catLabel: 'Proofs, sync & costs',
     q: 'Does every Audren action fit in one transaction?',
-    a: 'Audren uses one frozen 17,861-constraint circuit (3.93 MB proving key) that produces a 192-byte BN254 Groth16 proof on your device, in a browser Web Worker or a native SDK. Solana verifies it with its native alt_bn128 syscalls in ~103k–160k CU. Through a relayer, which submits Solana Transaction v1 (4,096 B with inline compute budget), every instruction, including up to 4 parallel 2 → 1 merges and multi-hop ExecViaEscrow routes, settles in one transaction with no multi-step proof upload. Direct wallet submission uses v0 (1,232 B), where large swap routes or merge batches may not fit.',
+    a: 'Audren uses one frozen 17,861-constraint circuit (3.93 MB proving key) that produces a 192-byte BN254 Groth16 proof on your device, in a browser Web Worker or a native SDK. Solana verifies it with its native alt_bn128 syscalls in ~116k–121k CU (full exit with read-only roots, zero global write-lock contention, 165k budget), ~145k–217k CU (withdraw, 255k budget), or ~205k CU (2-in/3-out private transfer with inline root update, 235k budget). Under Solana’s 12M CU/slot per-writable-account ceiling on GlobalRootHistory, a single pool sustains ~51–58 private transfers/slot (~127–145 TPS at 400ms slots) or ~160–222 deposits/slot (~400–555 TPS at 400ms slots), while 0-output full exits lock GlobalRootHistory read-only. Through a relayer, which submits Solana Transaction v1 (4,096 B with inline compute budget), every instruction, including up to 4 parallel 2 → 1 merges across distinct lanes and multi-hop ExecViaEscrow routes, settles in one transaction with no multi-step proof upload. Direct wallet submission uses v0 (1,232 B), where padded 2-nullifier or multi-hop swap routes and merge batches need a relay.',
   },
   {
     id: 'scaling',
     category: 'crypto',
     catLabel: 'Proofs, sync & costs',
-    q: 'How do append lanes scale throughput without changing the circuit?',
-    a: 'The frozen 4-ary depth-20 tree reserves 16 lane slots: two top levels over 16 depth-18 lane trees. Writes to different lanes do not contend for the same account, so more lanes allow more parallel appends. Pools launch with 4 active lanes, and the pool authority activates more one at a time up to 16 via InitLane, with no circuit change, no new ceremony, and no migration of existing notes. Nullifiers are pool-wide, so a note cannot be spent twice through different lanes.',
+    q: 'How do append lanes scale capacity and rollovers without changing the circuit?',
+    a: 'The frozen 4-ary depth-20 tree reserves 16 lane slots: two top levels over 16 depth-18 lane trees. Every note-appending write (Deposit, Transact with outputs, and ExecViaEscrow) write-locks the single GlobalRootHistory PDA (accounts[2]) for instant inline root updates, so single-pool write throughput follows Solana’s 12M CU/slot per-account ceiling (~51–58 private transfers/slot or ~127–145 TPS; ~160–222 deposits/slot or ~400–555 TPS at 400ms slots). Pools launch with 4 active lanes and expand monotonically to 8 or 16 via InitLane with no circuit change, no new ceremony, and no migration of existing notes: more lanes scale global tree capacity to 4^20 (1.099T notes), isolate per-lane page rollovers (enabling 4-merge Tx v1 batches across distinct lanes), and parallelize read-only Full Exits (output_mask == 0, which lock GlobalRootHistory read-only). Nullifiers are pool-wide, so a note cannot be spent twice through different lanes.',
   },
 ]
 
@@ -202,8 +202,8 @@ export function FaqExperience() {
               <span className={styles.heroMetaValue}>Ordinary Solana RPC · ~1.28 MB kept @ 10M notes</span>
             </div>
             <div className={styles.heroMetaCell}>
-              <span className={styles.heroMetaLabel}>Relayers &amp; checkpoints</span>
-              <span className={styles.heroMetaValue}>Optional · on-demand checkpoints (8-slot epochs) · no spend keys</span>
+              <span className={styles.heroMetaLabel}>Zero-crank &amp; instant</span>
+              <span className={styles.heroMetaValue}>~400ms spend today (~150ms under Alpenglow) · Inline GlobalRootHistory · Auto-OpenPage</span>
             </div>
             <div className={styles.heroMetaCell}>
               <span className={styles.heroMetaLabel}>Ceremony &amp; audit</span>

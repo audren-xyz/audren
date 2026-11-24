@@ -6,7 +6,7 @@
     "kind": "programNode",
     "name": "audren",
     "publicKey": "AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3",
-    "version": "1.2.1",
+    "version": "1.3.0",
     "origin": "shank",
     "docs": [
       "Audren \u2014 Global Multi-Asset Shielded Pool (BN254 Groth16, 4-ary Depth-20 MASP) and Protocol-Agnostic DeFi Execution Program on Solana."
@@ -16,7 +16,7 @@
         "kind": "accountNode",
         "name": "poolState",
         "docs": [
-          "Global pool configuration (128 B; read-only on all deposits, spends, checkpoints, and DeFi swaps)."
+          "Global pool configuration (128 B; read-only on all deposits, spends, and DeFi swaps)."
         ],
         "size": 128,
         "discriminators": [
@@ -101,7 +101,7 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "ckptInterval",
+              "name": "rootEpochInterval",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u64",
@@ -110,11 +110,13 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "maxCkptAge",
+              "name": "reserved24",
               "type": {
-                "kind": "numberTypeNode",
-                "format": "u64",
-                "endian": "le"
+                "kind": "fixedSizeTypeNode",
+                "size": 8,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
               }
             },
             {
@@ -964,11 +966,11 @@
       },
       {
         "kind": "accountNode",
-        "name": "rootCheckpoint",
+        "name": "globalRootHistory",
         "docs": [
-          "Fixed-size cyclic global checkpoint ring slot (704 B, 256 slots max)."
+          "Protocol-automated dual-ring global super_root history (10,216 B <= 10 KiB CPI cap; 128-entry slot ring + 89-entry epoch ring, updated atomically inline on every note commitment)."
         ],
-        "size": 704,
+        "size": 10216,
         "discriminators": [
           {
             "kind": "constantDiscriminatorNode",
@@ -985,7 +987,7 @@
               "value": {
                 "kind": "bytesValueNode",
                 "encoding": "utf8",
-                "data": "AUD1CK01"
+                "data": "AUD1RT01"
               }
             }
           }
@@ -1024,7 +1026,7 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "slotIdx",
+              "name": "slotCursor",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u16",
@@ -1042,7 +1044,52 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "epochId",
+              "name": "epochCursor",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u16",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "slotCount",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u16",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "epochCount",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u16",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "sameSlotBumped",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u8",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "pad",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u8",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "latestSlot",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u64",
@@ -1051,7 +1098,7 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "publishedSlot",
+              "name": "stableEpochId",
               "type": {
                 "kind": "numberTypeNode",
                 "format": "u64",
@@ -1060,7 +1107,54 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "superRoot",
+              "name": "stableSlot",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u64",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "epochInterval",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u64",
+                "endian": "le"
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "reserved",
+              "type": {
+                "kind": "fixedSizeTypeNode",
+                "size": 8,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "groupRoots",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "fixedSizeTypeNode",
+                  "size": 32,
+                  "type": {
+                    "kind": "bytesTypeNode"
+                  }
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 4
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "latestSuperRoot",
               "type": {
                 "kind": "fixedSizeTypeNode",
                 "size": 32,
@@ -1071,7 +1165,7 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "laneRoots",
+              "name": "latestLaneRoots",
               "type": {
                 "kind": "arrayTypeNode",
                 "item": {
@@ -1089,7 +1183,7 @@
             },
             {
               "kind": "structFieldTypeNode",
-              "name": "laneCounts",
+              "name": "latestLaneCounts",
               "type": {
                 "kind": "arrayTypeNode",
                 "item": {
@@ -1102,6 +1196,81 @@
                   "value": 16
                 }
               }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "stableSuperRoot",
+              "type": {
+                "kind": "fixedSizeTypeNode",
+                "size": 32,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "stableLaneRoots",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "fixedSizeTypeNode",
+                  "size": 32,
+                  "type": {
+                    "kind": "bytesTypeNode"
+                  }
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 16
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "stableLaneCounts",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "numberTypeNode",
+                  "format": "u64",
+                  "endian": "le"
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 16
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "slotRing",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "definedTypeLinkNode",
+                  "name": "rootEntry"
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 128
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "epochRing",
+              "type": {
+                "kind": "arrayTypeNode",
+                "item": {
+                  "kind": "definedTypeLinkNode",
+                  "name": "rootEntry"
+                },
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 89
+                }
+              }
             }
           ]
         }
@@ -1112,7 +1281,7 @@
         "kind": "instructionNode",
         "name": "initPool",
         "docs": [
-          "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0)."
+          "Initialize PoolState (128 B, PROTOCOL_VERSION = 1, active_lanes = 0) and empty GlobalRootHistory (10,216 B) atomically."
         ],
         "discriminators": [
           {
@@ -1155,6 +1324,16 @@
           },
           {
             "kind": "instructionAccountNode",
+            "name": "roots",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "GlobalRootHistory PDA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
             "name": "systemProgram",
             "isWritable": false,
             "isSigner": false,
@@ -1190,16 +1369,7 @@
           },
           {
             "kind": "instructionArgumentNode",
-            "name": "ckptInterval",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u64",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
-            "name": "maxCkptAge",
+            "name": "rootEpochInterval",
             "type": {
               "kind": "numberTypeNode",
               "format": "u64",
@@ -1523,7 +1693,7 @@
         "kind": "instructionNode",
         "name": "deposit",
         "docs": [
-          "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA."
+          "Unified deposit for Native SOL (via DEPOSIT_FLAG_NATIVE_SOL + SyncNative into WSOL vault ATA) and Classic SPL / Token-2022 (net TransferFee + active TransferHook) into canonical vault_auth ATA, updating GlobalRootHistory atomically inline."
         ],
         "discriminators": [
           {
@@ -1562,6 +1732,16 @@
             "isOptional": false,
             "docs": [
               "PoolState PDA (read-only)."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "roots",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "GlobalRootHistory PDA (updated atomically on deposit)."
             ]
           },
           {
@@ -1786,9 +1966,9 @@
       },
       {
         "kind": "instructionNode",
-        "name": "publishCheckpoint",
+        "name": "initRootHistory",
         "docs": [
-          "Permissionless, pause-exempt global super_root checkpoint publisher over active_lanes read-only lanes."
+          "Authority-gated one-shot initializer creating GlobalRootHistory (10,216 B) from existing active lanes (passed as trailing read-only accounts) and updating PoolState.root_epoch_interval."
         ],
         "discriminators": [
           {
@@ -1811,32 +1991,32 @@
         "accounts": [
           {
             "kind": "instructionAccountNode",
-            "name": "payer",
+            "name": "authority",
             "isWritable": true,
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Permissionless cranker."
+              "Pool authority signer and rent payer."
             ]
           },
           {
             "kind": "instructionAccountNode",
             "name": "poolState",
-            "isWritable": false,
-            "isSigner": false,
-            "isOptional": false,
-            "docs": [
-              "PoolState PDA (read-only)."
-            ]
-          },
-          {
-            "kind": "instructionAccountNode",
-            "name": "checkpoint",
             "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Cyclic RootCheckpoint(slot_idx) PDA."
+              "PoolState PDA."
+            ]
+          },
+          {
+            "kind": "instructionAccountNode",
+            "name": "roots",
+            "isWritable": true,
+            "isSigner": false,
+            "isOptional": false,
+            "docs": [
+              "GlobalRootHistory PDA."
             ]
           },
           {
@@ -1873,6 +2053,15 @@
               "format": "u32",
               "endian": "le"
             }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "rootEpochInterval",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            }
           }
         ]
       },
@@ -1880,7 +2069,7 @@
         "kind": "instructionNode",
         "name": "transact",
         "docs": [
-          "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit)."
+          "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit) with GlobalRootHistory verification and inline root update."
         ],
         "discriminators": [
           {
@@ -1923,12 +2112,12 @@
           },
           {
             "kind": "instructionAccountNode",
-            "name": "checkpoint",
-            "isWritable": false,
+            "name": "roots",
+            "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Referenced RootCheckpoint PDA."
+              "GlobalRootHistory PDA (writable when output_mask != 0; may be read-only on full exits with output_mask == 0)."
             ]
           },
           {
@@ -2099,6 +2288,30 @@
           },
           {
             "kind": "instructionArgumentNode",
+            "name": "rootRingKind",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "0=slot ring (0..128), 1=epoch ring (0..89)."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "rootRingIdx",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "Entry index inside the selected GlobalRootHistory ring."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
             "name": "proof192",
             "type": {
               "kind": "fixedSizeTypeNode",
@@ -2194,7 +2407,7 @@
         "kind": "instructionNode",
         "name": "execViaEscrow",
         "docs": [
-          "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, and XOR-masked 72 B dynamic output memo."
+          "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, XOR-masked 72 B dynamic output memo, and inline GlobalRootHistory update."
         ],
         "discriminators": [
           {
@@ -2237,12 +2450,12 @@
           },
           {
             "kind": "instructionAccountNode",
-            "name": "checkpoint",
-            "isWritable": false,
+            "name": "roots",
+            "isWritable": true,
             "isSigner": false,
             "isOptional": false,
             "docs": [
-              "Referenced RootCheckpoint PDA."
+              "GlobalRootHistory PDA (verified and updated atomically after output append)."
             ]
           },
           {
@@ -2430,6 +2643,30 @@
           },
           {
             "kind": "instructionArgumentNode",
+            "name": "rootRingKind",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "0=slot ring (0..128), 1=epoch ring (0..89)."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "rootRingIdx",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u8",
+              "endian": "le"
+            },
+            "docs": [
+              "Entry index inside the selected GlobalRootHistory ring."
+            ]
+          },
+          {
+            "kind": "instructionArgumentNode",
             "name": "proof192",
             "type": {
               "kind": "fixedSizeTypeNode",
@@ -2578,7 +2815,7 @@
         "kind": "instructionNode",
         "name": "setPaused",
         "docs": [
-          "Authority-only emergency pause toggle (full withdrawals, PublishCheckpoint, and OpenPage remain permanently open)."
+          "Authority-only emergency pause toggle (full withdrawals and OpenPage remain permanently open)."
         ],
         "discriminators": [
           {
@@ -2659,7 +2896,7 @@
         "kind": "instructionNode",
         "name": "updatePool",
         "docs": [
-          "Update pool governance parameters (max_ckpt_age, note_rent_fee, nf_rent_fee; ckpt_interval is immutable after InitPool) or execute two-step authority transfer / renounce (renounce requires !paused)."
+          "Update pool governance parameters (note_rent_fee, nf_rent_fee; root_epoch_interval is immutable after InitPool / InitRootHistory) or execute two-step authority transfer / renounce (renounce requires !paused)."
         ],
         "discriminators": [
           {
@@ -2744,13 +2981,46 @@
               "kind": "bytesTypeNode"
             },
             "docs": [
-              "UpdateParams: ckpt_interval(8, immutable \u2014 must equal PoolState.ckpt_interval)|max_ckpt_age(8)|note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."
+              "UpdateParams: note_rent_fee(8)|nf_rent_fee(8); ProposeAuthority: pending_authority(32); AcceptAuthority/RenounceAuthority: empty."
             ]
           }
         ]
       }
     ],
-    "definedTypes": [],
+    "definedTypes": [
+      {
+        "kind": "definedTypeNode",
+        "name": "rootEntry",
+        "docs": [
+          "Single ring entry inside GlobalRootHistory (40 B: super_root[32] || slot[8])."
+        ],
+        "type": {
+          "kind": "structTypeNode",
+          "fields": [
+            {
+              "kind": "structFieldTypeNode",
+              "name": "superRoot",
+              "type": {
+                "kind": "fixedSizeTypeNode",
+                "size": 32,
+                "type": {
+                  "kind": "bytesTypeNode"
+                }
+              }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "slot",
+              "type": {
+                "kind": "numberTypeNode",
+                "format": "u64",
+                "endian": "le"
+              }
+            }
+          ]
+        }
+      }
+    ],
     "pdas": [
       {
         "kind": "pdaNode",
@@ -3108,16 +3378,16 @@
       },
       {
         "kind": "pdaNode",
-        "name": "rootCheckpoint",
+        "name": "globalRootHistory",
         "docs": [
-          "Cyclic 256-slot global super_root checkpoint ring PDA (704 B)."
+          "Protocol-automated dual-ring global super_root history PDA (10,216 B)."
         ],
         "seeds": [
           {
             "kind": "constantPdaSeedNode",
             "type": {
               "kind": "fixedSizeTypeNode",
-              "size": 11,
+              "size": 12,
               "type": {
                 "kind": "bytesTypeNode"
               }
@@ -3125,7 +3395,7 @@
             "value": {
               "kind": "bytesValueNode",
               "encoding": "utf8",
-              "data": "audren_ckpt"
+              "data": "audren_roots"
             }
           },
           {
@@ -3134,15 +3404,6 @@
             "type": {
               "kind": "numberTypeNode",
               "format": "u32",
-              "endian": "le"
-            }
-          },
-          {
-            "kind": "variablePdaSeedNode",
-            "name": "slotIdx",
-            "type": {
-              "kind": "numberTypeNode",
-              "format": "u16",
               "endian": "le"
             }
           }
@@ -3345,29 +3606,29 @@
       },
       {
         "kind": "errorNode",
-        "name": "checkpointTooSoon",
+        "name": "invalidRootRing",
         "code": 6007,
-        "message": "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots.",
+        "message": "Root ring selector must be 0 (slot ring) or 1 (epoch ring).",
         "docs": [
-          "Existing checkpoint slot has not aged past PoolState.max_ckpt_age slots."
+          "Root ring selector must be 0 (slot ring) or 1 (epoch ring)."
         ]
       },
       {
         "kind": "errorNode",
-        "name": "checkpointExpired",
+        "name": "rootIndexOutOfBounds",
         "code": 6008,
-        "message": "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots.",
+        "message": "Referenced GlobalRootHistory ring index is out of bounds or unpopulated.",
         "docs": [
-          "Referenced RootCheckpoint exceeded PoolState.max_ckpt_age slots."
+          "Referenced GlobalRootHistory ring index is out of bounds or unpopulated."
         ]
       },
       {
         "kind": "errorNode",
-        "name": "checkpointMismatch",
+        "name": "rootHistoryMismatch",
         "code": 6009,
-        "message": "Referenced RootCheckpoint account is uninitialized or belongs to another pool.",
+        "message": "Referenced GlobalRootHistory account is uninitialized, corrupted, or belongs to another pool.",
         "docs": [
-          "Referenced RootCheckpoint account is uninitialized or belongs to another pool."
+          "Referenced GlobalRootHistory account is uninitialized, corrupted, or belongs to another pool."
         ]
       },
       {
@@ -3527,9 +3788,9 @@
         "kind": "errorNode",
         "name": "poolPaused",
         "code": 6027,
-        "message": "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open).",
+        "message": "Pool is paused by authority (full exits and OpenPage remain open).",
         "docs": [
-          "Pool is paused by authority (full exits, PublishCheckpoint, and OpenPage remain open)."
+          "Pool is paused by authority (full exits and OpenPage remain open)."
         ]
       },
       {
@@ -3554,9 +3815,9 @@
         "kind": "errorNode",
         "name": "invalidTargetProgram",
         "code": 6030,
-        "message": "Target program must be executable and cannot be Audren, System, Token, or ATA.",
+        "message": "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry.",
         "docs": [
-          "Target program must be executable and cannot be Audren, System, Token, or ATA."
+          "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry."
         ]
       },
       {

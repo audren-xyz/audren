@@ -5,10 +5,11 @@ import type {
   NormalizedSwapInstructions,
   RouteLegSummary,
 } from '../types'
-import type {
-  AdapterQuoteRequest,
-  AdapterSwapInstructionsRequest,
-  AggregatorAdapter,
+import {
+  computeAggregatorExecCuLimit,
+  type AdapterQuoteRequest,
+  type AdapterSwapInstructionsRequest,
+  type AggregatorAdapter,
 } from './types'
 
 /**
@@ -240,14 +241,19 @@ export const titanAdapter: AggregatorAdapter = {
       throw new Error('Titan route did not expose a single escrow-signed swapInstruction')
     }
 
+    const routeHopCount =
+      Array.isArray(raw.route?.steps) && raw.route.steps.length > 0 ? raw.route.steps.length : null
+
     return {
       provider: 'titan',
       swapInstruction: swapIx,
-      addressLookupTableAddresses: raw.route?.addressLookupTables ?? [],
-      computeUnitLimit: Math.min(
-        Math.max((raw.route?.computeUnits ?? 400_000) + 700_000, 1_100_000),
-        1_400_000,
-      ),
+      addressLookupTableAddresses: Array.isArray(raw.route?.addressLookupTables)
+        ? raw.route.addressLookupTables
+        : [],
+      computeUnitLimit: computeAggregatorExecCuLimit({
+        reportedRouterCu: raw.route?.computeUnits,
+        routeHopCount,
+      }),
       feeAccount: req.feeAccountAta ?? null,
     }
   },

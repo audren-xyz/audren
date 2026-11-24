@@ -26,16 +26,22 @@ const utf8Encoder = new TextEncoder();
 const ASSET_ID_DOMAIN_BYTES = utf8Encoder.encode(ASSET_ID_DOMAIN);
 
 export function modFr(x: bigint): bigint {
+  if (typeof x !== 'bigint') {
+    throw new RangeError(`Expected bigint field element, got ${typeof x}`);
+  }
   const r = x % BN254_FR_MODULUS;
   return r >= 0n ? r : r + BN254_FR_MODULUS;
 }
 
 export function isCanonicalFr(bytes: Uint8Array): boolean {
-  if (bytes.byteLength !== 32) return false;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 32) return false;
   return bytesToBigIntBe(bytes) < BN254_FR_MODULUS;
 }
 
 export function bytesToBigIntBe(bytes: Uint8Array): bigint {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new RangeError(`Expected Uint8Array, got ${String(bytes)}`);
+  }
   let acc = 0n;
   for (let i = 0; i < bytes.byteLength; i++) {
     acc = (acc << 8n) | BigInt(bytes[i]!);
@@ -54,8 +60,10 @@ export function frToBeBytes(v: bigint): Uint8Array {
 }
 
 export function frFromBeBytesStrict(bytes: Uint8Array): bigint {
-  if (bytes.byteLength !== 32) {
-    throw new RangeError(`Expected 32-byte BN254 Fr, got ${bytes.byteLength}`);
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 32) {
+    throw new RangeError(
+      `Expected 32-byte BN254 Fr Uint8Array, got ${bytes instanceof Uint8Array ? bytes.byteLength : String(bytes)}`,
+    );
   }
   const v = bytesToBigIntBe(bytes);
   if (v >= BN254_FR_MODULUS) {
@@ -65,8 +73,10 @@ export function frFromBeBytesStrict(bytes: Uint8Array): bigint {
 }
 
 export function maskToFrBe(bytes: Uint8Array): Uint8Array {
-  if (bytes.byteLength !== 32) {
-    throw new RangeError(`Expected 32 bytes, got ${bytes.byteLength}`);
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 32) {
+    throw new RangeError(
+      `Expected 32-byte Uint8Array, got ${bytes instanceof Uint8Array ? bytes.byteLength : String(bytes)}`,
+    );
   }
   const out = new Uint8Array(32);
   out.set(bytes);
@@ -88,6 +98,9 @@ function sbox5(x: bigint): bigint {
  * Exact Circom / Solana `sol_poseidon` BN254 x^5 Poseidon hash for 1..=5 inputs.
  */
 export function poseidonHash(inputs: readonly bigint[]): bigint {
+  if (!Array.isArray(inputs)) {
+    throw new RangeError('Expected array of bigint inputs for poseidonHash');
+  }
   const width = inputs.length + 1;
   const params = POSEIDON_PARAMS[width];
   if (!params) {
@@ -153,8 +166,10 @@ export function poseidon5(a: bigint, b: bigint, c: bigint, d: bigint, e: bigint)
 
 /** `asset_id = mask_to_fr_be(SHA-256("audren/v1/asset" || mint_32))`. */
 export function deriveAssetId(mintBytes: Uint8Array): bigint {
-  if (mintBytes.byteLength !== 32) {
-    throw new RangeError(`mintBytes must be 32 bytes, got ${mintBytes.byteLength}`);
+  if (!(mintBytes instanceof Uint8Array) || mintBytes.byteLength !== 32) {
+    throw new RangeError(
+      `mintBytes must be a 32-byte Uint8Array, got ${mintBytes instanceof Uint8Array ? mintBytes.byteLength : String(mintBytes)}`,
+    );
   }
   const preimage = new Uint8Array(ASSET_ID_DOMAIN_BYTES.byteLength + 32);
   preimage.set(ASSET_ID_DOMAIN_BYTES, 0);
@@ -195,7 +210,27 @@ export function computeDummyNullifier(nk: bigint, blinding: bigint): bigint {
   return poseidon3(DOMAIN_DUMMY_NF, nk, blinding);
 }
 
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
+
 export function packPublicAmounts(publicAmountOut: bigint, relayerFeeAmount: bigint): bigint {
+  if (
+    typeof publicAmountOut !== 'bigint' ||
+    publicAmountOut < 0n ||
+    publicAmountOut > U64_MAX
+  ) {
+    throw new RangeError(
+      `publicAmountOut must be a u64 bigint in 0..=2^64-1, got ${String(publicAmountOut)}`,
+    );
+  }
+  if (
+    typeof relayerFeeAmount !== 'bigint' ||
+    relayerFeeAmount < 0n ||
+    relayerFeeAmount > U64_MAX
+  ) {
+    throw new RangeError(
+      `relayerFeeAmount must be a u64 bigint in 0..=2^64-1, got ${String(relayerFeeAmount)}`,
+    );
+  }
   return modFr(publicAmountOut + (relayerFeeAmount << 64n));
 }
 
@@ -224,8 +259,8 @@ export function computePublicInputHash(params: {
 
 /** Compute the global 16-lane super-root (2-level 4-ary Poseidon4 tree). */
 export function computeSuperRoot4Ary(laneRoots: readonly bigint[]): bigint {
-  if (laneRoots.length !== NUM_LANES) {
-    throw new RangeError(`Expected ${NUM_LANES} lane roots, got ${laneRoots.length}`);
+  if (!Array.isArray(laneRoots) || laneRoots.length !== NUM_LANES) {
+    throw new RangeError(`Expected ${NUM_LANES} lane roots, got ${Array.isArray(laneRoots) ? laneRoots.length : String(laneRoots)}`);
   }
   const mid = [
     poseidon4(laneRoots[0]!, laneRoots[1]!, laneRoots[2]!, laneRoots[3]!),

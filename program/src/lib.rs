@@ -1,16 +1,16 @@
 //! Audren On-Chain Solana Program (Pinocchio `#![no_std]`, sBPFv3).
 //!
 //! 9 clean instructions (`PROTOCOL_VERSION = 1`):
-//!   0: InitPool          — PoolState (128 B)
-//!   1: InitLane          — LaneTreeState + `LaneRentVault` sentinel (16 B) + page 0s (sub0/sr0/memo0/nf0)
-//!   2: OpenPage          — Unified, idempotent, sequence-bounded, `LaneRentVault`-subsidized page opener
-//!   3: Deposit           — Unified Native SOL (`SyncNative` -> WSOL ATA) & SPL / Token-2022 deposit into canonical `vault_auth` ATA
-//!   4: PublishCheckpoint — 256-slot cyclic checkpoint ring (active read-only lanes -> super_root; pause-exempt)
-//!   5: Transact          — Private transfer (shielded `cm2` fees, economy 1-in `nf1==0` or padded) / Public withdraw (incl. atomic WSOL unwrap & pause-exempt full exit)
-//!   6: ExecViaEscrow     — SPL / Token-2022 DeFi CPI behind `WatchedEscrowBuf` firewall,
-//!                          `router_accounts` bound in `ctx_hash`, Token-2022 TLV checks, and XOR-masked 72 B `MemoPage`
-//!   7: SetPaused         — Authority-only pause/unpause (never locks full withdrawals, checkpoints, or `OpenPage`)
-//!   8: UpdatePool        — Governance parameter updates (`ckpt_interval` immutable after `InitPool`) and two-step authority transfer / renounce (`!paused`)
+//!   0: InitPool        — PoolState (128 B) + empty GlobalRootHistory (10,216 B)
+//!   1: InitLane        — LaneTreeState + `LaneRentVault` sentinel (16 B) + page 0s (sub0/sr0/memo0/nf0)
+//!   2: OpenPage        — Unified, idempotent, sequence-bounded, `LaneRentVault`-subsidized page opener
+//!   3: Deposit         — Unified Native SOL (`SyncNative` -> WSOL ATA) & SPL / Token-2022 deposit into canonical `vault_auth` ATA + inline `GlobalRootHistory` update
+//!   4: InitRootHistory — Authority-gated one-shot initializer creating `GlobalRootHistory` (10,216 B) from existing active lanes
+//!   5: Transact        — Private transfer (shielded `cm2` fees, economy 1-in `nf1==0` or padded) / Public withdraw (incl. atomic WSOL unwrap & pause-exempt full exit) with `GlobalRootHistory` verification & inline update
+//!   6: ExecViaEscrow   — SPL / Token-2022 DeFi CPI behind `WatchedEscrowBuf` firewall,
+//!                        `router_accounts` bound in `ctx_hash`, Token-2022 TLV checks, XOR-masked 72 B `MemoPage`, and inline `GlobalRootHistory` update
+//!   7: SetPaused       — Authority-only pause/unpause (never locks full withdrawals or `OpenPage`)
+//!   8: UpdatePool      — Governance parameter updates (`note_rent_fee`, `nf_rent_fee`; `root_epoch_interval` immutable after `InitPool` / `InitRootHistory`) and two-step authority transfer / renounce (`!paused`)
 
 #![no_std]
 #![allow(unexpected_cfgs)]
@@ -36,44 +36,48 @@ use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
 use crate::{
     poseidon::{
         append_leaf_4ary_in_place, compute_note_commitment, compute_public_input_hash,
-        compute_super_root_4ary, ensure_canonical_fr, mask_to_fr_be,
+        ensure_canonical_fr, mask_to_fr_be, poseidon4,
     },
     state::{
-        check_owned_and_magic, checkpoint_pda, ensure, err, escrow_pda, expected_ata,
-        is_supported_token_program, lane_pda, lane_rent_pda, memo_pda, nf_page_pda, nullifier_pda,
-        pool_pda, read_32, read_u16, read_u32, read_u64, subroot_pda, subtree_pda, unwrap_pda,
-        vault_auth_pda, AudrenError, ASSET_ID_DOMAIN, ASSET_MODE_PRIVATE, ASSET_MODE_PUBLIC,
-        ATA_PROGRAM_ID, CHECKPOINT_RING_SLOTS, CKPT_LEN, CKPT_MAGIC, CKPT_SEED, CK_OFF_BUMP,
-        CK_OFF_EPOCH_ID, CK_OFF_LANE_COUNTS, CK_OFF_LANE_ROOTS, CK_OFF_MAGIC, CK_OFF_POOL_ID,
-        CK_OFF_PUBLISHED_SLOT, CK_OFF_SLOT_IDX, CK_OFF_SUPER_ROOT, CK_OFF_VERSION,
+        check_owned_and_magic, ensure, err, escrow_pda, expected_ata, is_supported_token_program,
+        lane_pda, lane_rent_pda, memo_pda, nf_page_pda, nullifier_pda, pool_pda, read_32, read_u16,
+        read_u32, read_u64, roots_pda, subroot_pda, subtree_pda, unwrap_pda, vault_auth_pda,
+        AudrenError, ASSET_ID_DOMAIN, ASSET_MODE_PRIVATE, ASSET_MODE_PUBLIC, ATA_PROGRAM_ID,
         CTX_DOMAIN_EXEC_VIA_ESCROW, CTX_DOMAIN_ROUTER_ACCOUNTS, CTX_DOMAIN_TRANSACT,
         DEPOSIT_FLAG_FEE_FROM_AMOUNT, DEPOSIT_FLAG_NATIVE_SOL, DYN_MEMO_HEAD_LEN, DYN_MEMO_MAGIC,
-        ESCROW_SEED, EXEC_FLAG_FEE_ON_OUTPUT, GROTH16_PROOF_LEN, LANE_MAGIC, LANE_RENT_MAGIC,
-        LANE_RENT_SEED, LANE_SEED, LANE_STATE_LEN, LN_OFF_BUMP, LN_OFF_CURRENT_ROOT,
-        LN_OFF_LANE_ID, LN_OFF_MAGIC, LN_OFF_NEXT_LEAF, LN_OFF_NF_COUNT, LN_OFF_POOL_ID,
-        LN_OFF_RENT_BUMP, LN_OFF_VERSION, MAX_CPI_ACCOUNT_ALLOC, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN,
-        MEMO_MAGIC, MEMO_NOTES_PER_PAGE, MEMO_PAGE_LEN, MEMO_SEED, MM_OFF_BUMP, MM_OFF_CIPHERTEXTS,
-        MM_OFF_CLOSED_SLOT, MM_OFF_COUNT, MM_OFF_CREATED_SLOT, MM_OFF_EPHEMERAL_PKS,
-        MM_OFF_LANE_ID, MM_OFF_MAGIC, MM_OFF_PAGE_SEQ, MM_OFF_POOL_ID, MM_OFF_VIEW_TAGS,
-        NF_OFF_BUMP, NF_OFF_CLOSED_SLOT, NF_OFF_COUNT, NF_OFF_CREATED_SLOT, NF_OFF_LANE_ID,
-        NF_OFF_MAGIC, NF_OFF_PAGE_SEQ, NF_OFF_POOL_ID, NF_OFF_PREFIXES, NF_PAGE_LEN, NF_PAGE_MAGIC,
-        NF_PAGE_SEED, NF_PER_PAGE, NF_PREFIX_LEN, NULLIFIER_SEED, NUM_ESCROW_SHARDS, NUM_LANES,
+        ELGAMAL_REGISTRY_ID, EPOCH_RING_LEN, ESCROW_SEED, EXEC_FLAG_FEE_ON_OUTPUT,
+        GROTH16_PROOF_LEN, LANE_MAGIC, LANE_RENT_MAGIC, LANE_RENT_SEED, LANE_SEED, LANE_STATE_LEN,
+        LN_OFF_BUMP, LN_OFF_CURRENT_ROOT, LN_OFF_LANE_ID, LN_OFF_MAGIC, LN_OFF_NEXT_LEAF,
+        LN_OFF_NF_COUNT, LN_OFF_POOL_ID, LN_OFF_RENT_BUMP, LN_OFF_VERSION, MAX_CPI_ACCOUNT_ALLOC,
+        MAX_ROOT_EPOCH_INTERVAL, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_MAGIC, MEMO_NOTES_PER_PAGE,
+        MEMO_PAGE_LEN, MEMO_SEED, MM_OFF_BUMP, MM_OFF_CIPHERTEXTS, MM_OFF_CLOSED_SLOT,
+        MM_OFF_COUNT, MM_OFF_CREATED_SLOT, MM_OFF_EPHEMERAL_PKS, MM_OFF_LANE_ID, MM_OFF_MAGIC,
+        MM_OFF_PAGE_SEQ, MM_OFF_POOL_ID, MM_OFF_VIEW_TAGS, NF_OFF_BUMP, NF_OFF_CLOSED_SLOT,
+        NF_OFF_COUNT, NF_OFF_CREATED_SLOT, NF_OFF_LANE_ID, NF_OFF_MAGIC, NF_OFF_PAGE_SEQ,
+        NF_OFF_POOL_ID, NF_OFF_PREFIXES, NF_PAGE_LEN, NF_PAGE_MAGIC, NF_PAGE_SEED, NF_PER_PAGE,
+        NF_PREFIX_LEN, NULLIFIER_SEED, NUM_ESCROW_SHARDS, NUM_LANES,
         OPEN_PAGE_KIND_MEMO as PAGE_KIND_MEMO, OPEN_PAGE_KIND_NULLIFIER as PAGE_KIND_NF,
         OPEN_PAGE_KIND_SUBROOT as PAGE_KIND_SUBROOT, OPEN_PAGE_KIND_SUBTREE as PAGE_KIND_SUBTREE,
-        PL_OFF_ACTIVE_LANES, PL_OFF_AUTHORITY, PL_OFF_BUMP, PL_OFF_CKPT_INTERVAL, PL_OFF_MAGIC,
-        PL_OFF_MAX_CKPT_AGE, PL_OFF_NF_RENT_FEE, PL_OFF_NOTE_RENT_FEE, PL_OFF_PAUSED,
-        PL_OFF_PENDING_AUTHORITY, PL_OFF_POOL_ID, PL_OFF_VAULT_AUTH_BUMP, PL_OFF_VERSION,
-        POOL_MAGIC, POOL_SEED, POOL_STATE_LEN, PROTOCOL_VERSION, SB_OFF_BUMP, SB_OFF_COUNT,
-        SB_OFF_LANE_ID, SB_OFF_LEAVES, SB_OFF_MAGIC, SB_OFF_PAGE_SEQ, SB_OFF_POOL_ID, SENTINEL_LEN,
-        SN_OFF_BUMP, SN_OFF_LANE_ID, SN_OFF_MAGIC, SN_OFF_POOL_ID, SPL_TOKEN_ID, SR_OFF_BUMP,
-        SR_OFF_COUNT, SR_OFF_LANE_ID, SR_OFF_MAGIC, SR_OFF_POOL_ID, SR_OFF_ROOTS,
-        SR_OFF_ROOT_PAGE_SEQ, SUBROOTS_PER_PAGE, SUBROOT_MAGIC, SUBROOT_PAGE_LEN, SUBROOT_SEED,
-        SUBTREE_LEAVES, SUBTREE_MAGIC, SUBTREE_PAGE_LEN, SUBTREE_SEED, SYSTEM_PROGRAM_ID,
-        TAG_DEPOSIT, TAG_EXEC_VIA_ESCROW, TAG_INIT_LANE, TAG_INIT_POOL, TAG_OPEN_PAGE,
-        TAG_PUBLISH_CHECKPOINT, TAG_SET_PAUSED, TAG_TRANSACT, TAG_UPDATE_POOL, TOKEN_2022_ID,
-        UNWRAP_SEED, UPDATE_POOL_ACCEPT_AUTHORITY, UPDATE_POOL_PARAMS,
-        UPDATE_POOL_PROPOSE_AUTHORITY, UPDATE_POOL_RENOUNCE_AUTHORITY, VAULT_AUTH_SEED,
-        WITHDRAW_FLAG_UNWRAP_WSOL, WSOL_MINT, ZERO_HASHES_4ARY,
+        PL_OFF_ACTIVE_LANES, PL_OFF_AUTHORITY, PL_OFF_BUMP, PL_OFF_MAGIC, PL_OFF_NF_RENT_FEE,
+        PL_OFF_NOTE_RENT_FEE, PL_OFF_PAUSED, PL_OFF_PENDING_AUTHORITY, PL_OFF_POOL_ID,
+        PL_OFF_RESERVED_24, PL_OFF_ROOT_EPOCH_INTERVAL, PL_OFF_VAULT_AUTH_BUMP, PL_OFF_VERSION,
+        POOL_MAGIC, POOL_SEED, POOL_STATE_LEN, PROTOCOL_VERSION, ROOTS_MAGIC, ROOTS_SEED,
+        ROOT_ENTRY_LEN, ROOT_HISTORY_LEN, ROOT_RING_EPOCH, ROOT_RING_SLOT, ROOT_SNAPSHOT_LEN,
+        RT_OFF_BUMP, RT_OFF_EPOCH_COUNT, RT_OFF_EPOCH_CURSOR, RT_OFF_EPOCH_INTERVAL,
+        RT_OFF_EPOCH_RING, RT_OFF_GROUP_ROOTS, RT_OFF_LATEST_LANE_COUNTS, RT_OFF_LATEST_LANE_ROOTS,
+        RT_OFF_LATEST_SLOT, RT_OFF_LATEST_SUPER_ROOT, RT_OFF_MAGIC, RT_OFF_POOL_ID,
+        RT_OFF_SAME_SLOT_BUMPED, RT_OFF_SLOT_COUNT, RT_OFF_SLOT_CURSOR, RT_OFF_SLOT_RING,
+        RT_OFF_STABLE_EPOCH_ID, RT_OFF_STABLE_SLOT, RT_OFF_STABLE_SUPER_ROOT, RT_OFF_VERSION,
+        SB_OFF_BUMP, SB_OFF_COUNT, SB_OFF_LANE_ID, SB_OFF_LEAVES, SB_OFF_MAGIC, SB_OFF_PAGE_SEQ,
+        SB_OFF_POOL_ID, SENTINEL_LEN, SLOT_RING_LEN, SN_OFF_BUMP, SN_OFF_LANE_ID, SN_OFF_MAGIC,
+        SN_OFF_POOL_ID, SPL_TOKEN_ID, SR_OFF_BUMP, SR_OFF_COUNT, SR_OFF_LANE_ID, SR_OFF_MAGIC,
+        SR_OFF_POOL_ID, SR_OFF_ROOTS, SR_OFF_ROOT_PAGE_SEQ, SUBROOTS_PER_PAGE, SUBROOT_MAGIC,
+        SUBROOT_PAGE_LEN, SUBROOT_SEED, SUBTREE_LEAVES, SUBTREE_MAGIC, SUBTREE_PAGE_LEN,
+        SUBTREE_SEED, SYSTEM_PROGRAM_ID, TAG_DEPOSIT, TAG_EXEC_VIA_ESCROW, TAG_INIT_LANE,
+        TAG_INIT_POOL, TAG_INIT_ROOT_HISTORY, TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_TRANSACT,
+        TAG_UPDATE_POOL, TOKEN_2022_ID, UNWRAP_SEED, UPDATE_POOL_ACCEPT_AUTHORITY,
+        UPDATE_POOL_PARAMS, UPDATE_POOL_PROPOSE_AUTHORITY, UPDATE_POOL_RENOUNCE_AUTHORITY,
+        VAULT_AUTH_SEED, WITHDRAW_FLAG_UNWRAP_WSOL, WSOL_MINT, ZERO_HASHES_4ARY,
     },
     verifier::verify_joinsplit_proof_192,
 };
@@ -113,6 +117,7 @@ const SPL_ACCOUNT_LEN: usize = 165;
 const SPL_MULTISIG_LEN: usize = 355;
 const TOKEN_2022_ACCOUNT_TYPE_MINT: u8 = 1;
 const TOKEN_2022_ACCOUNT_TYPE_ACCOUNT: u8 = 2;
+const TOKEN_2022_EXT_CONFIDENTIAL_TRANSFER_ACCOUNT: u16 = 5;
 const TOKEN_2022_EXT_MEMO_TRANSFER: u16 = 8;
 const TOKEN_2022_EXT_CPI_GUARD: u16 = 11;
 const TOKEN_2022_EXT_TRANSFER_HOOK: u16 = 14;
@@ -286,21 +291,18 @@ fn compute_rent_minimum_balance(
     }
 }
 
-/// Exact live `SysvarRent` minimum balance calculation with zero floating-point instructions.
-#[inline]
-fn rent_minimum_balance(data_len: usize) -> Result<u64, ProgramError> {
-    RentParams::get()?.minimum_balance(data_len)
-}
-
-/// Create a PDA safely even if an attacker pre-funded lamports to it (immune to 1-lamport DoS)
-/// and clamp to at least `1` lamport so no Audren PDA can ever be reaped on a zero-rent cluster.
-fn create_pda_safe<'a>(
+/// Create a PDA safely using pre-fetched `RentParams` (even if an attacker pre-funded lamports
+/// to it — immune to 1-lamport DoS) and clamp to at least `1` lamport so no Audren PDA can ever
+/// be reaped on a zero-rent cluster.
+#[inline(never)]
+fn create_pda_safe_with_rent<'a>(
     payer: &'a AccountView,
     pda: &'a AccountView,
     sys_prog: &'a AccountView,
     space: usize,
     program_id: &Address,
     seeds: &[Seed<'_>],
+    rent: RentParams,
 ) -> ProgramResult {
     ensure(
         space <= MAX_CPI_ACCOUNT_ALLOC
@@ -309,7 +311,7 @@ fn create_pda_safe<'a>(
             && pda.is_data_empty(),
         AudrenError::InvalidAccount,
     )?;
-    let required = rent_minimum_balance(space)?.max(1);
+    let required = rent.minimum_balance(space)?.max(1);
     if pda.lamports() == 0 {
         let signer = Signer::from(seeds);
         CreateAccount {
@@ -345,6 +347,19 @@ fn create_pda_safe<'a>(
         }
         .invoke_signed(&[s2])
     }
+}
+
+/// Create a PDA safely, fetching live `SysvarRent` once via `RentParams::get()`.
+#[inline]
+fn create_pda_safe<'a>(
+    payer: &'a AccountView,
+    pda: &'a AccountView,
+    sys_prog: &'a AccountView,
+    space: usize,
+    program_id: &Address,
+    seeds: &[Seed<'_>],
+) -> ProgramResult {
+    create_pda_safe_with_rent(payer, pda, sys_prog, space, program_id, seeds, RentParams::get()?)
 }
 
 // =============================================================================
@@ -579,32 +594,36 @@ struct TokenSecuritySnapshot {
     mint: Address,
     owner: Address,
     amount: u64,
+    is_frozen: bool,
     has_delegate: bool,
     close_authority: Option<Address>,
     data_len: u16,
     has_restrictive_ext: bool,
 }
 
-fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot> {
-    let owner_prog = account.owner();
+#[inline]
+fn parse_token_account_security(
+    owner_prog: &Address,
+    data: &[u8],
+) -> Option<TokenSecuritySnapshot> {
     if !is_supported_token_program(owner_prog) {
         return None;
     }
-    let data = account.try_borrow().ok()?;
     let len = data.len();
     let valid = (len == SPL_ACCOUNT_LEN
         || (owner_prog == &TOKEN_2022_ID
             && len > SPL_ACCOUNT_LEN
             && len != SPL_MULTISIG_LEN
             && data[SPL_ACCOUNT_LEN] == TOKEN_2022_ACCOUNT_TYPE_ACCOUNT))
-        && data[108] == 1;
+        && (data[108] == 1 || data[108] == 2);
     if !valid {
         return None;
     }
+    let is_frozen = data[108] == 2;
     let data_len = u16::try_from(len).ok()?;
     let mint_bytes: [u8; 32] = data[0..32].try_into().ok()?;
     let owner_bytes: [u8; 32] = data[32..64].try_into().ok()?;
-    let amount = read_u64(&data, 64);
+    let amount = read_u64(data, 64);
     let has_delegate = match &data[72..76] {
         [0, 0, 0, 0] => false,
         [1, 0, 0, 0] => true,
@@ -634,8 +653,10 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
                 has_restrictive_ext = true;
                 break;
             }
-            if (ext_type == TOKEN_2022_EXT_MEMO_TRANSFER || ext_type == TOKEN_2022_EXT_CPI_GUARD)
-                && (ext_len < 1 || tlv[val_start] != 0)
+            if ext_type == TOKEN_2022_EXT_CONFIDENTIAL_TRANSFER_ACCOUNT
+                || ((ext_type == TOKEN_2022_EXT_MEMO_TRANSFER
+                    || ext_type == TOKEN_2022_EXT_CPI_GUARD)
+                    && (ext_len < 1 || tlv[val_start] != 0))
             {
                 has_restrictive_ext = true;
                 break;
@@ -648,6 +669,7 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
         mint: Address::new_from_array(mint_bytes),
         owner: Address::new_from_array(owner_bytes),
         amount,
+        is_frozen,
         has_delegate,
         close_authority,
         data_len,
@@ -655,8 +677,18 @@ fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot
     })
 }
 
-/// Validate SPL Token / Token-2022 custody account invariants (`mint`, `owner`, state != 0,
-/// and when `strict_custody == true`, forbids delegates, close authorities, and active
+fn token_account_security(account: &AccountView) -> Option<TokenSecuritySnapshot> {
+    let owner_prog = account.owner();
+    if !is_supported_token_program(owner_prog) {
+        return None;
+    }
+    let data = account.try_borrow().ok()?;
+    parse_token_account_security(owner_prog, &data)
+}
+
+/// Validate SPL Token / Token-2022 custody account invariants (`mint`, `owner`, `Initialized`
+/// state — not `Uninitialized` or `Frozen` — and when `strict_custody == true`, forbids
+/// delegates, close authorities, `ConfidentialTransferAccount`, and active
 /// `MemoTransfer` / `CpiGuard` extensions).
 fn validate_token_account(
     acc: &AccountView,
@@ -669,7 +701,8 @@ fn validate_token_account(
     ensure(
         &snap.token_program == token_prog
             && &snap.mint == expected_mint
-            && &snap.owner == expected_owner,
+            && &snap.owner == expected_owner
+            && !snap.is_frozen,
         AudrenError::InvalidTokenAccount,
     )?;
     if strict_custody {
@@ -871,8 +904,6 @@ struct PoolConfig {
     active_lanes: u8,
     authority: Address,
     pending_authority: Address,
-    ckpt_interval: u64,
-    max_ckpt_age: u64,
     vault_auth_bump: u8,
     note_rent_fee: u64,
     nf_rent_fee: u64,
@@ -896,8 +927,6 @@ fn load_and_verify_pool(
         active_lanes: pd[PL_OFF_ACTIVE_LANES],
         authority: Address::new_from_array(read_32(&pd, PL_OFF_AUTHORITY)),
         pending_authority: Address::new_from_array(read_32(&pd, PL_OFF_PENDING_AUTHORITY)),
-        ckpt_interval: read_u64(&pd, PL_OFF_CKPT_INTERVAL),
-        max_ckpt_age: read_u64(&pd, PL_OFF_MAX_CKPT_AGE),
         vault_auth_bump: pd[PL_OFF_VAULT_AUTH_BUMP],
         note_rent_fee: read_u64(&pd, PL_OFF_NOTE_RENT_FEE),
         nf_rent_fee: read_u64(&pd, PL_OFF_NF_RENT_FEE),
@@ -949,29 +978,315 @@ fn verify_lane_rent_vault(
     ensure(lane_rent_vault.address() == &exp, AudrenError::InvalidPda)
 }
 
-fn verify_and_load_checkpoint_root(
+#[inline(always)]
+fn slice_32(b: &[u8], off: usize) -> &[u8; 32] {
+    b[off..off + 32].try_into().unwrap()
+}
+
+fn verify_roots_pda(
     program_id: &Address,
     pool_id: u32,
-    max_ckpt_age: u64,
-    now: u64,
-    ckpt_acc: &AccountView,
-) -> Result<[u8; 32], ProgramError> {
-    check_owned_and_magic(ckpt_acc, program_id, CKPT_LEN, &CKPT_MAGIC)?;
-    let cd = ckpt_acc.try_borrow()?;
-    ensure(read_u32(&cd, CK_OFF_POOL_ID) == pool_id, AudrenError::CheckpointMismatch)?;
-    let slot_idx = read_u16(&cd, CK_OFF_SLOT_IDX);
-    let cb = cd[CK_OFF_BUMP];
-    let pool_le = pool_id.to_le_bytes();
-    let slot_le = slot_idx.to_le_bytes();
-    let exp = Address::create_program_address(&[CKPT_SEED, &pool_le, &slot_le, &[cb]], program_id)
-        .map_err(|_| err(AudrenError::InvalidPda))?;
-    ensure(ckpt_acc.address() == &exp, AudrenError::InvalidPda)?;
-    let pub_slot = read_u64(&cd, CK_OFF_PUBLISHED_SLOT);
+    roots_acc: &AccountView,
+) -> ProgramResult {
+    ensure(roots_acc.owned_by(program_id), AudrenError::RootHistoryMismatch)?;
+    let rd = roots_acc.try_borrow()?;
     ensure(
-        now >= pub_slot && now.saturating_sub(pub_slot) <= max_ckpt_age,
-        AudrenError::CheckpointExpired,
+        rd.len() == ROOT_HISTORY_LEN
+            && rd[RT_OFF_MAGIC..RT_OFF_MAGIC + 8] == ROOTS_MAGIC
+            && read_u32(&rd, RT_OFF_POOL_ID) == pool_id,
+        AudrenError::RootHistoryMismatch,
     )?;
-    Ok(read_32(&cd, CK_OFF_SUPER_ROOT))
+    let pool_le = pool_id.to_le_bytes();
+    let rb = rd[RT_OFF_BUMP];
+    let exp = Address::create_program_address(&[ROOTS_SEED, &pool_le, &[rb]], program_id)
+        .map_err(|_| err(AudrenError::InvalidPda))?;
+    ensure(roots_acc.address() == &exp, AudrenError::InvalidPda)
+}
+
+/// Zero-copy in-place initializer for `GlobalRootHistory` (`10,216 B`).
+/// Used by both `InitPool` (`lanes = &[]`, 0 Poseidon calls) and one-shot `InitRootHistory`
+/// (`lanes = lane_0..lane_{active-1}`, reading live lane roots directly into `roots_acc`).
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn init_root_history_account(
+    program_id: &Address,
+    pool_id: u32,
+    root_epoch_interval: u64,
+    now: u64,
+    payer: &AccountView,
+    roots_acc: &mut AccountView,
+    sys_prog: &AccountView,
+    lanes: &[AccountView],
+    rent: RentParams,
+) -> ProgramResult {
+    ensure(
+        (1..=MAX_ROOT_EPOCH_INTERVAL).contains(&root_epoch_interval),
+        AudrenError::InvalidInstruction,
+    )?;
+    let active = lanes.len();
+    ensure(active <= NUM_LANES, AudrenError::InvalidLane)?;
+    for (i, lane_acc) in lanes.iter().enumerate() {
+        let _ = verify_lane_pda(program_id, pool_id, i as u8, lane_acc)?;
+    }
+
+    let (exp_roots, roots_bump) = roots_pda(program_id, pool_id);
+    ensure(roots_acc.address() == &exp_roots, AudrenError::InvalidPda)?;
+    ensure(roots_acc.is_writable(), AudrenError::InvalidAccount)?;
+
+    let pool_le = pool_id.to_le_bytes();
+    let rb = [roots_bump];
+    create_pda_safe_with_rent(
+        payer,
+        roots_acc,
+        sys_prog,
+        ROOT_HISTORY_LEN,
+        program_id,
+        &[Seed::from(ROOTS_SEED), Seed::from(&pool_le), Seed::from(&rb)],
+        rent,
+    )?;
+
+    let mut rd = roots_acc.try_borrow_mut()?;
+    let stable_epoch_id = now / root_epoch_interval;
+    rd[RT_OFF_MAGIC..RT_OFF_MAGIC + 8].copy_from_slice(&ROOTS_MAGIC);
+    rd[RT_OFF_VERSION] = PROTOCOL_VERSION;
+    rd[RT_OFF_BUMP] = roots_bump;
+    rd[RT_OFF_SLOT_CURSOR..RT_OFF_SLOT_CURSOR + 2].copy_from_slice(&0u16.to_le_bytes());
+    rd[RT_OFF_POOL_ID..RT_OFF_POOL_ID + 4].copy_from_slice(&pool_le);
+    rd[RT_OFF_EPOCH_CURSOR..RT_OFF_EPOCH_CURSOR + 2].copy_from_slice(&0u16.to_le_bytes());
+    rd[RT_OFF_SLOT_COUNT..RT_OFF_SLOT_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    rd[RT_OFF_EPOCH_COUNT..RT_OFF_EPOCH_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    rd[RT_OFF_SAME_SLOT_BUMPED] = 0;
+    rd[RT_OFF_LATEST_SLOT..RT_OFF_LATEST_SLOT + 8].copy_from_slice(&now.to_le_bytes());
+    rd[RT_OFF_STABLE_EPOCH_ID..RT_OFF_STABLE_EPOCH_ID + 8]
+        .copy_from_slice(&stable_epoch_id.to_le_bytes());
+    rd[RT_OFF_STABLE_SLOT..RT_OFF_STABLE_SLOT + 8].copy_from_slice(&now.to_le_bytes());
+    rd[RT_OFF_EPOCH_INTERVAL..RT_OFF_EPOCH_INTERVAL + 8]
+        .copy_from_slice(&root_epoch_interval.to_le_bytes());
+
+    for (i, lane_acc) in lanes.iter().enumerate() {
+        let r_off = RT_OFF_LATEST_LANE_ROOTS + i * 32;
+        let c_off = RT_OFF_LATEST_LANE_COUNTS + i * 8;
+        let ld = lane_acc.try_borrow()?;
+        rd[r_off..r_off + 32].copy_from_slice(&ld[LN_OFF_CURRENT_ROOT..LN_OFF_CURRENT_ROOT + 32]);
+        rd[c_off..c_off + 8].copy_from_slice(&ld[LN_OFF_NEXT_LEAF..LN_OFF_NEXT_LEAF + 8]);
+    }
+    for i in active..NUM_LANES {
+        let r_off = RT_OFF_LATEST_LANE_ROOTS + i * 32;
+        let c_off = RT_OFF_LATEST_LANE_COUNTS + i * 8;
+        rd[r_off..r_off + 32].copy_from_slice(&ZERO_HASHES_4ARY[18]);
+        rd[c_off..c_off + 8].fill(0);
+    }
+
+    if active == 0 {
+        for g in 0..4 {
+            let g_off = RT_OFF_GROUP_ROOTS + g * 32;
+            rd[g_off..g_off + 32].copy_from_slice(&ZERO_HASHES_4ARY[19]);
+        }
+        rd[RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32]
+            .copy_from_slice(&ZERO_HASHES_4ARY[20]);
+    } else {
+        for g in 0..4 {
+            let g_off = RT_OFF_GROUP_ROOTS + g * 32;
+            if g * 4 < active {
+                let base = RT_OFF_LATEST_LANE_ROOTS + g * 4 * 32;
+                let gr = poseidon4(
+                    slice_32(&rd, base),
+                    slice_32(&rd, base + 32),
+                    slice_32(&rd, base + 64),
+                    slice_32(&rd, base + 96),
+                )?;
+                rd[g_off..g_off + 32].copy_from_slice(&gr);
+            } else {
+                rd[g_off..g_off + 32].copy_from_slice(&ZERO_HASHES_4ARY[19]);
+            }
+        }
+        let sr = poseidon4(
+            slice_32(&rd, RT_OFF_GROUP_ROOTS),
+            slice_32(&rd, RT_OFF_GROUP_ROOTS + 32),
+            slice_32(&rd, RT_OFF_GROUP_ROOTS + 64),
+            slice_32(&rd, RT_OFF_GROUP_ROOTS + 96),
+        )?;
+        rd[RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32].copy_from_slice(&sr);
+    }
+
+    rd.copy_within(
+        RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + ROOT_SNAPSHOT_LEN,
+        RT_OFF_STABLE_SUPER_ROOT,
+    );
+    rd.copy_within(
+        RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32,
+        RT_OFF_SLOT_RING,
+    );
+    rd[RT_OFF_SLOT_RING + 32..RT_OFF_SLOT_RING + ROOT_ENTRY_LEN]
+        .copy_from_slice(&now.to_le_bytes());
+    rd.copy_within(
+        RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32,
+        RT_OFF_EPOCH_RING,
+    );
+    rd[RT_OFF_EPOCH_RING + 32..RT_OFF_EPOCH_RING + ROOT_ENTRY_LEN]
+        .copy_from_slice(&now.to_le_bytes());
+    Ok(())
+}
+
+/// Zero-copy `GlobalRootHistory` verifier and root loader (no wall-clock expiry).
+#[inline(never)]
+fn verify_and_load_global_root(
+    program_id: &Address,
+    pool_id: u32,
+    roots_acc: &AccountView,
+    root_ring_kind: u8,
+    root_ring_idx: u8,
+) -> Result<[u8; 32], ProgramError> {
+    verify_roots_pda(program_id, pool_id, roots_acc)?;
+    let rd = roots_acc.try_borrow()?;
+    let idx = root_ring_idx as usize;
+    let entry_off = match root_ring_kind {
+        ROOT_RING_SLOT => {
+            let slot_count = read_u16(&rd, RT_OFF_SLOT_COUNT) as usize;
+            ensure(
+                (1..=SLOT_RING_LEN).contains(&slot_count),
+                AudrenError::RootHistoryMismatch,
+            )?;
+            ensure(idx < slot_count, AudrenError::RootIndexOutOfBounds)?;
+            RT_OFF_SLOT_RING + idx * ROOT_ENTRY_LEN
+        }
+        ROOT_RING_EPOCH => {
+            let epoch_count = read_u16(&rd, RT_OFF_EPOCH_COUNT) as usize;
+            ensure(
+                (1..=EPOCH_RING_LEN).contains(&epoch_count),
+                AudrenError::RootHistoryMismatch,
+            )?;
+            ensure(idx < epoch_count, AudrenError::RootIndexOutOfBounds)?;
+            RT_OFF_EPOCH_RING + idx * ROOT_ENTRY_LEN
+        }
+        _ => return Err(err(AudrenError::InvalidRootRing)),
+    };
+    let super_root = read_32(&rd, entry_off);
+    ensure(super_root != [0u8; 32], AudrenError::RootIndexOutOfBounds)?;
+    Ok(super_root)
+}
+
+/// Zero-copy incremental `GlobalRootHistory` updater (2x `sol_poseidon(4)` regardless of lane count).
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn update_global_root_history(
+    program_id: &Address,
+    pool_id: u32,
+    roots_acc: &mut AccountView,
+    lane_id: u8,
+    new_lane_root: &[u8; 32],
+    new_next_leaf: u64,
+    now: u64,
+    verified_slot_ring_idx: Option<u8>,
+) -> ProgramResult {
+    ensure((lane_id as usize) < NUM_LANES, AudrenError::InvalidLane)?;
+    ensure(roots_acc.is_writable(), AudrenError::InvalidAccount)?;
+    verify_roots_pda(program_id, pool_id, roots_acc)?;
+
+    let mut rd = roots_acc.try_borrow_mut()?;
+    let l_idx = lane_id as usize;
+    let r_off = RT_OFF_LATEST_LANE_ROOTS + l_idx * 32;
+    rd[r_off..r_off + 32].copy_from_slice(new_lane_root);
+    let c_off = RT_OFF_LATEST_LANE_COUNTS + l_idx * 8;
+    rd[c_off..c_off + 8].copy_from_slice(&new_next_leaf.to_le_bytes());
+
+    let g = l_idx / 4;
+    let grp_base = RT_OFF_LATEST_LANE_ROOTS + g * 4 * 32;
+    let group_root = poseidon4(
+        slice_32(&rd, grp_base),
+        slice_32(&rd, grp_base + 32),
+        slice_32(&rd, grp_base + 64),
+        slice_32(&rd, grp_base + 96),
+    )?;
+    let g_off = RT_OFF_GROUP_ROOTS + g * 32;
+    rd[g_off..g_off + 32].copy_from_slice(&group_root);
+
+    let new_super_root = poseidon4(
+        slice_32(&rd, RT_OFF_GROUP_ROOTS),
+        slice_32(&rd, RT_OFF_GROUP_ROOTS + 32),
+        slice_32(&rd, RT_OFF_GROUP_ROOTS + 64),
+        slice_32(&rd, RT_OFF_GROUP_ROOTS + 96),
+    )?;
+    rd[RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32].copy_from_slice(&new_super_root);
+
+    let prev_latest_slot = read_u64(&rd, RT_OFF_LATEST_SLOT);
+    let mut slot_cursor = read_u16(&rd, RT_OFF_SLOT_CURSOR) as usize;
+    let mut slot_count = read_u16(&rd, RT_OFF_SLOT_COUNT) as usize;
+    let mut same_slot_bumped = rd[RT_OFF_SAME_SLOT_BUMPED];
+    ensure(
+        (1..=SLOT_RING_LEN).contains(&slot_count)
+            && slot_cursor < slot_count
+            && same_slot_bumped <= 1,
+        AudrenError::RootHistoryMismatch,
+    )?;
+    ensure(now >= prev_latest_slot, AudrenError::RootHistoryMismatch)?;
+
+    if now > prev_latest_slot {
+        slot_cursor = (slot_cursor + 1) % SLOT_RING_LEN;
+        if slot_count < SLOT_RING_LEN {
+            slot_count += 1;
+        }
+        same_slot_bumped = 0;
+        rd[RT_OFF_LATEST_SLOT..RT_OFF_LATEST_SLOT + 8].copy_from_slice(&now.to_le_bytes());
+    } else if now == prev_latest_slot
+        && verified_slot_ring_idx == Some(slot_cursor as u8)
+        && same_slot_bumped == 0
+    {
+        slot_cursor = (slot_cursor + 1) % SLOT_RING_LEN;
+        if slot_count < SLOT_RING_LEN {
+            slot_count += 1;
+        }
+        same_slot_bumped = 1;
+    }
+
+    rd[RT_OFF_SLOT_CURSOR..RT_OFF_SLOT_CURSOR + 2]
+        .copy_from_slice(&(slot_cursor as u16).to_le_bytes());
+    rd[RT_OFF_SLOT_COUNT..RT_OFF_SLOT_COUNT + 2]
+        .copy_from_slice(&(slot_count as u16).to_le_bytes());
+    rd[RT_OFF_SAME_SLOT_BUMPED] = same_slot_bumped;
+
+    let slot_entry_off = RT_OFF_SLOT_RING + slot_cursor * ROOT_ENTRY_LEN;
+    rd[slot_entry_off..slot_entry_off + 32].copy_from_slice(&new_super_root);
+    rd[slot_entry_off + 32..slot_entry_off + ROOT_ENTRY_LEN].copy_from_slice(&now.to_le_bytes());
+
+    let epoch_interval = read_u64(&rd, RT_OFF_EPOCH_INTERVAL);
+    ensure(
+        (1..=MAX_ROOT_EPOCH_INTERVAL).contains(&epoch_interval),
+        AudrenError::RootHistoryMismatch,
+    )?;
+    let stable_epoch_id = read_u64(&rd, RT_OFF_STABLE_EPOCH_ID);
+    let cur_epoch_id = now / epoch_interval;
+    if cur_epoch_id > stable_epoch_id {
+        let mut epoch_cursor = read_u16(&rd, RT_OFF_EPOCH_CURSOR) as usize;
+        let mut epoch_count = read_u16(&rd, RT_OFF_EPOCH_COUNT) as usize;
+        ensure(
+            (1..=EPOCH_RING_LEN).contains(&epoch_count) && epoch_cursor < epoch_count,
+            AudrenError::RootHistoryMismatch,
+        )?;
+        epoch_cursor = (epoch_cursor + 1) % EPOCH_RING_LEN;
+        if epoch_count < EPOCH_RING_LEN {
+            epoch_count += 1;
+        }
+        rd[RT_OFF_EPOCH_CURSOR..RT_OFF_EPOCH_CURSOR + 2]
+            .copy_from_slice(&(epoch_cursor as u16).to_le_bytes());
+        rd[RT_OFF_EPOCH_COUNT..RT_OFF_EPOCH_COUNT + 2]
+            .copy_from_slice(&(epoch_count as u16).to_le_bytes());
+        rd[RT_OFF_STABLE_EPOCH_ID..RT_OFF_STABLE_EPOCH_ID + 8]
+            .copy_from_slice(&cur_epoch_id.to_le_bytes());
+        rd[RT_OFF_STABLE_SLOT..RT_OFF_STABLE_SLOT + 8].copy_from_slice(&now.to_le_bytes());
+
+        let epoch_entry_off = RT_OFF_EPOCH_RING + epoch_cursor * ROOT_ENTRY_LEN;
+        rd[epoch_entry_off..epoch_entry_off + 32].copy_from_slice(&new_super_root);
+        rd[epoch_entry_off + 32..epoch_entry_off + ROOT_ENTRY_LEN]
+            .copy_from_slice(&now.to_le_bytes());
+
+        rd.copy_within(
+            RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + ROOT_SNAPSHOT_LEN,
+            RT_OFF_STABLE_SUPER_ROOT,
+        );
+    }
+
+    Ok(())
 }
 
 /// Collect a self-balancing per-note & per-nullifier amortized rent contribution into `LaneRentVault`.
@@ -991,11 +1306,11 @@ fn collect_lane_rent_fee(
         return Ok(0);
     }
     let rent = RentParams::get()?;
-    let min_vault = rent.minimum_balance(SENTINEL_LEN)?;
-    let sub_rent = rent.minimum_balance(SUBTREE_PAGE_LEN)?;
-    let sr_rent = rent.minimum_balance(SUBROOT_PAGE_LEN)?;
-    let memo_rent = rent.minimum_balance(MEMO_PAGE_LEN)?;
-    let nf_rent = rent.minimum_balance(NF_PAGE_LEN)?;
+    let min_vault = rent.minimum_balance(SENTINEL_LEN)?.max(1);
+    let sub_rent = rent.minimum_balance(SUBTREE_PAGE_LEN)?.max(1);
+    let sr_rent = rent.minimum_balance(SUBROOT_PAGE_LEN)?.max(1);
+    let memo_rent = rent.minimum_balance(MEMO_PAGE_LEN)?.max(1);
+    let nf_rent = rent.minimum_balance(NF_PAGE_LEN)?.max(1);
 
     let target_balance = min_vault
         .saturating_add(sub_rent)
@@ -1038,9 +1353,9 @@ fn deterministic_note_rent_fee(cfg: &PoolConfig) -> Result<u64, ProgramError> {
         return Ok(0);
     }
     let rent = RentParams::get()?;
-    let sub_rent = rent.minimum_balance(SUBTREE_PAGE_LEN)?;
-    let sr_rent = rent.minimum_balance(SUBROOT_PAGE_LEN)?;
-    let memo_rent = rent.minimum_balance(MEMO_PAGE_LEN)?;
+    let sub_rent = rent.minimum_balance(SUBTREE_PAGE_LEN)?.max(1);
+    let sr_rent = rent.minimum_balance(SUBROOT_PAGE_LEN)?.max(1);
+    let memo_rent = rent.minimum_balance(MEMO_PAGE_LEN)?.max(1);
     let live_per_note = sub_rent
         .div_ceil(SUBTREE_LEAVES as u64)
         .saturating_add(sr_rent.div_ceil((SUBTREE_LEAVES * SUBROOTS_PER_PAGE) as u64))
@@ -1056,9 +1371,9 @@ fn deterministic_note_rent_fee(cfg: &PoolConfig) -> Result<u64, ProgramError> {
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn unwrap_wsol_and_payout(
-    program_id: &Address,
     pool_id: u32,
     nf0: &[u8; 32],
+    unwrap_bump: u8,
     payer: &AccountView,
     sys_prog: &AccountView,
     vault_auth: &AccountView,
@@ -1075,8 +1390,6 @@ fn unwrap_wsol_and_payout(
     let total_out = amount_out
         .checked_add(relayer_fee)
         .ok_or_else(|| err(AudrenError::Overflow))?;
-    let (exp_unwrap, unwrap_bump) = unwrap_pda(program_id, pool_id, nf0);
-    ensure(unwrap_acc.address() == &exp_unwrap, AudrenError::InvalidPda)?;
     ensure(
         unwrap_acc.is_writable()
             && unwrap_acc.owned_by(&SYSTEM_PROGRAM_ID)
@@ -1200,6 +1513,7 @@ fn unwrap_wsol_and_payout(
 // =============================================================================
 
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn append_leaf_and_memo(
     program_id: &Address,
     pool_id: u32,
@@ -1452,7 +1766,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         TAG_INIT_LANE => ix_init_lane(program_id, accounts, &data[1..]),
         TAG_OPEN_PAGE => ix_open_page(program_id, accounts, &data[1..]),
         TAG_DEPOSIT => ix_deposit(program_id, accounts, &data[1..]),
-        TAG_PUBLISH_CHECKPOINT => ix_publish_checkpoint(program_id, accounts, &data[1..]),
+        TAG_INIT_ROOT_HISTORY => ix_init_root_history(program_id, accounts, &data[1..]),
         TAG_TRANSACT => ix_transact(program_id, accounts, &data[1..]),
         TAG_EXEC_VIA_ESCROW => ix_exec_via_escrow(program_id, accounts, &data[1..]),
         TAG_SET_PAUSED => ix_set_paused(program_id, accounts, &data[1..]),
@@ -1462,7 +1776,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 }
 
 // =============================================================================
-// 0. InitPool (PoolState 128 B + ring-wrap deadlock guard)
+// 0. InitPool (PoolState 128 B + empty GlobalRootHistory 10,216 B)
 // =============================================================================
 
 #[inline(never)]
@@ -1471,23 +1785,26 @@ fn ix_init_pool(
     accounts: &mut [AccountView],
     data: &[u8],
 ) -> ProgramResult {
-    // pool_id(4) + ckpt_interval(8) + max_ckpt_age(8) + note_rent_fee(8) + nf_rent_fee(8) = 36 B
-    ensure(data.len() == 36, AudrenError::InvalidInstruction)?;
-    let [payer, pool_acc, sys_prog, ..] = accounts else {
+    // pool_id(4) + root_epoch_interval(8) + note_rent_fee(8) + nf_rent_fee(8) = 28 B
+    ensure(data.len() == 28, AudrenError::InvalidInstruction)?;
+    let [payer, pool_acc, roots_acc, sys_prog, ..] = accounts else {
         return Err(err(AudrenError::InvalidInstruction));
     };
     ensure(payer.is_signer(), AudrenError::Unauthorized)?;
+    ensure(
+        pool_acc.is_writable()
+            && roots_acc.is_writable()
+            && sys_prog.address() == &SYSTEM_PROGRAM_ID,
+        AudrenError::InvalidAccount,
+    )?;
 
     let pool_id = read_u32(data, 0);
-    let ckpt_interval = read_u64(data, 4);
-    let max_ckpt_age = read_u64(data, 12);
-    let note_rent_fee = read_u64(data, 20);
-    let nf_rent_fee = read_u64(data, 28);
+    let root_epoch_interval = read_u64(data, 4);
+    let note_rent_fee = read_u64(data, 12);
+    let nf_rent_fee = read_u64(data, 20);
 
-    // Prevent checkpoint ring deadlock: max_ckpt_age MUST stay strictly below (RING - 1) * interval!
-    let max_safe_age = (CHECKPOINT_RING_SLOTS - 1).saturating_mul(ckpt_interval);
     ensure(
-        ckpt_interval > 0 && max_ckpt_age >= ckpt_interval && max_ckpt_age < max_safe_age,
+        (1..=MAX_ROOT_EPOCH_INTERVAL).contains(&root_epoch_interval),
         AudrenError::InvalidInstruction,
     )?;
 
@@ -1497,32 +1814,48 @@ fn ix_init_pool(
 
     let pool_le = pool_id.to_le_bytes();
     let pb = [pool_bump];
-    create_pda_safe(
+    let rent = RentParams::get()?;
+    create_pda_safe_with_rent(
         payer,
         pool_acc,
         sys_prog,
         POOL_STATE_LEN,
         program_id,
         &[Seed::from(POOL_SEED), Seed::from(&pool_le), Seed::from(&pb)],
+        rent,
     )?;
 
-    let mut pd = pool_acc.try_borrow_mut()?;
-    pd[PL_OFF_MAGIC..PL_OFF_MAGIC + 8].copy_from_slice(&POOL_MAGIC);
-    pd[PL_OFF_VERSION] = PROTOCOL_VERSION;
-    pd[PL_OFF_BUMP] = pool_bump;
-    pd[PL_OFF_PAUSED] = 0;
-    pd[PL_OFF_ACTIVE_LANES] = 0;
-    pd[PL_OFF_POOL_ID..PL_OFF_POOL_ID + 4].copy_from_slice(&pool_le);
-    pd[PL_OFF_CKPT_INTERVAL..PL_OFF_CKPT_INTERVAL + 8]
-        .copy_from_slice(&ckpt_interval.to_le_bytes());
-    pd[PL_OFF_MAX_CKPT_AGE..PL_OFF_MAX_CKPT_AGE + 8].copy_from_slice(&max_ckpt_age.to_le_bytes());
-    pd[PL_OFF_AUTHORITY..PL_OFF_AUTHORITY + 32].copy_from_slice(payer.address().as_ref());
-    pd[PL_OFF_VAULT_AUTH_BUMP] = va_bump;
-    pd[PL_OFF_NOTE_RENT_FEE..PL_OFF_NOTE_RENT_FEE + 8]
-        .copy_from_slice(&note_rent_fee.to_le_bytes());
-    pd[PL_OFF_NF_RENT_FEE..PL_OFF_NF_RENT_FEE + 8].copy_from_slice(&nf_rent_fee.to_le_bytes());
-    pd[PL_OFF_PENDING_AUTHORITY..PL_OFF_PENDING_AUTHORITY + 32].fill(0);
-    Ok(())
+    {
+        let mut pd = pool_acc.try_borrow_mut()?;
+        pd[PL_OFF_MAGIC..PL_OFF_MAGIC + 8].copy_from_slice(&POOL_MAGIC);
+        pd[PL_OFF_VERSION] = PROTOCOL_VERSION;
+        pd[PL_OFF_BUMP] = pool_bump;
+        pd[PL_OFF_PAUSED] = 0;
+        pd[PL_OFF_ACTIVE_LANES] = 0;
+        pd[PL_OFF_POOL_ID..PL_OFF_POOL_ID + 4].copy_from_slice(&pool_le);
+        pd[PL_OFF_ROOT_EPOCH_INTERVAL..PL_OFF_ROOT_EPOCH_INTERVAL + 8]
+            .copy_from_slice(&root_epoch_interval.to_le_bytes());
+        pd[PL_OFF_RESERVED_24..PL_OFF_RESERVED_24 + 8].fill(0);
+        pd[PL_OFF_AUTHORITY..PL_OFF_AUTHORITY + 32].copy_from_slice(payer.address().as_ref());
+        pd[PL_OFF_VAULT_AUTH_BUMP] = va_bump;
+        pd[PL_OFF_NOTE_RENT_FEE..PL_OFF_NOTE_RENT_FEE + 8]
+            .copy_from_slice(&note_rent_fee.to_le_bytes());
+        pd[PL_OFF_NF_RENT_FEE..PL_OFF_NF_RENT_FEE + 8].copy_from_slice(&nf_rent_fee.to_le_bytes());
+        pd[PL_OFF_PENDING_AUTHORITY..PL_OFF_PENDING_AUTHORITY + 32].fill(0);
+    }
+
+    let now = Clock::get()?.slot;
+    init_root_history_account(
+        program_id,
+        pool_id,
+        root_epoch_interval,
+        now,
+        payer,
+        roots_acc,
+        sys_prog,
+        &[],
+        rent,
+    )
 }
 
 // =============================================================================
@@ -1560,11 +1893,12 @@ fn ix_init_lane(
     let lane_b = [lane_id];
     let seq0 = 0u64.to_le_bytes();
     let slot = Clock::get()?.slot;
+    let rent = RentParams::get()?;
 
     let (exp_rv, rvb) = lane_rent_pda(program_id, pool_id, lane_id);
     ensure(lane_rent_vault.address() == &exp_rv, AudrenError::InvalidPda)?;
     let rvb_arr = [rvb];
-    create_pda_safe(
+    create_pda_safe_with_rent(
         payer,
         lane_rent_vault,
         sys_prog,
@@ -1576,6 +1910,7 @@ fn ix_init_lane(
             Seed::from(&lane_b),
             Seed::from(&rvb_arr),
         ],
+        rent,
     )?;
     {
         let mut rd = lane_rent_vault.try_borrow_mut()?;
@@ -1588,7 +1923,7 @@ fn ix_init_lane(
     let (exp_lane, lb) = lane_pda(program_id, pool_id, lane_id);
     ensure(lane_acc.address() == &exp_lane, AudrenError::InvalidPda)?;
     let lb_arr = [lb];
-    create_pda_safe(
+    create_pda_safe_with_rent(
         payer,
         lane_acc,
         sys_prog,
@@ -1600,6 +1935,7 @@ fn ix_init_lane(
             Seed::from(&lane_b),
             Seed::from(&lb_arr),
         ],
+        rent,
     )?;
     {
         let mut ld = lane_acc.try_borrow_mut()?;
@@ -1615,7 +1951,7 @@ fn ix_init_lane(
     let (exp_sub0, sb) = subtree_pda(program_id, pool_id, lane_id, 0);
     ensure(sub0.address() == &exp_sub0, AudrenError::InvalidPda)?;
     let sb_arr = [sb];
-    create_pda_safe(
+    create_pda_safe_with_rent(
         payer,
         sub0,
         sys_prog,
@@ -1628,6 +1964,7 @@ fn ix_init_lane(
             Seed::from(&seq0),
             Seed::from(&sb_arr),
         ],
+        rent,
     )?;
     {
         let mut sd = sub0.try_borrow_mut()?;
@@ -1640,7 +1977,7 @@ fn ix_init_lane(
     let (exp_sr0, srb) = subroot_pda(program_id, pool_id, lane_id, 0);
     ensure(sr0.address() == &exp_sr0, AudrenError::InvalidPda)?;
     let srb_arr = [srb];
-    create_pda_safe(
+    create_pda_safe_with_rent(
         payer,
         sr0,
         sys_prog,
@@ -1653,6 +1990,7 @@ fn ix_init_lane(
             Seed::from(&seq0),
             Seed::from(&srb_arr),
         ],
+        rent,
     )?;
     {
         let mut srd = sr0.try_borrow_mut()?;
@@ -1665,7 +2003,7 @@ fn ix_init_lane(
     let (exp_mm0, mmb) = memo_pda(program_id, pool_id, lane_id, 0);
     ensure(memo0.address() == &exp_mm0, AudrenError::InvalidPda)?;
     let mmb_arr = [mmb];
-    create_pda_safe(
+    create_pda_safe_with_rent(
         payer,
         memo0,
         sys_prog,
@@ -1678,6 +2016,7 @@ fn ix_init_lane(
             Seed::from(&seq0),
             Seed::from(&mmb_arr),
         ],
+        rent,
     )?;
     {
         let mut md = memo0.try_borrow_mut()?;
@@ -1691,7 +2030,7 @@ fn ix_init_lane(
     let (exp_nf0, nfb) = nf_page_pda(program_id, pool_id, lane_id, 0);
     ensure(nf0.address() == &exp_nf0, AudrenError::InvalidPda)?;
     let nfb_arr = [nfb];
-    create_pda_safe(
+    create_pda_safe_with_rent(
         payer,
         nf0,
         sys_prog,
@@ -1704,6 +2043,7 @@ fn ix_init_lane(
             Seed::from(&seq0),
             Seed::from(&nfb_arr),
         ],
+        rent,
     )?;
     {
         let mut nd = nf0.try_borrow_mut()?;
@@ -1901,7 +2241,7 @@ fn ix_open_page(
 }
 
 // =============================================================================
-// 3. Deposit (Unified Native SOL via SyncNative & SPL / Token-2022 -> canonical vault_auth ATA)
+// 3. Deposit (Unified Native SOL via SyncNative & SPL / Token-2022 -> canonical vault_auth ATA + inline GlobalRootHistory update)
 // =============================================================================
 
 #[inline(never)]
@@ -1912,9 +2252,9 @@ fn ix_deposit(
 ) -> ProgramResult {
     // pool_id(4) + lane_id(1) + flags(1) + amount(8) + stealth_owner(32) + blinding(32) + memo(106) = 184 B (185 B w/ tag)
     const DATA_LEN: usize = 4 + 1 + 1 + 8 + 32 + 32 + MEMO_ENTRY_WIRE_LEN;
-    ensure(data.len() == DATA_LEN && accounts.len() >= 13, AudrenError::InvalidInstruction)?;
-    let (head, tail) = accounts.split_at_mut(13);
-    let [depositor, pool_acc, vault_auth, mint_acc, source_account, vault_ata, token_prog, lane_acc, lane_rent_vault, subtree_acc, subroot_acc, memo_acc, sys_prog] =
+    ensure(data.len() == DATA_LEN && accounts.len() >= 14, AudrenError::InvalidInstruction)?;
+    let (head, tail) = accounts.split_at_mut(14);
+    let [depositor, pool_acc, roots_acc, vault_auth, mint_acc, source_account, vault_ata, token_prog, lane_acc, lane_rent_vault, subtree_acc, subroot_acc, memo_acc, sys_prog] =
         head
     else {
         return Err(err(AudrenError::InvalidInstruction));
@@ -1947,6 +2287,8 @@ fn ix_deposit(
     let cfg = load_and_verify_pool(program_id, pool_id, pool_acc)?;
     ensure(!cfg.paused, AudrenError::PoolPaused)?;
     ensure(lane_id < cfg.active_lanes, AudrenError::InvalidLane)?;
+    ensure(roots_acc.is_writable(), AudrenError::InvalidAccount)?;
+    verify_roots_pda(program_id, pool_id, roots_acc)?;
 
     let pool_le = pool_id.to_le_bytes();
     let exp_va = Address::create_program_address(
@@ -2047,6 +2389,7 @@ fn ix_deposit(
         ensure(!fee_from_amount, AudrenError::InvalidInstruction)?;
         let blocked = [
             pool_acc.address(),
+            roots_acc.address(),
             vault_auth.address(),
             lane_acc.address(),
             lane_rent_vault.address(),
@@ -2102,96 +2445,80 @@ fn ix_deposit(
         memo_entry,
         slot,
     )?;
-    Ok(())
+
+    let (new_lane_root, new_next_leaf) = {
+        let ld = lane_acc.try_borrow()?;
+        (read_32(&ld, LN_OFF_CURRENT_ROOT), read_u64(&ld, LN_OFF_NEXT_LEAF))
+    };
+    update_global_root_history(
+        program_id,
+        pool_id,
+        roots_acc,
+        lane_id,
+        &new_lane_root,
+        new_next_leaf,
+        slot,
+        None,
+    )
 }
 
 // =============================================================================
-// 4. PublishCheckpoint (256-slot bounded cyclic ring, pause-exempt, DoS-safe)
+// 4. InitRootHistory (Authority-gated one-shot GlobalRootHistory initializer from live lanes)
 // =============================================================================
 
 #[inline(never)]
-fn ix_publish_checkpoint(
+fn ix_init_root_history(
     program_id: &Address,
     accounts: &mut [AccountView],
     data: &[u8],
 ) -> ProgramResult {
-    ensure(accounts.len() >= 5 && data.len() == 4, AudrenError::InvalidInstruction)?;
+    // pool_id(4) + root_epoch_interval(8) = 12 B
+    ensure(accounts.len() >= 4 && data.len() == 12, AudrenError::InvalidInstruction)?;
     let (head, lanes) = accounts.split_at_mut(4);
-    let [payer, pool_acc, ckpt_acc, sys_prog] = head else {
+    let [authority, pool_acc, roots_acc, sys_prog] = head else {
         return Err(err(AudrenError::InvalidInstruction));
     };
+    ensure(authority.is_signer(), AudrenError::Unauthorized)?;
     ensure(
-        payer.is_signer() && sys_prog.address() == &SYSTEM_PROGRAM_ID,
+        pool_acc.is_writable()
+            && roots_acc.is_writable()
+            && sys_prog.address() == &SYSTEM_PROGRAM_ID,
         AudrenError::InvalidAccount,
     )?;
 
     let pool_id = read_u32(data, 0);
+    let root_epoch_interval = read_u64(data, 4);
+    ensure(
+        (1..=MAX_ROOT_EPOCH_INTERVAL).contains(&root_epoch_interval),
+        AudrenError::InvalidInstruction,
+    )?;
+
     let cfg = load_and_verify_pool(program_id, pool_id, pool_acc)?;
+    ensure(
+        cfg.authority != ZERO_ADDRESS && authority.address() == &cfg.authority,
+        AudrenError::Unauthorized,
+    )?;
     let active = cfg.active_lanes as usize;
-    ensure(active > 0 && active <= NUM_LANES, AudrenError::InvalidLane)?;
-    ensure(lanes.len() == active, AudrenError::InvalidInstruction)?;
+    ensure(active <= NUM_LANES && lanes.len() == active, AudrenError::InvalidInstruction)?;
 
-    let slot = Clock::get()?.slot;
-    let epoch_id = slot / cfg.ckpt_interval;
-    let slot_idx = (epoch_id % CHECKPOINT_RING_SLOTS) as u16;
+    let now = Clock::get()?.slot;
+    let rent = RentParams::get()?;
+    init_root_history_account(
+        program_id,
+        pool_id,
+        root_epoch_interval,
+        now,
+        authority,
+        roots_acc,
+        sys_prog,
+        lanes,
+        rent,
+    )?;
 
-    let (exp_ckpt, bump) = checkpoint_pda(program_id, pool_id, slot_idx);
-    ensure(ckpt_acc.address() == &exp_ckpt, AudrenError::InvalidPda)?;
-
-    let pool_le = pool_id.to_le_bytes();
-    let mut lane_roots = [ZERO_HASHES_4ARY[18]; NUM_LANES];
-    let mut lane_counts = [0u64; NUM_LANES];
-    for i in 0..active {
-        let lane_acc = &lanes[i];
-        let _ = verify_lane_pda(program_id, pool_id, i as u8, lane_acc)?;
-        let ld = lane_acc.try_borrow()?;
-        lane_roots[i] = read_32(&ld, LN_OFF_CURRENT_ROOT);
-        lane_counts[i] = read_u64(&ld, LN_OFF_NEXT_LEAF);
-    }
-
-    let super_root = compute_super_root_4ary(&lane_roots, active)?;
-
-    if ckpt_acc.owned_by(&SYSTEM_PROGRAM_ID) {
-        let slot_le = slot_idx.to_le_bytes();
-        let bump_b = [bump];
-        create_pda_safe(
-            payer,
-            ckpt_acc,
-            sys_prog,
-            CKPT_LEN,
-            program_id,
-            &[
-                Seed::from(CKPT_SEED),
-                Seed::from(&pool_le),
-                Seed::from(&slot_le),
-                Seed::from(&bump_b),
-            ],
-        )?;
-    } else {
-        check_owned_and_magic(ckpt_acc, program_id, CKPT_LEN, &CKPT_MAGIC)?;
-        let cd = ckpt_acc.try_borrow()?;
-        let prev_slot = read_u64(&cd, CK_OFF_PUBLISHED_SLOT);
-        ensure(
-            slot > prev_slot && slot.saturating_sub(prev_slot) > cfg.max_ckpt_age,
-            AudrenError::CheckpointTooSoon,
-        )?;
-    }
-
-    let mut cd = ckpt_acc.try_borrow_mut()?;
-    cd[CK_OFF_MAGIC..CK_OFF_MAGIC + 8].copy_from_slice(&CKPT_MAGIC);
-    cd[CK_OFF_VERSION] = PROTOCOL_VERSION;
-    cd[CK_OFF_BUMP] = bump;
-    cd[CK_OFF_SLOT_IDX..CK_OFF_SLOT_IDX + 2].copy_from_slice(&slot_idx.to_le_bytes());
-    cd[CK_OFF_POOL_ID..CK_OFF_POOL_ID + 4].copy_from_slice(&pool_le);
-    cd[CK_OFF_EPOCH_ID..CK_OFF_EPOCH_ID + 8].copy_from_slice(&epoch_id.to_le_bytes());
-    cd[CK_OFF_PUBLISHED_SLOT..CK_OFF_PUBLISHED_SLOT + 8].copy_from_slice(&slot.to_le_bytes());
-    cd[CK_OFF_SUPER_ROOT..CK_OFF_SUPER_ROOT + 32].copy_from_slice(&super_root);
-    for i in 0..NUM_LANES {
-        let r_off = CK_OFF_LANE_ROOTS + i * 32;
-        cd[r_off..r_off + 32].copy_from_slice(&lane_roots[i]);
-        let c_off = CK_OFF_LANE_COUNTS + i * 8;
-        cd[c_off..c_off + 8].copy_from_slice(&lane_counts[i].to_le_bytes());
-    }
+    let mut pd = pool_acc.try_borrow_mut()?;
+    pd[PL_OFF_ROOT_EPOCH_INTERVAL..PL_OFF_ROOT_EPOCH_INTERVAL + 8]
+        .copy_from_slice(&root_epoch_interval.to_le_bytes());
+    pd[PL_OFF_RESERVED_24..PL_OFF_RESERVED_24 + 8].fill(0);
     Ok(())
 }
 
@@ -2206,12 +2533,15 @@ fn ix_transact(
     data: &[u8],
 ) -> ProgramResult {
     // pool_id(4) + vk_id(1) + out_lane(1) + output_mask(1) + asset_mode(1) + flags(1)
-    // + proof(192) + nf0(32) + nf1(32) + cm0(32) + cm1(32) + cm2(32) + pub_out(8) + rel_fee(8) = 377 B
-    const FIXED_LEN: usize = 4 + 1 + 1 + 1 + 1 + 1 + GROTH16_PROOF_LEN + 32 * 5 + 8 + 8;
+    // + root_ring_kind(1) + root_ring_idx(1)
+    // + proof(192) + nf0(32) + nf1(32) + cm0(32) + cm1(32) + cm2(32) + pub_out(8) + rel_fee(8) = 379 B
+    const FIXED_LEN: usize =
+        4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + GROTH16_PROOF_LEN + 32 * 5 + 8 + 8;
+    const _: () = assert!(FIXED_LEN == 379);
     ensure(accounts.len() >= 12 && data.len() >= FIXED_LEN, AudrenError::InvalidInstruction)?;
 
     let (head, tail) = accounts.split_at_mut(12);
-    let [payer, pool_acc, ckpt_acc, nf0_acc, nf1_acc, lane_acc, lane_rent_vault, subtree_acc, subroot_acc, memo_acc, nf_page_acc, sys_prog] =
+    let [payer, pool_acc, roots_acc, nf0_acc, nf1_acc, lane_acc, lane_rent_vault, subtree_acc, subroot_acc, memo_acc, nf_page_acc, sys_prog] =
         head
     else {
         return Err(err(AudrenError::InvalidInstruction));
@@ -2228,15 +2558,17 @@ fn ix_transact(
     let output_mask = data[6];
     let asset_mode = data[7];
     let rollover_flags = data[8];
+    let root_ring_kind = data[9];
+    let root_ring_idx = data[10];
     let proof_192: &[u8; GROTH16_PROOF_LEN] =
-        data[9..9 + GROTH16_PROOF_LEN].try_into().unwrap();
-    let nf0 = read_32(data, 201);
-    let nf1 = read_32(data, 233);
-    let cm0 = read_32(data, 265);
-    let cm1 = read_32(data, 297);
-    let cm2 = read_32(data, 329);
-    let public_amount_out = read_u64(data, 361);
-    let relayer_fee_amount = read_u64(data, 369);
+        data[11..11 + GROTH16_PROOF_LEN].try_into().unwrap();
+    let nf0 = read_32(data, 203);
+    let nf1 = read_32(data, 235);
+    let cm0 = read_32(data, 267);
+    let cm1 = read_32(data, 299);
+    let cm2 = read_32(data, 331);
+    let public_amount_out = read_u64(data, 363);
+    let relayer_fee_amount = read_u64(data, 371);
     let memos_bytes = &data[FIXED_LEN..];
 
     let num_outputs = (output_mask & 1).count_ones() as usize
@@ -2269,9 +2601,18 @@ fn ix_transact(
         ensure(is_full_exit, AudrenError::PoolPaused)?;
     }
 
+    if num_outputs > 0 {
+        ensure(roots_acc.is_writable(), AudrenError::InvalidAccount)?;
+    }
+
     let now = Clock::get()?.slot;
-    let super_root =
-        verify_and_load_checkpoint_root(program_id, pool_id, cfg.max_ckpt_age, now, ckpt_acc)?;
+    let super_root = verify_and_load_global_root(
+        program_id,
+        pool_id,
+        roots_acc,
+        root_ring_kind,
+        root_ring_idx,
+    )?;
     let rent_bump = verify_lane_pda(program_id, pool_id, out_lane_id, lane_acc)?;
     verify_lane_rent_vault(program_id, pool_id, out_lane_id, rent_bump, lane_rent_vault)?;
     let pool_le = pool_id.to_le_bytes();
@@ -2304,18 +2645,19 @@ fn ix_transact(
     // Economy mode: `nf1 == [0;32]` is ONLY provable when `is_dummy[1] == true && amount[1] == 0`.
     let has_nf1 = nf1 != [0u8; 32];
 
-    let (public_asset_id, recipient_key, relayer_fee_key, spl_mint_info, vault_before): (
+    let (public_asset_id, recipient_key, relayer_fee_key, spl_mint_info, vault_before, unwrap_bump): (
         [u8; 32],
         [u8; 32],
         [u8; 32],
         Option<MintInfo>,
         u64,
+        Option<u8>,
     ) = match asset_mode {
         ASSET_MODE_PRIVATE => {
             // Pure private transfers MUST NOT pay a public asset-disclosing relayer fee!
             // Relayers are compensated privately via shielded output `cm2`.
             ensure(total_outflow == 0, AudrenError::InvalidInstruction)?;
-            ([0u8; 32], [0u8; 32], [0u8; 32], None, 0)
+            ([0u8; 32], [0u8; 32], [0u8; 32], None, 0, None)
         }
         ASSET_MODE_PUBLIC => {
             // Public outflow mode requires `public_amount_out > 0`.
@@ -2349,13 +2691,13 @@ fn ix_transact(
                     && !recipient_acc.owned_by(program_id),
                 AudrenError::InvalidAccount,
             )?;
-            if unwrap_wsol {
+            let unwrap_bump = if unwrap_wsol {
                 ensure(
                     mint_acc.address() == &WSOL_MINT && token_prog.address() == &SPL_TOKEN_ID,
                     AudrenError::InvalidTokenAccount,
                 )?;
                 let unwrap_acc = &outflow_tail[6];
-                let (exp_unwrap, _) = unwrap_pda(program_id, pool_id, &nf0);
+                let (exp_unwrap, bump) = unwrap_pda(program_id, pool_id, &nf0);
                 ensure(unwrap_acc.address() == &exp_unwrap, AudrenError::InvalidPda)?;
                 ensure(
                     unwrap_acc.is_writable()
@@ -2392,6 +2734,7 @@ fn ix_transact(
                         )?;
                     }
                 }
+                Some(bump)
             } else {
                 let rec_snap = token_account_security(recipient_acc)
                     .ok_or_else(|| err(AudrenError::InvalidTokenAccount))?;
@@ -2402,6 +2745,7 @@ fn ix_transact(
                         && rec_snap.owner != *vault_auth.address(),
                     AudrenError::InvalidAccount,
                 )?;
+                ensure(!rec_snap.is_frozen, AudrenError::InvalidTokenAccount)?;
                 if relayer_fee_amount > 0 {
                     ensure(
                         relayer_fee_acc.address() != vault_ata.address()
@@ -2421,8 +2765,10 @@ fn ix_transact(
                             && fee_snap.owner != *vault_auth.address(),
                         AudrenError::InvalidAccount,
                     )?;
+                    ensure(!fee_snap.is_frozen, AudrenError::InvalidTokenAccount)?;
                 }
-            }
+                None
+            };
             let mut m32 = [0u8; 32];
             m32.copy_from_slice(mint_acc.address().as_ref());
             let mut rk = [0u8; 32];
@@ -2431,7 +2777,7 @@ fn ix_transact(
             if relayer_fee_amount > 0 {
                 fk.copy_from_slice(relayer_fee_acc.address().as_ref());
             }
-            (derive_asset_id(&m32), rk, fk, Some(mi), bal)
+            (derive_asset_id(&m32), rk, fk, Some(mi), bal, unwrap_bump)
         }
         _ => return Err(err(AudrenError::InvalidInstruction)),
     };
@@ -2519,6 +2865,27 @@ fn ix_transact(
         }
     }
 
+    if num_outputs > 0 {
+        let (new_lane_root, new_next_leaf) = {
+            let ld = lane_acc.try_borrow()?;
+            (read_32(&ld, LN_OFF_CURRENT_ROOT), read_u64(&ld, LN_OFF_NEXT_LEAF))
+        };
+        update_global_root_history(
+            program_id,
+            pool_id,
+            roots_acc,
+            out_lane_id,
+            &new_lane_root,
+            new_next_leaf,
+            now,
+            if root_ring_kind == ROOT_RING_SLOT {
+                Some(root_ring_idx)
+            } else {
+                None
+            },
+        )?;
+    }
+
     if !cfg.paused {
         let num_nfs = if has_nf1 { 2u64 } else { 1u64 };
         collect_lane_rent_fee(payer, lane_rent_vault, &cfg, num_outputs as u64, num_nfs)?;
@@ -2535,10 +2902,11 @@ fn ix_transact(
         let va_seeds = [Seed::from(VAULT_AUTH_SEED), Seed::from(&pool_le), Seed::from(&vab)];
         if unwrap_wsol {
             let unwrap_acc = &outflow_tail[6];
+            let unwrap_bump = unwrap_bump.ok_or_else(|| err(AudrenError::InvalidPda))?;
             unwrap_wsol_and_payout(
-                program_id,
                 pool_id,
                 &nf0,
+                unwrap_bump,
                 payer,
                 sys_prog,
                 vault_auth,
@@ -2557,14 +2925,14 @@ fn ix_transact(
             let blocked = [
                 payer.address(),
                 pool_acc.address(),
-                ckpt_acc.address(),
+                roots_acc.address(),
                 nf0_acc.address(),
                 if has_nf1 { nf1_acc.address() } else { nf0_acc.address() },
                 lane_acc.address(),
                 lane_rent_vault.address(),
-                subtree_acc.address(),
-                subroot_acc.address(),
-                memo_acc.address(),
+                if num_outputs > 0 { subtree_acc.address() } else { pool_acc.address() },
+                if num_outputs > 0 { subroot_acc.address() } else { pool_acc.address() },
+                if num_outputs > 0 { memo_acc.address() } else { pool_acc.address() },
                 nf_page_acc.address(),
                 vault_auth.address(),
             ];
@@ -2626,17 +2994,18 @@ fn ix_exec_via_escrow(
     data: &[u8],
 ) -> ProgramResult {
     // pool_id(4) + vk_id(1) + out_lane(1) + escrow_shard(1) + change_mask(1) + flags(1)
+    // + root_ring_kind(1) + root_ring_idx(1)
     // + proof(192) + nf0(32) + nf1(32) + cm0(32) + cm1(32) + cm2(32)
     // + amount_in(8) + min_amount_out(8) + relayer_fee_amount(8)
     // + out_stealth_owner(32) + out_blinding(32) + dyn_memo_head(34) + dyn_mask_72(72)
-    // + router_ix_len(2) = 557 B (558 B w/ tag)
+    // + router_ix_len(2) = 559 B (560 B w/ tag)
     const HEADER_LEN: usize =
-        9 + GROTH16_PROOF_LEN + 32 * 5 + 8 * 3 + 32 + 32 + DYN_MEMO_HEAD_LEN + MEMO_CT_LEN + 2;
-    const _: () = assert!(HEADER_LEN == 557);
+        11 + GROTH16_PROOF_LEN + 32 * 5 + 8 * 3 + 32 + 32 + DYN_MEMO_HEAD_LEN + MEMO_CT_LEN + 2;
+    const _: () = assert!(HEADER_LEN == 559);
     ensure(accounts.len() >= 14 && data.len() >= HEADER_LEN, AudrenError::InvalidInstruction)?;
 
     let (head, rest) = accounts.split_at_mut(14);
-    let [payer, pool_acc, ckpt_acc, nf0_acc, nf1_acc, lane_acc, lane_rent_vault, subtree_acc, subroot_acc, memo_acc, nf_page_acc, escrow_acc, router_prog, sys_prog] =
+    let [payer, pool_acc, roots_acc, nf0_acc, nf1_acc, lane_acc, lane_rent_vault, subtree_acc, subroot_acc, memo_acc, nf_page_acc, escrow_acc, router_prog, sys_prog] =
         head
     else {
         return Err(err(AudrenError::InvalidInstruction));
@@ -2653,21 +3022,23 @@ fn ix_exec_via_escrow(
     let escrow_shard = data[6];
     let change_mask = data[7];
     let rollover_flags = data[8];
+    let root_ring_kind = data[9];
+    let root_ring_idx = data[10];
     let proof_192: &[u8; GROTH16_PROOF_LEN] =
-        data[9..9 + GROTH16_PROOF_LEN].try_into().unwrap();
-    let nf0 = read_32(data, 201);
-    let nf1 = read_32(data, 233);
-    let cm0 = read_32(data, 265);
-    let cm1 = read_32(data, 297);
-    let cm2 = read_32(data, 329);
-    let amount_in = read_u64(data, 361);
-    let min_amount_out = read_u64(data, 369);
-    let relayer_fee_amount = read_u64(data, 377);
-    let out_stealth_owner = read_32(data, 385);
-    let out_blinding = read_32(data, 417);
-    let dyn_memo_head = &data[449..449 + DYN_MEMO_HEAD_LEN];
-    let dyn_mask_72 = &data[483..483 + MEMO_CT_LEN];
-    let router_ix_len = read_u16(data, 555) as usize;
+        data[11..11 + GROTH16_PROOF_LEN].try_into().unwrap();
+    let nf0 = read_32(data, 203);
+    let nf1 = read_32(data, 235);
+    let cm0 = read_32(data, 267);
+    let cm1 = read_32(data, 299);
+    let cm2 = read_32(data, 331);
+    let amount_in = read_u64(data, 363);
+    let min_amount_out = read_u64(data, 371);
+    let relayer_fee_amount = read_u64(data, 379);
+    let out_stealth_owner = read_32(data, 387);
+    let out_blinding = read_32(data, 419);
+    let dyn_memo_head = &data[451..451 + DYN_MEMO_HEAD_LEN];
+    let dyn_mask_72 = &data[485..485 + MEMO_CT_LEN];
+    let router_ix_len = read_u16(data, 557) as usize;
 
     let num_changes = (change_mask & 1).count_ones() as usize
         + ((change_mask >> 1) & 1).count_ones() as usize;
@@ -2698,10 +3069,16 @@ fn ix_exec_via_escrow(
     let cfg = load_and_verify_pool(program_id, pool_id, pool_acc)?;
     ensure(!cfg.paused, AudrenError::PoolPaused)?;
     ensure(out_lane_id < cfg.active_lanes, AudrenError::InvalidLane)?;
+    ensure(roots_acc.is_writable(), AudrenError::InvalidAccount)?;
 
     let now = Clock::get()?.slot;
-    let super_root =
-        verify_and_load_checkpoint_root(program_id, pool_id, cfg.max_ckpt_age, now, ckpt_acc)?;
+    let super_root = verify_and_load_global_root(
+        program_id,
+        pool_id,
+        roots_acc,
+        root_ring_kind,
+        root_ring_idx,
+    )?;
     let rent_bump = verify_lane_pda(program_id, pool_id, out_lane_id, lane_acc)?;
     verify_lane_rent_vault(program_id, pool_id, out_lane_id, rent_bump, lane_rent_vault)?;
     let pool_le = pool_id.to_le_bytes();
@@ -2719,7 +3096,8 @@ fn ix_exec_via_escrow(
             && router_prog.address() != &SYSTEM_PROGRAM_ID
             && router_prog.address() != &SPL_TOKEN_ID
             && router_prog.address() != &TOKEN_2022_ID
-            && router_prog.address() != &ATA_PROGRAM_ID,
+            && router_prog.address() != &ATA_PROGRAM_ID
+            && router_prog.address() != &ELGAMAL_REGISTRY_ID,
         AudrenError::InvalidTargetProgram,
     )?;
 
@@ -2805,6 +3183,7 @@ fn ix_exec_via_escrow(
                     && fee_snap.owner != exp_escrow,
                 AudrenError::InvalidAccount,
             )?;
+            ensure(!fee_snap.is_frozen, AudrenError::InvalidTokenAccount)?;
             forbidden_keys[forbidden_len] = *fee_ata.address();
             forbidden_len += 1;
             relayer_fee_key.copy_from_slice(fee_ata.address().as_ref());
@@ -2860,6 +3239,7 @@ fn ix_exec_via_escrow(
                     && fee_snap.owner != exp_escrow,
                 AudrenError::InvalidAccount,
             )?;
+            ensure(!fee_snap.is_frozen, AudrenError::InvalidTokenAccount)?;
             forbidden_keys[forbidden_len] = *fee_ata.address();
             forbidden_len += 1;
             relayer_fee_key.copy_from_slice(fee_ata.address().as_ref());
@@ -3008,7 +3388,7 @@ fn ix_exec_via_escrow(
     let blocked_hook = [
         payer.address(),
         pool_acc.address(),
-        ckpt_acc.address(),
+        roots_acc.address(),
         nf0_acc.address(),
         if has_nf1 { nf1_acc.address() } else { nf0_acc.address() },
         lane_acc.address(),
@@ -3026,7 +3406,10 @@ fn ix_exec_via_escrow(
         for (idx, acc) in router_accounts.iter().enumerate() {
             let a = acc.address();
             ensure(
-                a != program_id && !acc.owned_by(program_id),
+                a != program_id
+                    && !acc.owned_by(program_id)
+                    && a != &ELGAMAL_REGISTRY_ID
+                    && !acc.owned_by(&ELGAMAL_REGISTRY_ID),
                 AudrenError::ForbiddenRouterAccount,
             )?;
             for fk in &forbidden_keys[..forbidden_len] {
@@ -3043,7 +3426,8 @@ fn ix_exec_via_escrow(
                 pre_token_mask |= 1u128 << idx;
                 if snap.owner == exp_escrow {
                     ensure(
-                        !snap.has_delegate
+                        !snap.is_frozen
+                            && !snap.has_delegate
                             && snap.close_authority.is_none()
                             && !snap.has_restrictive_ext,
                         AudrenError::EscrowAccountAltered,
@@ -3127,6 +3511,7 @@ fn ix_exec_via_escrow(
             ensure(
                 snap.token_program == entry.token_program
                     && snap.owner == exp_escrow
+                    && !snap.is_frozen
                     && !snap.has_delegate
                     && snap.close_authority.is_none()
                     && !snap.has_restrictive_ext
@@ -3147,6 +3532,7 @@ fn ix_exec_via_escrow(
                 if is_escrow_owned || is_canonical_escrow_ata {
                     ensure(
                         is_escrow_owned
+                            && !post_snap.is_frozen
                             && !post_snap.has_delegate
                             && post_snap.close_authority.is_none()
                             && !post_snap.has_restrictive_ext,
@@ -3285,11 +3671,28 @@ fn ix_exec_via_escrow(
         now,
     )?;
 
-    Ok(())
+    let (new_lane_root, new_next_leaf) = {
+        let ld = lane_acc.try_borrow()?;
+        (read_32(&ld, LN_OFF_CURRENT_ROOT), read_u64(&ld, LN_OFF_NEXT_LEAF))
+    };
+    update_global_root_history(
+        program_id,
+        pool_id,
+        roots_acc,
+        out_lane_id,
+        &new_lane_root,
+        new_next_leaf,
+        now,
+        if root_ring_kind == ROOT_RING_SLOT {
+            Some(root_ring_idx)
+        } else {
+            None
+        },
+    )
 }
 
 // =============================================================================
-// 7. SetPaused (authority-only emergency pause; full exits & checkpoints always remain open)
+// 7. SetPaused (authority-only emergency pause; full exits & OpenPage always remain open)
 // =============================================================================
 
 #[inline(never)]
@@ -3343,28 +3746,15 @@ fn ix_update_pool(
 
     match action {
         UPDATE_POOL_PARAMS => {
-            // pool_id(4) + action(1) + ckpt_interval(8) + max_ckpt_age(8) + note_rent_fee(8) + nf_rent_fee(8) = 37 B
-            // `ckpt_interval` is immutable after `InitPool` so cyclic ring slot assignments cannot alias or regress.
-            ensure(data.len() == 37, AudrenError::InvalidInstruction)?;
+            // pool_id(4) + action(1) + note_rent_fee(8) + nf_rent_fee(8) = 21 B
+            ensure(data.len() == 21, AudrenError::InvalidInstruction)?;
             ensure(
                 cfg.authority != ZERO_ADDRESS && signer.address() == &cfg.authority,
                 AudrenError::Unauthorized,
             )?;
-            let ckpt_interval = read_u64(data, 5);
-            let max_ckpt_age = read_u64(data, 13);
-            let note_rent_fee = read_u64(data, 21);
-            let nf_rent_fee = read_u64(data, 29);
-            let max_safe_age = (CHECKPOINT_RING_SLOTS - 1).saturating_mul(cfg.ckpt_interval);
-            ensure(
-                cfg.ckpt_interval > 0
-                    && ckpt_interval == cfg.ckpt_interval
-                    && max_ckpt_age >= cfg.ckpt_interval
-                    && max_ckpt_age < max_safe_age,
-                AudrenError::InvalidInstruction,
-            )?;
+            let note_rent_fee = read_u64(data, 5);
+            let nf_rent_fee = read_u64(data, 13);
             let mut pd = pool_acc.try_borrow_mut()?;
-            pd[PL_OFF_MAX_CKPT_AGE..PL_OFF_MAX_CKPT_AGE + 8]
-                .copy_from_slice(&max_ckpt_age.to_le_bytes());
             pd[PL_OFF_NOTE_RENT_FEE..PL_OFF_NOTE_RENT_FEE + 8]
                 .copy_from_slice(&note_rent_fee.to_le_bytes());
             pd[PL_OFF_NF_RENT_FEE..PL_OFF_NF_RENT_FEE + 8]
@@ -3440,6 +3830,7 @@ mod tests {
         let prog = Address::new_from_array(audren_core::AUDREN_PROGRAM_ID);
         let (p0, pb) = pool_pda(&prog, 0);
         let (va0, vab) = vault_auth_pda(&prog, 0);
+        let (rt0, rtb) = roots_pda(&prog, 0);
         assert_eq!(
             p0,
             Address::new_from_array(audren_core::decode_base58(
@@ -3454,7 +3845,16 @@ mod tests {
             ))
         );
         assert_eq!(vab, 255);
+        assert_eq!(
+            rt0,
+            Address::new_from_array(audren_core::decode_base58(
+                "249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7"
+            ))
+        );
+        assert_eq!(rtb, 254);
         assert_ne!(p0, va0);
+        assert_ne!(p0, rt0);
+        assert_ne!(va0, rt0);
     }
 
     #[test]
@@ -3532,11 +3932,11 @@ mod tests {
             SENTINEL_LEN,
             128,
             SPL_ACCOUNT_LEN,
-            CKPT_LEN,
             LANE_STATE_LEN,
             SUBTREE_PAGE_LEN,
             SUBROOT_PAGE_LEN,
             NF_PAGE_LEN,
+            ROOT_HISTORY_LEN,
             MEMO_PAGE_LEN,
         ];
         let lpbys: &[u64] = &[
@@ -3664,5 +4064,82 @@ mod tests {
                 Err(ProgramError::UnsupportedSysvar)
             );
         }
+    }
+
+    #[test]
+    fn token_account_security_detects_frozen_and_confidential_transfer_ext() {
+        let mint = [0x11u8; 32];
+        let owner = [0x22u8; 32];
+        let make_base = |state: u8| -> [u8; SPL_ACCOUNT_LEN] {
+            let mut buf = [0u8; SPL_ACCOUNT_LEN];
+            buf[0..32].copy_from_slice(&mint);
+            buf[32..64].copy_from_slice(&owner);
+            buf[64..72].copy_from_slice(&42u64.to_le_bytes());
+            buf[108] = state;
+            buf
+        };
+
+        // Short accounts & uninitialized / invalid states return None without panicking
+        assert!(parse_token_account_security(&SPL_TOKEN_ID, &[]).is_none());
+        assert!(parse_token_account_security(&SPL_TOKEN_ID, &[0u8; SPL_MINT_LEN]).is_none());
+        assert!(parse_token_account_security(&SPL_TOKEN_ID, &make_base(0)).is_none());
+        assert!(parse_token_account_security(&SPL_TOKEN_ID, &make_base(3)).is_none());
+
+        // Classic SPL: Initialized (1) and Frozen (2) both parse with accurate `is_frozen`
+        let init_snap = parse_token_account_security(&SPL_TOKEN_ID, &make_base(1))
+            .expect("initialized classic SPL token account must parse");
+        assert!(!init_snap.is_frozen);
+        assert_eq!(init_snap.owner, Address::new_from_array(owner));
+        assert_eq!(init_snap.mint, Address::new_from_array(mint));
+        assert_eq!(init_snap.amount, 42);
+        assert!(!init_snap.has_restrictive_ext);
+
+        let frozen_snap = parse_token_account_security(&SPL_TOKEN_ID, &make_base(2))
+            .expect("frozen classic SPL token account must parse");
+        assert!(frozen_snap.is_frozen);
+        assert_eq!(frozen_snap.owner, Address::new_from_array(owner));
+
+        // Token-2022: Frozen account with benign ImmutableOwner (ext_type = 7, len = 0) parses as frozen
+        let mut t22_frozen = make_base(2).to_vec();
+        t22_frozen.push(TOKEN_2022_ACCOUNT_TYPE_ACCOUNT);
+        t22_frozen.extend_from_slice(&7u16.to_le_bytes());
+        t22_frozen.extend_from_slice(&0u16.to_le_bytes());
+        let t22_frozen_snap = parse_token_account_security(&TOKEN_2022_ID, &t22_frozen)
+            .expect("frozen Token-2022 account must parse");
+        assert!(t22_frozen_snap.is_frozen);
+        assert!(!t22_frozen_snap.has_restrictive_ext);
+
+        // Token-2022: ConfidentialTransferAccount (ext_type = 5) is unconditionally restrictive
+        let mut t22_ct = make_base(1).to_vec();
+        t22_ct.push(TOKEN_2022_ACCOUNT_TYPE_ACCOUNT);
+        // Preceded by ImmutableOwner (7, len 0) to verify TLV traversal
+        t22_ct.extend_from_slice(&7u16.to_le_bytes());
+        t22_ct.extend_from_slice(&0u16.to_le_bytes());
+        t22_ct.extend_from_slice(&TOKEN_2022_EXT_CONFIDENTIAL_TRANSFER_ACCOUNT.to_le_bytes());
+        t22_ct.extend_from_slice(&4u16.to_le_bytes());
+        t22_ct.extend_from_slice(&[0u8; 4]);
+        let t22_ct_snap = parse_token_account_security(&TOKEN_2022_ID, &t22_ct)
+            .expect("Token-2022 account with ConfidentialTransferAccount must parse");
+        assert!(!t22_ct_snap.is_frozen);
+        assert!(t22_ct_snap.has_restrictive_ext);
+
+        // Token-2022: Disabled MemoTransfer (8, val=[0]) & CpiGuard (11, val=[0]) remain non-restrictive
+        let mut t22_ok = make_base(1).to_vec();
+        t22_ok.push(TOKEN_2022_ACCOUNT_TYPE_ACCOUNT);
+        t22_ok.extend_from_slice(&TOKEN_2022_EXT_MEMO_TRANSFER.to_le_bytes());
+        t22_ok.extend_from_slice(&1u16.to_le_bytes());
+        t22_ok.push(0);
+        t22_ok.extend_from_slice(&TOKEN_2022_EXT_CPI_GUARD.to_le_bytes());
+        t22_ok.extend_from_slice(&1u16.to_le_bytes());
+        t22_ok.push(0);
+        let t22_ok_snap = parse_token_account_security(&TOKEN_2022_ID, &t22_ok)
+            .expect("Token-2022 account with disabled MemoTransfer/CpiGuard must parse");
+        assert!(!t22_ok_snap.has_restrictive_ext);
+
+        // Multisig length (355) is rejected even under Token-2022
+        let mut t22_ms = [0u8; SPL_MULTISIG_LEN];
+        t22_ms[108] = 1;
+        t22_ms[SPL_ACCOUNT_LEN] = TOKEN_2022_ACCOUNT_TYPE_ACCOUNT;
+        assert!(parse_token_account_security(&TOKEN_2022_ID, &t22_ms).is_none());
     }
 }

@@ -1,10 +1,10 @@
 /**
  * Live Cross-SDK LiteSVM Driver for `crates/audren-ffi/tests/cross_sdk_litesvm.rs`.
  *
- * Reads a JSON request from stdin describing on-chain `RootCheckpoint` + `SubtreePage` + `MemoPage`
+ * Reads a JSON request from stdin describing on-chain `GlobalRootHistory` + `SubtreePage` + `MemoPage`
  * raw bytes from a live LiteSVM instance, ingests them via TypeScript `CompactWalletStore`,
  * builds a real BN254 Groth16 proof inside `@audren/sdk/prover` WASM, compiles a complete
- * Audren v1 instruction (`Deposit` / `Transact`), and writes the resulting instruction JSON
+ * Audren v1.3.0 instruction (`Deposit` / `Transact`), and writes the resulting instruction JSON
  * to stdout for Rust LiteSVM to execute on-chain against `audren.so`.
  */
 
@@ -20,7 +20,7 @@ import {
   buildDepositInstruction,
   buildTransactInstruction,
   computeTransactCtxHash,
-  decodeRootCheckpoint,
+  decodeGlobalRootHistory,
   deriveAssetId,
   deriveKeysFromSeed,
   deriveStealthOwner,
@@ -93,8 +93,10 @@ if (req.action === 'deposit_sol') {
   const note = store.unspentNotes()[0];
   if (!note) throw new Error('TS CompactWalletStore found no unspent note');
 
-  const ckpt = decodeRootCheckpoint(fromHex(req.checkpoint_raw_hex));
-  const { superRoot, path } = store.buildWitnessForNote(note, ckpt);
+  const rootsRawHex = req.roots_raw_hex ?? req.root_history_raw_hex;
+  if (!rootsRawHex) throw new Error('Missing roots_raw_hex in transact_transfer request');
+  const roots = decodeGlobalRootHistory(fromHex(rootsRawHex));
+  const { superRoot, path, rootRingKind, rootRingIdx } = store.buildWitnessForNote(note, roots);
   const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
 
   const sendAmt = BigInt(req.send_amount);
@@ -176,7 +178,8 @@ if (req.action === 'deposit_sol') {
     payer: req.payer,
     poolId: req.pool_id,
     vkId: 0,
-    ckptSlotIdx: req.ckpt_slot_idx,
+    rootRingKind,
+    rootRingIdx,
     outLaneId: req.out_lane_id,
     outSubSeq: BigInt(req.out_sub_seq),
     outRootSeq: BigInt(req.out_root_seq),
@@ -207,6 +210,8 @@ if (req.action === 'deposit_sol') {
       nf0_hex: toHex(res.nf0),
       cm0_hex: toHex(res.cm0),
       cm1_hex: toHex(res.cm1),
+      root_ring_kind: rootRingKind,
+      root_ring_idx: rootRingIdx,
     }),
   );
 } else if (req.action === 'transact_withdraw_sol') {
@@ -223,8 +228,10 @@ if (req.action === 'deposit_sol') {
   const note = store.unspentNotes()[0];
   if (!note) throw new Error('TS CompactWalletStore found no unspent note for withdraw');
 
-  const ckpt = decodeRootCheckpoint(fromHex(req.checkpoint_raw_hex));
-  const { superRoot, path } = store.buildWitnessForNote(note, ckpt);
+  const rootsRawHex = req.roots_raw_hex ?? req.root_history_raw_hex;
+  if (!rootsRawHex) throw new Error('Missing roots_raw_hex in transact_withdraw_sol request');
+  const roots = decodeGlobalRootHistory(fromHex(rootsRawHex));
+  const { superRoot, path, rootRingKind, rootRingIdx } = store.buildWitnessForNote(note, roots);
   const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
   const feeAmt = BigInt(req.relayer_fee_amount);
   const pubOut = note.amount - feeAmt;
@@ -281,7 +288,8 @@ if (req.action === 'deposit_sol') {
     payer: req.payer,
     poolId: req.pool_id,
     vkId: 0,
-    ckptSlotIdx: req.ckpt_slot_idx,
+    rootRingKind,
+    rootRingIdx,
     outLaneId: req.out_lane_id,
     outSubSeq: BigInt(req.out_sub_seq),
     outRootSeq: BigInt(req.out_root_seq),
@@ -317,6 +325,8 @@ if (req.action === 'deposit_sol') {
       })),
       data_hex: toHex(ix.data),
       public_amount_out: pubOut.toString(),
+      root_ring_kind: rootRingKind,
+      root_ring_idx: rootRingIdx,
     }),
   );
 } else {

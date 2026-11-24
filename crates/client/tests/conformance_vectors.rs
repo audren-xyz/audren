@@ -27,18 +27,23 @@ use audren_client::{
         poseidon::{fr_to_be_bytes, poseidon2, poseidon4, poseidon5},
     },
     audren_core::{
-        instruction::{ASSET_MODE_PRIVATE, ASSET_MODE_PUBLIC, VK_ID_DEFAULT},
+        instruction::{ASSET_MODE_PRIVATE, ASSET_MODE_PUBLIC, TAG_INIT_ROOT_HISTORY, VK_ID_DEFAULT},
         layout::{
-            PoolState, CK_OFF_BUMP, CK_OFF_EPOCH_ID, CK_OFF_LANE_COUNTS, CK_OFF_LANE_ROOTS,
-            CK_OFF_MAGIC, CK_OFF_POOL_ID, CK_OFF_PUBLISHED_SLOT, CK_OFF_SLOT_IDX,
-            CK_OFF_SUPER_ROOT, CK_OFF_VERSION, CKPT_LEN, CKPT_MAGIC, DYN_MEMO_HEAD_LEN,
-            DYN_MEMO_MAGIC, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN, MEMO_VERSION_V1,
-            PL_OFF_ACTIVE_LANES, PL_OFF_AUTHORITY, PL_OFF_BUMP, PL_OFF_CKPT_INTERVAL,
-            PL_OFF_MAGIC, PL_OFF_MAX_CKPT_AGE, PL_OFF_NF_RENT_FEE, PL_OFF_NOTE_RENT_FEE,
-            PL_OFF_PAUSED, PL_OFF_PENDING_AUTHORITY, PL_OFF_POOL_ID, PL_OFF_VAULT_AUTH_BUMP,
-            PL_OFF_VERSION, POOL_MAGIC, POOL_STATE_LEN,
+            GlobalRootHistory, PoolState, DYN_MEMO_HEAD_LEN, DYN_MEMO_MAGIC, MEMO_CT_LEN,
+            MEMO_ENTRY_WIRE_LEN, MEMO_VERSION_V1, PL_OFF_ACTIVE_LANES, PL_OFF_AUTHORITY,
+            PL_OFF_BUMP, PL_OFF_MAGIC, PL_OFF_NF_RENT_FEE, PL_OFF_NOTE_RENT_FEE, PL_OFF_PAUSED,
+            PL_OFF_PENDING_AUTHORITY, PL_OFF_POOL_ID, PL_OFF_RESERVED_24,
+            PL_OFF_ROOT_EPOCH_INTERVAL, PL_OFF_VAULT_AUTH_BUMP, PL_OFF_VERSION, POOL_MAGIC,
+            POOL_STATE_LEN, ROOTS_MAGIC, ROOT_HISTORY_LEN, RT_OFF_BUMP, RT_OFF_EPOCH_COUNT,
+            RT_OFF_EPOCH_CURSOR, RT_OFF_EPOCH_INTERVAL, RT_OFF_EPOCH_RING, RT_OFF_GROUP_ROOTS,
+            RT_OFF_LATEST_LANE_COUNTS, RT_OFF_LATEST_LANE_ROOTS, RT_OFF_LATEST_SLOT,
+            RT_OFF_LATEST_SUPER_ROOT, RT_OFF_MAGIC, RT_OFF_POOL_ID, RT_OFF_SAME_SLOT_BUMPED,
+            RT_OFF_SLOT_COUNT, RT_OFF_SLOT_CURSOR, RT_OFF_SLOT_RING, RT_OFF_STABLE_EPOCH_ID,
+            RT_OFF_STABLE_LANE_COUNTS, RT_OFF_STABLE_LANE_ROOTS, RT_OFF_STABLE_SLOT,
+            RT_OFF_STABLE_SUPER_ROOT, RT_OFF_VERSION,
         },
-        AUDREN_PROGRAM_ID, NUM_LANES, PROTOCOL_VERSION, WSOL_MINT,
+        AudrenError, AUDREN_PROGRAM_ID, DEFAULT_ROOT_EPOCH_INTERVAL, EPOCH_RING_LEN, NUM_LANES,
+        PROTOCOL_VERSION, ROOT_RING_EPOCH, SLOT_RING_LEN, WSOL_MINT,
     },
     instructions::{compute_exec_ctx_hash, compute_transact_ctx_hash, AudrenAccountMeta},
     keys::{
@@ -47,8 +52,8 @@ use audren_client::{
         SelectiveDisclosureProof,
     },
     pda::{
-        derive_checkpoint_pda, derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda,
-        derive_memo_pda, derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda,
+        derive_escrow_pda, derive_lane_pda, derive_lane_rent_pda, derive_memo_pda,
+        derive_nf_page_pda, derive_nullifier_pda, derive_pool_pda, derive_roots_pda,
         derive_subroot_pda, derive_subtree_pda, derive_unwrap_pda, derive_vault_auth_pda,
     },
     prover::AudrenProver,
@@ -95,7 +100,6 @@ struct PdaVectors {
     pool_id: u32,
     lane_id: u8,
     page_seq: u64,
-    slot_idx: u16,
     shard_id: u8,
     nullifier_hex: String,
     pool: PdaEntry,
@@ -106,7 +110,7 @@ struct PdaVectors {
     subroot: PdaEntry,
     memo: PdaEntry,
     nf_page: PdaEntry,
-    checkpoint: PdaEntry,
+    roots: PdaEntry,
     nullifier: PdaEntry,
     escrow: PdaEntry,
     unwrap: PdaEntry,
@@ -184,12 +188,38 @@ struct PoolStateVector {
     raw_hex: String,
     pool_id: u32,
     active_lanes: u8,
-    ckpt_interval: u64,
-    max_ckpt_age: u64,
+    root_epoch_interval: u64,
     note_rent_fee: u64,
     nf_rent_fee: u64,
     paused: bool,
     pending_authority_b58: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+struct RootHistoryVector {
+    raw_hex: String,
+    account_len: usize,
+    magic: String,
+    slot_ring_len: usize,
+    epoch_ring_len: usize,
+    default_epoch_interval: u64,
+    tag_init_root_history: u8,
+    err_invalid_root_ring: u32,
+    err_root_index_out_of_bounds: u32,
+    err_root_history_mismatch: u32,
+    pool_id: u32,
+    bump: u8,
+    slot_cursor: u16,
+    epoch_cursor: u16,
+    slot_count: u16,
+    epoch_count: u16,
+    latest_slot: u64,
+    stable_epoch_id: u64,
+    stable_slot: u64,
+    epoch_interval: u64,
+    latest_super_root_hex: String,
+    stable_super_root_hex: String,
+    lane2_leaf_count: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -210,7 +240,7 @@ struct ConformanceVectors {
     ctx_hashes: CtxHashVectors,
     groth16: Groth16Vector,
     pool_state: PoolStateVector,
-    checkpoint_raw_hex: String,
+    root_history: RootHistoryVector,
 }
 
 fn key_vec(seed: [u8; 32], keys: &AudrenKeys) -> KeyVector {
@@ -339,7 +369,6 @@ fn build_canonical_vectors() -> ConformanceVectors {
         pool_id: 0,
         lane_id: 2,
         page_seq: 7,
-        slot_idx: 13,
         shard_id: 5,
         nullifier_hex: to_hex(&nf_sample),
         pool: mk_pda(derive_pool_pda(&program_id, 0)),
@@ -350,11 +379,13 @@ fn build_canonical_vectors() -> ConformanceVectors {
         subroot: mk_pda(derive_subroot_pda(&program_id, 0, 2, 7)),
         memo: mk_pda(derive_memo_pda(&program_id, 0, 2, 7)),
         nf_page: mk_pda(derive_nf_page_pda(&program_id, 0, 2, 7)),
-        checkpoint: mk_pda(derive_checkpoint_pda(&program_id, 0, 13)),
+        roots: mk_pda(derive_roots_pda(&program_id, 0)),
         nullifier: mk_pda(derive_nullifier_pda(&program_id, 0, &nf_sample)),
         escrow: mk_pda(derive_escrow_pda(&program_id, 0, 5)),
         unwrap: mk_pda(derive_unwrap_pda(&program_id, 0, &nf_sample)),
     };
+    assert_eq!(pdas.roots.address, "249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7");
+    assert_eq!(pdas.roots.bump, 254);
 
     // Context hashes (with vk_id = 0 bound)
     let recip = Address::new_from_array(sess0.pubkey);
@@ -484,7 +515,7 @@ fn build_canonical_vectors() -> ConformanceVectors {
     );
     let bundle = prover.prove_with_seed(circuit, [0x99u8; 32]);
 
-    // Synthetic v1 PoolState (128 B) & RootCheckpoint (704 B) raw bytes
+    // Synthetic v1.3.0 PoolState (128 B) & GlobalRootHistory (10,216 B) raw bytes
     let (_, pool_bump) = derive_pool_pda(&program_id, 0);
     let (_, va_bump) = derive_vault_auth_pda(&program_id, 0);
     let mut pool_raw = [0u8; POOL_STATE_LEN];
@@ -494,9 +525,9 @@ fn build_canonical_vectors() -> ConformanceVectors {
     pool_raw[PL_OFF_PAUSED] = 0;
     pool_raw[PL_OFF_ACTIVE_LANES] = 4;
     pool_raw[PL_OFF_POOL_ID..PL_OFF_POOL_ID + 4].copy_from_slice(&0u32.to_le_bytes());
-    pool_raw[PL_OFF_CKPT_INTERVAL..PL_OFF_CKPT_INTERVAL + 8].copy_from_slice(&8u64.to_le_bytes());
-    pool_raw[PL_OFF_MAX_CKPT_AGE..PL_OFF_MAX_CKPT_AGE + 8]
-        .copy_from_slice(&1_536u64.to_le_bytes());
+    pool_raw[PL_OFF_ROOT_EPOCH_INTERVAL..PL_OFF_ROOT_EPOCH_INTERVAL + 8]
+        .copy_from_slice(&DEFAULT_ROOT_EPOCH_INTERVAL.to_le_bytes());
+    pool_raw[PL_OFF_RESERVED_24..PL_OFF_RESERVED_24 + 8].fill(0);
     pool_raw[PL_OFF_AUTHORITY..PL_OFF_AUTHORITY + 32].copy_from_slice(&sess0.pubkey);
     pool_raw[PL_OFF_VAULT_AUTH_BUMP] = va_bump;
     pool_raw[PL_OFF_NOTE_RENT_FEE..PL_OFF_NOTE_RENT_FEE + 8]
@@ -507,24 +538,66 @@ fn build_canonical_vectors() -> ConformanceVectors {
         .copy_from_slice(&sess3.pubkey);
     let decoded_pool = PoolState::decode(&pool_raw).unwrap();
     assert_eq!(decoded_pool.active_lanes, 4);
+    assert_eq!(decoded_pool.root_epoch_interval, DEFAULT_ROOT_EPOCH_INTERVAL);
     assert_eq!(decoded_pool.pending_authority, sess3.pubkey);
 
-    let (_, ck_bump) = derive_checkpoint_pda(&program_id, 0, 13);
-    let mut ck_raw = [0u8; CKPT_LEN];
-    ck_raw[CK_OFF_MAGIC..CK_OFF_MAGIC + 8].copy_from_slice(&CKPT_MAGIC);
-    ck_raw[CK_OFF_VERSION] = PROTOCOL_VERSION;
-    ck_raw[CK_OFF_BUMP] = ck_bump;
-    ck_raw[CK_OFF_SLOT_IDX..CK_OFF_SLOT_IDX + 2].copy_from_slice(&13u16.to_le_bytes());
-    ck_raw[CK_OFF_POOL_ID..CK_OFF_POOL_ID + 4].copy_from_slice(&0u32.to_le_bytes());
-    ck_raw[CK_OFF_EPOCH_ID..CK_OFF_EPOCH_ID + 8].copy_from_slice(&13u64.to_le_bytes());
-    ck_raw[CK_OFF_PUBLISHED_SLOT..CK_OFF_PUBLISHED_SLOT + 8].copy_from_slice(&104u64.to_le_bytes());
-    ck_raw[CK_OFF_SUPER_ROOT..CK_OFF_SUPER_ROOT + 32].copy_from_slice(&fr_to_be_bytes(&super_root));
-    for l in 0..NUM_LANES {
-        ck_raw[CK_OFF_LANE_ROOTS + l * 32..CK_OFF_LANE_ROOTS + (l + 1) * 32]
-            .copy_from_slice(&fr_to_be_bytes(&lane_roots[l]));
+    let (_, roots_bump) = derive_roots_pda(&program_id, 0);
+    let snap_slot = 104u64;
+    let stable_epoch_id = snap_slot / DEFAULT_ROOT_EPOCH_INTERVAL;
+    let super_root_be = fr_to_be_bytes(&super_root);
+    let mut rh_raw = vec![0u8; ROOT_HISTORY_LEN];
+    rh_raw[RT_OFF_MAGIC..RT_OFF_MAGIC + 8].copy_from_slice(&ROOTS_MAGIC);
+    rh_raw[RT_OFF_VERSION] = PROTOCOL_VERSION;
+    rh_raw[RT_OFF_BUMP] = roots_bump;
+    rh_raw[RT_OFF_SLOT_CURSOR..RT_OFF_SLOT_CURSOR + 2].copy_from_slice(&0u16.to_le_bytes());
+    rh_raw[RT_OFF_POOL_ID..RT_OFF_POOL_ID + 4].copy_from_slice(&0u32.to_le_bytes());
+    rh_raw[RT_OFF_EPOCH_CURSOR..RT_OFF_EPOCH_CURSOR + 2].copy_from_slice(&0u16.to_le_bytes());
+    rh_raw[RT_OFF_SLOT_COUNT..RT_OFF_SLOT_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    rh_raw[RT_OFF_EPOCH_COUNT..RT_OFF_EPOCH_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    rh_raw[RT_OFF_SAME_SLOT_BUMPED] = 0;
+    rh_raw[RT_OFF_LATEST_SLOT..RT_OFF_LATEST_SLOT + 8].copy_from_slice(&snap_slot.to_le_bytes());
+    rh_raw[RT_OFF_STABLE_EPOCH_ID..RT_OFF_STABLE_EPOCH_ID + 8]
+        .copy_from_slice(&stable_epoch_id.to_le_bytes());
+    rh_raw[RT_OFF_STABLE_SLOT..RT_OFF_STABLE_SLOT + 8].copy_from_slice(&snap_slot.to_le_bytes());
+    rh_raw[RT_OFF_EPOCH_INTERVAL..RT_OFF_EPOCH_INTERVAL + 8]
+        .copy_from_slice(&DEFAULT_ROOT_EPOCH_INTERVAL.to_le_bytes());
+    for g in 0..4 {
+        let gr = poseidon4(
+            lane_roots[g * 4],
+            lane_roots[g * 4 + 1],
+            lane_roots[g * 4 + 2],
+            lane_roots[g * 4 + 3],
+        );
+        rh_raw[RT_OFF_GROUP_ROOTS + g * 32..RT_OFF_GROUP_ROOTS + (g + 1) * 32]
+            .copy_from_slice(&fr_to_be_bytes(&gr));
     }
-    ck_raw[CK_OFF_LANE_COUNTS + 2 * 8..CK_OFF_LANE_COUNTS + 3 * 8]
+    rh_raw[RT_OFF_LATEST_SUPER_ROOT..RT_OFF_LATEST_SUPER_ROOT + 32]
+        .copy_from_slice(&super_root_be);
+    rh_raw[RT_OFF_STABLE_SUPER_ROOT..RT_OFF_STABLE_SUPER_ROOT + 32]
+        .copy_from_slice(&super_root_be);
+    for l in 0..NUM_LANES {
+        let lr_be = fr_to_be_bytes(&lane_roots[l]);
+        rh_raw[RT_OFF_LATEST_LANE_ROOTS + l * 32..RT_OFF_LATEST_LANE_ROOTS + (l + 1) * 32]
+            .copy_from_slice(&lr_be);
+        rh_raw[RT_OFF_STABLE_LANE_ROOTS + l * 32..RT_OFF_STABLE_LANE_ROOTS + (l + 1) * 32]
+            .copy_from_slice(&lr_be);
+    }
+    rh_raw[RT_OFF_LATEST_LANE_COUNTS + 2 * 8..RT_OFF_LATEST_LANE_COUNTS + 3 * 8]
         .copy_from_slice(&6u64.to_le_bytes());
+    rh_raw[RT_OFF_STABLE_LANE_COUNTS + 2 * 8..RT_OFF_STABLE_LANE_COUNTS + 3 * 8]
+        .copy_from_slice(&6u64.to_le_bytes());
+    rh_raw[RT_OFF_SLOT_RING..RT_OFF_SLOT_RING + 32].copy_from_slice(&super_root_be);
+    rh_raw[RT_OFF_SLOT_RING + 32..RT_OFF_SLOT_RING + 40].copy_from_slice(&snap_slot.to_le_bytes());
+    rh_raw[RT_OFF_EPOCH_RING..RT_OFF_EPOCH_RING + 32].copy_from_slice(&super_root_be);
+    rh_raw[RT_OFF_EPOCH_RING + 32..RT_OFF_EPOCH_RING + 40]
+        .copy_from_slice(&snap_slot.to_le_bytes());
+    let decoded_rh = GlobalRootHistory::decode(&rh_raw).expect("valid GlobalRootHistory");
+    let chosen = decoded_rh
+        .select_snapshot_for_notes(&[(2, 5)])
+        .expect("lane 2 leaf 5 covered");
+    assert_eq!(chosen.ring_kind, ROOT_RING_EPOCH);
+    assert_eq!(chosen.ring_idx, 0);
+    assert_eq!(chosen.super_root, super_root_be);
 
     ConformanceVectors {
         protocol_version: PROTOCOL_VERSION,
@@ -614,14 +687,37 @@ fn build_canonical_vectors() -> ConformanceVectors {
             raw_hex: to_hex(&pool_raw),
             pool_id: 0,
             active_lanes: 4,
-            ckpt_interval: 8,
-            max_ckpt_age: 1_536,
+            root_epoch_interval: DEFAULT_ROOT_EPOCH_INTERVAL,
             note_rent_fee: 1_500_000,
             nf_rent_fee: 500_000,
             paused: false,
             pending_authority_b58: Address::new_from_array(sess3.pubkey).to_string(),
         },
-        checkpoint_raw_hex: to_hex(&ck_raw),
+        root_history: RootHistoryVector {
+            raw_hex: to_hex(&rh_raw),
+            account_len: ROOT_HISTORY_LEN,
+            magic: std::str::from_utf8(&ROOTS_MAGIC).unwrap().to_string(),
+            slot_ring_len: SLOT_RING_LEN,
+            epoch_ring_len: EPOCH_RING_LEN,
+            default_epoch_interval: DEFAULT_ROOT_EPOCH_INTERVAL,
+            tag_init_root_history: TAG_INIT_ROOT_HISTORY,
+            err_invalid_root_ring: AudrenError::InvalidRootRing as u32,
+            err_root_index_out_of_bounds: AudrenError::RootIndexOutOfBounds as u32,
+            err_root_history_mismatch: AudrenError::RootHistoryMismatch as u32,
+            pool_id: 0,
+            bump: roots_bump,
+            slot_cursor: 0,
+            epoch_cursor: 0,
+            slot_count: 1,
+            epoch_count: 1,
+            latest_slot: snap_slot,
+            stable_epoch_id,
+            stable_slot: snap_slot,
+            epoch_interval: DEFAULT_ROOT_EPOCH_INTERVAL,
+            latest_super_root_hex: to_hex(&super_root_be),
+            stable_super_root_hex: to_hex(&super_root_be),
+            lane2_leaf_count: 6,
+        },
     }
 }
 
