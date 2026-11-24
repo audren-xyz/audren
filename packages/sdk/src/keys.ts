@@ -8,6 +8,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { NUM_LANES } from './constants.ts';
+import { MAX_LEAVES_PER_LANE } from './layout.ts';
 import { base58Encode, formatAudrenAddress } from './pda.ts';
 import {
   bytes32ToFrMasked,
@@ -206,9 +207,14 @@ export function fvkRealNullifier(
 /**
  * Verify a Mode 1 per-transaction `SelectiveDisclosureProof` against an on-chain
  * `SubtreePage` leaf commitment in 1 Poseidon hash (reveals zero keys).
- * Enforces strict field bounds (`0 <= amount <= u64::MAX`, `0 <= leafIndex <= u64::MAX`,
- * valid `u32` `poolId`, `0 <= laneId < NUM_LANES`, exact 32-byte arrays) so modular
- * field aliasing (`amount + k * r`) is unconditionally rejected.
+ *
+ * Note: Mode 1 proves commitment preimage opening (`mint` + `amount` at a leaf), not exclusive
+ * recipient ownership (any party who knows the opening preimage, such as the sender or a public
+ * observer of `Deposit`/`ExecViaEscrow`, can construct the same opening).
+ *
+ * Enforces strict field bounds (`0 <= amount <= u64::MAX`, `0 <= leafIndex < MAX_LEAVES_PER_LANE`,
+ * valid `u32` `poolId`, `0 <= laneId < NUM_LANES`, exact 32-byte arrays) so modular field aliasing
+ * (`amount + k * r`) is unconditionally rejected.
  */
 export function verifySelectiveDisclosureProof(
   proof: SelectiveDisclosureProof,
@@ -236,7 +242,11 @@ export function verifySelectiveDisclosureProof(
   if (!Number.isInteger(proof.laneId) || proof.laneId < 0 || proof.laneId >= NUM_LANES) {
     return false;
   }
-  if (typeof proof.leafIndex !== 'bigint' || proof.leafIndex < 0n || proof.leafIndex > U64_MAX) {
+  if (
+    typeof proof.leafIndex !== 'bigint' ||
+    proof.leafIndex < 0n ||
+    proof.leafIndex >= MAX_LEAVES_PER_LANE
+  ) {
     return false;
   }
   if (typeof proof.amount !== 'bigint' || proof.amount < 0n || proof.amount > U64_MAX) {

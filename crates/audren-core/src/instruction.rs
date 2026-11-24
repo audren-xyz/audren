@@ -29,6 +29,18 @@ pub const OPEN_PAGE_KIND_SUBROOT: u8 = 1;
 pub const OPEN_PAGE_KIND_MEMO: u8 = 2;
 pub const OPEN_PAGE_KIND_NULLIFIER: u8 = 3;
 
+/// `OpenPage` (`TAG_OPEN_PAGE`) body length after the 1-byte tag (`22 B`; total wire length `23 B`):
+/// `page_kind(1) || pool_id(4) || lane_id(1) || page_seq(8) || max_payer_deficit(8)`.
+pub const OPEN_PAGE_DATA_LEN: usize = 22;
+pub const OPEN_PAGE_WIRE_LEN: usize = 1 + OPEN_PAGE_DATA_LEN;
+
+/// Minimum current-page occupancy slot required before `OpenPage` permits pre-opening `cur_seq + 1`
+/// (`>= 90%` full across all four page types; `cur_seq + 2` is unconditionally rejected).
+pub const OPEN_PAGE_SUBTREE_LOOKAHEAD_SLOT: u64 = 230;
+pub const OPEN_PAGE_SUBROOT_LOOKAHEAD_SLOT: u64 = 280;
+pub const OPEN_PAGE_MEMO_LOOKAHEAD_SLOT: u64 = 86;
+pub const OPEN_PAGE_NF_LOOKAHEAD_SLOT: u64 = 540;
+
 /// `Deposit` (`TAG_DEPOSIT`) flag in `data[5]`: deduct deterministic per-note `LaneRentVault` fee
 /// from `amount` (valid only when `DEPOSIT_FLAG_NATIVE_SOL` is set) for exact zero-dust SOL sweeps.
 pub const DEPOSIT_FLAG_FEE_FROM_AMOUNT: u8 = 1 << 2;

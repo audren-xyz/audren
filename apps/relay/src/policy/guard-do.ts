@@ -19,6 +19,9 @@ export interface GuardBeginRequest {
     ipCooldownSec: number
     ipMaxSponsoredPerHour: number
     ipMaxSponsoredPerDay: number
+    /** Optional global daily revert-burn ceiling (`lamports`); defaults to `maxDailySponsoredLamports` when set. */
+    maxDailySponsoredLamports?: number
+    maxDailyRevertBurnLamports?: number
   }
 }
 
@@ -35,6 +38,8 @@ export interface GuardAuthorizeRequest {
   maxRevertBurnLamports?: number
   limits: {
     maxDailySponsoredLamports: number
+    /** Optional explicit global daily revert-burn ceiling (`lamports`); defaults to `maxDailySponsoredLamports`. */
+    maxDailyRevertBurnLamports?: number
     ipMaxSponsoredPerHour: number
     ipMaxSponsoredPerDay: number
     ipCooldownSec: number
@@ -142,6 +147,107 @@ function nextUtcMidnightMs(nowMs: number): number {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 1)
 }
 
+function parseIpv4Octets(raw: string): [number, number, number, number] | null {
+  const parts = raw.split('.')
+  if (parts.length !== 4) return null
+  const out: number[] = []
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null
+    const n = Number(part)
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null
+    out.push(n)
+  }
+  return [out[0]!, out[1]!, out[2]!, out[3]!]
+}
+
+function parseIpv6Hextets(raw: string): number[] | null {
+  const doubleColonIdx = raw.indexOf('::')
+  if (doubleColonIdx !== -1 && raw.indexOf('::', doubleColonIdx + 2) !== -1) {
+    return null
+  }
+  const parsePart = (part: string, allowIpv4Tail: boolean): number[] | null => {
+    if (part === '') return []
+    const tokens = part.split(':')
+    const out: number[] = []
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i]!
+      if (allowIpv4Tail && i === tokens.length - 1 && tok.includes('.')) {
+        const v4 = parseIpv4Octets(tok)
+        if (!v4) return null
+        out.push((v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3])
+      } else {
+        if (!/^[0-9a-f]{1,4}$/i.test(tok)) return null
+        out.push(parseInt(tok, 16))
+      }
+    }
+    return out
+  }
+  if (doubleColonIdx === -1) {
+    const groups = parsePart(raw, true)
+    return groups && groups.length === 8 ? groups : null
+  }
+  const left = parsePart(raw.slice(0, doubleColonIdx), false)
+  const right = parsePart(raw.slice(doubleColonIdx + 2), true)
+  if (!left || !right) return null
+  const missing = 8 - left.length - right.length
+  if (missing < 1) return null
+  return [...left, ...new Array<number>(missing).fill(0), ...right]
+}
+
+/**
+ * Normalize a client IP for per-IP rate limiting and cooldown accounting:
+ *   - IPv6 addresses are masked to their canonical `/64` prefix (`hhhh:hhhh:hhhh:hhhh::/64`)
+ *     so rotating host interface IDs inside a single residential/VPS `/64` cannot bypass limits.
+ *   - IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) unwrap to canonical IPv4 `a.b.c.d`.
+ *   - Bracketed `[ipv6]:port`, IPv4 `:port`, and `%zone` suffixes are stripped cleanly.
+ */
+export function normalizeClientIpForRateLimit(rawIp: string): string {
+  let s = rawIp.trim().toLowerCase()
+  if (!s) return 'unknown'
+  if (s.startsWith('[')) {
+    const closeIdx = s.indexOf(']')
+    if (closeIdx > 1) {
+      s = s.slice(1, closeIdx)
+    }
+  }
+  const zoneIdx = s.indexOf('%')
+  if (zoneIdx !== -1) {
+    s = s.slice(0, zoneIdx)
+  }
+  if (!s.includes(':')) {
+    const v4 = parseIpv4Octets(s)
+    return v4 ? `${v4[0]}.${v4[1]}.${v4[2]}.${v4[3]}` : s
+  }
+  // Handle IPv4:port (single colon + dotted quad)
+  const firstColon = s.indexOf(':')
+  if (firstColon === s.lastIndexOf(':') && s.includes('.')) {
+    const v4 = parseIpv4Octets(s.slice(0, firstColon))
+    if (v4) return `${v4[0]}.${v4[1]}.${v4[2]}.${v4[3]}`
+  }
+  const hextets = parseIpv6Hextets(s)
+  if (!hextets) return s
+  // Unwrap IPv4-mapped IPv6 (`::ffff:a.b.c.d`)
+  if (
+    hextets[0] === 0 &&
+    hextets[1] === 0 &&
+    hextets[2] === 0 &&
+    hextets[3] === 0 &&
+    hextets[4] === 0 &&
+    hextets[5] === 0xffff
+  ) {
+    const a = (hextets[6]! >> 8) & 0xff
+    const b = hextets[6]! & 0xff
+    const c = (hextets[7]! >> 8) & 0xff
+    const d = hextets[7]! & 0xff
+    return `${a}.${b}.${c}.${d}`
+  }
+  const prefix = hextets
+    .slice(0, 4)
+    .map((h) => h.toString(16).padStart(4, '0'))
+    .join(':')
+  return `${prefix}::/64`
+}
+
 /**
  * Strongly consistent SQLite Durable Object protecting `relay.audren.xyz`
  * against rent-drain / ping-pong / simulation-spam abuse:
@@ -194,6 +300,14 @@ export class RelayGuard extends DurableObject<Env> {
           PRIMARY KEY (day, cluster)
         );
 
+        CREATE TABLE IF NOT EXISTS daily_revert_burns (
+          day TEXT NOT NULL,
+          cluster TEXT NOT NULL,
+          burned_lamports INTEGER NOT NULL DEFAULT 0,
+          revert_count INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (day, cluster)
+        );
+
         CREATE TABLE IF NOT EXISTS inflight_nullifiers (
           nullifier TEXT PRIMARY KEY,
           expires_at INTEGER NOT NULL
@@ -205,6 +319,7 @@ export class RelayGuard extends DurableObject<Env> {
           ip_hash TEXT NOT NULL,
           cluster TEXT NOT NULL,
           sponsored_lamports INTEGER NOT NULL,
+          burn_risk_lamports INTEGER NOT NULL DEFAULT 0,
           self_paying INTEGER NOT NULL,
           created_at INTEGER NOT NULL,
           expires_at INTEGER NOT NULL
@@ -230,6 +345,15 @@ export class RelayGuard extends DurableObject<Env> {
             expires_at INTEGER NOT NULL
           );
         `)
+      }
+
+      // Schema migration: add `burn_risk_lamports` to existing `pending_reservations` tables
+      // so concurrent Wave-1 in-flight burn exposure is enforced against `daily_revert_burns`.
+      const pendingCols = this.sql.exec('PRAGMA table_info(pending_reservations)').toArray()
+      if (!pendingCols.some((c) => String(c.name) === 'burn_risk_lamports')) {
+        this.sql.exec(
+          'ALTER TABLE pending_reservations ADD COLUMN burn_risk_lamports INTEGER NOT NULL DEFAULT 0',
+        )
       }
 
       await this.scheduleNextUtcMidnightAlarm(Date.now())
@@ -293,7 +417,92 @@ export class RelayGuard extends DurableObject<Env> {
 
   private computeDailyIpHash(clientIp: string, now: number): string {
     const saltHex = this.getOrCreateDailySaltHex(now)
-    return toHex(sha256(utf8(`${IP_HASH_DOMAIN_SEP}|${saltHex}|${clientIp}`))).slice(0, 32)
+    const normalizedIp = normalizeClientIpForRateLimit(clientIp)
+    return toHex(sha256(utf8(`${IP_HASH_DOMAIN_SEP}|${saltHex}|${normalizedIp}`))).slice(0, 32)
+  }
+
+  /**
+   * Persistent global daily revert-burn circuit breaker (`daily_revert_burns` + in-flight
+   * `pending_reservations.burn_risk_lamports`) spanning BOTH `sponsored` AND `selfPaying` requests
+   * across all client IPs. Stops distributed multi-IP botnets (including Wave-1 concurrent bursts)
+   * from draining relayer SOL via deliberate on-chain reverts even on audited routers, while leaving
+   * honest audited `self_paying` users unaffected when `daily_budgets` is spent solely by honest
+   * sponsored transactions (`burnedToday + pendingBurnRiskToday + txRisk <= rawCap`).
+   */
+  private checkGlobalRevertBurnCircuitBreaker(params: {
+    day: string
+    cluster: Cluster
+    txBurnRiskLamports: number
+    maxDailyRevertBurnLamports?: number
+    maxDailySponsoredLamports?: number
+  }): GuardDecision | null {
+    const hasExplicitRevertCap =
+      typeof params.maxDailyRevertBurnLamports === 'number' &&
+      Number.isFinite(params.maxDailyRevertBurnLamports) &&
+      params.maxDailyRevertBurnLamports >= 0
+    const rawCap = hasExplicitRevertCap
+      ? Math.trunc(params.maxDailyRevertBurnLamports!)
+      : typeof params.maxDailySponsoredLamports === 'number' &&
+          Number.isFinite(params.maxDailySponsoredLamports) &&
+          params.maxDailySponsoredLamports > 0
+        ? Math.trunc(params.maxDailySponsoredLamports)
+        : null
+    if (rawCap === null) return null
+
+    const rows = this.sql
+      .exec(
+        'SELECT burned_lamports FROM daily_revert_burns WHERE day = ? AND cluster = ?',
+        params.day,
+        params.cluster,
+      )
+      .toArray()
+    const burnedToday = Number(rows[0]?.burned_lamports ?? 0)
+    const pendingBurnRiskToday = Number(
+      this.sql
+        .exec(
+          'SELECT COALESCE(SUM(burn_risk_lamports), 0) AS lamports FROM pending_reservations WHERE day = ? AND cluster = ?',
+          params.day,
+          params.cluster,
+        )
+        .one().lamports ?? 0,
+    )
+    if (rawCap === 0) {
+      // Explicit zero revert-burn tolerance: serialize pre-revert exposure to at most 1 in-flight
+      // tx (closing Wave-1 concurrent botnet bursts) and halt until UTC midnight on the first revert.
+      if (burnedToday <= 0 && pendingBurnRiskToday <= 0) return null
+      const capExhausted = burnedToday > 0
+      return {
+        allowed: false,
+        status: 429,
+        code: 'REVERT_BURN_CIRCUIT_BREAKER',
+        reason: capExhausted
+          ? 'Daily global on-chain revert-burn safety cap has been reached. Relay submissions are paused until UTC midnight.'
+          : 'Relay revert-burn safety serialization limit is temporarily busy with an in-flight transaction. Please retry shortly.',
+        retryAfterSec: capExhausted ? 3600 : 5,
+      }
+    }
+
+    const txRisk =
+      Number.isFinite(params.txBurnRiskLamports) && params.txBurnRiskLamports > 0
+        ? Math.trunc(params.txBurnRiskLamports)
+        : 0
+    const totalExposure = burnedToday + pendingBurnRiskToday
+    if (
+      burnedToday >= rawCap ||
+      (txRisk === 0 ? totalExposure >= rawCap : totalExposure + txRisk > rawCap)
+    ) {
+      const capExhausted = burnedToday >= rawCap
+      return {
+        allowed: false,
+        status: 429,
+        code: 'REVERT_BURN_CIRCUIT_BREAKER',
+        reason: capExhausted
+          ? 'Daily global on-chain revert-burn safety cap has been reached. Relay submissions are paused until UTC midnight.'
+          : 'Relay revert-burn safety budget is temporarily reserved by in-flight transactions. Please retry shortly.',
+        retryAfterSec: capExhausted ? 3600 : 5,
+      }
+    }
+    return null
   }
 
   private prune(now: number): void {
@@ -519,6 +728,16 @@ export class RelayGuard extends DurableObject<Env> {
     }
 
     if (req.cluster && req.limits) {
+      const globalCircuitBreaker = this.checkGlobalRevertBurnCircuitBreaker({
+        day: utcDayKey(now),
+        cluster: req.cluster,
+        txBurnRiskLamports: 0,
+        maxDailyRevertBurnLamports: req.limits.maxDailyRevertBurnLamports,
+        maxDailySponsoredLamports: req.limits.maxDailySponsoredLamports,
+      })
+      if (globalCircuitBreaker) {
+        return { ...globalCircuitBreaker, ipHash }
+      }
       const revertCheck = this.checkPerIpRevertBurnLimits({
         ipHash,
         cluster: req.cluster,
@@ -560,6 +779,13 @@ export class RelayGuard extends DurableObject<Env> {
       }
       return decision
     }
+
+    const txBurnRiskLamports =
+      typeof req.maxRevertBurnLamports === 'number' &&
+      Number.isFinite(req.maxRevertBurnLamports) &&
+      req.maxRevertBurnLamports > 0
+        ? Math.trunc(req.maxRevertBurnLamports)
+        : 0
 
     if (req.selfPaying || req.sponsoredLamports <= 0) {
       const committedBurst = Number(
@@ -612,10 +838,8 @@ export class RelayGuard extends DurableObject<Env> {
 
       const checkRevertBudget = revertBurnsDay > 0 || req.hasUntrustedCpiTarget === true
       const burnRiskLamports = checkRevertBudget
-        ? typeof req.maxRevertBurnLamports === 'number' &&
-          Number.isFinite(req.maxRevertBurnLamports) &&
-          req.maxRevertBurnLamports > 0
-          ? Math.trunc(req.maxRevertBurnLamports)
+        ? txBurnRiskLamports > 0
+          ? txBurnRiskLamports
           : 10_000
         : 0
       if (checkRevertBudget) {
@@ -648,14 +872,26 @@ export class RelayGuard extends DurableObject<Env> {
         }
       }
 
+      const globalRevertCircuitBreaker = this.checkGlobalRevertBurnCircuitBreaker({
+        day,
+        cluster: req.cluster,
+        txBurnRiskLamports,
+        maxDailyRevertBurnLamports: req.limits.maxDailyRevertBurnLamports,
+        maxDailySponsoredLamports: req.limits.maxDailySponsoredLamports,
+      })
+      if (globalRevertCircuitBreaker) {
+        return deny(globalRevertCircuitBreaker)
+      }
+
       const reservationId = crypto.randomUUID()
       this.sql.exec(
-        'INSERT INTO pending_reservations (id, day, ip_hash, cluster, sponsored_lamports, self_paying, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+        'INSERT INTO pending_reservations (id, day, ip_hash, cluster, sponsored_lamports, burn_risk_lamports, self_paying, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
         reservationId,
         day,
         req.ipHash,
         req.cluster,
         burnRiskLamports,
+        txBurnRiskLamports,
         now,
         now + INFLIGHT_TTL_MS,
       )
@@ -785,14 +1021,26 @@ export class RelayGuard extends DurableObject<Env> {
         })
       }
 
+      const globalRevertCircuitBreaker = this.checkGlobalRevertBurnCircuitBreaker({
+        day,
+        cluster: req.cluster,
+        txBurnRiskLamports,
+        maxDailyRevertBurnLamports: req.limits.maxDailyRevertBurnLamports,
+        maxDailySponsoredLamports: req.limits.maxDailySponsoredLamports,
+      })
+      if (globalRevertCircuitBreaker) {
+        return deny(globalRevertCircuitBreaker)
+      }
+
       const reservationId = crypto.randomUUID()
       this.sql.exec(
-        'INSERT INTO pending_reservations (id, day, ip_hash, cluster, sponsored_lamports, self_paying, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)',
+        'INSERT INTO pending_reservations (id, day, ip_hash, cluster, sponsored_lamports, burn_risk_lamports, self_paying, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)',
         reservationId,
         day,
         req.ipHash,
         req.cluster,
         req.sponsoredLamports,
+        txBurnRiskLamports,
         now,
         now + INFLIGHT_TTL_MS,
       )
@@ -841,6 +1089,18 @@ export class RelayGuard extends DurableObject<Env> {
     )
 
     if (isFailed) {
+      if (lamports > 0) {
+        this.sql.exec(
+          `INSERT INTO daily_revert_burns (day, cluster, burned_lamports, revert_count)
+           VALUES (?, ?, ?, 1)
+           ON CONFLICT (day, cluster) DO UPDATE SET
+             burned_lamports = burned_lamports + excluded.burned_lamports,
+             revert_count = revert_count + 1`,
+          day,
+          req.cluster,
+          lamports,
+        )
+      }
       for (const nf of req.nullifiers) {
         this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
       }

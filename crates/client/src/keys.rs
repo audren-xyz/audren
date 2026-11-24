@@ -255,11 +255,21 @@ impl AudrenKeys {
 
 /// Deterministic Ed25519 keypair for stateful DeFi interactions (`session_index = 0, 1, 2, ...`).
 /// Recoverable from the single 32-byte Audren master seed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefiSessionKeypair {
     pub session_index: u32,
     pub secret_seed: [u8; 32],
     pub pubkey: [u8; 32],
+}
+
+impl std::fmt::Debug for DefiSessionKeypair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefiSessionKeypair")
+            .field("session_index", &self.session_index)
+            .field("pubkey", &bs58::encode(self.pubkey).into_string())
+            .field("secret_seed", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Public Audren v1 stealth address encoded as canonical BIP-350 Bech32m
@@ -376,12 +386,23 @@ impl AudrenAddress {
 /// Enables watch-only wallets, offline balance tracking, relayer hot-worker fee verification,
 /// and compliance auditors to decrypt incoming notes AND compute exact spent nullifiers with
 /// zero spend capability (`spend_sk` is never exposed).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FullViewingKey {
     pub spend_pk: [u8; 32],
     pub nk: [u8; 32],
     pub view_sk: [u8; 32],
     pub view_pk: [u8; 32],
+}
+
+impl std::fmt::Debug for FullViewingKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FullViewingKey")
+            .field("spend_pk", &bs58::encode(self.spend_pk).into_string())
+            .field("view_pk", &bs58::encode(self.view_pk).into_string())
+            .field("nk", &"<redacted>")
+            .field("view_sk", &"<redacted>")
+            .finish()
+    }
 }
 
 impl FullViewingKey {
@@ -407,9 +428,13 @@ impl FullViewingKey {
     }
 }
 
-/// Mode 1 per-transaction `SelectiveDisclosureProof`: proves receipt of `(mint, amount)` at a
-/// specific on-chain `(pool_id, lane_id, leaf_index)` in 1 Poseidon hash against `SubtreePage`
-/// without revealing `spend_sk`, `nk`, or `view_sk`.
+/// Mode 1 per-transaction `SelectiveDisclosureProof`: proves the commitment preimage opening
+/// `(stealth_owner, mint, amount, blinding)` at a specific on-chain `(pool_id, lane_id, leaf_index)`
+/// in 1 Poseidon hash against `SubtreePage` without revealing `spend_sk`, `nk`, or `view_sk`.
+///
+/// Note: Mode 1 proves commitment opening (that the leaf commits to `mint` and `amount`), not
+/// exclusive recipient ownership (any party who knows the opening preimage, such as the sender or
+/// a public observer of `Deposit`/`ExecViaEscrow`, can construct the same opening).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectiveDisclosureProof {
     pub pool_id: u32,
@@ -424,7 +449,9 @@ pub struct SelectiveDisclosureProof {
 
 impl SelectiveDisclosureProof {
     pub fn verify_against_leaf(&self, onchain_subtree_leaf: &[u8; 32]) -> bool {
-        if (self.lane_id as usize) >= audren_core::NUM_LANES {
+        if (self.lane_id as usize) >= audren_core::NUM_LANES
+            || self.leaf_index >= audren_core::layout::MAX_LEAVES_PER_LANE
+        {
             return false;
         }
         let Some(stealth) = fr_from_be_bytes_strict(&self.stealth_owner) else {

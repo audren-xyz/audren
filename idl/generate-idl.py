@@ -123,7 +123,7 @@ ERROR_DOCS: dict[str, str] = {
     "SlippageExceeded": "Measured net vault output is zero or below min_amount_out after fees.",
     "CustodyInvariantViolated": "Pool custody accounting invariant failed.",
     "Overflow": "Checked integer arithmetic overflow or tree capacity exceeded.",
-    "InsufficientVaultBalance": "Custody vault holds insufficient balance for outflow.",
+    "InsufficientVaultBalance": "Custody vault or LaneRentVault holds insufficient balance (or OpenPage payer_deficit exceeds max_payer_deficit).",
     "MemoPageFull": "Active MemoPage has reached 96 note entries.",
     "MemoPageMismatch": "Provided MemoPage sequence does not match active lane leaf index.",
     "InvalidTokenAccount": "Invalid SPL / Token-2022 mint, canonical custody/escrow ATA, delegate, close_authority, or TLV extension.",
@@ -135,7 +135,7 @@ ERROR_DOCS: dict[str, str] = {
     "InvalidFieldElement": "32-byte input is not a canonical BN254 scalar (< Fr modulus).",
     "PoolPaused": "Pool is paused by authority (full exits and OpenPage remain open).",
     "Unauthorized": "Required authority signer is missing, renounced, or mismatched.",
-    "PageSeqOutOfRange": "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage).",
+    "PageSeqOutOfRange": "OpenPage sequence exceeds allowed lookahead bound (cur_seq, or cur_seq + 1 only at >= 90% occupancy: Subtree >= 230/256, Subroot >= 280/300, Memo >= 86/96, Nullifier >= 540/600; cur_seq + 2 rejected).",
     "InvalidTargetProgram": "Target program must be executable and cannot be Audren, System, Token, Token-2022, ATA, or ElGamal Registry.",
     "EscrowAuthorityAltered": "Target CPI altered swap_escrow owner, data length, or drained lamports.",
     "EscrowAccountAltered": "Target CPI altered an escrow token account owner, delegate, close_authority, TLV, or size.",
@@ -510,9 +510,9 @@ def build_audren_codama(core: dict) -> dict:
         ix_node(
             "openPage",
             tags["TAG_OPEN_PAGE"],
-            ["Idempotent, sequence-bounded, pause-exempt, LaneRentVault-subsidized page opener."],
+            ["Idempotent, >=90%-lookahead-gated, pause-exempt, LaneRentVault-subsidized page opener with explicit max_payer_deficit protection against TOCTOU drains."],
             [
-                ix_acc("payer", True, True, ["Permissionless cranker / fallback rent payer."]),
+                ix_acc("payer", True, True, ["Permissionless cranker / bounded fallback rent payer."]),
                 ix_acc("poolState", False, False, ["PoolState PDA (read-only)."]),
                 ix_acc("laneState", False, False, ["LaneTreeState PDA (read-only)."]),
                 ix_acc("laneRentVault", True, False, ["Per-lane LaneRentVault PDA."]),
@@ -524,6 +524,7 @@ def build_audren_codama(core: dict) -> dict:
                 ix_arg("poolId", num_t("u32")),
                 ix_arg("laneId", num_t("u8")),
                 ix_arg("pageSeq", num_t("u64")),
+                ix_arg("maxPayerDeficit", num_t("u64"), ["Maximum lamports payer consents to cover if LaneRentVault cannot subsidize full page rent (pass 0 for proactive >=90% lookaheads)."]),
             ],
         ),
         ix_node(
@@ -741,9 +742,19 @@ def build_audren_anchor(core: dict, codama: dict) -> dict:
     anchor_instructions = []
     for ix in prog["instructions"]:
         disc = [ix["discriminators"][0]["constant"]["value"]["number"]]
+        has_raw_tail = any(
+            arg["type"]["kind"] == "bytesTypeNode"
+            for arg in ix["arguments"]
+            if arg["name"] != "tag"
+        )
+        ix_docs = list(ix.get("docs", []))
+        if has_raw_tail:
+            ix_docs.append(
+                "Wire note (Pinocchio raw framing): trailing `bytes` argument is raw unprefixed bytes on-chain (NOT Borsh u32-length-prefixed); use @audren/sdk or audren-client builders to serialize instruction data."
+            )
         anchor_instructions.append({
             "name": snake(ix["name"]),
-            "docs": ix.get("docs", []),
+            "docs": ix_docs,
             "discriminator": disc,
             "accounts": [
                 {
@@ -790,12 +801,18 @@ def build_audren_anchor(core: dict, codama: dict) -> dict:
             "name": acc_name,
             "discriminator": list(magic_str.encode("ascii")),
         })
+        # Anchor v0.30+ BorshAccountsCoder strips the 8-byte `discriminator` BEFORE decoding
+        # `types[*].fields`, so omit the leading `magic` field from Anchor account structs.
         anchor_types.append({
             "name": acc_name,
             "docs": acc.get("docs", []),
             "type": {
                 "kind": "struct",
-                "fields": [{"name": snake(f["name"]), "type": map_type(f["type"])} for f in acc["data"]["fields"]],
+                "fields": [
+                    {"name": snake(f["name"]), "type": map_type(f["type"])}
+                    for f in acc["data"]["fields"]
+                    if f["name"] != "magic"
+                ],
             },
         })
 

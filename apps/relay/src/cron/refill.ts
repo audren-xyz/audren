@@ -572,9 +572,9 @@ async function refillSinglePayer(
           )
           currentSol = (await fetchBalance(rpcUrl, relayerB58)) / 1e9
         } catch (err) {
-          details.push(
-            `Refill swap failed for ${acc.mint.slice(0, 6)}…: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          const rawErr = err instanceof Error ? err.message : String(err)
+          const safeErr = rawErr.replace(/https?:\/\/\S+/gi, '[redacted-url]').slice(0, 200)
+          details.push(`Refill swap failed for ${acc.mint.slice(0, 6)}…: ${safeErr}`)
         }
       }
     }

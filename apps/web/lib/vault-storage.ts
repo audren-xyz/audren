@@ -32,13 +32,28 @@ const IDB_NAME = 'audren_vault_store'
 const IDB_STORE = 'compact_stores'
 const IDB_VERSION = 1
 
-function storeKey(
+function legacyStoreKey(
   cluster: string,
   poolId: number,
   spendPkBytes: Uint8Array,
   walletScope = 'local',
 ): string {
   return `audren_store:${cluster}:${poolId}:${walletScope}:${base58Encode(spendPkBytes)}`
+}
+
+async function hashedStoreKey(
+  cluster: string,
+  poolId: number,
+  spendPkBytes: Uint8Array,
+  walletScope = 'local',
+): Promise<string> {
+  const preimage = encoder.encode(
+    `audren/v1/store-key:${cluster}:${poolId}:${walletScope}:${base58Encode(spendPkBytes)}`,
+  )
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', toArrayBuffer(preimage)))
+  let hex = ''
+  for (let i = 0; i < digest.byteLength; i++) hex += digest[i]!.toString(16).padStart(2, '0')
+  return `audren_store_v2:${cluster}:${poolId}:${hex}`
 }
 
 async function openVaultDb(): Promise<IDBDatabase | null> {
@@ -70,10 +85,30 @@ async function idbGet(key: string): Promise<string | null> {
     }
   }
   return new Promise((resolve) => {
-    const tx = db.transaction(IDB_STORE, 'readonly')
-    const req = tx.objectStore(IDB_STORE).get(key)
-    req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : null)
-    req.onerror = () => resolve(null)
+    let result: string | null = null
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      try {
+        db.close()
+      } catch {
+        // ignore
+      }
+      resolve(result)
+    }
+    try {
+      const tx = db.transaction(IDB_STORE, 'readonly')
+      const req = tx.objectStore(IDB_STORE).get(key)
+      req.onsuccess = () => {
+        result = typeof req.result === 'string' ? req.result : null
+      }
+      tx.oncomplete = finish
+      tx.onerror = finish
+      tx.onabort = finish
+    } catch {
+      finish()
+    }
   })
 }
 
@@ -88,10 +123,26 @@ async function idbSet(key: string, value: string): Promise<void> {
     return
   }
   await new Promise<void>((resolve) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite')
-    tx.objectStore(IDB_STORE).put(value, key)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => resolve()
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      try {
+        db.close()
+      } catch {
+        // ignore
+      }
+      resolve()
+    }
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite')
+      tx.objectStore(IDB_STORE).put(value, key)
+      tx.oncomplete = finish
+      tx.onerror = finish
+      tx.onabort = finish
+    } catch {
+      finish()
+    }
   })
 }
 
@@ -106,10 +157,26 @@ async function idbDelete(key: string): Promise<void> {
     return
   }
   await new Promise<void>((resolve) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite')
-    tx.objectStore(IDB_STORE).delete(key)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => resolve()
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      try {
+        db.close()
+      } catch {
+        // ignore
+      }
+      resolve()
+    }
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite')
+      tx.objectStore(IDB_STORE).delete(key)
+      tx.oncomplete = finish
+      tx.onerror = finish
+      tx.onabort = finish
+    } catch {
+      finish()
+    }
   })
 }
 
@@ -137,7 +204,14 @@ export async function loadEncryptedCompactStore(
 ): Promise<CompactWalletStore | null> {
   if (typeof window === 'undefined') return null
   try {
-    const raw = await idbGet(storeKey(cluster, poolId, keys.spendPkBytes, walletScope))
+    const hashedKey = await hashedStoreKey(cluster, poolId, keys.spendPkBytes, walletScope)
+    let raw = await idbGet(hashedKey)
+    let migratedFromLegacy = false
+    const legKey = legacyStoreKey(cluster, poolId, keys.spendPkBytes, walletScope)
+    if (!raw) {
+      raw = await idbGet(legKey)
+      migratedFromLegacy = Boolean(raw)
+    }
     if (!raw) return null
     const env = JSON.parse(raw) as { iv?: string; ct?: string }
     if (!env.iv || !env.ct) return null
@@ -151,7 +225,12 @@ export async function loadEncryptedCompactStore(
       aesKey,
       toArrayBuffer(fromBase64(env.ct)),
     )
-    return CompactWalletStore.fromJSON(decoder.decode(new Uint8Array(plain)))
+    const store = CompactWalletStore.fromJSON(decoder.decode(new Uint8Array(plain)))
+    if (migratedFromLegacy) {
+      await idbSet(hashedKey, raw)
+      await idbDelete(legKey)
+    }
+    return store
   } catch {
     return null
   }
@@ -177,8 +256,9 @@ export async function saveEncryptedCompactStore(
       aesKey,
       toArrayBuffer(encoder.encode(store.toJSON())),
     )
+    const hashedKey = await hashedStoreKey(cluster, poolId, keys.spendPkBytes, walletScope)
     await idbSet(
-      storeKey(cluster, poolId, keys.spendPkBytes, walletScope),
+      hashedKey,
       JSON.stringify({ iv: toBase64(iv), ct: toBase64(new Uint8Array(ct)) }),
     )
   } catch {
@@ -193,7 +273,9 @@ export async function clearEncryptedCompactStore(
   walletScope = 'local',
 ): Promise<void> {
   if (typeof window === 'undefined') return
-  await idbDelete(storeKey(cluster, poolId, spendPkBytes, walletScope))
+  const hashedKey = await hashedStoreKey(cluster, poolId, spendPkBytes, walletScope)
+  const legKey = legacyStoreKey(cluster, poolId, spendPkBytes, walletScope)
+  await Promise.all([idbDelete(hashedKey), idbDelete(legKey)])
 }
 
 // ============================================================================

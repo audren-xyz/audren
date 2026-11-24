@@ -296,6 +296,11 @@ impl CompactWalletStore {
             dec.amount,
             dec.blinding,
         );
+        if fr_to_be_bytes(&cm_fr) != cm_be {
+            return Err(ClientError::InvalidEncoding(
+                "note commitment mismatch in record_verified_memo",
+            ));
+        }
         let nf = fvk.real_nullifier(cm_fr, global_leaf)?;
         self.notes.push(OwnedNote {
             pool_id: self.pool_id,
@@ -1340,8 +1345,20 @@ mod tests {
             payment_id: [0u8; MEMO_PAYMENT_ID_LEN],
             is_dynamic: false,
         };
-        store.record_verified_memo(&fvk, 0, 0, &dec1, [0u8; 32]).unwrap();
-        store.record_verified_memo(&fvk, 0, 1, &dec2, [0u8; 32]).unwrap();
+        let cm1 = fr_to_be_bytes(&compute_note_commitment(
+            fvk.stealth_owner(dec1.tweak).unwrap(),
+            derive_asset_id(&dec1.mint),
+            dec1.amount,
+            dec1.blinding,
+        ));
+        let cm2 = fr_to_be_bytes(&compute_note_commitment(
+            fvk.stealth_owner(dec2.tweak).unwrap(),
+            derive_asset_id(&dec2.mint),
+            dec2.amount,
+            dec2.blinding,
+        ));
+        store.record_verified_memo(&fvk, 0, 0, &dec1, cm1).unwrap();
+        store.record_verified_memo(&fvk, 0, 1, &dec2, cm2).unwrap();
         assert_eq!(store.balances().get(&WSOL_MINT), Some(&u64::MAX));
 
         // 4. Forged page count > capacity & absurd page_seq jumps rejected without OOM/panic
@@ -1481,7 +1498,13 @@ mod tests {
             payment_id: [0u8; MEMO_PAYMENT_ID_LEN],
             is_dynamic: false,
         };
-        base.record_verified_memo(&fvk, 0, 5, &dec, valid_root).unwrap();
+        let dec_cm = fr_to_be_bytes(&compute_note_commitment(
+            fvk.stealth_owner(dec.tweak).unwrap(),
+            derive_asset_id(&dec.mint),
+            dec.amount,
+            dec.blinding,
+        ));
+        base.record_verified_memo(&fvk, 0, 5, &dec, dec_cm).unwrap();
         let base_val: serde_json::Value =
             serde_json::from_slice(&base.to_json_bytes().unwrap()).unwrap();
 

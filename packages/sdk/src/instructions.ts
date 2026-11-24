@@ -29,6 +29,7 @@ import {
   EXEC_FLAG_FEE_ON_OUTPUT,
   GROTH16_PROOF_LEN,
   MAX_ROOT_EPOCH_INTERVAL,
+  MAX_TX_CU_LIMIT,
   MEMO_CT_LEN,
   MEMO_ENTRY_WIRE_LEN,
   MEMO_NOTES_PER_PAGE,
@@ -64,6 +65,7 @@ import {
 } from './constants.ts';
 import { MAX_LEAVES_PER_LANE } from './layout.ts';
 import {
+  base58Decode,
   base58Encode,
   deriveAssociatedTokenAddressSync,
   deriveEscrowPdaSync,
@@ -366,13 +368,15 @@ export interface AutoOpenPageTarget {
   pageKind: number;
   pageSeq: bigint;
   pda: string;
+  /** `true` for mandatory rollover pages required by the tx; `false` for proactive `>= 90%` lookaheads (pass `maxPayerDeficit: 0n`). */
+  mandatory: boolean;
 }
 
 /**
  * Zero-crank Auto-`OpenPage` planner: returns every idempotent `OpenPage` (`Tag 2`) target
- * required for a lane when it is at an exact rollover boundary OR `>= 90%` full
- * (`subRem <= 26`, `memoRem <= 10`, `nfRem <= 60`, `subrootSlot >= 280`) and the target page
- * PDA is not present in `existingPages`.
+ * required for a lane when it is at an exact rollover boundary (`mandatory: true`) OR `>= 90%` full
+ * (`mandatory: false`: `subRem <= 26`, `memoRem <= 10`, `nfRem <= 60`, `subrootSlot >= 280`) and
+ * the target page PDA is not present in `existingPages`.
  */
 export function planAutoOpenPages(params: {
   programId?: string;
@@ -404,11 +408,16 @@ export function planAutoOpenPages(params: {
         : new Set(params.existingPages);
 
   const targets: AutoOpenPageTarget[] = [];
-  const seen = new Set<string>();
-  const addCandidate = (pageKind: number, pageSeq: bigint, pda: string) => {
-    if (seen.has(pda) || existing?.has(pda)) return;
-    seen.add(pda);
-    targets.push({ pageKind, pageSeq, pda });
+  const seenIdx = new Map<string, number>();
+  const addCandidate = (pageKind: number, pageSeq: bigint, pda: string, mandatory: boolean) => {
+    if (existing?.has(pda)) return;
+    const prevIdx = seenIdx.get(pda);
+    if (prevIdx !== undefined) {
+      if (mandatory) targets[prevIdx]!.mandatory = true;
+      return;
+    }
+    seenIdx.set(pda, targets.length);
+    targets.push({ pageKind, pageSeq, pda, mandatory });
   };
 
   if (numOutputs > 0 && nextLeaf < MAX_LEAVES_PER_LANE) {
@@ -427,15 +436,18 @@ export function planAutoOpenPages(params: {
         OPEN_PAGE_KIND_SUBTREE,
         curSubSeq,
         deriveSubtreePdaSync(poolId, params.laneId, curSubSeq, programId).address,
+        true,
       );
     }
-    if (subRem < numOutputs || subRem <= AUTO_OPEN_SUBTREE_REM_THRESHOLD) {
+    const subMandatoryNext = subRem < numOutputs;
+    if (subMandatoryNext || subRem <= AUTO_OPEN_SUBTREE_REM_THRESHOLD) {
       const nextSubSeq = curSubSeq + 1n;
       if (nextSubSeq < maxSubPages) {
         addCandidate(
           OPEN_PAGE_KIND_SUBTREE,
           nextSubSeq,
           deriveSubtreePdaSync(poolId, params.laneId, nextSubSeq, programId).address,
+          subMandatoryNext,
         );
       }
     }
@@ -447,15 +459,18 @@ export function planAutoOpenPages(params: {
         OPEN_PAGE_KIND_SUBROOT,
         curRootSeq,
         deriveSubrootPdaSync(poolId, params.laneId, curRootSeq, programId).address,
+        true,
       );
     }
-    if (subrootSlot >= AUTO_OPEN_SUBROOT_SLOT_THRESHOLD) {
+    const srMandatoryNext = subMandatoryNext && (curSubSeq + 1n) / srSize > curRootSeq;
+    if (srMandatoryNext || subrootSlot >= AUTO_OPEN_SUBROOT_SLOT_THRESHOLD) {
       const nextRootSeq = curRootSeq + 1n;
       if (nextRootSeq < maxSrPages) {
         addCandidate(
           OPEN_PAGE_KIND_SUBROOT,
           nextRootSeq,
           deriveSubrootPdaSync(poolId, params.laneId, nextRootSeq, programId).address,
+          srMandatoryNext,
         );
       }
     }
@@ -468,15 +483,18 @@ export function planAutoOpenPages(params: {
         OPEN_PAGE_KIND_MEMO,
         curMemoSeq,
         deriveMemoPdaSync(poolId, params.laneId, curMemoSeq, programId).address,
+        true,
       );
     }
-    if (memoRem < numOutputs || memoRem <= AUTO_OPEN_MEMO_REM_THRESHOLD) {
+    const memoMandatoryNext = memoRem < numOutputs;
+    if (memoMandatoryNext || memoRem <= AUTO_OPEN_MEMO_REM_THRESHOLD) {
       const nextMemoSeq = curMemoSeq + 1n;
       if (nextMemoSeq < maxMemoPages) {
         addCandidate(
           OPEN_PAGE_KIND_MEMO,
           nextMemoSeq,
           deriveMemoPdaSync(poolId, params.laneId, nextMemoSeq, programId).address,
+          memoMandatoryNext,
         );
       }
     }
@@ -492,14 +510,17 @@ export function planAutoOpenPages(params: {
         OPEN_PAGE_KIND_NULLIFIER,
         curNfSeq,
         deriveNfPagePdaSync(poolId, params.laneId, curNfSeq, programId).address,
+        true,
       );
     }
-    if (nfRem < numNfs || nfRem <= AUTO_OPEN_NF_REM_THRESHOLD) {
+    const nfMandatoryNext = nfRem < numNfs;
+    if (nfMandatoryNext || nfRem <= AUTO_OPEN_NF_REM_THRESHOLD) {
       const nextNfSeq = curNfSeq + 1n;
       addCandidate(
         OPEN_PAGE_KIND_NULLIFIER,
         nextNfSeq,
         deriveNfPagePdaSync(poolId, params.laneId, nextNfSeq, programId).address,
+        nfMandatoryNext,
       );
     }
   }
@@ -510,6 +531,10 @@ export function planAutoOpenPages(params: {
 /**
  * Build idempotent `OpenPage` (`Tag 2`) pre-instructions returned by `planAutoOpenPages` so
  * wallets and relayers keep lanes provisioned with zero external cranking.
+ *
+ * Proactive (`!mandatory`) lookahead instructions ALWAYS set `maxPayerDeficit = 0n` so
+ * `LaneRentVault` bears 100% of rent and TOCTOU drains revert cleanly instead of debiting `payer`.
+ * Pass `includeProactive: false` when `LaneRentVault` is known to be underfunded.
  */
 export function buildAutoOpenPageInstructions(params: {
   programId?: string;
@@ -521,7 +546,11 @@ export function buildAutoOpenPageInstructions(params: {
   numOutputs: number;
   numNfs: number;
   existingPages?: ReadonlySet<string> | ReadonlyArray<string>;
+  includeProactive?: boolean;
+  mandatoryMaxPayerDeficit?: bigint;
 }): AudrenInstruction[] {
+  const includeProactive = params.includeProactive ?? true;
+  const mandatoryMaxPayerDeficit = params.mandatoryMaxPayerDeficit ?? U64_MAX;
   const targets = planAutoOpenPages({
     programId: params.programId,
     poolId: params.poolId,
@@ -532,28 +561,50 @@ export function buildAutoOpenPageInstructions(params: {
     numNfs: params.numNfs,
     existingPages: params.existingPages,
   });
-  return targets.map((t) =>
-    buildOpenPageInstruction({
-      programId: params.programId,
-      payer: params.payer,
-      pageKind: t.pageKind,
-      poolId: params.poolId,
-      laneId: params.laneId,
-      pageSeq: t.pageSeq,
-    }),
-  );
+  return targets
+    .filter((t) => t.mandatory || includeProactive)
+    .map((t) =>
+      buildOpenPageInstruction({
+        programId: params.programId,
+        payer: params.payer,
+        pageKind: t.pageKind,
+        poolId: params.poolId,
+        laneId: params.laneId,
+        pageSeq: t.pageSeq,
+        maxPayerDeficit: t.mandatory ? mandatoryMaxPayerDeficit : 0n,
+      }),
+    );
 }
 
-const MAX_TX_CU_LIMIT = 1_400_000;
+/** Convert an `AudrenInstruction` (base58 pubkeys) into a binary `V1Instruction` for `compileV1Message`. */
+export function toV1Instruction(ix: AudrenInstruction): {
+  programId: Uint8Array;
+  accounts: { pubkey: Uint8Array; isSigner: boolean; isWritable: boolean }[];
+  data: Uint8Array;
+} {
+  return {
+    programId: base58Decode(ix.programId),
+    accounts: ix.accounts.map((a) => ({
+      pubkey: base58Decode(a.pubkey),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+    data: ix.data,
+  };
+}
+
 const CU_LIMIT_CREATE_ATA_CLASSIC = 30_000;
 const CU_LIMIT_CREATE_ATA_TOKEN_2022 = 45_000;
 const CU_LIMIT_EXEC_VIA_ESCROW_T22_LEG = 25_000;
 /** Compute Unit cost per failed `find_program_address` bump iteration on Solana (`1,500` CU). */
 export const CU_PER_PDA_BUMP_ITERATION = 1_500;
 
-function nonNegativeInt(n: number | undefined): number {
-  if (n === undefined || !Number.isFinite(n)) return 0;
-  return Math.max(0, Math.trunc(n));
+function nonNegativeInt(n: number | undefined, label = 'count'): number {
+  if (n === undefined) return 0;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+    throw new RangeError(`${label} must be a non-negative finite number, got ${String(n)}`);
+  }
+  return Math.trunc(n);
 }
 
 /**
@@ -809,6 +860,12 @@ export function computeExecCtxHash(params: {
   minAmountOut: bigint;
   routerProg: string | Uint8Array;
   routerAccounts: readonly RouterAccountMeta[];
+  /** Optional writable instruction accounts promoted onto `routerAccounts` matching `buildExecViaEscrowInstruction` & Solana runtime writability merge. */
+  payer?: string | Uint8Array | null;
+  escrowInAta?: string | Uint8Array | null;
+  escrowOutAta?: string | Uint8Array | null;
+  vaultInAta?: string | Uint8Array | null;
+  vaultOutAta?: string | Uint8Array | null;
   extraWritablePubkeys?: readonly (string | Uint8Array)[];
   outStealthOwner: Uint8Array;
   outBlinding: Uint8Array;
@@ -848,6 +905,11 @@ export function computeExecCtxHash(params: {
   const programBytes = toPubkeyBytes(programId);
   const escrowPda = deriveEscrowPdaSync(params.poolId, params.escrowShard, programId).address;
   const extraWritable: string[] = [];
+  if (params.payer) extraWritable.push(pubkeyToB58(params.payer));
+  if (params.escrowInAta) extraWritable.push(pubkeyToB58(params.escrowInAta));
+  if (params.escrowOutAta) extraWritable.push(pubkeyToB58(params.escrowOutAta));
+  if (params.vaultInAta) extraWritable.push(pubkeyToB58(params.vaultInAta));
+  if (params.vaultOutAta) extraWritable.push(pubkeyToB58(params.vaultOutAta));
   if (params.relayerFeeAmount > 0n && params.relayerFeeRecipient) {
     extraWritable.push(pubkeyToB58(params.relayerFeeRecipient));
   }
@@ -972,10 +1034,14 @@ export function buildOpenPageInstruction(params: {
   poolId: number;
   laneId: number;
   pageSeq: bigint;
+  /** Maximum lamports `payer` consents to cover if `LaneRentVault` cannot cover full page rent (default `U64_MAX`; pass `0n` for proactive `>= 90%` lookaheads). */
+  maxPayerDeficit?: bigint;
 }): AudrenInstruction {
   assertU32(params.poolId, 'poolId');
   assertLaneId(params.laneId, 'laneId');
   assertU64(params.pageSeq, 'pageSeq');
+  const maxPayerDeficit = params.maxPayerDeficit ?? U64_MAX;
+  assertU64(maxPayerDeficit, 'maxPayerDeficit');
   const programId = params.programId ?? AUDREN_PROGRAM_ID;
   let pagePda: string;
   if (params.pageKind === OPEN_PAGE_KIND_SUBTREE) {
@@ -994,6 +1060,7 @@ export function buildOpenPageInstruction(params: {
     u32le(params.poolId, 'poolId'),
     new Uint8Array([params.laneId]),
     u64le(params.pageSeq, 'pageSeq'),
+    u64le(maxPayerDeficit, 'maxPayerDeficit'),
   );
   return {
     programId,

@@ -26,8 +26,8 @@ use audren_client::{
         recommended_cu_limit_transact_with_bumps as rust_recommended_cu_limit_transact_with_bumps,
         try_build_deposit, try_build_exec_via_escrow, try_build_init_lane, try_build_init_pool,
         try_build_init_root_history, try_build_open_page, try_build_transact,
-        try_compute_exec_ctx_hash, try_compute_transact_ctx_hash, AudrenAccountMeta,
-        AudrenInstruction, UpdatePoolAction,
+        try_compute_exec_ctx_hash_with_writable, try_compute_transact_ctx_hash,
+        AudrenAccountMeta, AudrenInstruction, ExecCtxWritableAccounts, UpdatePoolAction,
     },
     keys::{
         check_memo_view_tag as rust_check_view_tag,
@@ -238,6 +238,8 @@ pub struct FfiOpenPageSpec {
     pub page_kind: u8,
     pub page_seq: u64,
     pub pda_b58: String,
+    #[uniffi(default = true)]
+    pub mandatory: bool,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -831,6 +833,21 @@ pub fn prove_joinsplit_witness_bytes(
     seed_32: Vec<u8>,
 ) -> Result<FfiGroth16ProofBundle, AudrenFfiError> {
     let seed = to_arr::<32>(&seed_32, "seed_32")?;
+    // Strictly reject non-boolean (2..=255) values for `omit_nf1` (offset 144) and
+    // `inputs[0..2].is_dummy` (offsets 281 and 2358) before decoding into the circuit.
+    if witness_4611.len() == audren_circuits::WITNESS_TOTAL_BYTES {
+        for (label, idx) in [
+            ("omit_nf1", 144usize),
+            ("inputs[0].is_dummy", 281usize),
+            ("inputs[1].is_dummy", 2358usize),
+        ] {
+            if witness_4611[idx] > 1 {
+                return Err(AudrenFfiError::InvalidInput {
+                    reason: format!("{label} must be 0 or 1, got {}", witness_4611[idx]),
+                });
+            }
+        }
+    }
     let circuit = audren_circuits::decode_joinsplit_witness_bytes(&witness_4611).map_err(|c| {
         AudrenFfiError::InvalidInput {
             reason: format!("invalid binary witness (code {c})"),
@@ -923,6 +940,16 @@ pub struct FfiExecCtxHashParams {
     pub dyn_mask_72: Vec<u8>,
     pub router_ix_data: Vec<u8>,
     pub change_memos: Vec<u8>,
+    #[uniffi(default = None)]
+    pub payer: Option<String>,
+    #[uniffi(default = None)]
+    pub escrow_in_ata: Option<String>,
+    #[uniffi(default = None)]
+    pub escrow_out_ata: Option<String>,
+    #[uniffi(default = None)]
+    pub vault_in_ata: Option<String>,
+    #[uniffi(default = None)]
+    pub vault_out_ata: Option<String>,
 }
 
 #[uniffi::export]
@@ -942,7 +969,34 @@ pub fn compute_exec_ctx_hash_ffi(
         .iter()
         .map(|s| parse_addr(s, "extra_writable_pubkeys"))
         .collect::<Result<_, _>>()?;
-    let h = try_compute_exec_ctx_hash(
+    let writable_ctx = ExecCtxWritableAccounts {
+        payer: params
+            .payer
+            .as_deref()
+            .map(|s| parse_addr(s, "payer"))
+            .transpose()?,
+        escrow_in_ata: params
+            .escrow_in_ata
+            .as_deref()
+            .map(|s| parse_addr(s, "escrow_in_ata"))
+            .transpose()?,
+        escrow_out_ata: params
+            .escrow_out_ata
+            .as_deref()
+            .map(|s| parse_addr(s, "escrow_out_ata"))
+            .transpose()?,
+        vault_in_ata: params
+            .vault_in_ata
+            .as_deref()
+            .map(|s| parse_addr(s, "vault_in_ata"))
+            .transpose()?,
+        vault_out_ata: params
+            .vault_out_ata
+            .as_deref()
+            .map(|s| parse_addr(s, "vault_out_ata"))
+            .transpose()?,
+    };
+    let h = try_compute_exec_ctx_hash_with_writable(
         &pid,
         params.pool_id,
         params.vk_id,
@@ -958,6 +1012,7 @@ pub fn compute_exec_ctx_hash_ffi(
         params.min_amount_out,
         &rprog,
         &raccs,
+        Some(&writable_ctx),
         &extra_writable,
         &to_arr::<32>(&params.out_stealth_owner, "out_stealth_owner")?,
         &to_arr::<32>(&params.out_blinding, "out_blinding")?,
@@ -1038,7 +1093,7 @@ pub fn build_init_lane_ix(
     )?))
 }
 
-#[uniffi::export]
+#[uniffi::export(default(max_payer_deficit = None))]
 pub fn build_open_page_ix(
     program_id: String,
     payer: String,
@@ -1046,6 +1101,7 @@ pub fn build_open_page_ix(
     pool_id: u32,
     lane_id: u8,
     page_seq: u64,
+    max_payer_deficit: Option<u64>,
 ) -> Result<FfiInstruction, AudrenFfiError> {
     Ok(from_audren_ix(try_build_open_page(
         parse_addr(&program_id, "program_id")?,
@@ -1054,6 +1110,7 @@ pub fn build_open_page_ix(
         pool_id,
         lane_id,
         page_seq,
+        max_payer_deficit.unwrap_or(u64::MAX),
     )?))
 }
 
@@ -1463,6 +1520,7 @@ pub fn plan_auto_open_pages(
             page_kind: s.page_kind,
             page_seq: s.page_seq,
             pda_b58: s.pda.to_string(),
+            mandatory: s.mandatory,
         })
         .collect())
 }

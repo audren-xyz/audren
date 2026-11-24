@@ -20,6 +20,7 @@
 
 export const SOLANA_TX_V1_PREFIX = 0x81;
 export const SOLANA_TX_V1_MAX_SIZE = 4_096;
+export const SOLANA_TX_V1_MAX_SIGNATURES = 12;
 export const SOLANA_TX_V1_DEFAULT_LOADED_ACCOUNTS_DATA_SIZE = 64 * 1024 * 1024;
 
 const CONFIG_MASK_PRIORITY_FEE = 0b11;
@@ -172,6 +173,13 @@ export function compileV1Message(params: {
   }
 
   const feeHex = bytesToHex(feePayer);
+  const compareBytes32 = (a: Uint8Array, b: Uint8Array): number => {
+    for (let i = 0; i < 32; i++) {
+      const diff = a[i]! - b[i]!;
+      if (diff !== 0) return diff;
+    }
+    return 0;
+  };
   const metas = Array.from(map.values()).sort((a, b) => {
     const aIsFee = bytesToHex(a.pubkey) === feeHex ? 0 : 1;
     const bIsFee = bytesToHex(b.pubkey) === feeHex ? 0 : 1;
@@ -179,7 +187,7 @@ export function compileV1Message(params: {
     const rank = (m: V1AccountMeta) => (m.isSigner ? 0 : 2) + (m.isWritable ? 0 : 1);
     const diff = rank(a) - rank(b);
     if (diff !== 0) return diff;
-    return bytesToHex(a.pubkey).localeCompare(bytesToHex(b.pubkey));
+    return compareBytes32(a.pubkey, b.pubkey);
   });
 
   if (metas.length > 64) {
@@ -187,6 +195,11 @@ export function compileV1Message(params: {
   }
 
   const numRequiredSignatures = metas.filter((m) => m.isSigner).length;
+  if (numRequiredSignatures > SOLANA_TX_V1_MAX_SIGNATURES) {
+    throw new RangeError(
+      `V1 required signature count ${numRequiredSignatures} exceeds ${SOLANA_TX_V1_MAX_SIGNATURES}`,
+    );
+  }
   const numReadonlySigned = metas.filter((m) => m.isSigner && !m.isWritable).length;
   const numReadonlyUnsigned = metas.filter((m) => !m.isSigner && !m.isWritable).length;
 
@@ -290,14 +303,22 @@ export function serializeV1Transaction(
   if (!compiled || typeof compiled !== 'object') {
     throw new RangeError('compiled must be a CompiledV1Message object');
   }
-  if (!(compiled.messageBytes instanceof Uint8Array)) {
+  if (
+    !(compiled.messageBytes instanceof Uint8Array) ||
+    compiled.messageBytes.byteLength === 0 ||
+    compiled.messageBytes[0] !== SOLANA_TX_V1_PREFIX
+  ) {
     throw new RangeError(
-      `compiled.messageBytes must be a Uint8Array, got ${String(compiled.messageBytes)}`,
+      `compiled.messageBytes must be a V1 message starting with 0x${SOLANA_TX_V1_PREFIX.toString(16)}`,
     );
   }
-  if (!Number.isInteger(compiled.numRequiredSignatures) || compiled.numRequiredSignatures < 0) {
+  if (
+    !Number.isInteger(compiled.numRequiredSignatures) ||
+    compiled.numRequiredSignatures < 1 ||
+    compiled.numRequiredSignatures > SOLANA_TX_V1_MAX_SIGNATURES
+  ) {
     throw new RangeError(
-      `compiled.numRequiredSignatures must be a non-negative integer, got ${String(compiled.numRequiredSignatures)}`,
+      `compiled.numRequiredSignatures must be an integer in 1..=${SOLANA_TX_V1_MAX_SIGNATURES}, got ${String(compiled.numRequiredSignatures)}`,
     );
   }
   if (!Array.isArray(signatures)) {

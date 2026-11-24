@@ -27,6 +27,7 @@ import {
   SUBTREE_PAGE_LEN,
   TAG_DEPOSIT,
   TAG_EXEC_VIA_ESCROW,
+  OPEN_PAGE_WIRE_LEN,
   TAG_OPEN_PAGE,
   TAG_TRANSACT,
   TOKEN_2022_PROGRAM_ID,
@@ -52,6 +53,7 @@ import {
   deriveAssociatedTokenAddressSync,
   deriveEscrowPdaSync,
   deriveLanePdaSync,
+  deriveLaneRentVaultPdaSync,
   deriveMemoPdaSync,
   deriveNfPagePdaSync,
   derivePoolPdaSync,
@@ -98,6 +100,16 @@ type Cluster = 'mainnet' | 'devnet'
 const DEFAULT_GATEWAY_ORIGIN = 'https://gateway.internal'
 const MAX_DEMO_DEPOSIT_LAMPORTS = 5_000_000n
 const MIN_DEMO_DEPOSIT_LAMPORTS = 100_000n
+const DEVNET_DAILY_FAUCET_MAX_LAMPORTS = 250_000_000n
+const DEVNET_DAILY_FAUCET_MAX_REQUESTS = 100
+const U64_MAX = 0xffff_ffff_ffff_ffffn
+const LANE_RENT_VAULT_RESERVE_FLOOR = 1_002_240n
+const PAGE_RENT_FALLBACK_BY_KIND: Record<number, bigint> = {
+  [OPEN_PAGE_KIND_SUBTREE]: 58_352_640n,
+  [OPEN_PAGE_KIND_SUBROOT]: 68_152_320n,
+  [OPEN_PAGE_KIND_MEMO]: 72_161_280n,
+  [OPEN_PAGE_KIND_NULLIFIER]: 68_152_320n,
+}
 const MAX_JSON_BODY_BYTES = 65_536
 const RATE_WINDOW_SHORT_MS = 60 * 1000
 const RATE_MAX_READ_PER_MIN = 120
@@ -532,9 +544,61 @@ function jsonResponse(body: unknown, status = 200, extraHeaders?: Record<string,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
+      'strict-transport-security': 'max-age=63072000; includeSubDomains; preload',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-frame-options': 'DENY',
       ...extraHeaders,
     },
   })
+}
+
+let devnetFaucetDay = ''
+let devnetFaucetDailyLamports = 0n
+let devnetFaucetDailyRequests = 0
+
+function reserveDevnetDailyFaucet(amountLamports: bigint): { allowed: true } | { allowed: false } {
+  const today = new Date().toISOString().slice(0, 10)
+  if (devnetFaucetDay !== today) {
+    devnetFaucetDay = today
+    devnetFaucetDailyLamports = 0n
+    devnetFaucetDailyRequests = 0
+  }
+  if (
+    devnetFaucetDailyRequests >= DEVNET_DAILY_FAUCET_MAX_REQUESTS ||
+    devnetFaucetDailyLamports + amountLamports > DEVNET_DAILY_FAUCET_MAX_LAMPORTS
+  ) {
+    return { allowed: false }
+  }
+  devnetFaucetDailyRequests += 1
+  devnetFaucetDailyLamports += amountLamports
+  return { allowed: true }
+}
+
+function releaseDevnetDailyFaucet(amountLamports: bigint): void {
+  if (devnetFaucetDailyRequests > 0) devnetFaucetDailyRequests -= 1
+  devnetFaucetDailyLamports =
+    devnetFaucetDailyLamports > amountLamports ? devnetFaucetDailyLamports - amountLamports : 0n
+}
+
+function enforceApiPostGuard(request: Request, url: URL): Response | null {
+  const rawCt = request.headers.get('content-type') ?? ''
+  const mediaType = rawCt.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+  if (mediaType !== 'application/json') {
+    return jsonResponse({ error: 'Content-Type must be application/json' }, 415)
+  }
+  const secFetchSite = request.headers.get('sec-fetch-site')?.trim().toLowerCase() ?? ''
+  if (secFetchSite && secFetchSite !== 'same-origin') {
+    return jsonResponse({ error: 'Cross-site API requests are not permitted' }, 403)
+  }
+  const origin = request.headers.get('origin')?.trim() ?? ''
+  if (origin && origin !== url.origin) {
+    return jsonResponse({ error: 'Cross-origin API requests are not permitted' }, 403)
+  }
+  if (!origin && secFetchSite !== 'same-origin') {
+    return jsonResponse({ error: 'Same-origin Origin or Sec-Fetch-Site header is required' }, 403)
+  }
+  return null
 }
 
 function shortMint(mint: string): string {
@@ -876,6 +940,7 @@ async function handleRpcAccounts(request: Request, env: Env): Promise<Response> 
   }
   const out: Array<string | null> = []
   const owners: Array<string | null> = []
+  const lamports: Array<number | null> = []
   const rpcCfg: { encoding: 'base64'; commitment: 'confirmed' | 'finalized'; dataSlice?: { offset: number; length: number } } = {
     encoding: 'base64',
     commitment,
@@ -884,14 +949,15 @@ async function handleRpcAccounts(request: Request, env: Env): Promise<Response> 
   for (let off = 0; off < addresses.length; off += 100) {
     const chunk = addresses.slice(off, off + 100)
     const res = await solanaRpc<{
-      value: Array<{ data: [string, string]; owner?: string } | null>
+      value: Array<{ data: [string, string]; owner?: string; lamports?: number } | null>
     }>(env, cluster, 'getMultipleAccounts', [chunk, rpcCfg])
     for (let i = 0; i < chunk.length; i++) {
       out.push(res.value[i]?.data?.[0] ?? null)
       owners.push(res.value[i]?.owner ?? null)
+      lamports.push(typeof res.value[i]?.lamports === 'number' ? res.value[i]!.lamports! : null)
     }
   }
-  return jsonResponse({ cluster, accounts: out, owners })
+  return jsonResponse({ cluster, accounts: out, owners, lamports })
 }
 
 async function handleWalletBalances(url: URL, env: Env): Promise<Response> {
@@ -992,8 +1058,8 @@ function validateRpcSendAudrenInstruction(data: Uint8Array): string | null {
   }
   const tag = data[0]!
   if (tag === TAG_OPEN_PAGE) {
-    if (data.byteLength !== 15) {
-      return `Invalid OpenPage instruction length (${data.byteLength}; expected 15)`
+    if (data.byteLength !== OPEN_PAGE_WIRE_LEN) {
+      return `Invalid OpenPage instruction length (${data.byteLength}; expected ${OPEN_PAGE_WIRE_LEN})`
     }
     if (data[1]! > OPEN_PAGE_KIND_NULLIFIER) {
       return `Invalid OpenPage kind (${data[1]!})`
@@ -1345,8 +1411,14 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
   if (!isValidPubkeyStr(body.inputMint) || !isValidPubkeyStr(body.outputMint)) {
     return jsonResponse({ error: 'inputMint and outputMint must be valid 32-byte Solana pubkeys' }, 400)
   }
-  if (typeof body.amount !== 'string' || body.amount.length > 20 || !/^\d+$/.test(body.amount) || BigInt(body.amount) <= 0n) {
-    return jsonResponse({ error: 'amount must be a positive integer string' }, 400)
+  if (
+    typeof body.amount !== 'string' ||
+    body.amount.length > 20 ||
+    !/^\d+$/.test(body.amount) ||
+    BigInt(body.amount) <= 0n ||
+    BigInt(body.amount) > U64_MAX
+  ) {
+    return jsonResponse({ error: 'amount must be a positive u64 integer string' }, 400)
   }
   const cluster = parseCluster(body.cluster)
   if (cluster !== 'mainnet') {
@@ -1441,12 +1513,24 @@ async function handleJupiterQuote(request: Request, env: Env): Promise<Response>
   } catch (err) {
     return jsonResponse({ error: err instanceof Error ? err.message : 'Invalid JUPITER_API_URL' }, 503)
   }
+  const rawSlippage = body.slippageBps === undefined ? 100 : Number(body.slippageBps)
+  if (!Number.isFinite(rawSlippage)) {
+    return jsonResponse({ error: 'slippageBps must be a finite number' }, 400)
+  }
+  const clampedSlippageBps = Math.min(5000, Math.max(1, Math.trunc(rawSlippage)))
+
+  const rawMaxAccounts = body.maxAccounts === undefined ? 28 : Number(body.maxAccounts)
+  if (!Number.isFinite(rawMaxAccounts)) {
+    return jsonResponse({ error: 'maxAccounts must be a finite integer' }, 400)
+  }
+  const clampedMaxAccounts = Math.min(48, Math.max(12, Math.trunc(rawMaxAccounts)))
+
   const qs = new URLSearchParams({
     inputMint: body.inputMint,
     outputMint: body.outputMint,
     amount: quoteAmount,
-    slippageBps: String(body.slippageBps ?? 100),
-    maxAccounts: String(Math.min(28, body.maxAccounts ?? 28)),
+    slippageBps: String(clampedSlippageBps),
+    maxAccounts: String(clampedMaxAccounts),
     excludeDexes: JUPITER_CPI_EXCLUDED_DEXES.join(','),
     ...(body.onlyDirectRoutes ? { onlyDirectRoutes: 'true' } : {}),
   })
@@ -1729,21 +1813,24 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
     CLASSIC_TOKEN_PROGRAM_ID,
   ).address
 
-  const pageCandidates: Array<{ pageKind: number; pageSeq: bigint; pda: string }> = [
+  const pageCandidates: Array<{ pageKind: number; pageSeq: bigint; pda: string; mandatory: boolean }> = [
     {
       pageKind: OPEN_PAGE_KIND_SUBTREE,
       pageSeq: subPageSeq,
       pda: deriveSubtreePdaSync(poolId, laneId, subPageSeq, AUDREN_PROGRAM_ID).address,
+      mandatory: true,
     },
     {
       pageKind: OPEN_PAGE_KIND_SUBROOT,
       pageSeq: rootPageSeq,
       pda: deriveSubrootPdaSync(poolId, laneId, rootPageSeq, AUDREN_PROGRAM_ID).address,
+      mandatory: true,
     },
     {
       pageKind: OPEN_PAGE_KIND_MEMO,
       pageSeq: memoPageSeq,
       pda: deriveMemoPdaSync(poolId, laneId, memoPageSeq, AUDREN_PROGRAM_ID).address,
+      mandatory: true,
     },
   ]
   const autoOpenTargets = planAutoOpenPages({
@@ -1759,15 +1846,28 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
   for (const t of autoOpenTargets) {
     if (!seenCandidatePdas.has(t.pda)) {
       seenCandidatePdas.add(t.pda)
-      pageCandidates.push(t)
+      pageCandidates.push({
+        pageKind: t.pageKind,
+        pageSeq: t.pageSeq,
+        pda: t.pda,
+        mandatory: t.mandatory,
+      })
     }
   }
 
-  const reqAccounts = [...pageCandidates.map((c) => c.pda), wsolVaultAta]
-  const pageCheck = await solanaRpc<{ value: Array<unknown | null> }>(env, 'devnet', 'getMultipleAccounts', [
-    reqAccounts,
-    { encoding: 'base64', commitment: 'confirmed' },
-  ])
+  const laneRentVaultPda = deriveLaneRentVaultPdaSync(poolId, laneId, AUDREN_PROGRAM_ID).address
+  const reqAccounts = [...pageCandidates.map((c) => c.pda), wsolVaultAta, laneRentVaultPda]
+  const pageCheck = await solanaRpc<{ value: Array<{ lamports?: number } | null> }>(
+    env,
+    'devnet',
+    'getMultipleAccounts',
+    [reqAccounts, { encoding: 'base64', commitment: 'confirmed' }],
+  )
+  const rawVaultLamports = BigInt(pageCheck.value[pageCandidates.length + 1]?.lamports ?? 0)
+  let vaultAvail =
+    rawVaultLamports > LANE_RENT_VAULT_RESERVE_FLOOR
+      ? rawVaultLamports - LANE_RENT_VAULT_RESERVE_FLOOR
+      : 0n
 
   const ixs: V1Instruction[] = []
   let openPageCount = 0
@@ -1775,6 +1875,13 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
   for (let i = 0; i < pageCandidates.length; i++) {
     if (!pageCheck.value[i]) {
       const c = pageCandidates[i]!
+      const pageRent = PAGE_RENT_FALLBACK_BY_KIND[c.pageKind] ?? 72_161_280n
+      if (!c.mandatory) {
+        if (vaultAvail < pageRent) continue
+        vaultAvail -= pageRent
+      } else {
+        vaultAvail = vaultAvail > pageRent ? vaultAvail - pageRent : 0n
+      }
       ixs.push(
         toV1Ix(
           buildOpenPageInstruction({
@@ -1783,6 +1890,7 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
             pageKind: c.pageKind,
             pageSeq: c.pageSeq,
             payer: demo.pubkeyStr,
+            maxPayerDeficit: c.mandatory ? undefined : 0n,
           }),
         ),
       )
@@ -1802,6 +1910,15 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
       ),
     )
     createAtaCount += 1
+  }
+
+  const dailyReservation = reserveDevnetDailyFaucet(amount)
+  if (!dailyReservation.allowed) {
+    return jsonResponse(
+      { error: 'Daily Devnet sandbox faucet budget reached; retry after UTC midnight' },
+      429,
+      { 'retry-after': '3600' },
+    )
   }
 
   const mintBytes = base58Decode(WSOL_MINT)
@@ -1835,7 +1952,15 @@ async function handleDevnetDeposit(request: Request, env: Env): Promise<Response
   )
 
   const cuLimit = recommendedDepositCuLimit({ openPageCount, createAtaCount })
-  const tx = await sendAndConfirmV1(env, 'devnet', demo, ixs, cuLimit)
+  let tx: Awaited<ReturnType<typeof sendAndConfirmV1>>
+  try {
+    tx = await sendAndConfirmV1(env, 'devnet', demo, ixs, cuLimit)
+  } catch (err) {
+    if (!(err instanceof TxConfirmationTimeoutError)) {
+      releaseDevnetDailyFaucet(amount)
+    }
+    throw err
+  }
 
   const commitmentBytes = frToBeBytes(commitment)
   const verifiedLeafIndex = await locateConfirmedDepositLeafIndex(
@@ -2092,50 +2217,54 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
       nfCount: hdr.nfCount,
       spentNullifiers,
     })
-    const neededPages: Array<{ pageKind: number; pageSeq: bigint; pda: string }> = []
+    const neededPages: Array<{ pageKind: number; pageSeq: bigint; pda: string; mandatory: boolean }> = []
     const seenPagePdas = new Set<string>()
-    const addPage = (pageKind: number, pageSeq: bigint, pda: string) => {
+    const addPage = (pageKind: number, pageSeq: bigint, pda: string, mandatory = true) => {
       if (seenPagePdas.has(pda)) return
       seenPagePdas.add(pda)
-      neededPages.push({ pageKind, pageSeq, pda })
+      neededPages.push({ pageKind, pageSeq, pda, mandatory })
     }
     if (outputCount > 0) {
       addPage(
         OPEN_PAGE_KIND_SUBTREE,
         BigInt(roll.outSubSeq),
         deriveSubtreePdaSync(0, outLaneId, BigInt(roll.outSubSeq), AUDREN_PROGRAM_ID).address,
+        true,
       )
       addPage(
         OPEN_PAGE_KIND_SUBROOT,
         BigInt(roll.outRootSeq),
         deriveSubrootPdaSync(0, outLaneId, BigInt(roll.outRootSeq), AUDREN_PROGRAM_ID).address,
+        true,
       )
       addPage(
         OPEN_PAGE_KIND_MEMO,
         BigInt(roll.outMemoSeq),
         deriveMemoPdaSync(0, outLaneId, BigInt(roll.outMemoSeq), AUDREN_PROGRAM_ID).address,
+        true,
       )
     }
     addPage(
       OPEN_PAGE_KIND_NULLIFIER,
       BigInt(roll.nfPageSeq),
       deriveNfPagePdaSync(0, outLaneId, BigInt(roll.nfPageSeq), AUDREN_PROGRAM_ID).address,
+      true,
     )
     if (outputCount > 0 && roll.nextSubSeq !== undefined) {
       const s = BigInt(roll.nextSubSeq)
-      addPage(OPEN_PAGE_KIND_SUBTREE, s, deriveSubtreePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address)
+      addPage(OPEN_PAGE_KIND_SUBTREE, s, deriveSubtreePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address, true)
     }
     if (outputCount > 0 && roll.nextRootSeq !== undefined) {
       const s = BigInt(roll.nextRootSeq)
-      addPage(OPEN_PAGE_KIND_SUBROOT, s, deriveSubrootPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address)
+      addPage(OPEN_PAGE_KIND_SUBROOT, s, deriveSubrootPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address, true)
     }
     if (outputCount > 0 && roll.nextMemoSeq !== undefined) {
       const s = BigInt(roll.nextMemoSeq)
-      addPage(OPEN_PAGE_KIND_MEMO, s, deriveMemoPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address)
+      addPage(OPEN_PAGE_KIND_MEMO, s, deriveMemoPdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address, true)
     }
     if (roll.nextNfSeq !== undefined) {
       const s = BigInt(roll.nextNfSeq)
-      addPage(OPEN_PAGE_KIND_NULLIFIER, s, deriveNfPagePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address)
+      addPage(OPEN_PAGE_KIND_NULLIFIER, s, deriveNfPagePdaSync(0, outLaneId, s, AUDREN_PROGRAM_ID).address, true)
     }
     for (const target of planAutoOpenPages({
       programId: AUDREN_PROGRAM_ID,
@@ -2146,17 +2275,30 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
       numOutputs: outputCount,
       numNfs: spentNullifiers,
     })) {
-      addPage(target.pageKind, target.pageSeq, target.pda)
+      addPage(target.pageKind, target.pageSeq, target.pda, target.mandatory)
     }
-    const pageCheck = await solanaRpc<{ value: Array<unknown | null> }>(
+    const laneRentVaultPda = deriveLaneRentVaultPdaSync(0, outLaneId, AUDREN_PROGRAM_ID).address
+    const pageCheck = await solanaRpc<{ value: Array<{ lamports?: number } | null> }>(
       env,
       'devnet',
       'getMultipleAccounts',
-      [neededPages.map((p) => p.pda), { encoding: 'base64', commitment: 'confirmed' }],
+      [[...neededPages.map((p) => p.pda), laneRentVaultPda], { encoding: 'base64', commitment: 'confirmed' }],
     )
+    const rawVaultLamports = BigInt(pageCheck.value[neededPages.length]?.lamports ?? 0)
+    let vaultAvail =
+      rawVaultLamports > LANE_RENT_VAULT_RESERVE_FLOOR
+        ? rawVaultLamports - LANE_RENT_VAULT_RESERVE_FLOOR
+        : 0n
     for (let i = 0; i < neededPages.length; i++) {
       if (!pageCheck.value[i]) {
         const p = neededPages[i]!
+        const pageRent = PAGE_RENT_FALLBACK_BY_KIND[p.pageKind] ?? 72_161_280n
+        if (!p.mandatory) {
+          if (vaultAvail < pageRent) continue
+          vaultAvail -= pageRent
+        } else {
+          vaultAvail = vaultAvail > pageRent ? vaultAvail - pageRent : 0n
+        }
         preIxs.push(
           toV1Ix(
             buildOpenPageInstruction({
@@ -2165,6 +2307,7 @@ async function handleDevnetRelaySubmit(request: Request, env: Env): Promise<Resp
               pageKind: p.pageKind,
               pageSeq: p.pageSeq,
               payer: demo.pubkeyStr,
+              maxPayerDeficit: p.mandatory ? undefined : 0n,
             }),
           ),
         )
@@ -2203,6 +2346,11 @@ const worker = {
     }
 
     try {
+      if (request.method === 'POST' && url.pathname.startsWith('/api/')) {
+        const postGuardRes = enforceApiPostGuard(request, url)
+        if (postGuardRes) return postGuardRes
+      }
+
       if (url.pathname === '/api/pool' && request.method === 'GET') {
         const rlRes = enforceRateLimit(
           request,

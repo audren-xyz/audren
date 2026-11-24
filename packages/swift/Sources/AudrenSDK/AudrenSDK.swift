@@ -1156,10 +1156,15 @@ public struct FfiExecCtxHashParams: Equatable, Hashable {
     public var dynMask72: Data
     public var routerIxData: Data
     public var changeMemos: Data
+    public var payer: String?
+    public var escrowInAta: String?
+    public var escrowOutAta: String?
+    public var vaultInAta: String?
+    public var vaultOutAta: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(programId: String, poolId: UInt32, vkId: UInt8, outLaneId: UInt8, escrowShard: UInt8, changeMask: UInt8, feeOnOutput: Bool, assetIn: Data, amountIn: UInt64, relayerFeeAmount: UInt64, relayerFeeRecipient: String?, assetOut: Data, minAmountOut: UInt64, routerProg: String, routerAccounts: [FfiAccountMeta], extraWritablePubkeys: [String], outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask72: Data, routerIxData: Data, changeMemos: Data) {
+    public init(programId: String, poolId: UInt32, vkId: UInt8, outLaneId: UInt8, escrowShard: UInt8, changeMask: UInt8, feeOnOutput: Bool, assetIn: Data, amountIn: UInt64, relayerFeeAmount: UInt64, relayerFeeRecipient: String?, assetOut: Data, minAmountOut: UInt64, routerProg: String, routerAccounts: [FfiAccountMeta], extraWritablePubkeys: [String], outStealthOwner: Data, outBlinding: Data, dynMemoHead: Data, dynMask72: Data, routerIxData: Data, changeMemos: Data, payer: String? = nil, escrowInAta: String? = nil, escrowOutAta: String? = nil, vaultInAta: String? = nil, vaultOutAta: String? = nil) {
         self.programId = programId
         self.poolId = poolId
         self.vkId = vkId
@@ -1182,6 +1187,11 @@ public struct FfiExecCtxHashParams: Equatable, Hashable {
         self.dynMask72 = dynMask72
         self.routerIxData = routerIxData
         self.changeMemos = changeMemos
+        self.payer = payer
+        self.escrowInAta = escrowInAta
+        self.escrowOutAta = escrowOutAta
+        self.vaultInAta = vaultInAta
+        self.vaultOutAta = vaultOutAta
     }
 
     
@@ -1221,7 +1231,12 @@ public struct FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer {
                 dynMemoHead: FfiConverterData.read(from: &buf), 
                 dynMask72: FfiConverterData.read(from: &buf), 
                 routerIxData: FfiConverterData.read(from: &buf), 
-                changeMemos: FfiConverterData.read(from: &buf)
+                changeMemos: FfiConverterData.read(from: &buf), 
+                payer: FfiConverterOptionString.read(from: &buf), 
+                escrowInAta: FfiConverterOptionString.read(from: &buf), 
+                escrowOutAta: FfiConverterOptionString.read(from: &buf), 
+                vaultInAta: FfiConverterOptionString.read(from: &buf), 
+                vaultOutAta: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1248,6 +1263,11 @@ public struct FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer {
         FfiConverterData.write(value.dynMask72, into: &buf)
         FfiConverterData.write(value.routerIxData, into: &buf)
         FfiConverterData.write(value.changeMemos, into: &buf)
+        FfiConverterOptionString.write(value.payer, into: &buf)
+        FfiConverterOptionString.write(value.escrowInAta, into: &buf)
+        FfiConverterOptionString.write(value.escrowOutAta, into: &buf)
+        FfiConverterOptionString.write(value.vaultInAta, into: &buf)
+        FfiConverterOptionString.write(value.vaultOutAta, into: &buf)
     }
 }
 
@@ -1913,13 +1933,15 @@ public struct FfiOpenPageSpec: Equatable, Hashable {
     public var pageKind: UInt8
     public var pageSeq: UInt64
     public var pdaB58: String
+    public var mandatory: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(pageKind: UInt8, pageSeq: UInt64, pdaB58: String) {
+    public init(pageKind: UInt8, pageSeq: UInt64, pdaB58: String, mandatory: Bool = true) {
         self.pageKind = pageKind
         self.pageSeq = pageSeq
         self.pdaB58 = pdaB58
+        self.mandatory = mandatory
     }
 
     
@@ -1940,7 +1962,8 @@ public struct FfiConverterTypeFfiOpenPageSpec: FfiConverterRustBuffer {
             try FfiOpenPageSpec(
                 pageKind: FfiConverterUInt8.read(from: &buf), 
                 pageSeq: FfiConverterUInt64.read(from: &buf), 
-                pdaB58: FfiConverterString.read(from: &buf)
+                pdaB58: FfiConverterString.read(from: &buf), 
+                mandatory: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -1948,6 +1971,7 @@ public struct FfiConverterTypeFfiOpenPageSpec: FfiConverterRustBuffer {
         FfiConverterUInt8.write(value.pageKind, into: &buf)
         FfiConverterUInt64.write(value.pageSeq, into: &buf)
         FfiConverterString.write(value.pdaB58, into: &buf)
+        FfiConverterBool.write(value.mandatory, into: &buf)
     }
 }
 
@@ -3077,7 +3101,7 @@ public func buildInitRootHistoryIx(programId: String, authority: String, poolId:
     )
 })
 }
-public func buildOpenPageIx(programId: String, payer: String, pageKind: UInt8, poolId: UInt32, laneId: UInt8, pageSeq: UInt64)throws  -> FfiInstruction  {
+public func buildOpenPageIx(programId: String, payer: String, pageKind: UInt8, poolId: UInt32, laneId: UInt8, pageSeq: UInt64, maxPayerDeficit: UInt64? = nil)throws  -> FfiInstruction  {
     return try  FfiConverterTypeFfiInstruction_lift(try rustCallWithError(FfiConverterTypeAudrenFfiError_lift) {
         uniffiCallStatus in
     uniffi_audren_ffi_fn_func_build_open_page_ix(
@@ -3086,7 +3110,8 @@ public func buildOpenPageIx(programId: String, payer: String, pageKind: UInt8, p
         FfiConverterUInt8.lower(pageKind),
         FfiConverterUInt32.lower(poolId),
         FfiConverterUInt8.lower(laneId),
-        FfiConverterUInt64.lower(pageSeq),uniffiCallStatus
+        FfiConverterUInt64.lower(pageSeq),
+        FfiConverterOptionUInt64.lower(maxPayerDeficit),uniffiCallStatus
     )
 })
 }
@@ -3564,7 +3589,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_audren_ffi_checksum_func_build_init_root_history_ix() != 53324) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_audren_ffi_checksum_func_build_open_page_ix() != 6216) {
+    if (uniffi_audren_ffi_checksum_func_build_open_page_ix() != 53263) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_audren_ffi_checksum_func_build_set_paused_ix() != 31548) {

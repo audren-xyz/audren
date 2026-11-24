@@ -141,6 +141,48 @@ def main() -> None:
         )
         assert acc["size"] == expected_sizes[name]
 
+    # 4b. Verify Anchor v0.30+ account roundtrip byte sizing: `discriminator` (8 B) +
+    # `types[*].fields` (with leading `magic` stripped) MUST equal layout.rs exact byte length.
+    anchor_type_map = {t["name"]: t["type"] for t in expected_anchor["types"]}
+
+    def anchor_fixed_size(t) -> int:
+        if isinstance(t, str):
+            if t in ("u8", "i8", "bool"):
+                return 1
+            if t in ("u16", "i16"):
+                return 2
+            if t in ("u32", "i32"):
+                return 4
+            if t in ("u64", "i64"):
+                return 8
+            if t == "pubkey":
+                return 32
+            raise ValueError(f"Unsupported Anchor primitive type: {t}")
+        if "array" in t:
+            inner, count = t["array"]
+            return anchor_fixed_size(inner) * int(count)
+        if "defined" in t:
+            dt = anchor_type_map[t["defined"]["name"]]
+            if dt["kind"] == "enum":
+                return 1
+            return sum(anchor_fixed_size(f["type"]) for f in dt["fields"])
+        raise ValueError(f"Unsupported Anchor compound type: {t}")
+
+    for a_acc in expected_anchor["accounts"]:
+        a_name = a_acc["name"]
+        disc_len = len(a_acc["discriminator"])
+        assert disc_len == 8, f"Anchor account {a_name} discriminator len {disc_len} != 8"
+        a_struct = anchor_type_map[a_name]
+        field_names = [f["name"] for f in a_struct["fields"]]
+        assert "magic" not in field_names, (
+            f"Anchor account type {a_name} must not duplicate leading `magic` inside types[*].fields"
+        )
+        body_len = sum(anchor_fixed_size(f["type"]) for f in a_struct["fields"])
+        codama_name = a_name[0].lower() + a_name[1:]
+        assert disc_len + body_len == expected_sizes[codama_name], (
+            f"Anchor account {a_name} size {disc_len}+{body_len} != layout.rs {expected_sizes[codama_name]}"
+        )
+
     # 5. Verify all 12 PDA constant seeds match crates/audren-core/src/lib.rs
     pda_names = {p["name"] for p in prog["pdas"]}
     pda_prefixes = {p["seeds"][0]["value"]["data"] for p in prog["pdas"]}
@@ -661,7 +703,7 @@ def main() -> None:
     )
 
     ffi_src = (ROOT / "crates" / "audren-ffi" / "src" / "lib.rs").read_text(encoding="utf-8")
-    ffi_exports = re.findall(r"#\[uniffi::export\](?:\s*#\[[^\]]+\])*\s*pub fn (\w+)\s*\(", ffi_src)
+    ffi_exports = re.findall(r"#\[uniffi::export(?:\([^\n]*\))?\](?:\s*#\[[^\]]+\])*\s*pub fn (\w+)\s*\(", ffi_src)
     assert len(ffi_exports) >= 41, f"Expected >= 41 UniFFI exports, found {len(ffi_exports)}"
     swift_gen = (ROOT / "packages" / "swift" / "Sources" / "AudrenSDK" / "AudrenSDK.swift").read_text(encoding="utf-8")
     kotlin_gen = (ROOT / "packages" / "kotlin" / "src" / "main" / "kotlin" / "xyz" / "audren" / "sdk" / "audren_ffi.kt").read_text(encoding="utf-8")

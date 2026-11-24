@@ -56,8 +56,11 @@ use crate::{
         NF_OFF_COUNT, NF_OFF_CREATED_SLOT, NF_OFF_LANE_ID, NF_OFF_MAGIC, NF_OFF_PAGE_SEQ,
         NF_OFF_POOL_ID, NF_OFF_PREFIXES, NF_PAGE_LEN, NF_PAGE_MAGIC, NF_PAGE_SEED, NF_PER_PAGE,
         NF_PREFIX_LEN, NULLIFIER_SEED, NUM_ESCROW_SHARDS, NUM_LANES,
-        OPEN_PAGE_KIND_MEMO as PAGE_KIND_MEMO, OPEN_PAGE_KIND_NULLIFIER as PAGE_KIND_NF,
-        OPEN_PAGE_KIND_SUBROOT as PAGE_KIND_SUBROOT, OPEN_PAGE_KIND_SUBTREE as PAGE_KIND_SUBTREE,
+        OPEN_PAGE_DATA_LEN, OPEN_PAGE_KIND_MEMO as PAGE_KIND_MEMO,
+        OPEN_PAGE_KIND_NULLIFIER as PAGE_KIND_NF, OPEN_PAGE_KIND_SUBROOT as PAGE_KIND_SUBROOT,
+        OPEN_PAGE_KIND_SUBTREE as PAGE_KIND_SUBTREE, OPEN_PAGE_MEMO_LOOKAHEAD_SLOT,
+        OPEN_PAGE_NF_LOOKAHEAD_SLOT, OPEN_PAGE_SUBROOT_LOOKAHEAD_SLOT,
+        OPEN_PAGE_SUBTREE_LOOKAHEAD_SLOT,
         PL_OFF_ACTIVE_LANES, PL_OFF_AUTHORITY, PL_OFF_BUMP, PL_OFF_MAGIC, PL_OFF_NF_RENT_FEE,
         PL_OFF_NOTE_RENT_FEE, PL_OFF_PAUSED, PL_OFF_PENDING_AUTHORITY, PL_OFF_POOL_ID,
         PL_OFF_RESERVED_24, PL_OFF_ROOT_EPOCH_INTERVAL, PL_OFF_VAULT_AUTH_BUMP, PL_OFF_VERSION,
@@ -2070,8 +2073,8 @@ fn ix_open_page(
     accounts: &mut [AccountView],
     data: &[u8],
 ) -> ProgramResult {
-    // page_kind(1) + pool_id(4) + lane_id(1) + page_seq(8) = 14 B
-    ensure(data.len() == 14, AudrenError::InvalidInstruction)?;
+    // page_kind(1) + pool_id(4) + lane_id(1) + page_seq(8) + max_payer_deficit(8) = 22 B
+    ensure(data.len() == OPEN_PAGE_DATA_LEN, AudrenError::InvalidInstruction)?;
     let [payer, pool_acc, lane_acc, lane_rent_vault, page_acc, sys_prog, ..] = accounts else {
         return Err(err(AudrenError::InvalidInstruction));
     };
@@ -2084,6 +2087,7 @@ fn ix_open_page(
     let pool_id = read_u32(data, 1);
     let lane_id = data[5];
     let page_seq = read_u64(data, 6);
+    let max_payer_deficit = read_u64(data, 14);
     ensure((lane_id as usize) < NUM_LANES, AudrenError::InvalidLane)?;
 
     let cfg = load_and_verify_pool(program_id, pool_id, pool_acc)?;
@@ -2095,50 +2099,57 @@ fn ix_open_page(
         let ld = lane_acc.try_borrow()?;
         (read_u64(&ld, LN_OFF_NEXT_LEAF), read_u64(&ld, LN_OFF_NF_COUNT))
     };
-    let (seed, magic, space, cur_seq, stamp_created, (exp, bump)) = match page_kind {
-        PAGE_KIND_SUBTREE => (
-            SUBTREE_SEED,
-            SUBTREE_MAGIC,
-            SUBTREE_PAGE_LEN,
-            next_leaf / (SUBTREE_LEAVES as u64),
-            false,
-            subtree_pda(program_id, pool_id, lane_id, page_seq),
-        ),
-        PAGE_KIND_SUBROOT => (
-            SUBROOT_SEED,
-            SUBROOT_MAGIC,
-            SUBROOT_PAGE_LEN,
-            (next_leaf / (SUBTREE_LEAVES as u64)) / (SUBROOTS_PER_PAGE as u64),
-            false,
-            subroot_pda(program_id, pool_id, lane_id, page_seq),
-        ),
-        PAGE_KIND_MEMO => (
-            MEMO_SEED,
-            MEMO_MAGIC,
-            MEMO_PAGE_LEN,
-            next_leaf / (MEMO_NOTES_PER_PAGE as u64),
-            true,
-            memo_pda(program_id, pool_id, lane_id, page_seq),
-        ),
-        PAGE_KIND_NF => (
-            NF_PAGE_SEED,
-            NF_PAGE_MAGIC,
-            NF_PAGE_LEN,
-            nf_count / (NF_PER_PAGE as u64),
-            true,
-            nf_page_pda(program_id, pool_id, lane_id, page_seq),
-        ),
-        _ => return Err(err(AudrenError::InvalidInstruction)),
-    };
+    let (seed, magic, space, cur_seq, cur_slot, lookahead_threshold, stamp_created, (exp, bump)) =
+        match page_kind {
+            PAGE_KIND_SUBTREE => (
+                SUBTREE_SEED,
+                SUBTREE_MAGIC,
+                SUBTREE_PAGE_LEN,
+                next_leaf / (SUBTREE_LEAVES as u64),
+                next_leaf % (SUBTREE_LEAVES as u64),
+                OPEN_PAGE_SUBTREE_LOOKAHEAD_SLOT,
+                false,
+                subtree_pda(program_id, pool_id, lane_id, page_seq),
+            ),
+            PAGE_KIND_SUBROOT => (
+                SUBROOT_SEED,
+                SUBROOT_MAGIC,
+                SUBROOT_PAGE_LEN,
+                (next_leaf / (SUBTREE_LEAVES as u64)) / (SUBROOTS_PER_PAGE as u64),
+                (next_leaf / (SUBTREE_LEAVES as u64)) % (SUBROOTS_PER_PAGE as u64),
+                OPEN_PAGE_SUBROOT_LOOKAHEAD_SLOT,
+                false,
+                subroot_pda(program_id, pool_id, lane_id, page_seq),
+            ),
+            PAGE_KIND_MEMO => (
+                MEMO_SEED,
+                MEMO_MAGIC,
+                MEMO_PAGE_LEN,
+                next_leaf / (MEMO_NOTES_PER_PAGE as u64),
+                next_leaf % (MEMO_NOTES_PER_PAGE as u64),
+                OPEN_PAGE_MEMO_LOOKAHEAD_SLOT,
+                true,
+                memo_pda(program_id, pool_id, lane_id, page_seq),
+            ),
+            PAGE_KIND_NF => (
+                NF_PAGE_SEED,
+                NF_PAGE_MAGIC,
+                NF_PAGE_LEN,
+                nf_count / (NF_PER_PAGE as u64),
+                nf_count % (NF_PER_PAGE as u64),
+                OPEN_PAGE_NF_LOOKAHEAD_SLOT,
+                true,
+                nf_page_pda(program_id, pool_id, lane_id, page_seq),
+            ),
+            _ => return Err(err(AudrenError::InvalidInstruction)),
+        };
 
-    if page_kind == PAGE_KIND_SUBROOT {
-        let subroot_slot = (next_leaf / (SUBTREE_LEAVES as u64)) % (SUBROOTS_PER_PAGE as u64);
-        let allowed = page_seq <= cur_seq
-            || (cur_seq.checked_add(1) == Some(page_seq) && subroot_slot >= 280);
-        ensure(allowed, AudrenError::PageSeqOutOfRange)?;
-    } else {
-        ensure(page_seq <= cur_seq.saturating_add(2), AudrenError::PageSeqOutOfRange)?;
-    }
+    // Unified >= 90% lookahead gating across all four page types:
+    // `page_seq <= cur_seq` is unconditionally permitted, `cur_seq + 1` is permitted ONLY once
+    // current page occupancy reaches >= 90%, and `cur_seq + 2` is unconditionally rejected.
+    let allowed = page_seq <= cur_seq
+        || (cur_seq.checked_add(1) == Some(page_seq) && cur_slot >= lookahead_threshold);
+    ensure(allowed, AudrenError::PageSeqOutOfRange)?;
     ensure(page_acc.address() == &exp, AudrenError::InvalidPda)?;
 
     // Idempotent: concurrent pre-openers both succeed cleanly!
@@ -2171,6 +2182,10 @@ fn ix_open_page(
     let needed = page_rent.saturating_sub(page_acc.lamports());
     let subsidy = available.min(needed);
     let payer_deficit = needed.saturating_sub(subsidy);
+    ensure(
+        payer_deficit <= max_payer_deficit,
+        AudrenError::InsufficientVaultBalance,
+    )?;
 
     let pool_le = pool_id.to_le_bytes();
     let lane_b = [lane_id];

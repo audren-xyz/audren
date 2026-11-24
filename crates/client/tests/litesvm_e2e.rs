@@ -2523,6 +2523,37 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
             );
         }
 
+        // At next_leaf=1 (< 86), pre-opening MemoPage 1 must be rejected with PageSeqOutOfRange (6029)
+        expect_err_code(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_open_page(
+                    program_id,
+                    payer.pubkey(),
+                    OPEN_PAGE_KIND_MEMO,
+                    POOL_ID,
+                    0,
+                    1,
+                    u64::MAX,
+                ))],
+                200_000,
+            ),
+            6029,
+            "OpenPage(MEMO, 1) below >=90% lookahead must fail with 6029",
+        );
+
+        // Temporarily advance lane0 next_leaf to 86 (>= 90% MemoPage threshold) to exercise
+        // OpenPage(MEMO, 1) under custom Rent sysvar, then restore lane0 before Transact/sweep.
+        let (lane0_pda, _) = derive_lane_pda(&program_id, POOL_ID, 0);
+        let orig_lane0 = svm.get_account(&lane0_pda).unwrap();
+        {
+            let mut bumped = orig_lane0.clone();
+            bumped.data[LN_OFF_NEXT_LEAF..LN_OFF_NEXT_LEAF + 8]
+                .copy_from_slice(&86u64.to_le_bytes());
+            svm.set_account(lane0_pda, bumped).unwrap();
+        }
         expect_ok(
             send_v1(
                 &mut svm,
@@ -2535,11 +2566,13 @@ fn test_regression_b_sysvar_rent_fractional_and_zero_thresholds() {
                     POOL_ID,
                     0,
                     1,
+                    u64::MAX,
                 ))],
                 200_000,
             ),
             "OpenPage(MEMO, 1) under custom Rent sysvar",
         );
+        svm.set_account(lane0_pda, orig_lane0).unwrap();
         let memo1_lamports = svm.get_account(&memo1_pda).unwrap().lamports;
         let expected_memo_actual = exp_memo_rent.max(1);
         assert_eq!(
@@ -3259,8 +3292,8 @@ fn test_regression_e_f_low_order_x25519_bech32m_and_96_note_memo_rollover() {
     svm.warp_to_slot(104);
     let vault_wsol = bootstrap_pool(&mut svm, program_id, &payer, 1);
 
-    // Pre-open MemoPage 1 via OpenPage (self-subsidized via LaneRentVault once funded)
-    expect_ok(
+    // Premature OpenPage(MEMO, 1) at next_leaf=0 must be rejected with PageSeqOutOfRange (6029)
+    expect_err_code(
         send_v1(
             &mut svm,
             &payer,
@@ -3272,16 +3305,38 @@ fn test_regression_e_f_low_order_x25519_bech32m_and_96_note_memo_rollover() {
                 POOL_ID,
                 0,
                 1,
+                u64::MAX,
             ))],
             200_000,
         ),
-        "OpenPage(MEMO, 1)",
+        6029,
+        "Premature OpenPage(MEMO, 1) at 0% occupancy must fail with 6029",
     );
 
-    // Fill 95 deposits (leaves 0..95) into MemoPage 0
+    // Fill 95 deposits (leaves 0..95) into MemoPage 0; open MemoPage 1 once >= 90% full (i == 86)
     let mut first_tw = Fr::from(0u64);
     let mut first_bl = Fr::from(0u64);
     for i in 0u64..95u64 {
+        if i == 86 {
+            expect_ok(
+                send_v1(
+                    &mut svm,
+                    &payer,
+                    &[],
+                    &[to_svm_ix(&build_open_page(
+                        program_id,
+                        payer.pubkey(),
+                        OPEN_PAGE_KIND_MEMO,
+                        POOL_ID,
+                        0,
+                        1,
+                        u64::MAX,
+                    ))],
+                    200_000,
+                ),
+                "OpenPage(MEMO, 1) at >=90% occupancy",
+            );
+        }
         let mut eph = [0x11u8; 32];
         eph[0] = (i & 0xff) as u8;
         let (tw, bl, memo) =
@@ -3494,6 +3549,7 @@ fn test_regression_g_v121_security_hardening() {
                 payer.pubkey(),
                 OPEN_PAGE_KIND_SUBROOT,
                 POOL_ID,
+                0,
                 0,
                 0,
             ))],
@@ -7094,6 +7150,84 @@ fn test_v130_auto_open_page_lookahead_and_empirical_cu_budgets() {
         &memo86,
         &[],
     )));
+    // H-1 regression checks at next_leaf = 86 (MemoPage 0 at 86/96 >= 90%, SubtreePage 0 at 86/256 < 90%):
+    // 1. cur_seq + 2 (MemoPage 2) is unconditionally rejected with PageSeqOutOfRange (6029)
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_open_page(
+                program_id,
+                payer.pubkey(),
+                OPEN_PAGE_KIND_MEMO,
+                POOL_ID,
+                0,
+                2,
+                u64::MAX,
+            ))],
+            CU_LIMIT_OPEN_PAGE,
+        ),
+        6029,
+        "H-1: OpenPage(MEMO, cur_seq+2) must fail with PageSeqOutOfRange (6029)",
+    );
+    // 2. SubtreePage 1 at 86/256 (< 230/256) is rejected with PageSeqOutOfRange (6029)
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[to_svm_ix(&build_open_page(
+                program_id,
+                payer.pubkey(),
+                OPEN_PAGE_KIND_SUBTREE,
+                POOL_ID,
+                0,
+                1,
+                u64::MAX,
+            ))],
+            CU_LIMIT_OPEN_PAGE,
+        ),
+        6029,
+        "H-1: OpenPage(SUBTREE, 1) below 230/256 must fail with PageSeqOutOfRange (6029)",
+    );
+    // 3. TOCTOU protection: if LaneRentVault is underfunded, proactive max_payer_deficit = 0 reverts
+    //    cleanly with InsufficientVaultBalance (6017) without draining payer!
+    {
+        let (rv0_pda, _) = derive_lane_rent_pda(&program_id, POOL_ID, 0);
+        let orig_rv = svm.get_account(&rv0_pda).unwrap();
+        let mut drained_rv = orig_rv.clone();
+        drained_rv.lamports =
+            svm.minimum_balance_for_rent_exemption(audren_core::layout::SENTINEL_LEN);
+        svm.set_account(rv0_pda, drained_rv).unwrap();
+        let payer_pre_toctou = svm.get_balance(&payer.pubkey()).unwrap();
+        expect_err_code(
+            send_v1(
+                &mut svm,
+                &payer,
+                &[],
+                &[to_svm_ix(&build_open_page(
+                    program_id,
+                    payer.pubkey(),
+                    OPEN_PAGE_KIND_MEMO,
+                    POOL_ID,
+                    0,
+                    1,
+                    0,
+                ))],
+                CU_LIMIT_OPEN_PAGE,
+            ),
+            6017,
+            "H-1: OpenPage with max_payer_deficit=0 on drained LaneRentVault must fail with 6017",
+        );
+        let payer_post_toctou = svm.get_balance(&payer.pubkey()).unwrap();
+        assert!(
+            payer_pre_toctou.saturating_sub(payer_post_toctou) <= 10_000,
+            "H-1: failed max_payer_deficit=0 OpenPage must not debit page rent from payer"
+        );
+        svm.set_account(rv0_pda, orig_rv).unwrap();
+    }
+
     let cu_auto_dep = expect_ok(
         send_v1(
             &mut svm,
@@ -7111,10 +7245,8 @@ fn test_v130_auto_open_page_lookahead_and_empirical_cu_budgets() {
         payer_delta < 2_000_000 + 2_000_000 + 10_000,
         "payer must NOT pay MemoPage 1 rent ({memo_rent_needed}); actual delta={payer_delta}"
     );
-    // Standalone OpenPage CU measurement (creating MemoPage 1 on Lane 1)
-    assert_eq!(CU_LIMIT_OPEN_PAGE, 40_000);
-    assert_eq!(CU_LIMIT_TRANSACT_FULL_EXIT, 165_000);
-    let cu_open_page = expect_ok(
+    // Idempotent hit on already-open MemoPage 1 MUST succeed even with max_payer_deficit = 0
+    expect_ok(
         send_v1(
             &mut svm,
             &payer,
@@ -7124,13 +7256,17 @@ fn test_v130_auto_open_page_lookahead_and_empirical_cu_budgets() {
                 payer.pubkey(),
                 OPEN_PAGE_KIND_MEMO,
                 POOL_ID,
+                0,
                 1,
-                1,
+                0,
             ))],
             CU_LIMIT_OPEN_PAGE,
         ),
-        "CU: OpenPage(MEMO, 1)",
+        "H-1: idempotent OpenPage(MEMO, 1) with max_payer_deficit=0 succeeds",
     );
+    assert_eq!(CU_LIMIT_OPEN_PAGE, 40_000);
+    assert_eq!(CU_LIMIT_TRANSACT_FULL_EXIT, 165_000);
+    let mut cu_open_page = 0u64;
 
     // 2. Measure Classic SPL Deposit, Token-2022 TransferFee+TransferHook Deposit,
     //    Transact Private 2in/3out, Transact Withdraw SPL, Transact Withdraw WSOL Unwrap,
@@ -7991,28 +8127,6 @@ fn test_v130_auto_open_page_lookahead_and_empirical_cu_budgets() {
 
     // Also measure worst-case 256-leaf SubtreePage seal boundary Deposit (leaf 255 -> 256)
     // and worst-case 2in/2out Withdraw WSOL Unwrap + 2in/2out Withdraw SPL + 2in/2out T22 Hook!
-    for (kind, seq) in [
-        (OPEN_PAGE_KIND_MEMO, 2u64),
-        (OPEN_PAGE_KIND_SUBTREE, 1u64),
-    ] {
-        expect_ok(
-            send_v1(
-                &mut svm,
-                &payer,
-                &[],
-                &[to_svm_ix(&build_open_page(
-                    program_id,
-                    payer.pubkey(),
-                    kind,
-                    POOL_ID,
-                    0,
-                    seq,
-                ))],
-                100_000,
-            ),
-            "pre-open page for 256-leaf seal CU measurement",
-        );
-    }
     let mut lane0_note_a = None;
     let mut lane0_note_b = None;
     let mut lane0_note_c = None;
@@ -8025,6 +8139,47 @@ fn test_v130_auto_open_page_lookahead_and_empirical_cu_budgets() {
     let mut lane0_note_j = None;
     let mut cu_deposit_sol_seal_256 = 0u64;
     for i in 87u64..256u64 {
+        if i == 182 {
+            // Standalone OpenPage CU measurement at >=90% MemoPage 1 occupancy (182 % 96 == 86)
+            cu_open_page = expect_ok(
+                send_v1(
+                    &mut svm,
+                    &payer,
+                    &[],
+                    &[to_svm_ix(&build_open_page(
+                        program_id,
+                        payer.pubkey(),
+                        OPEN_PAGE_KIND_MEMO,
+                        POOL_ID,
+                        0,
+                        2,
+                        u64::MAX,
+                    ))],
+                    CU_LIMIT_OPEN_PAGE,
+                ),
+                "CU: OpenPage(MEMO, 2) at >=90% occupancy",
+            );
+        }
+        if i == 230 {
+            expect_ok(
+                send_v1(
+                    &mut svm,
+                    &payer,
+                    &[],
+                    &[to_svm_ix(&build_open_page(
+                        program_id,
+                        payer.pubkey(),
+                        OPEN_PAGE_KIND_SUBTREE,
+                        POOL_ID,
+                        0,
+                        1,
+                        u64::MAX,
+                    ))],
+                    CU_LIMIT_OPEN_PAGE,
+                ),
+                "OpenPage(SUBTREE, 1) at >=90% occupancy (230/256)",
+            );
+        }
         let mut eph = [0xD0u8; 32];
         eph[0] = (i & 0xff) as u8;
         eph[1] = (i >> 8) as u8;

@@ -102,6 +102,9 @@ pub fn prepare_escrow_accounts(
     action_accounts: &[AudrenAccountMeta],
     extra_writable: &[Address],
 ) -> Result<PreparedEscrowAccounts, ClientError> {
+    if (shard_id as usize) >= audren_core::NUM_ESCROW_SHARDS {
+        return Err(ClientError::InvalidEncoding("shard_id out of range"));
+    }
     let (escrow_pda, _) = derive_escrow_pda(program_id, pool_id, shard_id);
     let escrow_in_ata = derive_ata(&escrow_pda, input_token_program, input_mint);
     let escrow_out_ata = derive_ata(&escrow_pda, output_token_program, output_mint);

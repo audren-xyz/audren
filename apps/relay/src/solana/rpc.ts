@@ -46,6 +46,18 @@ export {
 // Zero hardcoded mint metadata or rent constants — everything fetched live.
 // ============================================================================
 
+export class SolanaRpcJsonError extends Error {
+  readonly code?: number
+  readonly data?: unknown
+
+  constructor(message: string, code?: number, data?: unknown) {
+    super(message)
+    this.name = 'SolanaRpcJsonError'
+    this.code = code
+    this.data = data
+  }
+}
+
 export async function rpcCall<T>(rpcUrl: string, method: string, params: unknown[]): Promise<T> {
   const res = await fetch(rpcUrl, {
     method: 'POST',
@@ -76,7 +88,7 @@ export async function rpcCall<T>(rpcUrl: string, method: string, params: unknown
         // Ignore unserializable error data
       }
     }
-    throw new Error(`${baseMsg}${dataSuffix}`)
+    throw new SolanaRpcJsonError(`${baseMsg}${dataSuffix}`, body.error.code, body.error.data)
   }
   return body.result as T
 }
@@ -722,7 +734,12 @@ export class TransactionFailedOnChainError extends Error {
   }
 }
 
-export async function waitForConfirmation(rpcUrl: string, signature: string): Promise<{ slot: number }> {
+export async function waitForConfirmation(
+  rpcUrl: string,
+  signature: string,
+  maxWaitMs = 30_000,
+): Promise<{ slot: number }> {
+  const deadline = Date.now() + Math.max(1_000, maxWaitMs)
   for (let attempt = 0; attempt < 36; attempt++) {
     const res = await rpcCall<{
       value: Array<{
@@ -741,7 +758,9 @@ export async function waitForConfirmation(rpcUrl: string, signature: string): Pr
         return { slot: status.slot }
       }
     }
-    await new Promise((r) => setTimeout(r, 700))
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    await new Promise((r) => setTimeout(r, Math.min(700, remaining)))
   }
   throw new Error('Timed out waiting for confirmation')
 }

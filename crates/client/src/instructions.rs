@@ -10,21 +10,22 @@ use audren_core::{
         ASSET_MODE_PRIVATE, ASSET_MODE_PUBLIC, CTX_DOMAIN_EXEC_VIA_ESCROW,
         CTX_DOMAIN_ROUTER_ACCOUNTS, CTX_DOMAIN_TRANSACT, DEPOSIT_FLAG_FEE_FROM_AMOUNT,
         DEPOSIT_FLAG_NATIVE_SOL, EXEC_FLAG_FEE_ON_OUTPUT, GROTH16_PROOF_LEN, OPEN_PAGE_KIND_MEMO,
-        OPEN_PAGE_KIND_NULLIFIER, OPEN_PAGE_KIND_SUBROOT, OPEN_PAGE_KIND_SUBTREE, TAG_DEPOSIT,
-        TAG_EXEC_VIA_ESCROW, TAG_INIT_LANE, TAG_INIT_POOL, TAG_INIT_ROOT_HISTORY, TAG_OPEN_PAGE,
-        TAG_SET_PAUSED, TAG_TRANSACT, TAG_UPDATE_POOL, UPDATE_POOL_ACCEPT_AUTHORITY,
-        UPDATE_POOL_PARAMS, UPDATE_POOL_PROPOSE_AUTHORITY, UPDATE_POOL_RENOUNCE_AUTHORITY,
-        WITHDRAW_FLAG_UNWRAP_WSOL,
+        OPEN_PAGE_KIND_NULLIFIER, OPEN_PAGE_KIND_SUBROOT, OPEN_PAGE_KIND_SUBTREE,
+        OPEN_PAGE_WIRE_LEN, TAG_DEPOSIT, TAG_EXEC_VIA_ESCROW, TAG_INIT_LANE, TAG_INIT_POOL,
+        TAG_INIT_ROOT_HISTORY, TAG_OPEN_PAGE, TAG_SET_PAUSED, TAG_TRANSACT, TAG_UPDATE_POOL,
+        UPDATE_POOL_ACCEPT_AUTHORITY, UPDATE_POOL_PARAMS, UPDATE_POOL_PROPOSE_AUTHORITY,
+        UPDATE_POOL_RENOUNCE_AUTHORITY, WITHDRAW_FLAG_UNWRAP_WSOL,
     },
     layout::{
         DYN_MEMO_HEAD_LEN, MAX_LEAVES_PER_LANE, MEMO_CT_LEN, MEMO_ENTRY_WIRE_LEN,
         MEMO_NOTES_PER_PAGE, NF_PER_PAGE, SUBROOTS_PER_PAGE, SUBTREE_LEAVES,
     },
-    CU_LIMIT_DEPOSIT, CU_LIMIT_DEPOSIT_HOOK, CU_LIMIT_EXEC_VIA_ESCROW_BASE, CU_LIMIT_INIT_LANE,
-    CU_LIMIT_INIT_POOL, CU_LIMIT_INIT_ROOT_HISTORY, CU_LIMIT_OPEN_PAGE,
-    CU_LIMIT_TRANSACT_FULL_EXIT, CU_LIMIT_TRANSACT_PRIVATE, CU_LIMIT_TRANSACT_WITHDRAW,
-    CU_LIMIT_TRANSACT_WITHDRAW_HOOK, EPOCH_RING_LEN, MAX_ROOT_EPOCH_INTERVAL, NUM_ESCROW_SHARDS,
-    NUM_LANES, ROOT_RING_EPOCH, ROOT_RING_SLOT, SLOT_RING_LEN, SYSTEM_PROGRAM_ID,
+    CLASSIC_TOKEN_PROGRAM_ID, CU_LIMIT_DEPOSIT, CU_LIMIT_DEPOSIT_HOOK,
+    CU_LIMIT_EXEC_VIA_ESCROW_BASE, CU_LIMIT_INIT_LANE, CU_LIMIT_INIT_POOL,
+    CU_LIMIT_INIT_ROOT_HISTORY, CU_LIMIT_OPEN_PAGE, CU_LIMIT_TRANSACT_FULL_EXIT,
+    CU_LIMIT_TRANSACT_PRIVATE, CU_LIMIT_TRANSACT_WITHDRAW, CU_LIMIT_TRANSACT_WITHDRAW_HOOK,
+    EPOCH_RING_LEN, MAX_ROOT_EPOCH_INTERVAL, NUM_ESCROW_SHARDS, NUM_LANES, ROOT_RING_EPOCH,
+    ROOT_RING_SLOT, SLOT_RING_LEN, SYSTEM_PROGRAM_ID, WSOL_MINT,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,11 +94,27 @@ pub const AUTO_OPEN_NF_LOOKAHEAD_REM: u64 = 60;
 pub const AUTO_OPEN_SUBROOT_LOOKAHEAD_SLOT: u64 = 280;
 
 /// Single `OpenPage` (`TAG_OPEN_PAGE = 0x02`) candidate planned for zero-crank auto-opening.
+///
+/// - `mandatory == true`: required by the current transaction's own rollover boundary.
+/// - `mandatory == false`: proactive `>= 90%` lookahead (pass `max_payer_deficit = 0` so only
+///   `LaneRentVault` pays and TOCTOU races revert cleanly instead of debiting `payer`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AutoOpenPageSpec {
     pub page_kind: u8,
     pub page_seq: u64,
     pub pda: Address,
+    pub mandatory: bool,
+}
+
+/// Optional writable account context for `ExecViaEscrow` `ctx_hash` writability promotion,
+/// ensuring 100% parity with Solana's instruction-wide writability merge in `build_exec_via_escrow`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecCtxWritableAccounts {
+    pub payer: Option<Address>,
+    pub escrow_in_ata: Option<Address>,
+    pub escrow_out_ata: Option<Address>,
+    pub vault_in_ata: Option<Address>,
+    pub vault_out_ata: Option<Address>,
 }
 
 /// Validate `(root_ring_kind, root_ring_idx)` against `GlobalRootHistory` ring capacities.
@@ -494,16 +511,25 @@ pub fn plan_auto_open_pages(
     let num_nfs_u64 = u64::try_from(num_nfs).unwrap_or(u64::MAX);
 
     let mut specs: Vec<AutoOpenPageSpec> = Vec::new();
-    let mut seen: BTreeSet<(u8, u64)> = BTreeSet::new();
+    let mut seen: std::collections::BTreeMap<(u8, u64), usize> = std::collections::BTreeMap::new();
 
-    let mut maybe_push = |page_kind: u8, page_seq: u64, pda: Address| {
-        if !existing_pages.contains(&pda) && seen.insert((page_kind, page_seq)) {
-            specs.push(AutoOpenPageSpec {
-                page_kind,
-                page_seq,
-                pda,
-            });
+    let mut maybe_push = |page_kind: u8, page_seq: u64, pda: Address, mandatory: bool| {
+        if existing_pages.contains(&pda) {
+            return;
         }
+        if let Some(&idx) = seen.get(&(page_kind, page_seq)) {
+            if mandatory {
+                specs[idx].mandatory = true;
+            }
+            return;
+        }
+        seen.insert((page_kind, page_seq), specs.len());
+        specs.push(AutoOpenPageSpec {
+            page_kind,
+            page_seq,
+            pda,
+            mandatory,
+        });
     };
 
     let max_sub_pages = MAX_LEAVES_PER_LANE / sub_size;
@@ -519,15 +545,18 @@ pub fn plan_auto_open_pages(
                 OPEN_PAGE_KIND_SUBTREE,
                 cur_sub,
                 derive_subtree_pda(program_id, pool_id, lane_id, cur_sub).0,
+                true,
             );
         }
-        if sub_rem < num_outputs_u64 || sub_rem <= AUTO_OPEN_SUBTREE_LOOKAHEAD_REM {
+        let sub_mandatory_next = sub_rem < num_outputs_u64;
+        if sub_mandatory_next || sub_rem <= AUTO_OPEN_SUBTREE_LOOKAHEAD_REM {
             if let Some(next_sub) = cur_sub.checked_add(1) {
                 if next_sub < max_sub_pages {
                     maybe_push(
                         OPEN_PAGE_KIND_SUBTREE,
                         next_sub,
                         derive_subtree_pda(program_id, pool_id, lane_id, next_sub).0,
+                        sub_mandatory_next,
                     );
                 }
             }
@@ -540,15 +569,22 @@ pub fn plan_auto_open_pages(
                 OPEN_PAGE_KIND_SUBROOT,
                 cur_sr,
                 derive_subroot_pda(program_id, pool_id, lane_id, cur_sr).0,
+                true,
             );
         }
-        if subroot_slot >= AUTO_OPEN_SUBROOT_LOOKAHEAD_SLOT {
+        let sr_mandatory_next = sub_mandatory_next
+            && cur_sub
+                .checked_add(1)
+                .map(|ns| ns / sr_size > cur_sr)
+                .unwrap_or(false);
+        if sr_mandatory_next || subroot_slot >= AUTO_OPEN_SUBROOT_LOOKAHEAD_SLOT {
             if let Some(next_sr) = cur_sr.checked_add(1) {
                 if next_sr < max_sr_pages {
                     maybe_push(
                         OPEN_PAGE_KIND_SUBROOT,
                         next_sr,
                         derive_subroot_pda(program_id, pool_id, lane_id, next_sr).0,
+                        sr_mandatory_next,
                     );
                 }
             }
@@ -562,15 +598,18 @@ pub fn plan_auto_open_pages(
                 OPEN_PAGE_KIND_MEMO,
                 cur_memo,
                 derive_memo_pda(program_id, pool_id, lane_id, cur_memo).0,
+                true,
             );
         }
-        if memo_rem < num_outputs_u64 || memo_rem <= AUTO_OPEN_MEMO_LOOKAHEAD_REM {
+        let memo_mandatory_next = memo_rem < num_outputs_u64;
+        if memo_mandatory_next || memo_rem <= AUTO_OPEN_MEMO_LOOKAHEAD_REM {
             if let Some(next_memo) = cur_memo.checked_add(1) {
                 if next_memo < max_memo_pages {
                     maybe_push(
                         OPEN_PAGE_KIND_MEMO,
                         next_memo,
                         derive_memo_pda(program_id, pool_id, lane_id, next_memo).0,
+                        memo_mandatory_next,
                     );
                 }
             }
@@ -586,14 +625,17 @@ pub fn plan_auto_open_pages(
                 OPEN_PAGE_KIND_NULLIFIER,
                 cur_nf,
                 derive_nf_page_pda(program_id, pool_id, lane_id, cur_nf).0,
+                true,
             );
         }
-        if nf_rem < num_nfs_u64 || nf_rem <= AUTO_OPEN_NF_LOOKAHEAD_REM {
+        let nf_mandatory_next = nf_rem < num_nfs_u64;
+        if nf_mandatory_next || nf_rem <= AUTO_OPEN_NF_LOOKAHEAD_REM {
             if let Some(next_nf) = cur_nf.checked_add(1) {
                 maybe_push(
                     OPEN_PAGE_KIND_NULLIFIER,
                     next_nf,
                     derive_nf_page_pda(program_id, pool_id, lane_id, next_nf).0,
+                    nf_mandatory_next,
                 );
             }
         }
@@ -602,11 +644,13 @@ pub fn plan_auto_open_pages(
     Ok(specs)
 }
 
-/// Build idempotent `OpenPage` (`TAG_OPEN_PAGE = 0x02`) instructions to prepend in the same
-/// Transaction v1 whenever a lane is at exact rollover or `>= 90%` full and the target page PDA
-/// is not yet initialized.
+/// Build idempotent `OpenPage` (`TAG_OPEN_PAGE = 0x02`) instructions with explicit control over
+/// proactive `>= 90%` lookaheads and mandatory rollover `max_payer_deficit`.
+///
+/// Proactive (`!mandatory`) lookahead instructions ALWAYS set `max_payer_deficit = 0` so
+/// `LaneRentVault` bears 100% of rent and TOCTOU drains revert cleanly instead of debiting `payer`.
 #[allow(clippy::too_many_arguments)]
-pub fn build_auto_open_page_ixs(
+pub fn build_auto_open_page_ixs_with_options(
     program_id: Address,
     payer: Address,
     pool_id: u32,
@@ -616,6 +660,8 @@ pub fn build_auto_open_page_ixs(
     num_outputs: usize,
     num_nfs: usize,
     existing_pages: &BTreeSet<Address>,
+    include_proactive: bool,
+    mandatory_max_payer_deficit: u64,
 ) -> Result<Vec<AudrenInstruction>, ClientError> {
     let specs = plan_auto_open_pages(
         &program_id,
@@ -629,8 +675,54 @@ pub fn build_auto_open_page_ixs(
     )?;
     specs
         .into_iter()
-        .map(|s| try_build_open_page(program_id, payer, s.page_kind, pool_id, lane_id, s.page_seq))
+        .filter(|s| s.mandatory || include_proactive)
+        .map(|s| {
+            let max_deficit = if s.mandatory {
+                mandatory_max_payer_deficit
+            } else {
+                0
+            };
+            try_build_open_page(
+                program_id,
+                payer,
+                s.page_kind,
+                pool_id,
+                lane_id,
+                s.page_seq,
+                max_deficit,
+            )
+        })
         .collect()
+}
+
+/// Build idempotent `OpenPage` (`TAG_OPEN_PAGE = 0x02`) instructions to prepend in the same
+/// Transaction v1 whenever a lane is at exact rollover or `>= 90%` full and the target page PDA
+/// is not yet initialized. Proactive lookahead pages pass `max_payer_deficit = 0`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_auto_open_page_ixs(
+    program_id: Address,
+    payer: Address,
+    pool_id: u32,
+    lane_id: u8,
+    next_leaf: u64,
+    nf_count: u64,
+    num_outputs: usize,
+    num_nfs: usize,
+    existing_pages: &BTreeSet<Address>,
+) -> Result<Vec<AudrenInstruction>, ClientError> {
+    build_auto_open_page_ixs_with_options(
+        program_id,
+        payer,
+        pool_id,
+        lane_id,
+        next_leaf,
+        nf_count,
+        num_outputs,
+        num_nfs,
+        existing_pages,
+        true,
+        u64::MAX,
+    )
 }
 
 /// Fallible exact `Transact` (`0x05`) `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
@@ -753,13 +845,49 @@ pub fn compute_router_accounts_hash(router_accounts: &[AudrenAccountMeta]) -> [u
     h.finalize().into()
 }
 
-/// Fallible exact `ExecViaEscrow` (`0x06`) `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
-///
-/// Applies Solana's transaction-wide writability promotion across `escrow_pda`,
-/// `relayer_fee_recipient`, `extra_writable_pubkeys`, and duplicate writable `router_accounts`
-/// before hashing `router_accounts` so on-chain `hash_router_accounts_arena` matches identically.
+/// Collect every writable account preceding `router_accounts` in `ExecViaEscrow` that can
+/// trigger Solana's instruction-wide writability merge (`payer`, `escrow_in_ata`,
+/// `escrow_out_ata`, `vault_in_ata`, `vault_out_ata`, `relayer_fee_recipient`, plus
+/// `extra_writable_pubkeys`), matching `build_exec_via_escrow` and on-chain `ix_exec_via_escrow`.
+pub fn collect_exec_writable_pubkeys(
+    writable_accounts: Option<&ExecCtxWritableAccounts>,
+    relayer_fee_amount: u64,
+    relayer_fee_recipient: Option<&Address>,
+    extra_writable_pubkeys: &[Address],
+) -> Vec<Address> {
+    let mut out = Vec::with_capacity(6 + extra_writable_pubkeys.len());
+    if let Some(w) = writable_accounts {
+        if let Some(a) = w.payer {
+            out.push(a);
+        }
+        if let Some(a) = w.escrow_in_ata {
+            out.push(a);
+        }
+        if let Some(a) = w.escrow_out_ata {
+            out.push(a);
+        }
+        if let Some(a) = w.vault_in_ata {
+            out.push(a);
+        }
+        if let Some(a) = w.vault_out_ata {
+            out.push(a);
+        }
+    }
+    if relayer_fee_amount > 0 {
+        if let Some(fee_r) = relayer_fee_recipient {
+            out.push(*fee_r);
+        }
+    }
+    out.extend_from_slice(extra_writable_pubkeys);
+    out
+}
+
+/// Fallible exact `ExecViaEscrow` (`0x06`) `ctx_hash` matching `program/src/lib.rs` bit-for-bit,
+/// with full writability-promotion parity against `build_exec_via_escrow` (covering `payer`,
+/// `escrow_pda`, `escrow_in_ata`, `escrow_out_ata`, `vault_in_ata`, `vault_out_ata`,
+/// `relayer_fee_recipient`, and `extra_writable_pubkeys`).
 #[allow(clippy::too_many_arguments)]
-pub fn try_compute_exec_ctx_hash(
+pub fn try_compute_exec_ctx_hash_with_writable(
     program_id: &Address,
     pool_id: u32,
     vk_id: u8,
@@ -775,6 +903,7 @@ pub fn try_compute_exec_ctx_hash(
     min_amount_out: u64,
     router_prog: &Address,
     router_accounts: &[AudrenAccountMeta],
+    writable_accounts: Option<&ExecCtxWritableAccounts>,
     extra_writable_pubkeys: &[Address],
     out_stealth_owner: &[u8; 32],
     out_blinding: &[u8; 32],
@@ -811,13 +940,12 @@ pub fn try_compute_exec_ctx_hash(
     };
 
     let (escrow_pda, _) = derive_escrow_pda(program_id, pool_id, escrow_shard);
-    let mut extra_writable = Vec::with_capacity(1 + extra_writable_pubkeys.len());
-    if relayer_fee_amount > 0 {
-        if let Some(fee_r) = relayer_fee_recipient {
-            extra_writable.push(*fee_r);
-        }
-    }
-    extra_writable.extend_from_slice(extra_writable_pubkeys);
+    let extra_writable = collect_exec_writable_pubkeys(
+        writable_accounts,
+        relayer_fee_amount,
+        relayer_fee_recipient,
+        extra_writable_pubkeys,
+    );
     let normalized_router_accs =
         prepare_escrow_accounts_for_audren(router_accounts, &escrow_pda, &extra_writable);
     let router_accs_hash = compute_router_accounts_hash(&normalized_router_accs);
@@ -850,6 +978,66 @@ pub fn try_compute_exec_ctx_hash(
     h.update(change_memos);
     let digest: [u8; 32] = h.finalize().into();
     Ok(mask_to_fr(&digest))
+}
+
+/// Fallible exact `ExecViaEscrow` (`0x06`) `ctx_hash` matching `program/src/lib.rs` bit-for-bit.
+///
+/// Applies Solana's transaction-wide writability promotion across `escrow_pda`,
+/// `relayer_fee_recipient`, `extra_writable_pubkeys`, and duplicate writable `router_accounts`
+/// before hashing `router_accounts` so on-chain `hash_router_accounts_arena` matches identically.
+/// For automatic promotion of `payer`, `escrow_in_ata`, `escrow_out_ata`, `vault_in_ata`, and
+/// `vault_out_ata` without manually listing them in `extra_writable_pubkeys`, use
+/// [`try_compute_exec_ctx_hash_with_writable`].
+#[allow(clippy::too_many_arguments)]
+pub fn try_compute_exec_ctx_hash(
+    program_id: &Address,
+    pool_id: u32,
+    vk_id: u8,
+    out_lane_id: u8,
+    escrow_shard: u8,
+    change_mask: u8,
+    fee_on_output: bool,
+    asset_in: &[u8; 32],
+    amount_in: u64,
+    relayer_fee_amount: u64,
+    relayer_fee_recipient: Option<&Address>,
+    asset_out: &[u8; 32],
+    min_amount_out: u64,
+    router_prog: &Address,
+    router_accounts: &[AudrenAccountMeta],
+    extra_writable_pubkeys: &[Address],
+    out_stealth_owner: &[u8; 32],
+    out_blinding: &[u8; 32],
+    dyn_memo_head: &[u8; DYN_MEMO_HEAD_LEN],
+    dyn_mask_72: &[u8; MEMO_CT_LEN],
+    router_ix_data: &[u8],
+    change_memos: &[u8],
+) -> Result<Fr, ClientError> {
+    try_compute_exec_ctx_hash_with_writable(
+        program_id,
+        pool_id,
+        vk_id,
+        out_lane_id,
+        escrow_shard,
+        change_mask,
+        fee_on_output,
+        asset_in,
+        amount_in,
+        relayer_fee_amount,
+        relayer_fee_recipient,
+        asset_out,
+        min_amount_out,
+        router_prog,
+        router_accounts,
+        None,
+        extra_writable_pubkeys,
+        out_stealth_owner,
+        out_blinding,
+        dyn_memo_head,
+        dyn_mask_72,
+        router_ix_data,
+        change_memos,
+    )
 }
 
 /// Exact `ExecViaEscrow` (`0x06`) `ctx_hash` matching `program/src/lib.rs` bit-for-bit (with `vk_id` bound).
@@ -1022,6 +1210,7 @@ pub fn try_build_open_page(
     pool_id: u32,
     lane_id: u8,
     page_seq: u64,
+    max_payer_deficit: u64,
 ) -> Result<AudrenInstruction, ClientError> {
     if (lane_id as usize) >= NUM_LANES {
         return Err(ClientError::InvalidEncoding("lane_id out of range"));
@@ -1037,12 +1226,13 @@ pub fn try_build_open_page(
             ));
         }
     };
-    let mut data = Vec::with_capacity(15);
+    let mut data = Vec::with_capacity(OPEN_PAGE_WIRE_LEN);
     data.push(TAG_OPEN_PAGE);
     data.push(page_kind);
     data.extend_from_slice(&pool_id.to_le_bytes());
     data.push(lane_id);
     data.extend_from_slice(&page_seq.to_le_bytes());
+    data.extend_from_slice(&max_payer_deficit.to_le_bytes());
     Ok(AudrenInstruction {
         program_id: program_id.to_bytes(),
         accounts: vec![
@@ -1067,9 +1257,18 @@ pub fn build_open_page(
     pool_id: u32,
     lane_id: u8,
     page_seq: u64,
+    max_payer_deficit: u64,
 ) -> AudrenInstruction {
-    try_build_open_page(program_id, payer, page_kind, pool_id, lane_id, page_seq)
-        .expect("valid OpenPage parameters")
+    try_build_open_page(
+        program_id,
+        payer,
+        page_kind,
+        pool_id,
+        lane_id,
+        page_seq,
+        max_payer_deficit,
+    )
+    .expect("valid OpenPage parameters")
 }
 
 /// Fallible unified `Deposit` (`TAG_DEPOSIT = 0x03`, `185 B`, 14 fixed accounts + optional rollovers/hooks).
@@ -1103,6 +1302,23 @@ pub fn try_build_deposit(
         return Err(ClientError::InvalidEncoding(
             "fee_from_amount is only valid when native_sol is true",
         ));
+    }
+    if native_sol {
+        if mint != Address::new_from_array(WSOL_MINT) {
+            return Err(ClientError::InvalidEncoding(
+                "native_sol deposit requires WSOL_MINT",
+            ));
+        }
+        if token_prog != Address::new_from_array(CLASSIC_TOKEN_PROGRAM_ID) {
+            return Err(ClientError::InvalidEncoding(
+                "native_sol deposit requires CLASSIC_TOKEN_PROGRAM_ID",
+            ));
+        }
+        if source_account != depositor {
+            return Err(ClientError::InvalidEncoding(
+                "native_sol deposit requires source_account == depositor",
+            ));
+        }
     }
     let flags = u8::from(next_sub_seq.is_some())
         | (u8::from(next_memo_seq.is_some()) << 1)
@@ -1932,9 +2148,12 @@ mod tests {
         let sibling_writable = Address::new_from_array([0x33u8; 32]);
         let leg_acc = Address::new_from_array([0x44u8; 32]);
 
-        // try_build_open_page rejects page_kind > 3 and lane_id >= 16
-        assert!(try_build_open_page(pid, payer, 4, 0, 0, 0).is_err());
-        assert!(try_build_open_page(pid, payer, 0, 0, 16, 0).is_err());
+        // try_build_open_page rejects page_kind > 3 and lane_id >= 16, and encodes 23 B with max_payer_deficit
+        assert!(try_build_open_page(pid, payer, 4, 0, 0, 0, u64::MAX).is_err());
+        assert!(try_build_open_page(pid, payer, 0, 0, 16, 0, u64::MAX).is_err());
+        let op_zero = try_build_open_page(pid, payer, OPEN_PAGE_KIND_MEMO, 0, 0, 1, 0).unwrap();
+        assert_eq!(op_zero.data.len(), OPEN_PAGE_WIRE_LEN);
+        assert_eq!(&op_zero.data[15..23], &0u64.to_le_bytes());
 
         // try_build_init_pool / try_build_init_lane / try_build_init_root_history / try_build_deposit bounds
         assert!(try_build_init_pool(pid, payer, 0, 0, 0, 0).is_err());

@@ -1554,7 +1554,7 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "instructionNode",
         "name": "openPage",
         "docs": [
-          "Idempotent, sequence-bounded, pause-exempt, LaneRentVault-subsidized page opener."
+          "Idempotent, >=90%-lookahead-gated, pause-exempt, LaneRentVault-subsidized page opener with explicit max_payer_deficit protection against TOCTOU drains."
         ],
         "discriminators": [
           {
@@ -1582,7 +1582,7 @@ export const AUDREN_CODAMA_IDL = {
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Permissionless cranker / fallback rent payer."
+              "Permissionless cranker / bounded fallback rent payer."
             ]
           },
           {
@@ -1689,6 +1689,18 @@ export const AUDREN_CODAMA_IDL = {
               "format": "u64",
               "endian": "le"
             }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "maxPayerDeficit",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            },
+            "docs": [
+              "Maximum lamports payer consents to cover if LaneRentVault cannot subsidize full page rent (pass 0 for proactive >=90% lookaheads)."
+            ]
           }
         ]
       },
@@ -3701,9 +3713,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "insufficientVaultBalance",
         "code": 6017,
-        "message": "Custody vault holds insufficient balance for outflow.",
+        "message": "Custody vault or LaneRentVault holds insufficient balance (or OpenPage payer_deficit exceeds max_payer_deficit).",
         "docs": [
-          "Custody vault holds insufficient balance for outflow."
+          "Custody vault or LaneRentVault holds insufficient balance (or OpenPage payer_deficit exceeds max_payer_deficit)."
         ]
       },
       {
@@ -3809,9 +3821,9 @@ export const AUDREN_CODAMA_IDL = {
         "kind": "errorNode",
         "name": "pageSeqOutOfRange",
         "code": 6029,
-        "message": "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage).",
+        "message": "OpenPage sequence exceeds allowed lookahead bound (cur_seq, or cur_seq + 1 only at >= 90% occupancy: Subtree >= 230/256, Subroot >= 280/300, Memo >= 86/96, Nullifier >= 540/600; cur_seq + 2 rejected).",
         "docs": [
-          "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage)."
+          "OpenPage sequence exceeds allowed lookahead bound (cur_seq, or cur_seq + 1 only at >= 90% occupancy: Subtree >= 230/256, Subroot >= 280/300, Memo >= 86/96, Nullifier >= 540/600; cur_seq + 2 rejected)."
         ]
       },
       {
@@ -3974,7 +3986,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "open_page",
       "docs": [
-        "Idempotent, sequence-bounded, pause-exempt, LaneRentVault-subsidized page opener."
+        "Idempotent, >=90%-lookahead-gated, pause-exempt, LaneRentVault-subsidized page opener with explicit max_payer_deficit protection against TOCTOU drains."
       ],
       "discriminator": [
         2
@@ -4026,6 +4038,10 @@ export const AUDREN_ANCHOR_IDL = {
         },
         {
           "name": "page_seq",
+          "type": "u64"
+        },
+        {
+          "name": "max_payer_deficit",
           "type": "u64"
         }
       ]
@@ -4212,7 +4228,8 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "transact",
       "docs": [
-        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit) with GlobalRootHistory verification and inline root update."
+        "Unified 2-in -> 3-out BN254 Groth16 private transfer (shielded cm2 fee) or public withdraw from canonical vault_auth ATA (incl. atomic WSOL unwrap & pause-exempt full exit) with GlobalRootHistory verification and inline root update.",
+        "Wire note (Pinocchio raw framing): trailing `bytes` argument is raw unprefixed bytes on-chain (NOT Borsh u32-length-prefixed); use @audren/sdk or audren-client builders to serialize instruction data."
       ],
       "discriminator": [
         5
@@ -4383,7 +4400,8 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "exec_via_escrow",
       "docs": [
-        "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, XOR-masked 72 B dynamic output memo, and inline GlobalRootHistory update."
+        "Atomic SPL / Token-2022 DeFi CPI behind WatchedEscrowBuf firewall with canonical vault/escrow ATAs, optional EXEC_FLAG_FEE_ON_OUTPUT, XOR-masked 72 B dynamic output memo, and inline GlobalRootHistory update.",
+        "Wire note (Pinocchio raw framing): trailing `bytes` argument is raw unprefixed bytes on-chain (NOT Borsh u32-length-prefixed); use @audren/sdk or audren-client builders to serialize instruction data."
       ],
       "discriminator": [
         6
@@ -4635,7 +4653,8 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "name": "update_pool",
       "docs": [
-        "Update pool governance parameters (note_rent_fee, nf_rent_fee; root_epoch_interval is immutable after InitPool / InitRootHistory) or execute two-step authority transfer / renounce (renounce requires !paused)."
+        "Update pool governance parameters (note_rent_fee, nf_rent_fee; root_epoch_interval is immutable after InitPool / InitRootHistory) or execute two-step authority transfer / renounce (renounce requires !paused).",
+        "Wire note (Pinocchio raw framing): trailing `bytes` argument is raw unprefixed bytes on-chain (NOT Borsh u32-length-prefixed); use @audren/sdk or audren-client builders to serialize instruction data."
       ],
       "discriminator": [
         8
@@ -4808,15 +4827,6 @@ export const AUDREN_ANCHOR_IDL = {
         "kind": "struct",
         "fields": [
           {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
-          {
             "name": "version",
             "type": "u8"
           },
@@ -4899,15 +4909,6 @@ export const AUDREN_ANCHOR_IDL = {
         "kind": "struct",
         "fields": [
           {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
-          {
             "name": "pool_id",
             "type": "u32"
           },
@@ -4939,15 +4940,6 @@ export const AUDREN_ANCHOR_IDL = {
       "type": {
         "kind": "struct",
         "fields": [
-          {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
           {
             "name": "version",
             "type": "u8"
@@ -5020,15 +5012,6 @@ export const AUDREN_ANCHOR_IDL = {
         "kind": "struct",
         "fields": [
           {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
-          {
             "name": "lane_id",
             "type": "u8"
           },
@@ -5083,15 +5066,6 @@ export const AUDREN_ANCHOR_IDL = {
         "kind": "struct",
         "fields": [
           {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
-          {
             "name": "lane_id",
             "type": "u8"
           },
@@ -5145,15 +5119,6 @@ export const AUDREN_ANCHOR_IDL = {
       "type": {
         "kind": "struct",
         "fields": [
-          {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
           {
             "name": "lane_id",
             "type": "u8"
@@ -5245,15 +5210,6 @@ export const AUDREN_ANCHOR_IDL = {
         "kind": "struct",
         "fields": [
           {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
-          {
             "name": "lane_id",
             "type": "u8"
           },
@@ -5315,15 +5271,6 @@ export const AUDREN_ANCHOR_IDL = {
       "type": {
         "kind": "struct",
         "fields": [
-          {
-            "name": "magic",
-            "type": {
-              "array": [
-                "u8",
-                8
-              ]
-            }
-          },
           {
             "name": "version",
             "type": "u8"
@@ -5582,7 +5529,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6017,
       "name": "InsufficientVaultBalance",
-      "msg": "Custody vault holds insufficient balance for outflow."
+      "msg": "Custody vault or LaneRentVault holds insufficient balance (or OpenPage payer_deficit exceeds max_payer_deficit)."
     },
     {
       "code": 6018,
@@ -5642,7 +5589,7 @@ export const AUDREN_ANCHOR_IDL = {
     {
       "code": 6029,
       "name": "PageSeqOutOfRange",
-      "msg": "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage)."
+      "msg": "OpenPage sequence exceeds allowed lookahead bound (cur_seq, or cur_seq + 1 only at >= 90% occupancy: Subtree >= 230/256, Subroot >= 280/300, Memo >= 86/96, Nullifier >= 540/600; cur_seq + 2 rejected)."
     },
     {
       "code": 6030,

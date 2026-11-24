@@ -36,7 +36,6 @@ use audren_core::{
     EPOCH_RING_LEN, LANE_DEPTH_4ARY, MAX_ROOT_EPOCH_INTERVAL, NUM_LANES, ROOT_RING_EPOCH,
     ROOT_RING_SLOT, SLOT_RING_LEN, ZERO_HASHES_4ARY,
 };
-use rand::{rngs::OsRng, Rng};
 use sha2::{Digest, Sha256};
 use solana_address::Address;
 
@@ -108,7 +107,6 @@ fn compute_lane_root_from_subroots_and_frontier(
 const DECOY_DOMAIN: &[u8] = b"audren/v1/decoy";
 const DECOY_SCOPE_SYNC: &[u8] = b"sync";
 const DECOY_SCOPE_WITNESS_PREFIX: &[u8] = b"witness";
-const DECOY_ORDER_LABEL: &[u8] = b"order";
 /// Byte length of the `MemoPage` header prefix (`closed_slot` binary search).
 pub const MEMO_PAGE_HEADER_LEN: usize = 64;
 /// Byte length of the `MemoPage` SoA scan slice (`header + view_tags + ephemeral_pks = 3,328 B`).
@@ -160,51 +158,93 @@ pub struct WitnessOptions {
     pub decoy_epoch_bucket: Option<u64>,
 }
 
-fn make_witness_decoy_scope(target_lane_id: u8, target_page_seq: u64) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    out[0..7].copy_from_slice(DECOY_SCOPE_WITNESS_PREFIX);
-    out[7] = target_lane_id;
-    out[8..16].copy_from_slice(&target_page_seq.to_le_bytes());
+/// Derive deterministic watermark-bound HRW decoy scope for Pass 1D catch-up syncs:
+/// `"sync" || lane_count(1) || sorted(lane_id(1) || start_leaf_le8(8))...`.
+///
+/// Because Pass 1 performs zero store mutation on failure, retries of an interrupted sync keep
+/// identical starting watermarks (preserving HRW retry-intersection immunity across `+1` growth),
+/// whereas every subsequent distinct sync after `next_memo_leaf` advances uses a fresh decoy set
+/// (eliminating the deterministic multi-sync hit oracle and persistent cross-IP decoy cookie).
+fn make_sync_decoy_scope(start_leaves_by_lane: &[(u8, u64)]) -> Vec<u8> {
+    let mut sorted: Vec<(u8, u64)> = start_leaves_by_lane.to_vec();
+    sorted.sort_by_key(|&(l, _)| l);
+    sorted.dedup_by_key(|(l, _)| *l);
+    let mut out = Vec::with_capacity(DECOY_SCOPE_SYNC.len() + 1 + sorted.len() * 9);
+    out.extend_from_slice(DECOY_SCOPE_SYNC);
+    out.push(sorted.len().min(u8::MAX as usize) as u8);
+    for (lane_id, start_leaf) in sorted {
+        out.push(lane_id);
+        out.extend_from_slice(&start_leaf.to_le_bytes());
+    }
     out
 }
 
-fn compute_subtree_order_key(
-    view_sk: &[u8; 32],
-    scope: &[u8],
-    epoch_bucket: u64,
-    addr: &Address,
-) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(view_sk);
-    h.update(DECOY_DOMAIN);
-    h.update(scope);
-    h.update(epoch_bucket.to_le_bytes());
-    h.update(DECOY_ORDER_LABEL);
-    h.update(addr.as_ref());
-    h.finalize().into()
+/// Derive order-independent HRW decoy scope across all input notes' `(lane_id, page_seq)` targets.
+///
+/// Single-page batches emit `"witness" || lane_id(1) || page_seq_le8(8)` (16 B). Multi-page batches
+/// deduplicate and sort `(lane_id, page_seq)` ascending so retrying `[noteB, noteA]` in swapped
+/// order produces the exact same decoy set as `[noteA, noteB]`.
+fn make_witness_decoy_scope_for_notes(notes: &[(u8, u64)], sub_size: u64) -> Vec<u8> {
+    let mut pages: BTreeSet<(u8, u64)> = BTreeSet::new();
+    for &(lane_id, leaf_idx) in notes {
+        pages.insert((lane_id, leaf_idx / sub_size));
+    }
+    if pages.len() == 1 {
+        let (lane_id, page_seq) = *pages.iter().next().unwrap();
+        let mut out = Vec::with_capacity(16);
+        out.extend_from_slice(DECOY_SCOPE_WITNESS_PREFIX);
+        out.push(lane_id);
+        out.extend_from_slice(&page_seq.to_le_bytes());
+        return out;
+    }
+    let count = u16::try_from(pages.len()).unwrap_or(u16::MAX);
+    let mut out = Vec::with_capacity(DECOY_SCOPE_WITNESS_PREFIX.len() + 2 + pages.len() * 9);
+    out.extend_from_slice(DECOY_SCOPE_WITNESS_PREFIX);
+    out.extend_from_slice(&count.to_le_bytes());
+    for (lane_id, page_seq) in pages {
+        out.push(lane_id);
+        out.extend_from_slice(&page_seq.to_le_bytes());
+    }
+    out
 }
 
 /// Fallible deterministic Rendezvous (Highest Random Weight) sealed `SubtreePage` decoy selection
-/// enforcing [`MAX_HRW_SEALED_SUBTREES`] before iterating so untrusted RPC headers cannot spin CPU.
-pub fn try_select_hrw_sealed_decoys(
+/// over explicit per-lane half-open ranges `[(lane_id, start_seq, end_seq)]`, enforcing
+/// [`MAX_HRW_SEALED_SUBTREES`] before iterating so untrusted RPC headers cannot spin CPU.
+pub fn try_select_hrw_sealed_decoys_in_ranges(
     view_sk: &[u8; 32],
     scope: &[u8],
     epoch_bucket: u64,
-    sealed_by_lane: &[(u8, u64)],
+    ranges_by_lane: &[(u8, u64, u64)],
     already_selected: &BTreeSet<(u8, u64)>,
     target_sealed: usize,
 ) -> Result<Vec<(u8, u64)>, ClientError> {
     let mut total_sealed = 0u64;
     let mut already_sealed_count = 0usize;
-    for &(lane_id, sealed_count) in sealed_by_lane {
-        total_sealed = total_sealed.saturating_add(sealed_count);
+    let mut seen_lanes: BTreeSet<u8> = BTreeSet::new();
+    for &(lane_id, start_seq, end_seq) in ranges_by_lane {
+        if (lane_id as usize) >= NUM_LANES {
+            return Err(ClientError::InvalidEncoding("lane_id out of range"));
+        }
+        if !seen_lanes.insert(lane_id) {
+            return Err(ClientError::InvalidEncoding(
+                "duplicate lane_id in HRW decoy ranges",
+            ));
+        }
+        if start_seq > end_seq {
+            return Err(ClientError::InvalidEncoding(
+                "HRW decoy range start_seq > end_seq",
+            ));
+        }
+        let span = end_seq - start_seq;
+        total_sealed = total_sealed.saturating_add(span);
         if total_sealed > MAX_HRW_SEALED_SUBTREES {
             return Err(ClientError::InvalidEncoding(
                 "sealed subtree count exceeds HRW operational bound",
             ));
         }
         for &(sel_lane, sel_seq) in already_selected {
-            if sel_lane == lane_id && sel_seq < sealed_count {
+            if sel_lane == lane_id && sel_seq >= start_seq && sel_seq < end_seq {
                 already_sealed_count += 1;
             }
         }
@@ -217,8 +257,8 @@ pub fn try_select_hrw_sealed_decoys(
 
     if total_sealed <= capped_target as u64 {
         let mut out = Vec::with_capacity(need);
-        for &(lane_id, sealed_count) in sealed_by_lane {
-            for s in 0..sealed_count {
+        for &(lane_id, start_seq, end_seq) in ranges_by_lane {
+            for s in start_seq..end_seq {
                 if !already_selected.contains(&(lane_id, s)) {
                     out.push((lane_id, s));
                 }
@@ -250,9 +290,9 @@ pub fn try_select_hrw_sealed_decoys(
     };
 
     let mut top: Vec<([u8; 32], u8, u64)> = Vec::with_capacity(need + 1);
-    for &(lane_id, sealed_count) in sealed_by_lane {
+    for &(lane_id, start_seq, end_seq) in ranges_by_lane {
         preimage[lane_off] = lane_id;
-        for s in 0..sealed_count {
+        for s in start_seq..end_seq {
             if already_selected.contains(&(lane_id, s)) {
                 continue;
             }
@@ -273,6 +313,30 @@ pub fn try_select_hrw_sealed_decoys(
     }
 
     Ok(top.into_iter().map(|(_, l, s)| (l, s)).collect())
+}
+
+/// Fallible deterministic Rendezvous (Highest Random Weight) sealed `SubtreePage` decoy selection
+/// enforcing [`MAX_HRW_SEALED_SUBTREES`] before iterating so untrusted RPC headers cannot spin CPU.
+pub fn try_select_hrw_sealed_decoys(
+    view_sk: &[u8; 32],
+    scope: &[u8],
+    epoch_bucket: u64,
+    sealed_by_lane: &[(u8, u64)],
+    already_selected: &BTreeSet<(u8, u64)>,
+    target_sealed: usize,
+) -> Result<Vec<(u8, u64)>, ClientError> {
+    let ranges: Vec<(u8, u64, u64)> = sealed_by_lane
+        .iter()
+        .map(|&(lane_id, sealed_count)| (lane_id, 0, sealed_count))
+        .collect();
+    try_select_hrw_sealed_decoys_in_ranges(
+        view_sk,
+        scope,
+        epoch_bucket,
+        &ranges,
+        already_selected,
+        target_sealed,
+    )
 }
 
 /// Deterministic Rendezvous (Highest Random Weight) sealed `SubtreePage` decoy selection matching
@@ -300,14 +364,6 @@ pub fn select_hrw_sealed_decoys(
         target_sealed,
     )
     .unwrap_or_default()
-}
-
-fn shuffle_in_place<T>(items: &mut [T]) {
-    let len = items.len();
-    for i in (1..len).rev() {
-        let j = OsRng.gen_range(0..=i);
-        items.swap(i, j);
-    }
 }
 
 pub fn decode_pool_state(data: &[u8]) -> Result<PoolState, ClientError> {
@@ -959,7 +1015,7 @@ where
                 .saturating_mul(STRICT_DECOY_SEALED_SUBTREE_TARGET as u64))
             .min(total_sealed) as usize;
             let epoch_bucket = options.decoy_epoch_bucket.unwrap_or(0);
-            let scope = make_witness_decoy_scope(notes[0].0, notes[0].1 / sub_size);
+            let scope = make_witness_decoy_scope_for_notes(notes, sub_size);
             let decoys = try_select_hrw_sealed_decoys(
                 &key,
                 &scope,
@@ -981,9 +1037,9 @@ where
         .copied()
         .chain(sub_expected.keys().copied())
         .collect();
-    if addrs.len() > 1 {
-        shuffle_in_place(&mut addrs);
-    }
+    // Sort canonically by public 32-byte PDA address so request order leaks 0 bits of
+    // target vs decoy vs frontier roles and 0 bits of `view_sk`, while remaining deterministic.
+    addrs.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
 
     let mut raw_by_addr: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
     for chunk in addrs.chunks(RPC_BATCH_CHUNK) {
@@ -1710,10 +1766,12 @@ where
         if lane_hdr.next_leaf == 0 || start_leaf >= lane_hdr.next_leaf {
             continue;
         }
+        let start_memo = start_leaf / memo_size;
+        let end_memo = (lane_hdr.next_leaf - 1) / memo_size;
         memo_cursors.push(MemoCursor {
             lane_id: lane_hdr.lane_id,
-            next_memo: start_leaf / memo_size,
-            end_memo: (lane_hdr.next_leaf - 1) / memo_size,
+            next_memo: start_memo,
+            end_memo,
             next_leaf: lane_hdr.next_leaf,
             stopped: false,
         });
@@ -1940,22 +1998,49 @@ where
     }
 
     // Rendezvous (HRW) wallet-keyed decoy padding for historical sealed `SubtreePage` fetches in
-    // `Strict` mode (`SHA256(view_sk || "audren/v1/decoy" || "sync" || epoch_bucket_le8 || lane_id || page_seq_le8)`):
-    // - Always fetches a fixed uniform count independent of hit count (even 0 hits) during large
-    //   catch-up so RPC cannot tell whether a wallet had hits.
-    // - Preserves `~(K - 1) / K` of decoys across `+1` sealed subtree growth within an epoch bucket
-    //   and matches TypeScript `packages/sdk/src/scanner.ts` bit-for-bit.
+    // `Strict` mode:
+    // - Windowed strictly to the actual hit-independent Pass 1C scanned ceiling
+    //   `[start_sub_l .. actual_end_sub_l)` derived from `scanned_watermark_by_lane` (bounded by
+    //   `MAX_SYNC_PAGES_PER_CALL = 4,096` MemoPages and tracking early-stop spillover accurately).
+    // - When `!has_outside_window_sealed && window_sealed_subtrees < target_sealed`, first include
+    //   EVERY sealed subtree in the scanned window uniformly, then draw remaining decoys from a
+    //   bounded downward tail `[start_sub - tail .. start_sub)` and (if still short) a bounded
+    //   upward tail `[actual_end_sub .. min(fc, actual_end_sub + tail))`.
+    // - Scoped deterministically to the sync's starting watermark state (`"sync" || start_leaves`),
+    //   preserving HRW retry-intersection immunity across failed retries while eliminating both the
+    //   deterministic multi-sync hit oracle and persistent cross-IP decoy fingerprinting.
     let mut finalized_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
     let mut frontier_rem_by_lane: BTreeMap<u8, usize> = BTreeMap::new();
-    let mut sealed_by_lane_list: Vec<(u8, u64)> = Vec::with_capacity(lanes.len());
+    let mut start_sub_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut actual_end_sub_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut watermark_pairs: Vec<(u8, u64)> = Vec::with_capacity(lanes.len());
+    let mut full_ranges_by_lane: Vec<(u8, u64, u64)> = Vec::with_capacity(lanes.len());
+    let mut windowed_ranges_by_lane: Vec<(u8, u64, u64)> = Vec::with_capacity(lanes.len());
     let mut total_sealed_subtrees = 0u64;
+    let mut window_sealed_subtrees = 0u64;
     for lane_hdr in &lanes {
+        let lid = lane_hdr.lane_id;
         let fc = lane_hdr.next_leaf / sub_size;
         let frem = (lane_hdr.next_leaf % sub_size) as usize;
-        finalized_by_lane.insert(lane_hdr.lane_id, fc);
-        frontier_rem_by_lane.insert(lane_hdr.lane_id, frem);
-        sealed_by_lane_list.push((lane_hdr.lane_id, fc));
+        let start_leaf = *scan_start_leaf_by_lane
+            .get(&lid)
+            .unwrap_or(&store.lanes[lid as usize].next_memo_leaf);
+        let start_sub = (start_leaf / sub_size).min(fc);
+        let scanned_leaf = *scanned_watermark_by_lane.get(&lid).unwrap_or(&start_leaf);
+        let actual_end_sub = if scanned_leaf <= start_leaf {
+            start_sub
+        } else {
+            scanned_leaf.div_ceil(sub_size).min(fc).max(start_sub)
+        };
+        finalized_by_lane.insert(lid, fc);
+        frontier_rem_by_lane.insert(lid, frem);
+        start_sub_by_lane.insert(lid, start_sub);
+        actual_end_sub_by_lane.insert(lid, actual_end_sub);
+        watermark_pairs.push((lid, start_leaf));
+        full_ranges_by_lane.push((lid, 0, fc));
+        windowed_ranges_by_lane.push((lid, start_sub, actual_end_sub));
         total_sealed_subtrees = total_sealed_subtrees.saturating_add(fc);
+        window_sealed_subtrees = window_sealed_subtrees.saturating_add(actual_end_sub - start_sub);
     }
     let epoch_bucket: u64 = options.decoy_epoch_bucket.unwrap_or(0);
 
@@ -1964,15 +2049,16 @@ where
         && (has_hit_correlated_sealed_subtree
             || (!fetch_new_subtrees_uniformly && total_new_memo_pages > 0));
     if should_decoy_pad {
-        if total_sealed_subtrees > MAX_HRW_SEALED_SUBTREES {
-            return Err(ClientError::InvalidEncoding(
-                "sealed subtree count exceeds HRW operational bound",
-            ));
-        }
         let current_sealed_count = needed_subtrees
             .keys()
             .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
             .count();
+        let has_outside_window_sealed = needed_subtrees.keys().any(|&(lid, s)| {
+            let fc = *finalized_by_lane.get(&lid).unwrap_or(&0);
+            let s_start = *start_sub_by_lane.get(&lid).unwrap_or(&0);
+            let s_end = *actual_end_sub_by_lane.get(&lid).unwrap_or(&s_start);
+            s < fc && (s < s_start || s >= s_end)
+        });
         let buckets = current_sealed_count
             .max(1)
             .div_ceil(STRICT_DECOY_SEALED_SUBTREE_TARGET);
@@ -1981,28 +2067,167 @@ where
             .min(total_sealed_subtrees) as usize;
 
         if current_sealed_count < target_sealed {
-            let already_selected: BTreeSet<(u8, u64)> = needed_subtrees.keys().copied().collect();
-            let decoys = try_select_hrw_sealed_decoys(
-                &fvk.view_sk,
-                DECOY_SCOPE_SYNC,
-                epoch_bucket,
-                &sealed_by_lane_list,
-                &already_selected,
-                target_sealed,
-            )?;
-            for (d_lane, d_seq) in decoys {
-                add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+            let sync_scope = make_sync_decoy_scope(&watermark_pairs);
+            let lane_count = (lanes.len().max(1)) as u64;
+            let per_lane_max_span = MAX_HRW_SEALED_SUBTREES / lane_count;
+
+            if !has_outside_window_sealed && window_sealed_subtrees >= target_sealed as u64 {
+                if window_sealed_subtrees > MAX_HRW_SEALED_SUBTREES {
+                    return Err(ClientError::InvalidEncoding(
+                        "sealed subtree count exceeds HRW operational bound",
+                    ));
+                }
+                let already_selected: BTreeSet<(u8, u64)> =
+                    needed_subtrees.keys().copied().collect();
+                let decoys = try_select_hrw_sealed_decoys_in_ranges(
+                    &fvk.view_sk,
+                    &sync_scope,
+                    epoch_bucket,
+                    &windowed_ranges_by_lane,
+                    &already_selected,
+                    target_sealed,
+                )?;
+                for (d_lane, d_seq) in decoys {
+                    add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+                }
+            } else if !has_outside_window_sealed {
+                // Step 2a: include EVERY sealed subtree in the RPC-visible scanned window uniformly
+                // so hits inside 26..42 MemoPage or early-stopped scans are never distinguishable.
+                for &(lid, s, e) in &windowed_ranges_by_lane {
+                    for seq in s..e {
+                        add_needed_subtree(&mut needed_subtrees, lid, seq);
+                    }
+                }
+                let tail_per_lane = (target_sealed as u64)
+                    .saturating_mul(64)
+                    .max(1024)
+                    .min(per_lane_max_span);
+                let sealed_after_window = needed_subtrees
+                    .keys()
+                    .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
+                    .count();
+                if sealed_after_window < target_sealed {
+                    // Step 2b: bounded downward tail `[start_sub - tail .. start_sub)`
+                    let remaining_down = target_sealed - sealed_after_window;
+                    let tail_ranges: Vec<(u8, u64, u64)> = lanes
+                        .iter()
+                        .map(|h| {
+                            let start_sub = *start_sub_by_lane.get(&h.lane_id).unwrap_or(&0);
+                            (h.lane_id, start_sub.saturating_sub(tail_per_lane), start_sub)
+                        })
+                        .collect();
+                    let already_selected: BTreeSet<(u8, u64)> =
+                        needed_subtrees.keys().copied().collect();
+                    let decoys = try_select_hrw_sealed_decoys_in_ranges(
+                        &fvk.view_sk,
+                        &sync_scope,
+                        epoch_bucket,
+                        &tail_ranges,
+                        &already_selected,
+                        remaining_down,
+                    )?;
+                    for (d_lane, d_seq) in decoys {
+                        add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+                    }
+                }
+                let sealed_after_down = needed_subtrees
+                    .keys()
+                    .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
+                    .count();
+                if sealed_after_down < target_sealed {
+                    // Step 2c: bounded upward tail `[actual_end_sub .. min(fc, actual_end_sub + tail))`
+                    // (e.g. start_sub == 0 after early-stopped Pass 1C; disjoint from Steps 2a/2b).
+                    let remaining_up = target_sealed - sealed_after_down;
+                    let up_ranges: Vec<(u8, u64, u64)> = lanes
+                        .iter()
+                        .map(|h| {
+                            let fc = *finalized_by_lane.get(&h.lane_id).unwrap_or(&0);
+                            let s_end = *actual_end_sub_by_lane.get(&h.lane_id).unwrap_or(&0);
+                            (h.lane_id, s_end, s_end.saturating_add(tail_per_lane).min(fc))
+                        })
+                        .collect();
+                    let already_selected: BTreeSet<(u8, u64)> =
+                        needed_subtrees.keys().copied().collect();
+                    let decoys = try_select_hrw_sealed_decoys_in_ranges(
+                        &fvk.view_sk,
+                        &sync_scope,
+                        epoch_bucket,
+                        &up_ranges,
+                        &already_selected,
+                        remaining_up,
+                    )?;
+                    for (d_lane, d_seq) in decoys {
+                        add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+                    }
+                }
+            } else {
+                let older_ranges: Vec<(u8, u64, u64)> =
+                    if total_sealed_subtrees <= MAX_HRW_SEALED_SUBTREES {
+                        full_ranges_by_lane.clone()
+                    } else {
+                        lanes
+                            .iter()
+                            .map(|h| {
+                                let lid = h.lane_id;
+                                let fc = *finalized_by_lane.get(&lid).unwrap_or(&0);
+                                let mut min_s: Option<u64> = None;
+                                let mut max_s: Option<u64> = None;
+                                for &(nl, ns) in needed_subtrees.keys() {
+                                    if nl == lid && ns < fc {
+                                        min_s = Some(min_s.map_or(ns, |cur| cur.min(ns)));
+                                        max_s = Some(max_s.map_or(ns, |cur| cur.max(ns)));
+                                    }
+                                }
+                                let (low, high) = match (min_s, max_s) {
+                                    (Some(lo_n), Some(hi_n)) => {
+                                        let anchor = if hi_n.saturating_sub(lo_n) < per_lane_max_span {
+                                            lo_n + (hi_n - lo_n) / 2
+                                        } else {
+                                            lo_n
+                                        };
+                                        let low = anchor
+                                            .saturating_sub(per_lane_max_span / 2)
+                                            .min(fc.saturating_sub(per_lane_max_span));
+                                        (low, low.saturating_add(per_lane_max_span).min(fc))
+                                    }
+                                    _ => (fc.saturating_sub(per_lane_max_span), fc),
+                                };
+                                (lid, low, high)
+                            })
+                            .collect()
+                    };
+                let outside_older_count = needed_subtrees
+                    .keys()
+                    .filter(|&&(lid, s)| {
+                        s < *finalized_by_lane.get(&lid).unwrap_or(&0)
+                            && !older_ranges
+                                .iter()
+                                .any(|&(rl, rs, re)| rl == lid && s >= rs && s < re)
+                    })
+                    .count();
+                let older_target = target_sealed.saturating_sub(outside_older_count);
+                let already_selected: BTreeSet<(u8, u64)> =
+                    needed_subtrees.keys().copied().collect();
+                let decoys = try_select_hrw_sealed_decoys_in_ranges(
+                    &fvk.view_sk,
+                    &sync_scope,
+                    epoch_bucket,
+                    &older_ranges,
+                    &already_selected,
+                    older_target,
+                )?;
+                for (d_lane, d_seq) in decoys {
+                    add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+                }
             }
         }
     }
 
     let mut sub_list: Vec<((u8, u64), Address)> =
         needed_subtrees.iter().map(|(&k, &v)| (k, v)).collect();
-    if sub_list.len() > 1 {
-        sub_list.sort_by_cached_key(|(_, addr)| {
-            compute_subtree_order_key(&fvk.view_sk, DECOY_SCOPE_SYNC, epoch_bucket, addr)
-        });
-    }
+    // Canonical public 32-byte PDA order (matching TS `scanner.ts` bit-for-bit): reveals 0 bits of
+    // insertion order (hits vs decoys vs frontiers) and 0 bits of `view_sk` wallet identity.
+    sub_list.sort_by(|(_, a), (_, b)| a.as_ref().cmp(b.as_ref()));
 
     // Privacy & integrity invariant (R2-C1): uniformly validate EVERY fetched SubtreePage (both
     // hits AND decoys) for exact header `(pool_id, lane_id, page_seq)`, strict canonical Fr on ALL
@@ -2070,6 +2295,11 @@ where
         let finalized_count = lane_hdr.next_leaf / sub_size;
         let frontier_rem = (lane_hdr.next_leaf % sub_size) as usize;
         if finalized_count == 0 && frontier_rem == 0 {
+            if lane_hdr.current_root != audren_core::ZERO_HASHES_4ARY[LANE_DEPTH_4ARY] {
+                return Err(ClientError::WitnessNotFound(
+                    "empty lane header carries non-zero current_root",
+                ));
+            }
             continue;
         }
 
@@ -4388,8 +4618,8 @@ mod tests {
             SyncOptions::default(),
         );
         assert!(
-            huge_res.is_err(),
-            "R2-C3: next_leaf = MAX_LEAVES_PER_LANE must cleanly error on HRW operational bound without OOM/spin"
+            huge_res.is_ok(),
+            "R2-C3 + H-3: next_leaf = MAX_LEAVES_PER_LANE must lazily bound Pass 1D to the planned MAX_SYNC_PAGES_PER_CALL window without OOM/spin or mature-pool HRW DoS: {huge_res:?}"
         );
         assert!(huge_calls <= 10, "R2-C3: lazy Pass 1A/1C must halt immediately on missing pages (got {huge_calls})");
 
@@ -7159,6 +7389,411 @@ mod tests {
                     )
                 ),
                 "unexpected error for {label}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_remediation_scanner_privacy_and_client_invariants() {
+        use crate::{
+            keys::{AudrenKeys, DecryptedMemo, SelectiveDisclosureProof},
+            router::prepare_escrow_accounts,
+            store::CompactWalletStore,
+        };
+
+        // H-3: Windowed HRW decoys strictly fall inside [start_seq, end_seq) and reject duplicate lanes
+        let vsk = [0x42u8; 32];
+        let scope = make_sync_decoy_scope(&[(0, 10_000 * 256), (1, 10_000 * 256)]);
+        let decoys = try_select_hrw_sealed_decoys_in_ranges(
+            &vsk,
+            &scope,
+            0,
+            &[(0, 10_000, 10_010), (1, 10_000, 10_010)],
+            &BTreeSet::from([(0u8, 10_005u64)]),
+            16,
+        )
+        .unwrap();
+        assert_eq!(decoys.len(), 15);
+        for &(l, s) in &decoys {
+            assert!(
+                s >= 10_000 && s < 10_010,
+                "H-3: decoy ({l}, {s}) leaked outside scanned window [10000..10010)"
+            );
+        }
+        assert!(
+            try_select_hrw_sealed_decoys_in_ranges(&vsk, &scope, 0, &[(0, 0, 5), (0, 5, 10)], &BTreeSet::new(), 4)
+                .is_err(),
+            "duplicate lane_id must be rejected"
+        );
+
+        // H-4: Watermark-scoped sync HRW produces fresh decoy sets when watermark advances
+        let scope_t1 = make_sync_decoy_scope(&[(0, 0), (1, 0)]);
+        let scope_t2 = make_sync_decoy_scope(&[(0, 256 * 20), (1, 256 * 20)]);
+        assert_ne!(scope_t1, scope_t2);
+        let d1 = try_select_hrw_sealed_decoys(&vsk, &scope_t1, 0, &[(0, 500), (1, 500)], &BTreeSet::new(), 16).unwrap();
+        let d2 = try_select_hrw_sealed_decoys(&vsk, &scope_t2, 0, &[(0, 500), (1, 500)], &BTreeSet::new(), 16).unwrap();
+        assert_ne!(d1, d2, "H-4: advancing sync watermark must rotate HRW decoy set");
+
+        // M-1: Order-independent witness decoy scope ([B, A] == [A, B])
+        let s_ab = make_witness_decoy_scope_for_notes(&[(0, 512), (2, 1024)], 256);
+        let s_ba = make_witness_decoy_scope_for_notes(&[(2, 1024), (0, 512)], 256);
+        assert_eq!(s_ab, s_ba, "M-1: witness decoy scope must be independent of input note ordering");
+
+        // L-1: record_verified_memo rejects mismatched commitment
+        let keys = AudrenKeys::from_seed(&[0x33u8; 32]);
+        let fvk = keys.full_viewing_key();
+        let mut store = CompactWalletStore::new(0, 0);
+        let dec = DecryptedMemo {
+            tweak: Fr::from(7u64),
+            blinding: Fr::from(9u64),
+            amount: 1000,
+            mint: audren_core::WSOL_MINT,
+            memo_version: 1,
+            memo_flags: 0,
+            payment_id: [0u8; 14],
+            is_dynamic: false,
+        };
+        assert!(
+            store.record_verified_memo(&fvk, 0, 0, &dec, [0xAAu8; 32]).is_err(),
+            "L-1: mismatched cm_be must be rejected"
+        );
+
+        // L-2: Redacted Debug on DefiSessionKeypair and FullViewingKey
+        let sess = AudrenKeys::derive_defi_session_keypair(&[0x33u8; 32], 0);
+        let sess_dbg = format!("{sess:?}");
+        assert!(sess_dbg.contains("<redacted>"));
+        let fvk_dbg = format!("{fvk:?}");
+        assert!(fvk_dbg.contains("<redacted>"));
+
+        // M-4: SelectiveDisclosureProof rejects leaf_index >= MAX_LEAVES_PER_LANE
+        let stealth = fvk.stealth_owner(Fr::from(7u64)).unwrap();
+        let cm = audren_circuits::note::compute_note_commitment(
+            stealth,
+            audren_circuits::note::derive_asset_id(&audren_core::WSOL_MINT),
+            1000,
+            Fr::from(9u64),
+        );
+        let cm_be = fr_to_be_bytes(&cm);
+        let bad_sd = SelectiveDisclosureProof {
+            pool_id: 0,
+            lane_id: 0,
+            leaf_index: MAX_LEAVES_PER_LANE,
+            stealth_owner: fr_to_be_bytes(&stealth),
+            mint: audren_core::WSOL_MINT,
+            amount: 1000,
+            blinding: fr_to_be_bytes(&Fr::from(9u64)),
+            commitment: cm_be,
+        };
+        assert!(!bad_sd.verify_against_leaf(&cm_be));
+
+        // L-5: prepare_escrow_accounts rejects shard_id >= 16
+        let pid = Address::new_from_array(audren_core::AUDREN_PROGRAM_ID);
+        let mint = Address::new_from_array(audren_core::WSOL_MINT);
+        let tok = Address::new_from_array(audren_core::CLASSIC_TOKEN_PROGRAM_ID);
+        assert!(prepare_escrow_accounts(&pid, 0, 16, &mint, &mint, &tok, &tok, &[], &[]).is_err());
+    }
+
+    #[test]
+    fn h3_case2_uniform_window_and_planned_cap_bounds_pass1d_decoys() {
+        let program_id = Address::new_from_array(AUDREN_PROGRAM_ID);
+        let alice = AudrenKeys::from_seed(&[0x7au8; 32]);
+        let fvk = alice.full_viewing_key();
+        let sol_asset = derive_asset_id(&WSOL_MINT);
+
+        // Build one reusable dummy sealed subtree + one hit sealed subtree
+        let dummy_leaves: Vec<Fr> = (0..SUBTREE_LEAVES)
+            .map(|i| Fr::from((i + 500) as u64))
+            .collect();
+        let dummy_subroot = compute_subtree_256_root(&dummy_leaves, SUBTREE_LEAVES);
+
+        let (tw, bl, hit_memo) =
+            encrypt_note_memo(&alice.view_pk, [0x7bu8; 32], 1_234_567, &WSOL_MINT).unwrap();
+        let hit_cm = compute_note_commitment(
+            derive_stealth_owner(alice.spend_pk, tw),
+            sol_asset,
+            1_234_567,
+            bl,
+        );
+        let mut hit_leaves = dummy_leaves.clone();
+        hit_leaves[42] = hit_cm;
+        let hit_subroot = compute_subtree_256_root(&hit_leaves, SUBTREE_LEAVES);
+
+        let pool_pda = derive_pool_pda(&program_id, 0).0;
+        let lane0_pda = derive_lane_pda(&program_id, 0, 0).0;
+
+        // (1) Case 2 catch-up: 30 sealed subtrees total, wallet starts at sub 19 -> 11 newly sealed
+        //     subtrees [19..30) (`30` MemoPages > 25, `11 < 16` targetSealed), hit in sub 25.
+        //     Pass 1D MUST fetch ALL 11 window subtrees [19..30) uniformly + exactly 5 tail decoys
+        //     from [0..19) (= 16 total), identical with or without a hit!
+        {
+            let total_subs = 30usize;
+            let start_sub = 19u64;
+            let hit_sub = 25usize;
+            let hit_leaf = hit_sub * SUBTREE_LEAVES + 42;
+            let next_leaf = (total_subs * SUBTREE_LEAVES) as u64;
+
+            let run_case2 = |include_hit: bool| -> Vec<u64> {
+                let mut subroots = vec![dummy_subroot; total_subs];
+                if include_hit {
+                    subroots[hit_sub] = hit_subroot;
+                }
+                let lane_root = compute_lane_root_from_subroots_and_frontier(&subroots, None, 0).unwrap();
+
+                let mut sub_by_addr: BTreeMap<Address, (u64, Vec<u8>)> = BTreeMap::new();
+                for s in 0..total_subs {
+                    let leaves = if include_hit && s == hit_sub {
+                        &hit_leaves
+                    } else {
+                        &dummy_leaves
+                    };
+                    sub_by_addr.insert(
+                        derive_subtree_pda(&program_id, 0, 0, s as u64).0,
+                        (s as u64, make_subtree(0, s as u64, leaves)),
+                    );
+                }
+                let mut accounts: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                accounts.insert(pool_pda, make_pool(1));
+                accounts.insert(lane0_pda, make_lane_with_root(0, next_leaf, 0, lane_root));
+                accounts.insert(
+                    derive_subroot_pda(&program_id, 0, 0, 0).0,
+                    make_subroot(0, 0, &subroots),
+                );
+                let total_memos = (next_leaf as usize).div_ceil(MEMO_NOTES_PER_PAGE);
+                for m in 0..total_memos {
+                    let cnt = MEMO_NOTES_PER_PAGE
+                        .min(next_leaf as usize - m * MEMO_NOTES_PER_PAGE) as u16;
+                    let mut mraw = make_memo(0, m as u64, cnt, 0);
+                    if include_hit && hit_leaf / MEMO_NOTES_PER_PAGE == m {
+                        write_memo(&mut mraw, hit_leaf % MEMO_NOTES_PER_PAGE, &hit_memo);
+                    }
+                    accounts.insert(derive_memo_pda(&program_id, 0, 0, m as u64).0, mraw);
+                }
+
+                let mut st = CompactWalletStore::new(0, 0);
+                st.lanes[0].next_memo_leaf = start_sub * SUBTREE_LEAVES as u64;
+                st.lanes[0].finalized_subroots = subroots[..start_sub as usize]
+                    .iter()
+                    .map(fr_to_be_bytes)
+                    .collect();
+
+                let fetched_subs = std::cell::RefCell::new(Vec::<u64>::new());
+                let res = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if let Some((seq, bytes)) = sub_by_addr.get(a) {
+                                    fetched_subs.borrow_mut().push(*seq);
+                                    return Some(bytes.clone());
+                                }
+                                accounts.get(a).cloned()
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(res.2, usize::from(include_hit));
+                let mut subs = fetched_subs.into_inner();
+                subs.sort_unstable();
+                subs
+            };
+
+            let subs_with_hit = run_case2(true);
+            let subs_without_hit = run_case2(false);
+            assert_eq!(subs_with_hit.len(), 16, "Case 2 must fetch exactly 16 sealed subtrees");
+            assert_eq!(
+                subs_with_hit, subs_without_hit,
+                "Case 2 hit vs 0-hit fetch set MUST be byte-for-byte identical"
+            );
+            for s in start_sub..total_subs as u64 {
+                assert!(
+                    subs_with_hit.contains(&s),
+                    "Case 2 must uniformly fetch every window subtree {s} in [19..30)"
+                );
+            }
+            let tail_count = subs_with_hit.iter().filter(|&&s| s < start_sub).count();
+            assert_eq!(tail_count, 5, "Case 2 must draw exactly 5 tail decoys from [0..19)");
+        }
+
+        // (2) Planned Pass 1C cap (`MAX_SYNC_PAGES_PER_CALL = 4,096` MemoPages -> 1,536 subtrees):
+        //     Lane 0 has 1,875 sealed subtrees (5,000 MemoPages). Pass 1D MUST cap all decoys to
+        //     the planned scanned range `[0..1536)` (ZERO decoys in unscanned `[1536..1875)`!).
+        {
+            let total_subs = 1_875usize; // 5,000 MemoPages * 96 / 256 = 1,875 sealed subtrees
+            let next_leaf = (total_subs * SUBTREE_LEAVES) as u64;
+            let planned_cap_sub = (MAX_SYNC_PAGES_PER_CALL as u64 * MEMO_NOTES_PER_PAGE as u64)
+                / SUBTREE_LEAVES as u64; // 4096 * 96 / 256 = 1536
+            assert_eq!(planned_cap_sub, 1_536);
+
+            let subroots = vec![dummy_subroot; total_subs];
+            let lane_root =
+                compute_lane_root_from_subroots_and_frontier(&subroots, None, 0).unwrap();
+            let pool_bytes = make_pool(1);
+            let lane_bytes = make_lane_with_root(0, next_leaf, 0, lane_root);
+
+            let mut sub_pda_to_seq: BTreeMap<Address, u64> = BTreeMap::new();
+            for s in 0..total_subs as u64 {
+                sub_pda_to_seq.insert(derive_subtree_pda(&program_id, 0, 0, s).0, s);
+            }
+            let mut memo_pda_to_seq: BTreeMap<Address, u64> = BTreeMap::new();
+            for m in 0..5_000u64 {
+                memo_pda_to_seq.insert(derive_memo_pda(&program_id, 0, 0, m).0, m);
+            }
+
+            let mut st = CompactWalletStore::new(0, 0);
+            // Pre-populate finalized_subroots so Pass 1A does 0 RPC calls and focuses on Pass 1C + 1D
+            st.lanes[0].finalized_subroots = subroots.iter().map(fr_to_be_bytes).collect();
+
+            let fetched_subs = std::cell::RefCell::new(Vec::<u64>::new());
+            sync_compact_store_with_batch(
+                &mut st,
+                &fvk,
+                |addrs, _| {
+                    addrs
+                        .iter()
+                        .map(|a| {
+                            if *a == pool_pda {
+                                return Some(pool_bytes.clone());
+                            }
+                            if *a == lane0_pda {
+                                return Some(lane_bytes.clone());
+                            }
+                            if let Some(&seq) = sub_pda_to_seq.get(a) {
+                                fetched_subs.borrow_mut().push(seq);
+                                return Some(make_subtree(0, seq, &dummy_leaves));
+                            }
+                            if let Some(&m) = memo_pda_to_seq.get(a) {
+                                return Some(make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0));
+                            }
+                            None
+                        })
+                        .collect()
+                },
+                &program_id,
+                SyncOptions::default(),
+            )
+            .unwrap();
+
+            let subs = fetched_subs.into_inner();
+            assert_eq!(subs.len(), 16, "Capped catch-up must fetch exactly 16 sealed decoys");
+            for s in &subs {
+                assert!(
+                    *s < planned_cap_sub,
+                    "H-3: decoy subtree {s} leaked beyond MAX_SYNC_PAGES_PER_CALL planned ceiling {planned_cap_sub}"
+                );
+            }
+        }
+
+        // (3) R2-2 High-1: Multi-lane Pass 1C early-stop spillover (Lane 0 drops MemoPage 10 ->
+        //     stops at sub 4 and spills remaining budget to scan Lane 1's 200 MemoPages [0..75)
+        //     with Alice's hit at (lane 1, sub 10)). Pass 1D MUST compute actual post-Pass-1C
+        //     windows [(0, 0, 4), (1, 0, 75)], fetch EXACTLY 16 sealed subtrees (never 17), place
+        //     Lane 0 decoys strictly < 4, and mix (1, 10) with Lane 1 decoys inside [0..75)!
+        {
+            let lane0_subs = 1_875usize;
+            let lane1_subs = 75usize; // 200 MemoPages * 96 / 256 = 75 sealed subtrees
+            let lane0_next_leaf = (lane0_subs * SUBTREE_LEAVES) as u64;
+            let lane1_next_leaf = (lane1_subs * SUBTREE_LEAVES) as u64;
+            let hit_sub = 10usize;
+            let hit_leaf = hit_sub * SUBTREE_LEAVES + 42;
+
+            let lane0_subroots = vec![dummy_subroot; lane0_subs];
+            let mut lane1_subroots = vec![dummy_subroot; lane1_subs];
+            lane1_subroots[hit_sub] = hit_subroot;
+            let lane0_root =
+                compute_lane_root_from_subroots_and_frontier(&lane0_subroots, None, 0).unwrap();
+            let lane1_root =
+                compute_lane_root_from_subroots_and_frontier(&lane1_subroots, None, 0).unwrap();
+            let lane1_pda = derive_lane_pda(&program_id, 0, 1).0;
+
+            let pool_bytes = make_pool(2);
+            let lane0_bytes = make_lane_with_root(0, lane0_next_leaf, 0, lane0_root);
+            let lane1_bytes = make_lane_with_root(1, lane1_next_leaf, 0, lane1_root);
+
+            let mut sub_pda_to_key: BTreeMap<Address, (u8, u64)> = BTreeMap::new();
+            for s in 0..lane0_subs as u64 {
+                sub_pda_to_key.insert(derive_subtree_pda(&program_id, 0, 0, s).0, (0, s));
+            }
+            for s in 0..lane1_subs as u64 {
+                sub_pda_to_key.insert(derive_subtree_pda(&program_id, 0, 1, s).0, (1, s));
+            }
+            let mut memo_pda_to_key: BTreeMap<Address, (u8, u64)> = BTreeMap::new();
+            for m in 0..100u64 {
+                memo_pda_to_key.insert(derive_memo_pda(&program_id, 0, 0, m).0, (0, m));
+            }
+            for m in 0..200u64 {
+                memo_pda_to_key.insert(derive_memo_pda(&program_id, 0, 1, m).0, (1, m));
+            }
+
+            let mut st = CompactWalletStore::new(0, 0);
+            st.lanes[0].finalized_subroots = lane0_subroots.iter().map(fr_to_be_bytes).collect();
+            st.lanes[1].finalized_subroots = lane1_subroots.iter().map(fr_to_be_bytes).collect();
+
+            let fetched_subs = std::cell::RefCell::new(Vec::<(u8, u64)>::new());
+            let res = sync_compact_store_with_batch(
+                &mut st,
+                &fvk,
+                |addrs, _| {
+                    addrs
+                        .iter()
+                        .map(|a| {
+                            if *a == pool_pda {
+                                return Some(pool_bytes.clone());
+                            }
+                            if *a == lane0_pda {
+                                return Some(lane0_bytes.clone());
+                            }
+                            if *a == lane1_pda {
+                                return Some(lane1_bytes.clone());
+                            }
+                            if let Some(&(lid, seq)) = sub_pda_to_key.get(a) {
+                                fetched_subs.borrow_mut().push((lid, seq));
+                                let leaves = if lid == 1 && seq == hit_sub as u64 {
+                                    &hit_leaves
+                                } else {
+                                    &dummy_leaves
+                                };
+                                return Some(make_subtree(lid, seq, leaves));
+                            }
+                            if let Some(&(lid, m)) = memo_pda_to_key.get(a) {
+                                // Adversarial/lagging RPC drops MemoPage 10 on Lane 0
+                                if lid == 0 && m == 10 {
+                                    return None;
+                                }
+                                let mut mraw = make_memo(lid, m, MEMO_NOTES_PER_PAGE as u16, 0);
+                                if lid == 1 && (hit_leaf / MEMO_NOTES_PER_PAGE) as u64 == m {
+                                    write_memo(&mut mraw, hit_leaf % MEMO_NOTES_PER_PAGE, &hit_memo);
+                                }
+                                return Some(mraw);
+                            }
+                            None
+                        })
+                        .collect()
+                },
+                &program_id,
+                SyncOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(res.2, 1, "Spilled Lane 1 hit must be discovered cleanly");
+            let subs = fetched_subs.into_inner();
+            assert_eq!(subs.len(), 16, "Early-stop spillover MUST preserve exact 16 sealed subtrees");
+            let mut lane1_count = 0usize;
+            for &(lid, seq) in &subs {
+                if lid == 0 {
+                    assert!(seq < 4, "Lane 0 decoy {seq} leaked past early-stop scanned ceiling 4");
+                } else {
+                    assert_eq!(lid, 1);
+                    assert!(seq < 75);
+                    lane1_count += 1;
+                }
+            }
+            assert!(
+                lane1_count >= 12,
+                "Spilled Lane 1 hit must be surrounded by Lane 1 decoys (got {lane1_count})"
             );
         }
     }

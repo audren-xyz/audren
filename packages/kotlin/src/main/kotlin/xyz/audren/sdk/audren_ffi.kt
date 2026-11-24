@@ -803,7 +803,7 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_init_root_history_ix(`programId`: RustBuffer.ByValue,`authority`: RustBuffer.ByValue,`poolId`: Int,`rootEpochInterval`: Long,`activeLanes`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_audren_ffi_fn_func_build_open_page_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`pageKind`: Byte,`poolId`: Int,`laneId`: Byte,`pageSeq`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_audren_ffi_fn_func_build_open_page_ix(`programId`: RustBuffer.ByValue,`payer`: RustBuffer.ByValue,`pageKind`: Byte,`poolId`: Int,`laneId`: Byte,`pageSeq`: Long,`maxPayerDeficit`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_audren_ffi_fn_func_build_set_paused_ix(`programId`: RustBuffer.ByValue,`authority`: RustBuffer.ByValue,`poolId`: Int,`paused`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1031,7 +1031,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_audren_ffi_checksum_func_build_init_root_history_ix() and 0xFFFF) != 53324) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_audren_ffi_checksum_func_build_open_page_ix() and 0xFFFF) != 6216) {
+    if ((lib.uniffi_audren_ffi_checksum_func_build_open_page_ix() and 0xFFFF) != 53263) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_audren_ffi_checksum_func_build_set_paused_ix() and 0xFFFF) != 31548) {
@@ -1951,6 +1951,16 @@ data class FfiExecCtxHashParams (
     var `routerIxData`: kotlin.ByteArray
     , 
     var `changeMemos`: kotlin.ByteArray
+    , 
+    var `payer`: kotlin.String? = null 
+    , 
+    var `escrowInAta`: kotlin.String? = null 
+    , 
+    var `escrowOutAta`: kotlin.String? = null 
+    , 
+    var `vaultInAta`: kotlin.String? = null 
+    , 
+    var `vaultOutAta`: kotlin.String? = null 
     
 ){
     
@@ -1989,6 +1999,11 @@ public object FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer<FfiEx
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
             FfiConverterByteArray.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -2014,7 +2029,12 @@ public object FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer<FfiEx
             FfiConverterByteArray.allocationSize(value.`dynMemoHead`) +
             FfiConverterByteArray.allocationSize(value.`dynMask72`) +
             FfiConverterByteArray.allocationSize(value.`routerIxData`) +
-            FfiConverterByteArray.allocationSize(value.`changeMemos`)
+            FfiConverterByteArray.allocationSize(value.`changeMemos`) +
+            FfiConverterOptionalString.allocationSize(value.`payer`) +
+            FfiConverterOptionalString.allocationSize(value.`escrowInAta`) +
+            FfiConverterOptionalString.allocationSize(value.`escrowOutAta`) +
+            FfiConverterOptionalString.allocationSize(value.`vaultInAta`) +
+            FfiConverterOptionalString.allocationSize(value.`vaultOutAta`)
     )
 
     override fun write(value: FfiExecCtxHashParams, buf: ByteBuffer) {
@@ -2040,6 +2060,11 @@ public object FfiConverterTypeFfiExecCtxHashParams: FfiConverterRustBuffer<FfiEx
             FfiConverterByteArray.write(value.`dynMask72`, buf)
             FfiConverterByteArray.write(value.`routerIxData`, buf)
             FfiConverterByteArray.write(value.`changeMemos`, buf)
+            FfiConverterOptionalString.write(value.`payer`, buf)
+            FfiConverterOptionalString.write(value.`escrowInAta`, buf)
+            FfiConverterOptionalString.write(value.`escrowOutAta`, buf)
+            FfiConverterOptionalString.write(value.`vaultInAta`, buf)
+            FfiConverterOptionalString.write(value.`vaultOutAta`, buf)
     }
 }
 
@@ -2647,6 +2672,8 @@ data class FfiOpenPageSpec (
     var `pageSeq`: kotlin.ULong
     , 
     var `pdaB58`: kotlin.String
+    , 
+    var `mandatory`: kotlin.Boolean = true 
     
 ){
     
@@ -2666,19 +2693,22 @@ public object FfiConverterTypeFfiOpenPageSpec: FfiConverterRustBuffer<FfiOpenPag
             FfiConverterUByte.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: FfiOpenPageSpec) = (
             FfiConverterUByte.allocationSize(value.`pageKind`) +
             FfiConverterULong.allocationSize(value.`pageSeq`) +
-            FfiConverterString.allocationSize(value.`pdaB58`)
+            FfiConverterString.allocationSize(value.`pdaB58`) +
+            FfiConverterBoolean.allocationSize(value.`mandatory`)
     )
 
     override fun write(value: FfiOpenPageSpec, buf: ByteBuffer) {
             FfiConverterUByte.write(value.`pageKind`, buf)
             FfiConverterULong.write(value.`pageSeq`, buf)
             FfiConverterString.write(value.`pdaB58`, buf)
+            FfiConverterBoolean.write(value.`mandatory`, buf)
     }
 }
 
@@ -3843,7 +3873,7 @@ public object FfiConverterSequenceTypeFfiOpenPageSpec: FfiConverterRustBuffer<Li
     }
     
 
-    @Throws(AudrenFfiException::class) fun `buildOpenPageIx`(`programId`: kotlin.String, `payer`: kotlin.String, `pageKind`: kotlin.UByte, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `pageSeq`: kotlin.ULong): FfiInstruction {
+    @Throws(AudrenFfiException::class) fun `buildOpenPageIx`(`programId`: kotlin.String, `payer`: kotlin.String, `pageKind`: kotlin.UByte, `poolId`: kotlin.UInt, `laneId`: kotlin.UByte, `pageSeq`: kotlin.ULong, `maxPayerDeficit`: kotlin.ULong? = null): FfiInstruction {
             return FfiConverterTypeFfiInstruction.lift(
     uniffiRustCallWithError(AudrenFfiException) { _status ->
     UniffiLib.uniffi_audren_ffi_fn_func_build_open_page_ix(
@@ -3854,7 +3884,8 @@ public object FfiConverterSequenceTypeFfiOpenPageSpec: FfiConverterRustBuffer<Li
         FfiConverterUByte.lower(`pageKind`),
         FfiConverterUInt.lower(`poolId`),
         FfiConverterUByte.lower(`laneId`),
-        FfiConverterULong.lower(`pageSeq`),_status)
+        FfiConverterULong.lower(`pageSeq`),
+        FfiConverterOptionalULong.lower(`maxPayerDeficit`),_status)
 }
     )
     }

@@ -9,6 +9,7 @@ export const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 export const CLASSIC_TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 export const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 export const ASSOCIATED_TOKEN_PROGRAM_ID = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+export const ELGAMAL_REGISTRY_PROGRAM_ID = 'regVYJW7tcT8zipN5YiBvHsvR5jXW1uLFxaHSbugABg';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
 export const NUM_LANES = 16;
@@ -40,6 +41,7 @@ export const CU_LIMIT_TRANSACT_FULL_EXIT = 165_000;
 export const CU_LIMIT_TRANSACT_WITHDRAW = 255_000;
 export const CU_LIMIT_TRANSACT_WITHDRAW_HOOK = 295_000;
 export const CU_LIMIT_EXEC_VIA_ESCROW_BASE = 285_000;
+export const MAX_TX_CU_LIMIT = 1_400_000;
 
 // Canonical 12 PDA seed prefixes (`audren_*`)
 export const POOL_SEED = 'audren_pool';
@@ -72,11 +74,20 @@ export const VK_ID_DEFAULT = 0;
 export const CANONICAL_PK_BYTES = 3_927_280;
 export const CANONICAL_PK_SHA256 =
   '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4';
+export const CANONICAL_WASM_BYTES = 2_419_544;
+export const CANONICAL_WASM_SHA256 =
+  '8f2e8b07d42b166c1801d8c1e7f521e5867de7be1aa9d1d7eebca6459b42da23';
 
 export const OPEN_PAGE_KIND_SUBTREE = 0;
 export const OPEN_PAGE_KIND_SUBROOT = 1;
 export const OPEN_PAGE_KIND_MEMO = 2;
 export const OPEN_PAGE_KIND_NULLIFIER = 3;
+export const OPEN_PAGE_DATA_LEN = 22;
+export const OPEN_PAGE_WIRE_LEN = 23;
+export const OPEN_PAGE_SUBTREE_LOOKAHEAD_SLOT = 230n;
+export const OPEN_PAGE_SUBROOT_LOOKAHEAD_SLOT = 280n;
+export const OPEN_PAGE_MEMO_LOOKAHEAD_SLOT = 86n;
+export const OPEN_PAGE_NF_LOOKAHEAD_SLOT = 540n;
 
 export const DEPOSIT_FLAG_FEE_FROM_AMOUNT = 1 << 2;
 export const DEPOSIT_FLAG_NATIVE_SOL = 1 << 3;
@@ -150,6 +161,12 @@ export const MEMO_PAGE_LEN = 10_240;
 export const NF_PAGE_LEN = 9_664;
 export const ROOT_SNAPSHOT_LEN = 672;
 export const ROOT_HISTORY_LEN = 10_216;
+
+// Sentinel (LaneRentVault / NullifierPDA) offsets (16 B)
+export const SN_OFF_MAGIC = 0;
+export const SN_OFF_POOL_ID = 8;
+export const SN_OFF_LANE_ID = 12;
+export const SN_OFF_BUMP = 13;
 
 // PoolState offsets (128 B)
 export const PL_OFF_MAGIC = 0;

@@ -73,6 +73,7 @@ import {
 import { AudrenWasmProver, dummyInputWitness, dummyOutputWitness } from '../lib/audren-prover'
 import { AUDREN, getPool0LookupTable } from '../lib/protocol'
 import { compileKitV0Transaction } from '../lib/solana-wallet'
+import webWorker from '../worker/index'
 
 async function main() {
   const seed = new Uint8Array(32).fill(7)
@@ -282,8 +283,13 @@ async function main() {
     }
   }
   const workerSrc = await readFile(resolve(process.cwd(), 'public/wasm/prover-worker.js'), 'utf8')
-  if (!workerSrc.includes('?v=1.3.0') || !workerSrc.includes('WebAssembly.RuntimeError')) {
-    throw new Error('prover-worker.js missing v1.3.0 cache-buster or RuntimeError reset')
+  if (
+    !workerSrc.includes('?v=1.3.0') ||
+    !workerSrc.includes('WebAssembly.RuntimeError') ||
+    !workerSrc.includes('CANONICAL_WASM_SHA256') ||
+    !workerSrc.includes('oPtr, PROVE_OUTPUT_BYTES).fill(0)')
+  ) {
+    throw new Error('prover-worker.js missing v1.3.0 cache-buster, RuntimeError reset, WASM SHA-256 pin, or oPtr scrub')
   }
   const sampleMemos = new Uint8Array(MEMO_ENTRY_WIRE_LEN * 3)
   sampleMemos.set(memo, 0)
@@ -368,8 +374,136 @@ async function main() {
     throw new Error(`Direct Self-Pay v0 Transact with Pool #0 ALT exceeded 1,232 B (${v0Wire.byteLength} B)`)
   }
 
+  // H-8 / M-8 / M-10: Verify apps/web worker CSRF guard, security headers, and Jupiter clamps
+  const dummyEnv = {
+    ASSETS: { fetch: async () => new Response('not found', { status: 404 }) },
+  }
+  const ctReject = await webWorker.fetch(
+    new Request('https://audren.xyz/api/devnet/deposit', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', origin: 'https://audren.xyz' },
+      body: '{}',
+    }),
+    dummyEnv,
+  )
+  if (ctReject.status !== 415) {
+    throw new Error(`Expected 415 for non-JSON POST /api/*, got ${ctReject.status}`)
+  }
+  if (
+    ctReject.headers.get('x-content-type-options') !== 'nosniff' ||
+    ctReject.headers.get('referrer-policy') !== 'no-referrer' ||
+    !ctReject.headers.get('strict-transport-security')?.includes('max-age=')
+  ) {
+    throw new Error('jsonResponse missing required M-8 security headers')
+  }
+  const csrfReject = await webWorker.fetch(
+    new Request('https://audren.xyz/api/devnet/deposit', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://evil.example',
+        'sec-fetch-site': 'cross-site',
+      },
+      body: '{}',
+    }),
+    dummyEnv,
+  )
+  if (csrfReject.status !== 403) {
+    throw new Error(`Expected 403 for cross-origin POST /api/*, got ${csrfReject.status}`)
+  }
+  const missingOriginReject = await webWorker.fetch(
+    new Request('https://audren.xyz/api/devnet/deposit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }),
+    dummyEnv,
+  )
+  if (missingOriginReject.status !== 403) {
+    throw new Error(`Expected 403 when both Origin and Sec-Fetch-Site are absent, got ${missingOriginReject.status}`)
+  }
+
+  // R2-1 High #1: Verify /api/rpc/send accepts 23-byte OpenPage and rejects stale 15-byte OpenPage
+  const { buildOpenPageInstruction, OPEN_PAGE_KIND_MEMO } = await import('@audren/sdk')
+  const openPage23 = buildOpenPageInstruction({
+    payer: AUDREN.mainnetRelayer,
+    pageKind: OPEN_PAGE_KIND_MEMO,
+    poolId: 0,
+    laneId: 0,
+    pageSeq: 1n,
+    maxPayerDeficit: 0n,
+  })
+  const tx23 = compileKitV0Transaction({
+    feePayer: AUDREN.mainnetRelayer,
+    recentBlockhash: '11111111111111111111111111111111',
+    lastValidBlockHeight: 1n,
+    instructions: [audrenInstructionToSolana(openPage23)],
+    computeUnitLimit: 60_000,
+  })
+  const openPage15 = { ...openPage23, data: openPage23.data.slice(0, 15) }
+  const tx15 = compileKitV0Transaction({
+    feePayer: AUDREN.mainnetRelayer,
+    recentBlockhash: '11111111111111111111111111111111',
+    lastValidBlockHeight: 1n,
+    instructions: [audrenInstructionToSolana(openPage15)],
+    computeUnitLimit: 60_000,
+  })
+  const envWithDummyRpc = { ...dummyEnv, MAINNET_RPC_URL: 'https://rpc.example.invalid' }
+  const res15 = await webWorker.fetch(
+    new Request('https://audren.xyz/api/rpc/send', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://audren.xyz',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ cluster: 'mainnet', transactionB64: Buffer.from(tx15).toString('base64') }),
+    }),
+    envWithDummyRpc,
+  )
+  if (res15.status !== 403) {
+    throw new Error(`Expected 403 for legacy 15-byte OpenPage on /api/rpc/send, got ${res15.status}`)
+  }
+  const origFetch = globalThis.fetch
+  try {
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const rpcBody = JSON.parse(String(init?.body ?? '{}')) as { method?: string }
+      if (rpcBody.method === 'getSignatureStatuses') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: { value: [{ slot: 123_456, err: null, confirmationStatus: 'confirmed' }] },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, result: '5OpenPage23OkSig11111111111111111111111111' }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }) as typeof fetch
+    const res23 = await webWorker.fetch(
+      new Request('https://audren.xyz/api/rpc/send', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: 'https://audren.xyz',
+          'sec-fetch-site': 'same-origin',
+        },
+        body: JSON.stringify({ cluster: 'mainnet', transactionB64: Buffer.from(tx23).toString('base64') }),
+      }),
+      envWithDummyRpc,
+    )
+    if (res23.status !== 200) {
+      throw new Error(`Expected 200 for canonical 23-byte OpenPage on /api/rpc/send, got ${res23.status}`)
+    }
+  } finally {
+    globalThis.fetch = origFetch
+  }
+
   console.log(
-    `Audren v1.3.0 full crypto + GlobalRootHistory + Bech32m + Pool #0 ALT (${v0Wire.byteLength} B v0) + WASM prover audit PASSED (192 B Groth16 in ${ms} ms)`,
+    `Audren v1.3.0 full crypto + GlobalRootHistory + Bech32m + Pool #0 ALT (${v0Wire.byteLength} B v0) + Worker CSRF/headers/OpenPage23 + WASM prover audit PASSED (192 B Groth16 in ${ms} ms)`,
   )
 }
 

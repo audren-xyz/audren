@@ -53,7 +53,6 @@ import {
   audrenInstructionToSolana,
   base58Decode,
   base58Encode,
-  buildAutoOpenPageInstructions,
   buildCreateAtaIdempotentInstruction,
   buildDepositInstruction,
   buildExecViaEscrowInstruction,
@@ -74,6 +73,7 @@ import {
   deriveDefiSessionKeypair,
   deriveEscrowPdaSync,
   deriveKeysFromSeed,
+  deriveLaneRentVaultPdaSync,
   deriveMemoPdaSync,
   deriveNfPagePdaSync,
   deriveStealthOwner,
@@ -97,7 +97,7 @@ import {
   prepareEscrowAccountsForAudren,
   recommendedDepositCuLimit,
   recommendedTransactCuLimit,
-  reconstructWitness,
+  reconstructWitnessesForNotes,
   syncCompactStoreWithRpc,
   toBase64,
   toHex,
@@ -109,6 +109,7 @@ import {
   type MerklePath4Ary,
   type OwnedNote,
   type RelayAggregatorId,
+  type RelayInfoResponse,
   type RelayInstructionPayload,
   type RelaySetupAta,
   type RootSnapshotChoice,
@@ -589,7 +590,16 @@ function countUniqueTransactionAccounts(
   return unique.size
 }
 
+const LANE_RENT_VAULT_RESERVE_FLOOR = 1_002_240n
+const PAGE_RENT_FALLBACK_BY_KIND: Record<number, bigint> = {
+  [OPEN_PAGE_KIND_SUBTREE]: 58_352_640n,
+  [OPEN_PAGE_KIND_SUBROOT]: 68_152_320n,
+  [OPEN_PAGE_KIND_MEMO]: 72_161_280n,
+  [OPEN_PAGE_KIND_NULLIFIER]: 68_152_320n,
+}
+
 async function ensureLanePagesPreIxs(params: {
+  cluster: SolanaCluster
   fetcher: AccountBatchFetcher
   payer: string
   laneId: number
@@ -608,6 +618,7 @@ async function ensureLanePagesPreIxs(params: {
   includeOutputs: boolean
 }): Promise<AudrenInstruction[]> {
   const {
+    cluster,
     fetcher,
     payer,
     laneId,
@@ -626,12 +637,12 @@ async function ensureLanePagesPreIxs(params: {
     includeOutputs,
   } = params
   const effectiveOutputs = includeOutputs ? Math.max(1, numOutputs) : 0
-  const candidates: Array<{ pageKind: number; pageSeq: bigint; pda: string }> = []
+  const candidates: Array<{ pageKind: number; pageSeq: bigint; pda: string; mandatory: boolean }> = []
   const seen = new Set<string>()
-  const addCandidate = (pageKind: number, pageSeq: bigint, pda: string) => {
+  const addCandidate = (pageKind: number, pageSeq: bigint, pda: string, mandatory: boolean) => {
     if (seen.has(pda)) return
     seen.add(pda)
-    candidates.push({ pageKind, pageSeq, pda })
+    candidates.push({ pageKind, pageSeq, pda, mandatory })
   }
 
   if (includeOutputs) {
@@ -639,22 +650,26 @@ async function ensureLanePagesPreIxs(params: {
       OPEN_PAGE_KIND_SUBTREE,
       subSeq,
       deriveSubtreePdaSync(0, laneId, subSeq, AUDREN_PROGRAM_ID).address,
+      true,
     )
     addCandidate(
       OPEN_PAGE_KIND_SUBROOT,
       rootSeq,
       deriveSubrootPdaSync(0, laneId, rootSeq, AUDREN_PROGRAM_ID).address,
+      true,
     )
     addCandidate(
       OPEN_PAGE_KIND_MEMO,
       memoSeq,
       deriveMemoPdaSync(0, laneId, memoSeq, AUDREN_PROGRAM_ID).address,
+      true,
     )
     if (nextSubSeq != null) {
       addCandidate(
         OPEN_PAGE_KIND_SUBTREE,
         nextSubSeq,
         deriveSubtreePdaSync(0, laneId, nextSubSeq, AUDREN_PROGRAM_ID).address,
+        true,
       )
     }
     if (nextRootSeq != null) {
@@ -662,6 +677,7 @@ async function ensureLanePagesPreIxs(params: {
         OPEN_PAGE_KIND_SUBROOT,
         nextRootSeq,
         deriveSubrootPdaSync(0, laneId, nextRootSeq, AUDREN_PROGRAM_ID).address,
+        true,
       )
     }
     if (nextMemoSeq != null) {
@@ -669,6 +685,7 @@ async function ensureLanePagesPreIxs(params: {
         OPEN_PAGE_KIND_MEMO,
         nextMemoSeq,
         deriveMemoPdaSync(0, laneId, nextMemoSeq, AUDREN_PROGRAM_ID).address,
+        true,
       )
     }
   }
@@ -677,17 +694,19 @@ async function ensureLanePagesPreIxs(params: {
       OPEN_PAGE_KIND_NULLIFIER,
       nfSeq,
       deriveNfPagePdaSync(0, laneId, nfSeq, AUDREN_PROGRAM_ID).address,
+      true,
     )
     if (nextNfSeq != null) {
       addCandidate(
         OPEN_PAGE_KIND_NULLIFIER,
         nextNfSeq,
         deriveNfPagePdaSync(0, laneId, nextNfSeq, AUDREN_PROGRAM_ID).address,
+        true,
       )
     }
   }
 
-  // Zero-crank Auto-OpenPage: merge >=90% lookahead targets from @audren/sdk
+  // Zero-crank Auto-OpenPage: merge >=90% lookahead targets from @audren/sdk with `mandatory` preserved.
   const autoTargets = planAutoOpenPages({
     programId: AUDREN_PROGRAM_ID,
     poolId: 0,
@@ -698,20 +717,71 @@ async function ensureLanePagesPreIxs(params: {
     numNfs,
   })
   for (const t of autoTargets) {
-    addCandidate(t.pageKind, t.pageSeq, t.pda)
+    addCandidate(t.pageKind, t.pageSeq, t.pda, t.mandatory)
   }
 
   if (candidates.length === 0) return []
-  const res = await fetcher(candidates.map((c) => c.pda))
+  const laneRentVaultPda = deriveLaneRentVaultPdaSync(0, laneId, AUDREN_PROGRAM_ID).address
+  const hasOptionalProactive = candidates.some((c) => !c.mandatory)
   const existingPages = new Set<string>()
-  for (let i = 0; i < candidates.length; i++) {
-    if (res[i]) existingPages.add(candidates[i]!.pda)
+  let vaultAvail = 0n
+
+  if (hasOptionalProactive) {
+    try {
+      const resp = await fetch('/api/rpc/accounts', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          cluster,
+          addresses: [...candidates.map((c) => c.pda), laneRentVaultPda],
+          commitment: 'confirmed',
+          dataSlice: { offset: 0, length: 8 },
+        }),
+      })
+      const body = (await resp.json().catch(() => ({}))) as {
+        accounts?: Array<string | null>
+        lamports?: Array<number | null>
+      }
+      if (resp.ok && Array.isArray(body.accounts) && body.accounts.length === candidates.length + 1) {
+        for (let i = 0; i < candidates.length; i++) {
+          if (body.accounts[i]) existingPages.add(candidates[i]!.pda)
+        }
+        const rawVaultLamports = BigInt(body.lamports?.[candidates.length] ?? 0)
+        vaultAvail =
+          rawVaultLamports > LANE_RENT_VAULT_RESERVE_FLOOR
+            ? rawVaultLamports - LANE_RENT_VAULT_RESERVE_FLOOR
+            : 0n
+      } else {
+        const res = await fetcher(candidates.map((c) => c.pda))
+        for (let i = 0; i < candidates.length; i++) {
+          if (res[i]) existingPages.add(candidates[i]!.pda)
+        }
+      }
+    } catch {
+      const res = await fetcher(candidates.map((c) => c.pda))
+      for (let i = 0; i < candidates.length; i++) {
+        if (res[i]) existingPages.add(candidates[i]!.pda)
+      }
+    }
+  } else {
+    const res = await fetcher(candidates.map((c) => c.pda))
+    for (let i = 0; i < candidates.length; i++) {
+      if (res[i]) existingPages.add(candidates[i]!.pda)
+    }
   }
 
   const emittedPdas = new Set<string>()
   const ixs: AudrenInstruction[] = []
   for (const c of candidates) {
     if (existingPages.has(c.pda) || emittedPdas.has(c.pda)) continue
+    const pageRent = PAGE_RENT_FALLBACK_BY_KIND[c.pageKind] ?? 72_161_280n
+    if (!c.mandatory) {
+      // Optional >= 90% lookahead: prepend ONLY when LaneRentVault covers full rent (0 payer deficit).
+      if (vaultAvail < pageRent) continue
+      vaultAvail -= pageRent
+    } else {
+      vaultAvail = vaultAvail > pageRent ? vaultAvail - pageRent : 0n
+    }
     emittedPdas.add(c.pda)
     ixs.push(
       buildOpenPageInstruction({
@@ -720,21 +790,9 @@ async function ensureLanePagesPreIxs(params: {
         pageKind: c.pageKind,
         pageSeq: c.pageSeq,
         payer,
+        maxPayerDeficit: c.mandatory ? undefined : 0n,
       }),
     )
-  }
-  for (const autoIx of buildAutoOpenPageInstructions({
-    programId: AUDREN_PROGRAM_ID,
-    payer,
-    poolId: 0,
-    laneId,
-    nextLeaf,
-    nfCount,
-    numOutputs: effectiveOutputs,
-    numNfs,
-    existingPages: new Set([...existingPages, ...emittedPdas]),
-  })) {
-    ixs.push(autoIx)
   }
   return ixs
 }
@@ -750,6 +808,7 @@ export function LiveWalletVault() {
   const [unlockSource, setUnlockSource] = useState<UnlockSource>(null)
   const unlockSourceRef = useRef<UnlockSource>(null)
   const [seedBytes, setSeedBytes] = useState<Uint8Array | null>(null)
+  const seedBytesRef = useRef<Uint8Array | null>(null)
   const [keys, setKeys] = useState<AudrenKeys | null>(null)
   const [store, setStore] = useState<CompactWalletStore | null>(null)
   const [birthdayByCluster, setBirthdayByCluster] = useState<Record<SolanaCluster, bigint>>({
@@ -835,6 +894,26 @@ export function LiveWalletVault() {
   const verifyReceiptSeqRef = useRef<number>(0)
   const activeMintRef = useRef<string>(WSOL_MINT)
   const pinnedRelayerRef = useRef<{ scope: string; pubkey: string } | null>(null)
+  const relayInfoCacheRef = useRef<{ scope: string; fetchedAt: number; info: RelayInfoResponse } | null>(null)
+
+  const getCachedRelayInfo = useCallback(
+    async (targetCluster: SolanaCluster, targetRelayUrl: string): Promise<RelayInfoResponse | null> => {
+      const scope = `${targetCluster}|${targetRelayUrl}`
+      const cached = relayInfoCacheRef.current
+      if (cached && cached.scope === scope && Date.now() - cached.fetchedAt < 60_000) {
+        return cached.info
+      }
+      try {
+        const client = new AudrenRelayClient(targetRelayUrl)
+        const info = await client.getInfo(targetCluster)
+        relayInfoCacheRef.current = { scope, fetchedAt: Date.now(), info }
+        return info
+      } catch {
+        return null
+      }
+    },
+    [],
+  )
 
   const [withdrawRecipient, setWithdrawRecipient] = useState<string>('')
   const [withdrawAmount, setWithdrawAmount] = useState<string>('')
@@ -853,13 +932,35 @@ export function LiveWalletVault() {
     billingMode: 'self_paying' | 'sponsored'
   } | null>(null)
 
-  const [sessionIndex, setSessionIndex] = useState<number>(0)
+  const [sessionIndexByCluster, setSessionIndexByCluster] = useState<Record<SolanaCluster, number>>({
+    devnet: 0,
+    mainnet: 0,
+  })
+  const sessionIndex = sessionIndexByCluster[cluster]
+  const updateSessionIndex = useCallback(
+    (updater: (prev: number) => number) => {
+      const target = clusterRef.current
+      setSessionIndexByCluster((prev) => {
+        const next = Math.max(0, Math.min(10_000, updater(prev[target])))
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(`audren_defi_session_idx:${target}`, String(next))
+          } catch {
+            // ignore storage quota errors
+          }
+        }
+        return { ...prev, [target]: next }
+      })
+    },
+    [],
+  )
   const [receiptJson, setReceiptJson] = useState<string>('')
   const [receiptVerdict, setReceiptVerdict] = useState<'valid' | 'invalid' | null>(null)
   const [receiptVerdictDetail, setReceiptVerdictDetail] = useState<string | null>(null)
   const [verifyingReceipt, setVerifyingReceipt] = useState(false)
   const [showFvk, setShowFvk] = useState(false)
   const [backupPassphrase, setBackupPassphrase] = useState('')
+  const [restoreSeedInput, setRestoreSeedInput] = useState('')
   const [restoreBirthdayInput, setRestoreBirthdayInput] = useState('')
   const [backupStatus, setBackupStatus] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -874,6 +975,41 @@ export function LiveWalletVault() {
   useEffect(() => {
     clusterRef.current = cluster
   }, [cluster])
+
+  useEffect(() => {
+    let active = true
+    if (typeof window === 'undefined') return
+    const readSavedIdx = (c: SolanaCluster): number => {
+      try {
+        const saved = window.localStorage.getItem(`audren_defi_session_idx:${c}`)
+        const n = saved && /^\d+$/.test(saved) ? Number(saved) : 0
+        return Number.isSafeInteger(n) && n >= 0 ? Math.min(10_000, n) : 0
+      } catch {
+        return 0
+      }
+    }
+    const nextDevnet = readSavedIdx('devnet')
+    const nextMainnet = readSavedIdx('mainnet')
+    if (nextDevnet > 0 || nextMainnet > 0) {
+      void Promise.resolve().then(() => {
+        if (!active) return
+        setSessionIndexByCluster({ devnet: nextDevnet, mainnet: nextMainnet })
+      })
+    }
+    return () => {
+      active = false
+    }
+  }, [])
+
+  // Scrub raw master seed bytes from memory if the Vault component unmounts.
+  useEffect(() => {
+    return () => {
+      if (seedBytesRef.current) {
+        seedBytesRef.current.fill(0)
+        seedBytesRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     connectedAddrRef.current = connectedAddress
@@ -963,6 +1099,10 @@ export function LiveWalletVault() {
     sessionEpochRef.current += 1
     vaultEpochRef.current += 1
     unlockSourceRef.current = null
+    if (seedBytesRef.current) {
+      seedBytesRef.current.fill(0)
+      seedBytesRef.current = null
+    }
     setKeys(null)
     setSeedBytes(null)
     setUnlockSource(null)
@@ -1447,6 +1587,10 @@ export function LiveWalletVault() {
       setVerifyingReceipt(false)
       setBackupStatus(null)
       const derived = deriveKeysFromSeed(seed)
+      if (seedBytesRef.current && seedBytesRef.current !== seed) {
+        seedBytesRef.current.fill(0)
+      }
+      seedBytesRef.current = seed
       unlockSourceRef.current = source
       setSeedBytes(seed)
       setKeys(derived)
@@ -1542,6 +1686,52 @@ export function LiveWalletVault() {
         capturedBirthday > 0n
           ? `Ephemeral local vault created at birthday slot #${capturedBirthday.toString()}. Save an encrypted backup before closing.`
           : 'Ephemeral local vault created. Save an encrypted backup before closing.',
+      )
+    } catch (err) {
+      if (clusterRef.current === targetCluster) {
+        setErrorMsg(err instanceof Error ? err.message : String(err))
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleRestoreFromHexSeed = async () => {
+    if (busy || connecting) return
+    const trimmedHex = restoreSeedInput.trim()
+    if (!STRICT_HEX_64_RE.test(trimmedHex)) {
+      setErrorMsg('Recovery seed must be exactly 64 hexadecimal characters (32 bytes)')
+      return
+    }
+    const overrideTrimmed = restoreBirthdayInput.trim()
+    let effectiveBirthday = 0n
+    if (overrideTrimmed.length > 0) {
+      if (!/^\d+$/.test(overrideTrimmed)) {
+        setErrorMsg('Birthday slot override must be a non-negative integer')
+        return
+      }
+      effectiveBirthday = BigInt(overrideTrimmed)
+    }
+    const targetCluster = cluster
+    setBusy(true)
+    setErrorMsg(null)
+    setBackupStatus(null)
+    try {
+      const restoredSeed = fromHex(trimmedHex)
+      setRestoreSeedInput('')
+      setBirthdayByCluster((prev) => ({
+        ...prev,
+        [targetCluster]: effectiveBirthday,
+      }))
+      const unlockedEpoch = await unlockFromSeed(restoredSeed, targetCluster, 'backup', 'local', {
+        birthdaySlot: effectiveBirthday,
+        resetStore: true,
+      })
+      if (unlockedEpoch === null) return
+      setStatusMsg(
+        effectiveBirthday > 0n
+          ? `Restored Audren vault from 64-hex seed on ${targetCluster} (birthday slot #${effectiveBirthday.toString()}).`
+          : `Restored Audren vault from 64-hex seed on ${targetCluster}.`,
       )
     } catch (err) {
       if (clusterRef.current === targetCluster) {
@@ -1987,6 +2177,7 @@ export function LiveWalletVault() {
   const quoteSendInputCount = sendInputNotesBase
     ? sendInputNotesBase.length
     : Math.min(2, activeMintNoteCount)
+  const sendQuoteOmitNf1 = economyMode && quoteSendInputCount <= 1
   const quoteWithdrawInputCount = withdrawInputNotesBase
     ? withdrawInputNotesBase.length
     : Math.min(2, activeMintNoteCount)
@@ -2013,39 +2204,46 @@ export function LiveWalletVault() {
     }
     let active = true
     if (tab === 'send') {
-      const sendRawAmt = parseUnits(sendAmount, activeMintDecimals)
-      if (!sendAmount.trim() || !sendRawAmt || sendRawAmt <= 0n) {
-        void Promise.resolve().then(() => {
-          if (active) setSendFeePreview(null)
-        })
-        return () => {
-          active = false
-        }
-      }
       const timer = setTimeout(() => {
-        const client = new AudrenRelayClient(relayUrl)
-        const omitNf1 = economyMode && quoteSendInputCount <= 1
-        const relayScope = `${cluster}|${relayUrl}`
-        const pinnedRelayer =
-          pinnedRelayerRef.current?.scope === relayScope ? pinnedRelayerRef.current.pubkey : undefined
-        client
-          .getFeeQuote({
-            cluster,
-            op: 'transfer',
-            mint: activeMintStr,
-            outputCount: 3,
-            omitNf1,
-            ...(pinnedRelayer ? { relayerPubkey: pinnedRelayer } : {}),
-          })
-          .then((fq) => {
+        void (async () => {
+          const info = await getCachedRelayInfo(cluster, relayUrl)
+          if (!active) return
+          // M-2: When the relayer has no shielded FVK configured, all private transfers are
+          // sponsored at 0 fee regardless of mint or amount. Resolve locally without transmitting
+          // the hidden mint or firing keystroke-correlated `/v1/fee-quote` requests.
+          if (info && !info.relayerShieldedAddress) {
+            setSendFeePreview({
+              relayerFee: 0n,
+              billingMode: 'sponsored',
+              reason: 'Relayer sponsors private transfers under rate limits.',
+            })
+            return
+          }
+          const client = new AudrenRelayClient(relayUrl)
+          const omitNf1 = sendQuoteOmitNf1
+          const relayScope = `${cluster}|${relayUrl}`
+          const pinnedRelayer =
+            pinnedRelayerRef.current?.scope === relayScope ? pinnedRelayerRef.current.pubkey : undefined
+          try {
+            const fq = await client.getFeeQuote({
+              cluster,
+              op: 'transfer',
+              ...(info?.relayerShieldedAddress ? { mint: activeMintStr } : {}),
+              outputCount: 3,
+              omitNf1,
+              ...(pinnedRelayer ? { relayerPubkey: pinnedRelayer } : {}),
+            })
             if (!active) return
             if (typeof fq.relayerPubkey === 'string' && fq.relayerPubkey) {
               pinnedRelayerRef.current = { scope: relayScope, pubkey: fq.relayerPubkey }
             }
             const validDec = parseValidDecimals(fq.feeDecimals)
-            hydrateMintMeta(fq.feeMint || activeMintStr, fq.feeDecimals, fq.feeTokenProgram)
+            if (fq.feeMint) {
+              hydrateMintMeta(fq.feeMint, fq.feeDecimals, fq.feeTokenProgram)
+            }
             if (
-              (!fq.feeMint || fq.feeMint === activeMintStr) &&
+              fq.feeMint &&
+              fq.feeMint === activeMintStr &&
               validDec !== undefined &&
               validDec !== activeMintDecimals
             ) {
@@ -2061,10 +2259,10 @@ export function LiveWalletVault() {
               billingMode: fq.billingMode,
               reason: fq.reason,
             })
-          })
-          .catch(() => {
+          } catch {
             if (active) setSendFeePreview(null)
-          })
+          }
+        })()
       }, 250)
       return () => {
         active = false
@@ -2209,19 +2407,19 @@ export function LiveWalletVault() {
     activeMintNoteCount,
     activeMintStr,
     activeMintDecimals,
-    sendAmount,
     withdrawAmount,
     unwrapWsol,
     economyMode,
     poolPausedFlag,
     effectiveRelayedMissingAta,
-    quoteSendInputCount,
+    sendQuoteOmitNf1,
     quoteWithdrawInputCount,
     quoteWithdrawTotalStr,
     maxSpendableNotePairStr,
     cluster,
     relayUrl,
     hydrateMintMeta,
+    getCachedRelayInfo,
   ])
 
   const handleClickMaxSend = async () => {
@@ -2242,6 +2440,18 @@ export function LiveWalletVault() {
       activeMintRef.current === targetMint
     setQuotingMaxSend(true)
     try {
+      const info = await getCachedRelayInfo(targetCluster, relayUrl)
+      if (!isCurrent()) return
+      // M-2: Sponsored relays without shielded FVK charge 0 fee regardless of mint.
+      if (info && !info.relayerShieldedAddress) {
+        setSendFeePreview({
+          relayerFee: 0n,
+          billingMode: 'sponsored',
+          reason: 'Relayer sponsors private transfers under rate limits.',
+        })
+        setSendAmount(formatUnitsExact(maxSpendableNotePair, activeMintDecimals))
+        return
+      }
       const client = new AudrenRelayClient(relayUrl)
       const maxPairNotes = selectInputNotesForMint(activeMintNotes, maxSpendableNotePair, {
         economyMode,
@@ -2254,7 +2464,7 @@ export function LiveWalletVault() {
       const fq = await client.getFeeQuote({
         cluster: targetCluster,
         op: 'transfer',
-        mint: targetMint,
+        ...(info?.relayerShieldedAddress ? { mint: targetMint } : {}),
         outputCount: 3,
         omitNf1,
         ...(pinnedRelayer ? { relayerPubkey: pinnedRelayer } : {}),
@@ -2264,7 +2474,9 @@ export function LiveWalletVault() {
         pinnedRelayerRef.current = { scope: relayScope, pubkey: fq.relayerPubkey }
       }
       const resolvedDecimals = parseValidDecimals(fq.feeDecimals) ?? activeMintDecimals
-      hydrateMintMeta(fq.feeMint || targetMint, fq.feeDecimals, fq.feeTokenProgram)
+      if (fq.feeMint) {
+        hydrateMintMeta(fq.feeMint, fq.feeDecimals, fq.feeTokenProgram)
+      }
       const fee = BigInt(fq.relayerFee || '0')
       setSendFeePreview({
         relayerFee: fee,
@@ -2302,6 +2514,8 @@ export function LiveWalletVault() {
       activeMintRef.current === targetMint
     setQuotingMaxWithdraw(true)
     try {
+      const info = await getCachedRelayInfo(targetCluster, relayUrl)
+      if (!isCurrent()) return
       const client = new AudrenRelayClient(relayUrl)
       const maxPairNotes = selectInputNotesForMint(activeMintNotes, maxSpendableNotePair, {
         economyMode,
@@ -2319,73 +2533,217 @@ export function LiveWalletVault() {
       const pinnedRelayer =
         pinnedRelayerRef.current?.scope === relayScope ? pinnedRelayerRef.current.pubkey : undefined
       const unwrapFlag = unwrapWsol && targetMint === WSOL_MINT
-      const fq = await client.getFeeQuote({
-        cluster: targetCluster,
-        op: 'withdraw',
-        mint: targetMint,
-        amount: maxSpendableNotePair.toString(),
-        unwrapWsol: unwrapFlag,
-        outputCount,
-        missingAtaCount: effectiveRelayedMissingAta,
-        omitNf1,
-        ...(pinnedRelayer ? { relayerPubkey: pinnedRelayer } : {}),
-      })
-      if (!isCurrent()) return
-      const activeRelayer =
-        typeof fq.relayerPubkey === 'string' && fq.relayerPubkey ? fq.relayerPubkey : pinnedRelayer
-      if (activeRelayer) {
-        pinnedRelayerRef.current = { scope: relayScope, pubkey: activeRelayer }
-      }
-      let resolvedDecimals = parseValidDecimals(fq.feeDecimals) ?? activeMintDecimals
-      hydrateMintMeta(fq.feeMint || targetMint, fq.feeDecimals, fq.feeTokenProgram)
-      let finalFq = fq
-      let finalFee = BigInt(fq.relayerFee || '0')
-      let netMax = maxSpendableNotePair > finalFee ? maxSpendableNotePair - finalFee : 0n
+      const baseSwapFeeBps = BigInt(Math.max(0, Math.trunc(info?.policy?.baseSwapFeeBps ?? 25)))
+      const maxSelfPayBps = BigInt(Math.max(1, Math.trunc(info?.policy?.maxSelfPayBps ?? 450)))
+      const selfPayMarginBps = BigInt(Math.max(10_000, Math.trunc(info?.policy?.selfPayMarginBps ?? 11_000)))
 
-      // Fixed-point iteration for percentage-fee regimes (`feeBps > 0`) so Max Withdraw
-      // converges to exact `amount + fee(amount) === total` (preserving Pause Escape Hatch
-      // `output_mask === 0` and preventing dust change notes in Economy Mode).
-      if (fq.feeBps > 0 && finalFee > 0n) {
-        const fee1 = finalFee
-        const guess = (maxSpendableNotePair * 10_000n) / (10_000n + BigInt(fq.feeBps))
-        if (guess > 0n && guess < maxSpendableNotePair) {
-          const fq2 = await client.getFeeQuote({
-            cluster: targetCluster,
-            op: 'withdraw',
-            mint: targetMint,
-            amount: guess.toString(),
-            unwrapWsol: unwrapFlag,
-            outputCount,
-            missingAtaCount: effectiveRelayedMissingAta,
-            omitNf1,
-            ...(activeRelayer ? { relayerPubkey: activeRelayer } : {}),
-          })
-          if (!isCurrent()) return
-          resolvedDecimals = parseValidDecimals(fq2.feeDecimals) ?? resolvedDecimals
-          hydrateMintMeta(fq2.feeMint || targetMint, fq2.feeDecimals, fq2.feeTokenProgram)
-          const fee2 = BigInt(fq2.relayerFee || '0')
-          if (fee2 === 0n) {
-            // Crossing the MAX_SELF_PAY_BPS cliff at `guess` dropped fq2 to sponsored (`0`).
-            // Keep the first self-paying quote (`fee1`) so `netMax + fee1 === maxSpendableNotePair`
-            // (exact full exit with zero unwithdrawn residual).
-            finalFq = fq
-            finalFee = fee1
-            netMax = maxSpendableNotePair > fee1 ? maxSpendableNotePair - fee1 : 0n
-          } else {
-            finalFq = fq2
-            finalFee = fee2
-            const adjusted = maxSpendableNotePair > fee2 ? maxSpendableNotePair - fee2 : 0n
+      // M-2: Solve Max Withdraw fixed-point locally WITHOUT transmitting exact pre-fee
+      // `maxSpendableNotePair` to `/v1/fee-quote`!
+      //   - For WSOL unwrap (`unwrapFlag`), compute exact fee directly from `/v1/info` rentSchedule + policy (0 `/v1/fee-quote` calls).
+      //   - For SPL / Token-2022 mints, query `/v1/fee-quote` with a fixed public reference probe
+      //     (1e15 base units) to read the flat rent floor (`neededUnits`), decimals, and allowlist
+      //     eligibility, then solve `netMax + fee(netMax) === maxSpendableNotePair` strictly locally.
+      let resolvedDecimals = activeMintDecimals
+      let finalFee = 0n
+      let finalBillingMode: 'self_paying' | 'sponsored' = 'sponsored'
+      let finalReason = 'Small or unpriced withdrawal sponsored under relay rate limits.'
+      let netMax = maxSpendableNotePair
+
+      const solveLocalFixedPoint = (flatFloorUnits: bigint): {
+        net: bigint
+        fee: bigint
+        selfPaying: boolean
+      } => {
+        if (flatFloorUnits <= 0n) {
+          return { net: maxSpendableNotePair, fee: 0n, selfPaying: false }
+        }
+        // 1. O(1) percentage-fee regime (`pctFee(net) >= flatFloorUnits`):
+        //    For `n0 = floor(total * 10000 / (10000 + bps))`, the maximum feasible `net` with
+        //    `net + floor(net * bps / 10000) <= total` is mathematically guaranteed to be
+        //    either `n0 + 1` or `n0` (zero linear scan).
+        if (baseSwapFeeBps > 0n && baseSwapFeeBps <= maxSelfPayBps) {
+          const n0 = (maxSpendableNotePair * 10_000n) / (10_000n + baseSwapFeeBps)
+          for (const cand of [n0 + 1n, n0]) {
+            if (cand <= 0n) continue
+            const pctFee = (cand * baseSwapFeeBps) / 10_000n
             if (
-              fee2 < fee1 &&
-              adjusted > guess &&
-              fq2.feeBps > 0 &&
-              (adjusted * BigInt(fq2.feeBps)) / 10_000n > fee2
+              pctFee >= flatFloorUnits &&
+              pctFee < cand &&
+              cand + pctFee <= maxSpendableNotePair &&
+              (pctFee * 10_000n) / cand <= maxSelfPayBps
             ) {
-              netMax = guess
-            } else {
-              netMax = adjusted
+              return { net: cand, fee: pctFee, selfPaying: true }
             }
           }
+        }
+        // 2. O(1) flat-floor regime (`pctFee(net) < flatFloorUnits`): `net = total - flatFloorUnits`
+        if (maxSpendableNotePair > flatFloorUnits) {
+          const candFlatNet = maxSpendableNotePair - flatFloorUnits
+          const pctAtFlat = (candFlatNet * baseSwapFeeBps) / 10_000n
+          if (
+            pctAtFlat <= flatFloorUnits &&
+            flatFloorUnits < candFlatNet &&
+            (flatFloorUnits * 10_000n) / candFlatNet <= maxSelfPayBps
+          ) {
+            return { net: candFlatNet, fee: flatFloorUnits, selfPaying: true }
+          }
+          // 3. O(1) `maxSelfPayBps` cliff band `[threshold, threshold + flatFloorUnits - 1]`:
+          //    `maxSpendableNotePair` itself triggers `self_paying` on `/v1/fee-quote`, while
+          //    `candFlatNet = total - flatFloorUnits` pays full `flatFloorUnits` on `/v1/submit`
+          //    (preserving `quotedMaxFee` for Pause Escape Hatch, missing recipient ATA `setupAtas`,
+          //    and economy-mode 0-output residual folding).
+          if ((flatFloorUnits * 10_000n) / maxSpendableNotePair <= maxSelfPayBps) {
+            return { net: candFlatNet, fee: flatFloorUnits, selfPaying: true }
+          }
+        }
+        return { net: maxSpendableNotePair, fee: 0n, selfPaying: false }
+      }
+
+      if (unwrapFlag && info?.rentSchedule) {
+        const rs = info.rentSchedule
+        const nfCount = omitNf1 ? 1n : 2n
+        const nfRent = BigInt(rs.nullifierRentLamports) + BigInt(rs.nfPageRentPerNfLamports ?? '0')
+        const noteRent = BigInt(rs.pageRentPerNoteLamports ?? rs.noteRentPerLeafLamports ?? '0')
+        const ataRent = BigInt(rs.ataRentLamports)
+        const txBase =
+          nfCount * nfRent +
+          BigInt(outputCount) * noteRent +
+          BigInt(effectiveRelayedMissingAta) * ataRent +
+          20_000n
+        const neededLamports = (txBase * selfPayMarginBps + 9_999n) / 10_000n
+        const solved = solveLocalFixedPoint(neededLamports)
+        netMax = solved.net
+        finalFee = solved.fee
+        finalBillingMode = solved.selfPaying ? 'self_paying' : 'sponsored'
+        finalReason = solved.selfPaying
+          ? 'Self-paying atomic WSOL-unwrap relay fee covers nullifier rent & gas (computed locally from relay schedule).'
+          : 'Small action sponsored under relay rate limits.'
+      } else {
+        // Fixed public probe amount (10^15 base units, independent of user balance) to read
+        // exact `minFlatFeeUnits`, decimals, and allowlist eligibility without leaking note size.
+        const probeAmount = 1_000_000_000_000_000n
+        const fq = await client.getFeeQuote({
+          cluster: targetCluster,
+          op: 'withdraw',
+          mint: targetMint,
+          amount: probeAmount.toString(),
+          unwrapWsol: unwrapFlag,
+          outputCount,
+          missingAtaCount: effectiveRelayedMissingAta,
+          omitNf1,
+          ...(pinnedRelayer ? { relayerPubkey: pinnedRelayer } : {}),
+        })
+        if (!isCurrent()) return
+        const activeRelayer =
+          typeof fq.relayerPubkey === 'string' && fq.relayerPubkey ? fq.relayerPubkey : pinnedRelayer
+        if (activeRelayer) {
+          pinnedRelayerRef.current = { scope: relayScope, pubkey: activeRelayer }
+        }
+        resolvedDecimals = parseValidDecimals(fq.feeDecimals) ?? activeMintDecimals
+        hydrateMintMeta(fq.feeMint || targetMint, fq.feeDecimals, fq.feeTokenProgram)
+
+        let flatFloorUnits = 0n
+        if (typeof fq.minFlatFeeUnits === 'string' && /^\d+$/.test(fq.minFlatFeeUnits)) {
+          flatFloorUnits = BigInt(fq.minFlatFeeUnits)
+        } else if (
+          fq.billingMode === 'self_paying' &&
+          targetMint === WSOL_MINT &&
+          fq.estimatedRelayCostLamports
+        ) {
+          flatFloorUnits =
+            (BigInt(fq.estimatedRelayCostLamports) * selfPayMarginBps + 9_999n) / 10_000n
+        } else if (fq.billingMode === 'self_paying' && BigInt(fq.relayerFee || '0') > 0n) {
+          const probeFee = BigInt(fq.relayerFee || '0')
+          const probePctFee = (probeAmount * baseSwapFeeBps) / 10_000n
+          if (probeFee > probePctFee) {
+            flatFloorUnits = probeFee
+          } else {
+            // Fallback for older/third-party relays omitting `minFlatFeeUnits`: step down fixed
+            // public buckets independent of user balance; if a step crosses directly into
+            // `sponsored` (e.g. narrow `maxSelfPayBps / baseSwapFeeBps <= 10` policy), binary-search
+            // `(stepAmt, prevAmt)` to recover the exact flat floor.
+            let prevAmt = probeAmount
+            let prevFee = probeFee
+            let stepAmt = probeAmount / 10n
+            let crossedSponsored = false
+            for (let step = 0; step < 15 && stepAmt > 0n; step++) {
+              const fqStep = await client.getFeeQuote({
+                cluster: targetCluster,
+                op: 'withdraw',
+                mint: targetMint,
+                amount: stepAmt.toString(),
+                unwrapWsol: unwrapFlag,
+                outputCount,
+                missingAtaCount: effectiveRelayedMissingAta,
+                omitNf1,
+                ...(activeRelayer ? { relayerPubkey: activeRelayer } : {}),
+              })
+              if (!isCurrent()) return
+              if (fqStep.billingMode !== 'self_paying') {
+                crossedSponsored = true
+                let lo = stepAmt
+                let hi = prevAmt
+                for (let b = 0; b < 8 && hi - lo > 1n; b++) {
+                  const mid = lo + (hi - lo) / 2n
+                  const fqMid = await client.getFeeQuote({
+                    cluster: targetCluster,
+                    op: 'withdraw',
+                    mint: targetMint,
+                    amount: mid.toString(),
+                    unwrapWsol: unwrapFlag,
+                    outputCount,
+                    missingAtaCount: effectiveRelayedMissingAta,
+                    omitNf1,
+                    ...(activeRelayer ? { relayerPubkey: activeRelayer } : {}),
+                  })
+                  if (!isCurrent()) return
+                  if (fqMid.billingMode === 'self_paying') {
+                    const midFee = BigInt(fqMid.relayerFee || '0')
+                    const midPct = (mid * baseSwapFeeBps) / 10_000n
+                    if (midFee > midPct) {
+                      flatFloorUnits = midFee
+                      break
+                    }
+                    hi = mid
+                    prevFee = midFee
+                  } else {
+                    lo = mid
+                  }
+                }
+                if (flatFloorUnits === 0n) {
+                  flatFloorUnits = prevFee
+                }
+                break
+              }
+              const stepFee = BigInt(fqStep.relayerFee || '0')
+              const stepPct = (stepAmt * baseSwapFeeBps) / 10_000n
+              if (stepFee > stepPct) {
+                flatFloorUnits = stepFee
+                break
+              }
+              prevAmt = stepAmt
+              prevFee = stepFee
+              stepAmt /= 10n
+            }
+            if (flatFloorUnits === 0n && !crossedSponsored) {
+              flatFloorUnits = 1n
+            }
+          }
+        }
+
+        if (flatFloorUnits > 0n) {
+          const solved = solveLocalFixedPoint(flatFloorUnits)
+          netMax = solved.net
+          finalFee = solved.fee
+          finalBillingMode = solved.selfPaying ? 'self_paying' : 'sponsored'
+          finalReason = solved.selfPaying
+            ? fq.reason
+            : 'Small action sponsored under relay rate limits.'
+        } else {
+          finalBillingMode = 'sponsored'
+          finalFee = 0n
+          finalReason = fq.reason
+          netMax = maxSpendableNotePair
         }
       }
 
@@ -2404,12 +2762,12 @@ export function LiveWalletVault() {
           missingAtaCount: effectiveRelayedMissingAta,
         }),
         quotedFee: finalFee,
-        billingMode: finalFq.billingMode,
+        billingMode: finalBillingMode,
       }
       setWithdrawFeePreview({
         relayerFee: finalFee,
-        billingMode: finalFq.billingMode,
-        reason: finalFq.reason,
+        billingMode: finalBillingMode,
+        reason: finalReason,
       })
       setWithdrawAmount(netMaxStr)
     } catch {
@@ -2569,39 +2927,38 @@ export function LiveWalletVault() {
     }
   }
 
-  const buildLocalOrRpcWitness = async (params: {
+  const buildLocalOrRpcWitnesses = async (params: {
     activeStore: CompactWalletStore
     fetcher: AccountBatchFetcher
     history: DecodedGlobalRootHistory
     snapshot: RootSnapshotChoice
-    allInputNotes: readonly OwnedNote[]
-    note: OwnedNote
+    inputNotes: readonly OwnedNote[]
   }): Promise<{
     rootRingKind: number
     rootRingIdx: number
     superRoot: bigint
-    path: MerklePath4Ary
+    paths: MerklePath4Ary[]
   }> => {
-    const { activeStore, fetcher, history, snapshot, allInputNotes, note } = params
+    const { activeStore, fetcher, history, snapshot, inputNotes } = params
     try {
-      const localWitness = activeStore.buildWitnessForNote(note, snapshot)
-      if (localWitness) {
+      // M-1: Pass full `DecodedGlobalRootHistory` so offline `CompactWalletStore` can fall back
+      // from `ROOT_RING_EPOCH` to `ROOT_RING_SLOT` locally without hitting RPC.
+      const localBatch = activeStore.buildWitnessesForNotes(inputNotes, history)
+      if (localBatch.paths.length === inputNotes.length) {
         return {
-          rootRingKind: localWitness.rootRingKind,
-          rootRingIdx: localWitness.rootRingIdx,
-          superRoot: localWitness.superRoot,
-          path: localWitness.path,
+          rootRingKind: localBatch.rootRingKind,
+          rootRingIdx: localBatch.rootRingIdx,
+          superRoot: localBatch.superRoot,
+          paths: localBatch.paths,
         }
       }
     } catch {
-      // Fall back cleanly to ordinary batched RPC reconstruction if local store missed frontier/siblings
+      // Fall back cleanly to ONE batched decoy-padded RPC reconstruction across all input notes
     }
-    const res = await reconstructWitness({
+    const res = await reconstructWitnessesForNotes({
       fetchBatch: fetcher,
       poolId: 0,
-      laneId: note.laneId,
-      leafIdx: note.leafIndex,
-      allInputNotes: allInputNotes.map((n) => ({ laneId: n.laneId, leafIndex: n.leafIndex })),
+      notes: inputNotes.map((n) => ({ laneId: n.laneId, leafIndex: n.leafIndex })),
       rootHistory: history,
       rootSnapshot: snapshot,
       viewSk: keys?.viewSk,
@@ -2610,7 +2967,7 @@ export function LiveWalletVault() {
       rootRingKind: res.rootRingKind,
       rootRingIdx: res.rootRingIdx,
       superRoot: res.superRoot,
-      path: res.path,
+      paths: res.paths,
     }
   }
 
@@ -2701,6 +3058,7 @@ export function LiveWalletVault() {
       const vaultAta = deriveAssociatedTokenAddressSync(vaultAuth, targetMint, tokenProgram).address
 
       const openPagePreIxs = await ensureLanePagesPreIxs({
+        cluster: targetCluster,
         fetcher,
         payer: connected.address,
         laneId,
@@ -2941,7 +3299,45 @@ export function LiveWalletVault() {
         parseAudrenAddress(sendRecipient.trim())
       }
 
-      let inputNotes = selectInputNotesForMint(activeMintNotes, amount, {
+      const currentWithdrawMaxKey = buildMaxWithdrawKey({
+        cluster,
+        relayUrl,
+        mint: mintStr,
+        amountStr: withdrawAmount.trim(),
+        maxSpendableNotePairStr: maxSpendableNotePair.toString(),
+        economyMode,
+        unwrapWsol,
+        poolPaused: poolPausedFlag,
+        missingAtaCount: effectiveRelayedMissingAta,
+      })
+      const currentWithdrawMaxKeyLive = buildMaxWithdrawKey({
+        cluster,
+        relayUrl,
+        mint: mintStr,
+        amountStr: withdrawAmount.trim(),
+        maxSpendableNotePairStr: maxSpendableNotePair.toString(),
+        economyMode,
+        unwrapWsol,
+        poolPaused,
+        missingAtaCount: effectiveRelayedMissingAta,
+      })
+      const wasMaxWithdrawClick =
+        mode === 'withdraw' &&
+        (initialMaxWithdraw?.key === currentWithdrawMaxKey ||
+          initialMaxWithdraw?.key === currentWithdrawMaxKeyLive)
+      const quotedMaxFee = wasMaxWithdrawClick ? (initialMaxWithdraw?.quotedFee ?? 0n) : 0n
+      const quotedMaxBillingMode = wasMaxWithdrawClick
+        ? (initialMaxWithdraw?.billingMode ?? null)
+        : null
+      const allowCliffMaxSelfPayFold =
+        wasMaxWithdrawClick && quotedMaxBillingMode === 'self_paying' && quotedMaxFee > 0n
+
+      // R3-4 Medium #2: When submitting a Max Withdraw that quoted a self-paying fee (including
+      // Regime-3 cliff-band balances on 3+ note wallets), select notes covering `amount + quotedMaxFee`
+      // upfront so note selection picks the full `maxSpendableNotePair` rather than a smaller pair.
+      const initialSelectTarget =
+        useRelayer && allowCliffMaxSelfPayFold ? amount + quotedMaxFee : amount
+      let inputNotes = selectInputNotesForMint(activeMintNotes, initialSelectTarget, {
         economyMode,
         preferredNote: manualPreferredNote,
       })
@@ -2973,37 +3369,6 @@ export function LiveWalletVault() {
         throw new Error('Enter a valid public Solana recipient address')
       }
 
-      const currentWithdrawMaxKey = buildMaxWithdrawKey({
-        cluster,
-        relayUrl,
-        mint: mintStr,
-        amountStr: withdrawAmount.trim(),
-        maxSpendableNotePairStr: maxSpendableNotePair.toString(),
-        economyMode,
-        unwrapWsol,
-        poolPaused: poolPausedFlag,
-        missingAtaCount: effectiveRelayedMissingAta,
-      })
-      const currentWithdrawMaxKeyLive = buildMaxWithdrawKey({
-        cluster,
-        relayUrl,
-        mint: mintStr,
-        amountStr: withdrawAmount.trim(),
-        maxSpendableNotePairStr: maxSpendableNotePair.toString(),
-        economyMode,
-        unwrapWsol,
-        poolPaused,
-        missingAtaCount: effectiveRelayedMissingAta,
-      })
-      const wasMaxWithdrawClick =
-        mode === 'withdraw' &&
-        (initialMaxWithdraw?.key === currentWithdrawMaxKey ||
-          initialMaxWithdraw?.key === currentWithdrawMaxKeyLive)
-      const quotedMaxFee = wasMaxWithdrawClick ? (initialMaxWithdraw?.quotedFee ?? 0n) : 0n
-      const quotedMaxBillingMode = wasMaxWithdrawClick
-        ? (initialMaxWithdraw?.billingMode ?? null)
-        : null
-
       const computeBpsRoundingCap = (curTotalIn: bigint, feeBps: number): bigint =>
         feeBps > 0
           ? (((curTotalIn * BigInt(feeBps) + 9_999n) / 10_000n) * BigInt(feeBps + 1)) / 10_000n +
@@ -3018,7 +3383,10 @@ export function LiveWalletVault() {
         feeRecExists: boolean,
       ): boolean => {
         const residual = curTotalIn - amount - fee
-        if (residual <= 0n || !feeRecipient || (fee === 0n && !feeRecExists)) return false
+        if (residual <= 0n || !feeRecipient) return false
+        if (fee === 0n && !feeRecExists && !(allowCliffMaxSelfPayFold && residual >= quotedMaxFee)) {
+          return false
+        }
         const cap = computeBpsRoundingCap(curTotalIn, feeBps)
         const maxRefFee = fee > quotedMaxFee ? fee : quotedMaxFee
         return residual <= cap || (wasMaxWithdrawClick && residual <= maxRefFee + cap)
@@ -3054,11 +3422,27 @@ export function LiveWalletVault() {
         relayerFeeRecipientExists = q.feeRecipientExists
       }
 
+      let relayerSupportsShieldedSendFee = false
       const quoteRelayerFee = async (
         curOmitNf1: boolean,
         curTotalIn: bigint,
         forcedWithdrawOutputs?: number,
       ): Promise<QuotedRelayerFee> => {
+        // M-2: When the relayer has no shielded FVK configured, all private transfers are
+        // sponsored at 0 fee regardless of mint or amount. Skip `/v1/fee-quote` so the hidden
+        // shielded `mint` is never transmitted to the relayer on submit.
+        if (mode === 'send' && !relayerSupportsShieldedSendFee) {
+          return {
+            relayerFee: 0n,
+            billingMode: 'sponsored',
+            feeRecipient: null,
+            feeShieldedAddress: null,
+            needsFeeAtaSetup: false,
+            feeBps: 0,
+            feeRecipientExists: false,
+            outputCount: 3,
+          }
+        }
         const withdrawOutCount =
           forcedWithdrawOutputs ??
           computeWithdrawOutputCount({
@@ -3181,6 +3565,7 @@ export function LiveWalletVault() {
         const info = await relayClient.getInfo(targetCluster)
         if (!isVaultActive()) return
         if (!info.relayerPubkey) throw new Error(`Relayer at ${relayUrl} has no fee payer for ${targetCluster}`)
+        relayerSupportsShieldedSendFee = Boolean(info.relayerShieldedAddress)
         const activePool =
           Array.isArray(info.relayerPubkeys) && info.relayerPubkeys.length > 0
             ? info.relayerPubkeys
@@ -3306,7 +3691,9 @@ export function LiveWalletVault() {
             } else if (
               useRelayer &&
               relayerFeeRecipient &&
-              (relayerFeeAmount > 0n || relayerFeeRecipientExists)
+              (relayerFeeAmount > 0n ||
+                relayerFeeRecipientExists ||
+                (allowCliffMaxSelfPayFold && residual >= quotedMaxFee))
             ) {
               relayerFeeAmount += residual
             } else if (!useRelayer || relayerFeeAmount === 0n) {
@@ -3343,19 +3730,14 @@ export function LiveWalletVault() {
         snapshot: rootSnapshot,
         witnessFetcher,
       } = await fetchRootSnapshotForNotes(cluster, inputNotes)
-      const witnesses = await Promise.all(
-        inputNotes.map((note) =>
-          buildLocalOrRpcWitness({
-            activeStore: store,
-            fetcher: witnessFetcher,
-            history: rootHistory,
-            snapshot: rootSnapshot,
-            allInputNotes: inputNotes,
-            note,
-          }),
-        ),
-      )
-      const superRoot = witnesses[0]!.superRoot
+      const witnessBatch = await buildLocalOrRpcWitnesses({
+        activeStore: store,
+        fetcher: witnessFetcher,
+        history: rootHistory,
+        snapshot: rootSnapshot,
+        inputNotes,
+      })
+      const superRoot = witnessBatch.superRoot
 
       const outLaneId = pickRandomLaneId(activeLanes)
       const outLane = snap.lanes?.[outLaneId]
@@ -3376,9 +3758,9 @@ export function LiveWalletVault() {
         merklePath: path,
       })
       const inputs: [JoinSplitInputWitness, JoinSplitInputWitness] = [
-        buildRealInput(inputNotes[0]!, witnesses[0]!.path),
+        buildRealInput(inputNotes[0]!, witnessBatch.paths[0]!),
         inputNotes[1]
-          ? buildRealInput(inputNotes[1]!, witnesses[1]!.path)
+          ? buildRealInput(inputNotes[1]!, witnessBatch.paths[1]!)
           : dummyInputWitness(keys.spendSk, assetId, randomFr()),
       ]
 
@@ -3512,8 +3894,8 @@ export function LiveWalletVault() {
       const ix = buildTransactInstruction({
         poolId: 0,
         vkId: VK_ID_DEFAULT,
-        rootRingKind: rootSnapshot.ringKind,
-        rootRingIdx: rootSnapshot.ringIdx,
+        rootRingKind: witnessBatch.rootRingKind,
+        rootRingIdx: witnessBatch.rootRingIdx,
         outLaneId,
         outSubSeq,
         outRootSeq,
@@ -3565,7 +3947,7 @@ export function LiveWalletVault() {
           } else if (missingRecipientAta) {
             sponsoredSkippedRecipientAta = true
           }
-          if (pubFeeAmt > 0n && needsFeeAtaSetup) {
+          if (pubFeeAmt > 0n && (needsFeeAtaSetup || !relayerFeeRecipientExists)) {
             setupAtas.push({ owner: payerPubkey, mint: mintStr, tokenProgram })
           }
         }
@@ -3593,6 +3975,7 @@ export function LiveWalletVault() {
         signature = sub.signature
       } else {
         const openPagePreIxs = await ensureLanePagesPreIxs({
+          cluster: targetCluster,
           fetcher,
           payer: payerPubkey,
           laneId: outLaneId,
@@ -3678,7 +4061,7 @@ export function LiveWalletVault() {
         relayed: useRelayer,
         summary:
           mode === 'send'
-            ? `Sent ${sendAmount} ${symbol} privately (${inputNotes.length} ${inputNotes.length === 1 ? 'note' : 'notes'} · 192 B Groth16 · ${rootSnapshot.ringKind === ROOT_RING_EPOCH ? 'epoch' : 'slot'} ring #${rootSnapshot.ringIdx})`
+            ? `Sent ${sendAmount} ${symbol} privately (${inputNotes.length} ${inputNotes.length === 1 ? 'note' : 'notes'} · 192 B Groth16 · ${witnessBatch.rootRingKind === ROOT_RING_EPOCH ? 'epoch' : 'slot'} ring #${witnessBatch.rootRingIdx})`
             : `Withdrew ${withdrawAmount} ${symbol}${isWsolUnwrap ? ' as native SOL' : ''}${inputNotes.length === 2 ? ' (2-note consolidation)' : ''}`,
       })
       setStatusMsg('Confirmed. Syncing CompactWalletStore…')
@@ -3760,12 +4143,13 @@ export function LiveWalletVault() {
       let payerPubkey = connected?.address ?? ''
       let relayerFeePerIx = 0n
       let feeShieldedAddr: string | null = null
-      const candidateMaxBatch = Math.min(
+      let candidateMaxBatch = Math.min(
         MAX_PARALLEL_MERGE_IXS,
         activeLanes,
         Math.floor(candidates.length / 2),
       )
-      const initialQuotedOutputs = candidateMaxBatch > 1 ? 2 : 3
+      let initialQuotedOutputs = candidateMaxBatch > 1 ? 2 : 3
+      let singleMergeFallbackNote: string | null = null
 
       if (useRelayer) {
         if (!isVaultActive()) return
@@ -3774,6 +4158,23 @@ export function LiveWalletVault() {
         if (!isVaultActive()) return
         if (!relayInfo.relayerPubkey) {
           throw new Error(`Relayer at ${relayUrl} has no fee payer for ${targetCluster}`)
+        }
+        // H-6: Respect `supportedOperations.transfer.maxBatchSize` advertised by `/v1/info`
+        // (1 when relayer has no shielded FVK; up to 4 when shielded cm2 fees are enabled).
+        const relayMaxBatch =
+          typeof relayInfo.supportedOperations?.transfer?.maxBatchSize === 'number' &&
+          relayInfo.supportedOperations.transfer.maxBatchSize >= 1
+            ? Math.trunc(relayInfo.supportedOperations.transfer.maxBatchSize)
+            : relayInfo.relayerShieldedAddress
+              ? MAX_PARALLEL_MERGE_IXS
+              : 1
+        if (candidateMaxBatch > relayMaxBatch) {
+          candidateMaxBatch = relayMaxBatch
+          initialQuotedOutputs = candidateMaxBatch > 1 ? 2 : 3
+          if (relayMaxBatch === 1) {
+            singleMergeFallbackNote =
+              'Relayer advertises single-merge mode (maxBatchSize = 1); running one 2-to-1 merge.'
+          }
         }
         const activePool =
           Array.isArray(relayInfo.relayerPubkeys) && relayInfo.relayerPubkeys.length > 0
@@ -3787,19 +4188,24 @@ export function LiveWalletVault() {
             ? pinnedPubkey
             : relayInfo.relayerPubkey
         pinnedRelayerRef.current = { scope: relayScope, pubkey: payerPubkey }
-        const fq = await relayClient.getFeeQuote({
-          cluster: targetCluster,
-          op: 'transfer',
-          mint: mintStr,
-          outputCount: initialQuotedOutputs,
-          omitNf1: false,
-          relayerPubkey: payerPubkey,
-        })
-        if (!isVaultActive()) return
-        hydrateMintMeta(fq.feeMint || mintStr, fq.feeDecimals, fq.feeTokenProgram)
-        decimals = parseValidDecimals(fq.feeDecimals) ?? decimals
-        relayerFeePerIx = BigInt(fq.relayerFee || '0')
-        feeShieldedAddr = fq.feeShieldedAddress
+        if (relayInfo.relayerShieldedAddress) {
+          const fq = await relayClient.getFeeQuote({
+            cluster: targetCluster,
+            op: 'transfer',
+            mint: mintStr,
+            outputCount: initialQuotedOutputs,
+            omitNf1: false,
+            relayerPubkey: payerPubkey,
+          })
+          if (!isVaultActive()) return
+          hydrateMintMeta(fq.feeMint || mintStr, fq.feeDecimals, fq.feeTokenProgram)
+          decimals = parseValidDecimals(fq.feeDecimals) ?? decimals
+          relayerFeePerIx = BigInt(fq.relayerFee || '0')
+          feeShieldedAddr = fq.feeShieldedAddress
+        } else {
+          relayerFeePerIx = 0n
+          feeShieldedAddr = null
+        }
       } else if (!connected) {
         throw new Error('Enable Privacy Relayer or connect a Solana wallet to consolidate notes')
       }
@@ -3841,10 +4247,11 @@ export function LiveWalletVault() {
       }
 
       // Single-instruction merges keep uniform 3-output `0b111` padding; re-quote for 3 outputs
-      // if we initially quoted `outputCount: 2` for a multi-ix batch that collapsed to 1 pair.
-      if (useRelayer && validPairs.length === 1 && initialQuotedOutputs !== 3) {
+      // if we initially quoted `outputCount: 2` for a multi-ix batch that collapsed to 1 pair
+      // (skipping when the relayer has no shielded FVK so the hidden mint is never leaked).
+      if (useRelayer && feeShieldedAddr && validPairs.length === 1 && initialQuotedOutputs !== 3) {
         const fq3 = await relayClient.getFeeQuote({
-          cluster,
+          cluster: targetCluster,
           op: 'transfer',
           mint: mintStr,
           outputCount: 3,
@@ -3873,7 +4280,8 @@ export function LiveWalletVault() {
       const activeInputs = validPairs.flat()
       if (!isPreSubmitActive()) return
       setStatusMsg(
-        `Consolidating ${activeInputs.length} ${info.symbol} notes via ${validPairs.length} parallel 2-to-1 ${validPairs.length === 1 ? 'merge' : 'merges'}…`,
+        singleMergeFallbackNote ??
+          `Consolidating ${activeInputs.length} ${info.symbol} notes via ${validPairs.length} parallel 2-to-1 ${validPairs.length === 1 ? 'merge' : 'merges'}…`,
       )
       const {
         history: rootHistory,
@@ -3882,18 +4290,13 @@ export function LiveWalletVault() {
       } = await fetchRootSnapshotForNotes(targetCluster, activeInputs)
       if (!isPreSubmitActive()) return
 
-      const witnesses = await Promise.all(
-        activeInputs.map((note) =>
-          buildLocalOrRpcWitness({
-            activeStore: store,
-            fetcher: witnessFetcher,
-            history: rootHistory,
-            snapshot: rootSnapshot,
-            allInputNotes: activeInputs,
-            note,
-          }),
-        ),
-      )
+      const witnessBatch = await buildLocalOrRpcWitnesses({
+        activeStore: store,
+        fetcher: witnessFetcher,
+        history: rootHistory,
+        snapshot: rootSnapshot,
+        inputNotes: activeInputs,
+      })
 
       // Assign distinct random output lanes so every merge in the batch updates disjoint lane pages
       const outLaneIds = pickDistinctRandomLanes(activeLanes, validPairs.length)
@@ -3919,8 +4322,8 @@ export function LiveWalletVault() {
 
       for (let k = 0; k < validPairs.length; k++) {
         const [noteA, noteB] = validPairs[k]!
-        const wA = witnesses[2 * k]!
-        const wB = witnesses[2 * k + 1]!
+        const pathA = witnessBatch.paths[2 * k]!
+        const pathB = witnessBatch.paths[2 * k + 1]!
         const outLaneId = outLaneIds[k]!
         const outLane = snap.lanes?.[outLaneId]
         if (!outLane) {
@@ -4003,7 +4406,7 @@ export function LiveWalletVault() {
           `Proving merge ${k + 1} of ${validPairs.length} in Web Worker…`,
         )
         const { result, elapsedMs } = await proveJoinsplitInBrowser({
-          superRoot: wA.superRoot,
+          superRoot: witnessBatch.superRoot,
           txAssetId: assetId,
           publicAssetId: 0n,
           publicAmountOut: 0n,
@@ -4018,7 +4421,7 @@ export function LiveWalletVault() {
               assetId,
               amount: noteA.amount,
               blinding: frFromBeBytesStrict(noteA.blinding),
-              merklePath: wA.path,
+              merklePath: pathA,
             },
             {
               isDummy: false,
@@ -4027,7 +4430,7 @@ export function LiveWalletVault() {
               assetId,
               amount: noteB.amount,
               blinding: frFromBeBytesStrict(noteB.blinding),
-              merklePath: wB.path,
+              merklePath: pathB,
             },
           ],
           outputs: [
@@ -4041,8 +4444,8 @@ export function LiveWalletVault() {
         const ix = buildTransactInstruction({
           poolId: 0,
           vkId: VK_ID_DEFAULT,
-          rootRingKind: rootSnapshot.ringKind,
-          rootRingIdx: rootSnapshot.ringIdx,
+          rootRingKind: witnessBatch.rootRingKind,
+          rootRingIdx: witnessBatch.rootRingIdx,
           outLaneId,
           outSubSeq,
           outRootSeq,
@@ -4122,6 +4525,7 @@ export function LiveWalletVault() {
         const lastValidBlockHeight = BigInt(bh.lastValidBlockHeight ?? '0')
         for (const m of builtMerges) {
           const openPagePreIxs = await ensureLanePagesPreIxs({
+            cluster: targetCluster,
             fetcher,
             payer: payerPubkey,
             laneId: m.outLaneId,
@@ -4781,19 +5185,14 @@ export function LiveWalletVault() {
         snapshot: rootSnapshot,
         witnessFetcher,
       } = await fetchRootSnapshotForNotes(cluster, inputNotes)
-      const witnesses = await Promise.all(
-        inputNotes.map((note) =>
-          buildLocalOrRpcWitness({
-            activeStore: store,
-            fetcher: witnessFetcher,
-            history: rootHistory,
-            snapshot: rootSnapshot,
-            allInputNotes: inputNotes,
-            note,
-          }),
-        ),
-      )
-      const superRoot = witnesses[0]!.superRoot
+      const witnessBatch = await buildLocalOrRpcWitnesses({
+        activeStore: store,
+        fetcher: witnessFetcher,
+        history: rootHistory,
+        snapshot: rootSnapshot,
+        inputNotes,
+      })
+      const superRoot = witnessBatch.superRoot
 
       const outLaneId = pickRandomLaneId(activeLanes)
       const outLane = snap.lanes?.[outLaneId]
@@ -4868,6 +5267,11 @@ export function LiveWalletVault() {
         minAmountOut: minOut,
         routerProg,
         routerAccounts,
+        payer: payerPubkey,
+        escrowInAta: inEscrowAta,
+        escrowOutAta: outEscrowAta,
+        vaultInAta: inVaultAta,
+        vaultOutAta: outVaultAta,
         extraWritablePubkeys,
         outStealthOwner: frToBeBytes(outStealthOwner),
         outBlinding: frToBeBytes(dyn.blinding),
@@ -4887,9 +5291,9 @@ export function LiveWalletVault() {
         merklePath: path,
       })
       const swapInputs: [JoinSplitInputWitness, JoinSplitInputWitness] = [
-        buildSwapInput(inputNotes[0]!, witnesses[0]!.path),
+        buildSwapInput(inputNotes[0]!, witnessBatch.paths[0]!),
         inputNotes[1]
-          ? buildSwapInput(inputNotes[1]!, witnesses[1]!.path)
+          ? buildSwapInput(inputNotes[1]!, witnessBatch.paths[1]!)
           : dummyInputWitness(keys.spendSk, assetIn, randomFr()),
       ]
 
@@ -4911,8 +5315,8 @@ export function LiveWalletVault() {
       const ix = buildExecViaEscrowInstruction({
         poolId: 0,
         vkId: VK_ID_DEFAULT,
-        rootRingKind: rootSnapshot.ringKind,
-        rootRingIdx: rootSnapshot.ringIdx,
+        rootRingKind: witnessBatch.rootRingKind,
+        rootRingIdx: witnessBatch.rootRingIdx,
         outLaneId,
         escrowShard,
         outSubSeq,
@@ -4972,6 +5376,7 @@ export function LiveWalletVault() {
         signature = sub.signature
       } else {
         const openPagePreIxs = await ensureLanePagesPreIxs({
+          cluster: targetCluster,
           fetcher,
           payer: payerPubkey,
           laneId: outLaneId,
@@ -5358,6 +5763,7 @@ export function LiveWalletVault() {
       a.click()
       URL.revokeObjectURL(url)
       setEphemeralBackedUp(true)
+      setBackupPassphrase('')
       setBackupStatus(
         `Encrypted backup downloaded (birthday slot #${effectiveBirthday.toString()} · PBKDF2-SHA256 600k + AES-256-GCM)`,
       )
@@ -5417,6 +5823,7 @@ export function LiveWalletVault() {
         resetStore: true,
       })
       if (unlockedEpoch === null) return
+      setBackupPassphrase('')
       setBackupStatus(
         `Restored Audren vault on ${restored.cluster} (birthday slot #${effectiveBirthday.toString()})`,
       )
@@ -5492,8 +5899,8 @@ export function LiveWalletVault() {
         <AlertCircle size={15} />
         <span style={{ flex: 1 }}>
           <span className="lv-strong">Audren ({AUDREN.releaseTag}):</span> 192 B BN254 Groth16 global 4-ary MASP (17,861 R1CS) ·
-          Perpetual Powers of Tau + BGM17 ceremony (<code>{shortHash(AUDREN.pkCompressedSha256, 8, 6)}</code>) ·
-          Pre-audit release (open for independent security audit &amp; additional community Phase-2 contributions).
+          Perpetual Powers of Tau + 2-contribution release-environment Phase-2 ceremony (<code>{shortHash(AUDREN.pkCompressedSha256, 8, 6)}</code>) ·
+          Pre-audit release with active program upgrade authority (open for independent security review &amp; community Phase-2 contributions).
         </span>
       </div>
 
@@ -5566,15 +5973,20 @@ export function LiveWalletVault() {
 
             <div className="lv-unlock-actions">
               {connected && (
-                <button
-                  type="button"
-                  className="btn-primary lv-submit-btn"
-                  disabled={busy || connecting}
-                  onClick={handleUnlockWithWalletSignature}
-                >
-                  {busy ? <Loader2 size={15} className="spin" /> : <KeyRound size={15} />}
-                  Unlock vault with {connected.name}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn-primary lv-submit-btn"
+                    disabled={busy || connecting}
+                    onClick={handleUnlockWithWalletSignature}
+                  >
+                    {busy ? <Loader2 size={15} className="spin" /> : <KeyRound size={15} />}
+                    Unlock vault with {connected.name}
+                  </button>
+                  <p className="lv-quote-loading">
+                    Wallet unlock derives keys from a deterministic Ed25519 signature over the cluster and wallet address (not the site origin). Export an encrypted backup right after unlocking so you can recover funds if your wallet changes signing behavior.
+                  </p>
+                </>
               )}
               <button
                 type="button"
@@ -5626,6 +6038,30 @@ export function LiveWalletVault() {
                 />
               </div>
               {backupStatus && <p className="lv-backup-status mono">{backupStatus}</p>}
+            </div>
+
+            <div className="lv-backup-box" style={{ marginTop: '0.5rem' }}>
+              <span className="lv-box-title">Restore from 64-hex recovery seed</span>
+              <p>Paste a raw 32-byte recovery seed (64 hex characters) saved from an ephemeral vault. Uses the optional birthday slot above if entered.</p>
+              <div className="lv-backup-row">
+                <input
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="lv-input mono"
+                  value={restoreSeedInput}
+                  onChange={(e) => setRestoreSeedInput(e.target.value)}
+                  placeholder="64-character hex seed"
+                />
+                <button
+                  type="button"
+                  className="lv-mini-btn"
+                  disabled={busy || connecting || !STRICT_HEX_64_RE.test(restoreSeedInput.trim())}
+                  onClick={() => void handleRestoreFromHexSeed()}
+                >
+                  <KeyRound size={13} /> Restore seed
+                </button>
+              </div>
             </div>
 
             {errorMsg && (
@@ -5827,14 +6263,17 @@ export function LiveWalletVault() {
                       type="button"
                       className="lv-mini-btn"
                       onClick={() => {
-                        if (isAllowedRelayUrl(relayDraft)) {
+                        const trimmedRelay = relayDraft.trim()
+                        if (isAllowedRelayUrl(trimmedRelay)) {
                           maxSendSeqRef.current += 1
                           maxWithdrawSeqRef.current += 1
                           setQuotingMaxSend(false)
                           setQuotingMaxWithdraw(false)
                           lastQuotedMaxWithdrawRef.current = null
-                          setRelayUrl(relayDraft)
-                          window.localStorage.setItem(RELAY_STORAGE_KEY, relayDraft)
+                          relayInfoCacheRef.current = null
+                          setRelayDraft(trimmedRelay)
+                          setRelayUrl(trimmedRelay)
+                          window.localStorage.setItem(RELAY_STORAGE_KEY, trimmedRelay)
                           setShowRelayConfig(false)
                         } else {
                           setErrorMsg('Relay URL must be https:// or http://localhost')
@@ -6537,7 +6976,7 @@ export function LiveWalletVault() {
                             <div>
                               <span className="lv-checkbox-title">Economy mode (1 nullifier &amp; unpadded full-note exits)</span>
                               <span>
-                                Saves ~0.00089 SOL in NullifierPDA rent on 1-note spends and skips zero-value change padding on full-note exits. Tradeoff: observers can distinguish 1-note spends and full sweeps from 2-note partial spends.
+                                Saves ~0.00065 SOL in NullifierPDA rent (live SysvarRent) on 1-note spends and skips zero-value change padding on full-note exits. Tradeoff: observers can distinguish 1-note spends and full sweeps from 2-note partial spends.
                               </span>
                             </div>
                           </label>
@@ -6645,14 +7084,14 @@ export function LiveWalletVault() {
                           <button
                             type="button"
                             className="lv-mini-btn"
-                            onClick={() => setSessionIndex((i) => Math.max(0, i - 1))}
+                            onClick={() => updateSessionIndex((i) => Math.max(0, i - 1))}
                           >
                             −
                           </button>
                           <button
                             type="button"
                             className="lv-mini-btn"
-                            onClick={() => setSessionIndex((i) => i + 1)}
+                            onClick={() => updateSessionIndex((i) => i + 1)}
                           >
                             +
                           </button>

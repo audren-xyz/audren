@@ -33,6 +33,8 @@ import {
   OPEN_PAGE_KIND_NULLIFIER,
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
+  OPEN_PAGE_MEMO_LOOKAHEAD_SLOT,
+  OPEN_PAGE_WIRE_LEN,
   PROTOCOL_VERSION,
   ROOTS_MAGIC,
   ROOTS_SEED,
@@ -157,6 +159,8 @@ export {
   OPEN_PAGE_KIND_NULLIFIER,
   OPEN_PAGE_KIND_SUBROOT,
   OPEN_PAGE_KIND_SUBTREE,
+  OPEN_PAGE_MEMO_LOOKAHEAD_SLOT,
+  OPEN_PAGE_WIRE_LEN,
   PROTOCOL_VERSION,
   ROOTS_MAGIC,
   ROOTS_SEED,
@@ -637,7 +641,7 @@ export function computeOpenPageCuLimitForBump(bump: number): number {
 }
 
 export function deriveOpenPageBumpFromIx(openIx: SolanaInstruction): number {
-  if (openIx.data.length < 15 || openIx.data[0] !== TAG_OPEN_PAGE) {
+  if (openIx.data.length !== OPEN_PAGE_WIRE_LEN || openIx.data[0] !== TAG_OPEN_PAGE) {
     return 255
   }
   const pageKind = openIx.data[1]!
@@ -669,6 +673,7 @@ export function buildOpenPageSolanaIx(params: {
   poolId: number
   laneId: number
   pageSeq: bigint
+  maxPayerDeficit?: bigint
 }): SolanaInstruction {
   return toSolanaInstruction(buildOpenPageInstruction(params))
 }
@@ -1189,6 +1194,8 @@ export function planMissingOpenPageIxs(params: {
   laneCounters?: { nextLeaf: bigint; nfCount: bigint }
   /** Optional shared set of page PDAs already scheduled for `OpenPage` in an earlier batch entry. */
   alreadyScheduledPdas?: Set<string>
+  /** Explicit on-chain payer deficit ceiling (`max_payer_deficit: u64`). Defaults to `u64::MAX`. */
+  maxPayerDeficit?: bigint
 }): MissingPagePlanResult {
   const {
     payerB58,
@@ -1336,7 +1343,7 @@ export function planMissingOpenPageIxs(params: {
       }
     } else if (item.slot === 'nextMemo' && expectedSeq > curMemo) {
       const memoSlot = Number(nextLeaf % BigInt(MEMO_NOTES_PER_PAGE))
-      if (memoSlot + clampedOut < MEMO_NOTES_PER_PAGE - 12) {
+      if (memoSlot < Number(OPEN_PAGE_MEMO_LOOKAHEAD_SLOT)) {
         return {
           ok: false,
           error: `Premature rollover OpenPage rejected for nextMemo (lane ${outLaneId} memo offset ${memoSlot}/${MEMO_NOTES_PER_PAGE})`,
@@ -1369,6 +1376,7 @@ export function planMissingOpenPageIxs(params: {
           poolId,
           laneId: outLaneId,
           pageSeq: expectedSeq,
+          maxPayerDeficit: params.maxPayerDeficit,
         }),
       )
     }
@@ -1391,6 +1399,7 @@ export function planBatchMissingOpenPageIxs(params: {
     pages: ParsedPageAccounts
   }>
   fetchedAccounts: Map<string, FetchedAccountMeta | null>
+  maxPayerDeficit?: bigint
 }): MissingPagePlanResult {
   const { payerB58, entries, fetchedAccounts } = params
   const laneCountersByKey = new Map<string, { nextLeaf: bigint; nfCount: bigint }>()
@@ -1429,6 +1438,7 @@ export function planBatchMissingOpenPageIxs(params: {
       nullifierCount: entry.nullifierCount,
       laneCounters: counters,
       alreadyScheduledPdas,
+      maxPayerDeficit: params.maxPayerDeficit,
     })
     if (!res.ok) return res
     openPageIxs.push(...res.openPageIxs)

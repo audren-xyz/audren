@@ -8,6 +8,8 @@
 
 const CANONICAL_PK_SHA256 =
   '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4'
+const CANONICAL_WASM_SHA256 =
+  '8f2e8b07d42b166c1801d8c1e7f521e5867de7be1aa9d1d7eebca6459b42da23'
 const WITNESS_TOTAL_BYTES = 4611
 const PROVE_OUTPUT_BYTES = 384
 const DEFAULT_WASM_URL = '/wasm/audren_circuits.wasm?v=1.3.0'
@@ -39,17 +41,24 @@ async function initWasmProver(wasmUrl, pkUrl) {
     throw new Error(`Failed to fetch Audren ceremony PK: HTTP ${pkRes.status}`)
   }
   const [wasmBuf, pkBuf] = await Promise.all([wasmRes.arrayBuffer(), pkRes.arrayBuffer()])
+  const wasmBytes = new Uint8Array(wasmBuf)
   const pkBytes = new Uint8Array(pkBuf)
-  const digest = await sha256Hex(pkBytes)
-  if (digest !== CANONICAL_PK_SHA256) {
+  const [wasmDigest, pkDigest] = await Promise.all([sha256Hex(wasmBytes), sha256Hex(pkBytes)])
+  if (wasmDigest !== CANONICAL_WASM_SHA256) {
     throw new Error(
-      `Audren proving key SHA-256 mismatch: got ${digest}, expected ${CANONICAL_PK_SHA256}`,
+      `Audren WASM prover SHA-256 mismatch: got ${wasmDigest}, expected ${CANONICAL_WASM_SHA256}`,
+    )
+  }
+  if (pkDigest !== CANONICAL_PK_SHA256) {
+    throw new Error(
+      `Audren proving key SHA-256 mismatch: got ${pkDigest}, expected ${CANONICAL_PK_SHA256}`,
     )
   }
 
   const { instance } = await WebAssembly.instantiate(wasmBuf, {})
   const exports = instance.exports
   let pkPtr = 0
+  let deallocFailed = false
   try {
     pkPtr = exports.wasm_alloc(pkBytes.byteLength)
     new Uint8Array(exports.memory.buffer, pkPtr, pkBytes.byteLength).set(pkBytes)
@@ -62,22 +71,33 @@ async function initWasmProver(wasmUrl, pkUrl) {
       try {
         exports.wasm_dealloc(pkPtr, pkBytes.byteLength)
       } catch {
-        // Ignore deallocation failure if WASM memory trapped
+        deallocFailed = true
       }
     }
   }
-  return exports
+  if (deallocFailed) {
+    throw new Error('WASM proving key buffer cleanup trapped; discarding instance')
+  }
+  return { exports, poisoned: false }
+}
+
+function invalidateReady(targetPromise, handle) {
+  if (handle) handle.poisoned = true
+  if (targetPromise && readyPromise === targetPromise) {
+    readyPromise = null
+  }
 }
 
 function ensureReady(wasmUrl, pkUrl) {
   if (!readyPromise) {
-    readyPromise = initWasmProver(
+    const current = initWasmProver(
       wasmUrl || DEFAULT_WASM_URL,
       pkUrl || DEFAULT_PK_URL,
     ).catch((err) => {
-      readyPromise = null
+      if (readyPromise === current) readyPromise = null
       throw err
     })
+    readyPromise = current
   }
   return readyPromise
 }
@@ -102,12 +122,19 @@ globalThis.addEventListener('message', async (event) => {
   const id = data.id
   try {
     if (data.type === 'warm') {
-      await ensureReady(data.wasmUrl, data.pkUrl)
+      const p = ensureReady(data.wasmUrl, data.pkUrl)
+      const h = await p
+      if (h.poisoned) {
+        invalidateReady(p, h)
+        await ensureReady(data.wasmUrl, data.pkUrl)
+      }
       globalThis.postMessage({ id, ok: true })
       return
     }
 
     if (data.type === 'prove') {
+      let handlePromise = null
+      let handle = null
       let exports = null
       let witnessBytes = null
       let seed = null
@@ -117,7 +144,17 @@ globalThis.addEventListener('message', async (event) => {
       let raw
       let elapsedMs = 0
       try {
-        exports = await ensureReady(data.wasmUrl, data.pkUrl)
+        handlePromise = ensureReady(data.wasmUrl, data.pkUrl)
+        handle = await handlePromise
+        if (handle.poisoned) {
+          invalidateReady(handlePromise, handle)
+          handlePromise = ensureReady(data.wasmUrl, data.pkUrl)
+          handle = await handlePromise
+          if (handle.poisoned) {
+            throw new Error('WASM prover instance is poisoned')
+          }
+        }
+        exports = handle.exports
         witnessBytes =
           data.witnessBytes instanceof Uint8Array
             ? data.witnessBytes
@@ -139,6 +176,10 @@ globalThis.addEventListener('message', async (event) => {
         wPtr = exports.wasm_alloc(WITNESS_TOTAL_BYTES)
         sPtr = exports.wasm_alloc(32)
         oPtr = exports.wasm_alloc(PROVE_OUTPUT_BYTES)
+        if (!wPtr || !sPtr || !oPtr) {
+          invalidateReady(handlePromise, handle)
+          throw new Error('wasm_alloc returned null pointer for proveJoinsplit')
+        }
         new Uint8Array(exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).set(witnessBytes)
         new Uint8Array(exports.memory.buffer, sPtr, 32).set(seed)
         const rc = exports.wasm_prove_joinsplit(wPtr, WITNESS_TOTAL_BYTES, sPtr, oPtr)
@@ -152,15 +193,16 @@ globalThis.addEventListener('message', async (event) => {
         elapsedMs = Math.round(globalThis.performance.now() - t0)
       } catch (proveErr) {
         if (proveErr instanceof WebAssembly.RuntimeError) {
-          readyPromise = null
+          invalidateReady(handlePromise, handle)
         }
         throw proveErr
       } finally {
         if (exports && oPtr) {
           try {
+            new Uint8Array(exports.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).fill(0)
             exports.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES)
           } catch {
-            // Ignore deallocation failure if WASM instance trapped
+            invalidateReady(handlePromise, handle)
           }
         }
         if (exports && sPtr) {
@@ -168,7 +210,7 @@ globalThis.addEventListener('message', async (event) => {
             new Uint8Array(exports.memory.buffer, sPtr, 32).fill(0)
             exports.wasm_dealloc(sPtr, 32)
           } catch {
-            // Ignore deallocation failure if WASM instance trapped
+            invalidateReady(handlePromise, handle)
           }
         }
         if (exports && wPtr) {
@@ -176,7 +218,7 @@ globalThis.addEventListener('message', async (event) => {
             new Uint8Array(exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).fill(0)
             exports.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES)
           } catch {
-            // Ignore deallocation failure if WASM instance trapped
+            invalidateReady(handlePromise, handle)
           }
         }
         scrubBytes(seed)
@@ -207,9 +249,6 @@ globalThis.addEventListener('message', async (event) => {
 
     throw new Error(`Unsupported prover worker message type: ${String(data.type)}`)
   } catch (err) {
-    if (err instanceof WebAssembly.RuntimeError) {
-      readyPromise = null
-    }
     globalThis.postMessage({
       id,
       ok: false,

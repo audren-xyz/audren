@@ -71,6 +71,11 @@ export interface NativeFeeQuote {
   needsFeeAtaSetup: boolean
   /** Exact raw fee in base units of `feeMint` (lamports for WSOL / `unwrap_wsol` / shielded WSOL note). */
   relayerFee: string
+  /**
+   * Minimum flat fee floor in base units of `feeMint` (`ceil(costLamports * marginBps)` converted to
+   * gross fee-mint base units), independent of `amount` / percentage bps.
+   */
+  minFlatFeeUnits?: string
   feeBps: number
   /** True when the fee is a flat per-mint rent/gas fee independent of transfer amount (`op === 'transfer'`). */
   flatFee?: boolean

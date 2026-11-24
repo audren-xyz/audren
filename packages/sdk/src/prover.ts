@@ -6,9 +6,11 @@
  * using the fixed `4,611 B` binary witness -> `384 B` proof+public-outputs ABI.
  */
 
+import { sha256 } from '@noble/hashes/sha2.js';
 import {
   BN254_FR_MODULUS,
   CANONICAL_PK_SHA256,
+  CANONICAL_WASM_SHA256,
   PROVE_OUTPUT_BYTES,
   TOTAL_DEPTH_4ARY,
   WITNESS_TOTAL_BYTES,
@@ -229,6 +231,8 @@ export interface AudrenWasmProverInitOptions {
   deferPk?: boolean;
   /** Verify loaded proving key SHA-256 against `CANONICAL_PK_SHA256` (default: true). */
   verifyPkHash?: boolean;
+  /** Verify loaded WASM binary SHA-256 against `CANONICAL_WASM_SHA256` (default: true). */
+  verifyWasmHash?: boolean;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -289,11 +293,42 @@ function defaultSiblingPkUrl(wasmUrl: string): string {
  * Reuse one instance per Worker/process to keep the deserialized ceremony proving key warm in WASM RAM.
  */
 export class AudrenWasmProver {
-  private readonly exports: AudrenWasmExports;
+  private exports: AudrenWasmExports | null;
   private pkReady = false;
+  private disposed = false;
+  private poisoned = false;
 
   private constructor(exports: AudrenWasmExports) {
     this.exports = exports;
+  }
+
+  private assertUsable(): AudrenWasmExports {
+    if (this.disposed || this.exports === null) {
+      throw new Error('AudrenWasmProver has been disposed; call AudrenWasmProver.init() to create a new instance');
+    }
+    if (this.poisoned) {
+      throw new Error('AudrenWasmProver WASM instance trapped (e.g. OOM) and is poisoned; create a fresh instance');
+    }
+    return this.exports;
+  }
+
+  /**
+   * Release this prover handle, zeroize WASM linear memory, and drop the `WebAssembly.Instance`
+   * reference so residual witness secrets and proving-key buffers can be garbage-collected.
+   * Subsequent calls throw immediately instead of reusing freed or stale WASM state.
+   */
+  dispose(): void {
+    const exp = this.exports;
+    this.pkReady = false;
+    this.disposed = true;
+    this.exports = null;
+    if (exp) {
+      try {
+        new Uint8Array(exp.memory.buffer).fill(0);
+      } catch {
+        // Ignore detached or non-writable WASM linear memory during teardown
+      }
+    }
   }
 
   static async init(options: AudrenWasmProverInitOptions = {}): Promise<AudrenWasmProver> {
@@ -349,48 +384,78 @@ export class AudrenWasmProver {
 
     const [bytes, pkBytes] = await Promise.all([wasmPromise, pkPromise]);
 
+    if (options.verifyWasmHash !== false) {
+      const wasmDigest = await sha256Hex(bytes);
+      if (wasmDigest !== CANONICAL_WASM_SHA256) {
+        throw new Error(
+          `Audren WASM prover SHA-256 mismatch: got ${wasmDigest}, expected ${CANONICAL_WASM_SHA256}`,
+        );
+      }
+    }
+
     const wasmBuf = new Uint8Array(bytes.byteLength);
     wasmBuf.set(bytes);
     const { instance } = await WebAssembly.instantiate(wasmBuf, {});
     const prover = new AudrenWasmProver(instance.exports as unknown as AudrenWasmExports);
 
     if (pkBytes) {
-      if (options.verifyPkHash !== false) {
-        const digest = await sha256Hex(pkBytes);
-        if (digest !== CANONICAL_PK_SHA256) {
-          throw new Error(
-            `Audren proving key SHA-256 mismatch: got ${digest}, expected ${CANONICAL_PK_SHA256}`,
-          );
-        }
-      }
-      prover.loadProvingKeyCompressed(pkBytes);
+      prover.loadProvingKeyCompressed(pkBytes, {
+        allowCustomPk: options.verifyPkHash === false,
+      });
     }
     return prover;
   }
 
-  /** Load a compressed `ProvingKey<Bn254>` (`audren_joinsplit.pk`, curve-validated inside WASM). */
-  loadProvingKeyCompressed(pkCompressed: Uint8Array): void {
+  /**
+   * Load a compressed `ProvingKey<Bn254>` (`audren_joinsplit.pk`, curve-validated inside WASM).
+   * Enforces `CANONICAL_PK_SHA256` by default (even when `init({ deferPk: true })` was used);
+   * pass `{ allowCustomPk: true }` to opt out explicitly for custom circuits/testing.
+   */
+  loadProvingKeyCompressed(
+    pkCompressed: Uint8Array,
+    options?: { allowCustomPk?: boolean },
+  ): void {
+    const exp = this.assertUsable();
     if (!(pkCompressed instanceof Uint8Array) || pkCompressed.byteLength === 0) {
       throw new RangeError(
         `pkCompressed must be a non-empty Uint8Array, got ${pkCompressed instanceof Uint8Array ? pkCompressed.byteLength : String(pkCompressed)}`,
       );
     }
+    if (!options?.allowCustomPk) {
+      const digest = bytesToHex(sha256(pkCompressed));
+      if (digest !== CANONICAL_PK_SHA256) {
+        throw new Error(
+          `Audren proving key SHA-256 mismatch: got ${digest}, expected ${CANONICAL_PK_SHA256}`,
+        );
+      }
+    }
     let ptr = 0;
     try {
-      ptr = this.exports.wasm_alloc(pkCompressed.byteLength);
-      new Uint8Array(this.exports.memory.buffer, ptr, pkCompressed.byteLength).set(pkCompressed);
-      const rc = this.exports.wasm_load_pk_compressed(ptr, pkCompressed.byteLength);
+      ptr = exp.wasm_alloc(pkCompressed.byteLength);
+      if (!ptr) {
+        this.poisoned = true;
+        throw new Error('wasm_alloc returned null pointer for proving key');
+      }
+      new Uint8Array(exp.memory.buffer, ptr, pkCompressed.byteLength).set(pkCompressed);
+      const rc = exp.wasm_load_pk_compressed(ptr, pkCompressed.byteLength);
       if (rc !== 0) {
         throw new Error(`wasm_load_pk_compressed failed with code ${rc}`);
       }
       this.pkReady = true;
+    } catch (err) {
+      if (err instanceof WebAssembly.RuntimeError) {
+        this.poisoned = true;
+        this.pkReady = false;
+      }
+      throw err;
     } finally {
       if (ptr) {
         try {
-          new Uint8Array(this.exports.memory.buffer, ptr, pkCompressed.byteLength).fill(0);
-          this.exports.wasm_dealloc(ptr, pkCompressed.byteLength);
+          new Uint8Array(exp.memory.buffer, ptr, pkCompressed.byteLength).fill(0);
+          exp.wasm_dealloc(ptr, pkCompressed.byteLength);
         } catch {
-          // Ignore cleanup failure if WASM instance trapped
+          this.poisoned = true;
+          this.pkReady = false;
         }
       }
     }
@@ -398,6 +463,7 @@ export class AudrenWasmProver {
 
   /** Compute canonical Circom / `sol_poseidon` BN254 hash directly inside WASM (1..=12 inputs). */
   poseidonHashWasm(inputsBe32: readonly Uint8Array[]): Uint8Array {
+    const exp = this.assertUsable();
     if (!Array.isArray(inputsBe32)) {
       throw new RangeError('inputsBe32 must be an array of 32-byte Uint8Arrays');
     }
@@ -417,28 +483,40 @@ export class AudrenWasmProver {
     let inPtr = 0;
     let outPtr = 0;
     try {
-      inPtr = this.exports.wasm_alloc(inLen);
-      outPtr = this.exports.wasm_alloc(32);
-      const memIn = new Uint8Array(this.exports.memory.buffer, inPtr, inLen);
+      inPtr = exp.wasm_alloc(inLen);
+      outPtr = exp.wasm_alloc(32);
+      if (!inPtr || !outPtr) {
+        this.poisoned = true;
+        throw new Error('wasm_alloc returned null pointer for poseidonHashWasm');
+      }
+      const memIn = new Uint8Array(exp.memory.buffer, inPtr, inLen);
       for (let i = 0; i < arity; i++) memIn.set(inputsBe32[i]!, i * 32);
-      const rc = this.exports.wasm_poseidon_hash(arity, inPtr, outPtr);
+      const rc = exp.wasm_poseidon_hash(arity, inPtr, outPtr);
       if (rc !== 0) throw new Error(`wasm_poseidon_hash failed with code ${rc}`);
-      return new Uint8Array(this.exports.memory.buffer, outPtr, 32).slice();
+      return new Uint8Array(exp.memory.buffer, outPtr, 32).slice();
+    } catch (err) {
+      if (err instanceof WebAssembly.RuntimeError) {
+        this.poisoned = true;
+        this.pkReady = false;
+      }
+      throw err;
     } finally {
       if (outPtr) {
         try {
-          new Uint8Array(this.exports.memory.buffer, outPtr, 32).fill(0);
-          this.exports.wasm_dealloc(outPtr, 32);
+          new Uint8Array(exp.memory.buffer, outPtr, 32).fill(0);
+          exp.wasm_dealloc(outPtr, 32);
         } catch {
-          // Ignore cleanup failure if WASM instance trapped
+          this.poisoned = true;
+          this.pkReady = false;
         }
       }
       if (inPtr) {
         try {
-          new Uint8Array(this.exports.memory.buffer, inPtr, inLen).fill(0);
-          this.exports.wasm_dealloc(inPtr, inLen);
+          new Uint8Array(exp.memory.buffer, inPtr, inLen).fill(0);
+          exp.wasm_dealloc(inPtr, inLen);
         } catch {
-          // Ignore cleanup failure if WASM instance trapped
+          this.poisoned = true;
+          this.pkReady = false;
         }
       }
     }
@@ -449,6 +527,7 @@ export class AudrenWasmProver {
    * Uses cryptographic randomness from `crypto.getRandomValues` unless an explicit `seed32` is passed.
    */
   proveJoinsplit(witness: JoinSplitWitness, seed32?: Uint8Array): JoinSplitProofResult {
+    const exp = this.assertUsable();
     if (!this.pkReady) {
       throw new Error('Proving key not initialized — pass pkUrl/pkCompressed or call loadProvingKeyCompressed()');
     }
@@ -470,19 +549,23 @@ export class AudrenWasmProver {
         globalThis.crypto.getRandomValues(s);
         seed = s;
       }
-      wPtr = this.exports.wasm_alloc(WITNESS_TOTAL_BYTES);
-      sPtr = this.exports.wasm_alloc(32);
-      oPtr = this.exports.wasm_alloc(PROVE_OUTPUT_BYTES);
-      new Uint8Array(this.exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).set(witnessBytes);
-      new Uint8Array(this.exports.memory.buffer, sPtr, 32).set(seed);
-      const rc = this.exports.wasm_prove_joinsplit(wPtr, WITNESS_TOTAL_BYTES, sPtr, oPtr);
+      wPtr = exp.wasm_alloc(WITNESS_TOTAL_BYTES);
+      sPtr = exp.wasm_alloc(32);
+      oPtr = exp.wasm_alloc(PROVE_OUTPUT_BYTES);
+      if (!wPtr || !sPtr || !oPtr) {
+        this.poisoned = true;
+        throw new Error('wasm_alloc returned null pointer for proveJoinsplit');
+      }
+      new Uint8Array(exp.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).set(witnessBytes);
+      new Uint8Array(exp.memory.buffer, sPtr, 32).set(seed);
+      const rc = exp.wasm_prove_joinsplit(wPtr, WITNESS_TOTAL_BYTES, sPtr, oPtr);
       if (rc === -6) {
         throw new Error('Groth16 witness failed off-chain R1CS verification (rc=-6)');
       }
       if (rc !== 0) {
         throw new Error(`wasm_prove_joinsplit failed with code ${rc}`);
       }
-      const raw = new Uint8Array(this.exports.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).slice();
+      const raw = new Uint8Array(exp.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).slice();
       return {
         proof192: raw.slice(0, 192),
         nf0: raw.slice(192, 224),
@@ -492,31 +575,40 @@ export class AudrenWasmProver {
         cm2: raw.slice(320, 352),
         publicInputHash: raw.slice(352, 384),
       };
+    } catch (err) {
+      if (err instanceof WebAssembly.RuntimeError) {
+        this.poisoned = true;
+        this.pkReady = false;
+      }
+      throw err;
     } finally {
       witnessBytes.fill(0);
       if (generatedSeed && seed) seed.fill(0);
       if (oPtr) {
         try {
-          new Uint8Array(this.exports.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).fill(0);
-          this.exports.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES);
+          new Uint8Array(exp.memory.buffer, oPtr, PROVE_OUTPUT_BYTES).fill(0);
+          exp.wasm_dealloc(oPtr, PROVE_OUTPUT_BYTES);
         } catch {
-          // Ignore cleanup failure if WASM instance trapped
+          this.poisoned = true;
+          this.pkReady = false;
         }
       }
       if (sPtr) {
         try {
-          new Uint8Array(this.exports.memory.buffer, sPtr, 32).fill(0);
-          this.exports.wasm_dealloc(sPtr, 32);
+          new Uint8Array(exp.memory.buffer, sPtr, 32).fill(0);
+          exp.wasm_dealloc(sPtr, 32);
         } catch {
-          // Ignore cleanup failure if WASM instance trapped
+          this.poisoned = true;
+          this.pkReady = false;
         }
       }
       if (wPtr) {
         try {
-          new Uint8Array(this.exports.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).fill(0);
-          this.exports.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES);
+          new Uint8Array(exp.memory.buffer, wPtr, WITNESS_TOTAL_BYTES).fill(0);
+          exp.wasm_dealloc(wPtr, WITNESS_TOTAL_BYTES);
         } catch {
-          // Ignore cleanup failure if WASM instance trapped
+          this.poisoned = true;
+          this.pkReady = false;
         }
       }
     }

@@ -534,8 +534,10 @@ export function ArchitectureExperience() {
                     read-only).
                   </li>
                   <li>
-                    Mode 1 <code>SelectiveDisclosureProof</code> verifies one note against{' '}
-                    <code>SubtreePage</code> in 1 Poseidon5 hash with zero keys disclosed.
+                    Mode 1 <code>SelectiveDisclosureProof</code> is a commitment preimage opening
+                    checked against <code>SubtreePage</code> in 1 Poseidon5 hash with zero keys
+                    disclosed (proves note existence on-chain; does not prove current ownership or
+                    unspent status).
                   </li>
                   <li>
                     Mode 2 <code>FullViewingKey</code> (<code>spend_pk, nk, view_sk, view_pk</code>)

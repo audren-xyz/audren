@@ -1244,7 +1244,8 @@ async function main() {
     const escrowPda = deriveEscrowPdaSync(poolId, escrowShard, PROGRAM_ID).address;
     console.log(`\n[7] Executing live ExecViaEscrow Jupiter Swap (Tag 6, WSOL -> ${swapOutMint}, shard=${escrowShard})...`);
 
-    await ensureAtaExists(vaultAuthPda, swapOutMint, CLASSIC_TOKEN_PROGRAM_ID);
+    const { ata: vaultInAta } = await ensureAtaExists(vaultAuthPda, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID);
+    const { ata: vaultOutAta } = await ensureAtaExists(vaultAuthPda, swapOutMint, CLASSIC_TOKEN_PROGRAM_ID);
     const { ata: escrowInAta } = await ensureAtaExists(escrowPda, WSOL_MINT, CLASSIC_TOKEN_PROGRAM_ID);
     const { ata: escrowOutAta } = await ensureAtaExists(escrowPda, swapOutMint, CLASSIC_TOKEN_PROGRAM_ID);
 
@@ -1297,7 +1298,12 @@ async function main() {
       minAmountOut,
       routerProg: swap.swapInstruction.programId,
       routerAccounts,
-      extraWritablePubkeys: [payerStr, escrowInAta, escrowOutAta],
+      payer: payerStr,
+      escrowInAta,
+      escrowOutAta,
+      vaultInAta,
+      vaultOutAta,
+      extraWritablePubkeys: [payerStr, escrowInAta, escrowOutAta, vaultInAta, vaultOutAta],
       outStealthOwner: swapOutOwner,
       outBlinding: swapOutBlinding,
       dynMemoHead: dyn.dynHead34,

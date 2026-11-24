@@ -512,6 +512,12 @@ export class CompactWalletStore {
       decrypted.amount,
       decrypted.blinding,
     );
+    const computedCmBe = frToBeBytes(cmFr);
+    for (let i = 0; i < 32; i++) {
+      if (computedCmBe[i] !== cmBe[i]) {
+        throw new Error('Note commitment mismatch in recordVerifiedMemo');
+      }
+    }
     const nf = fvkRealNullifier(fvk, cmFr, globalLeaf);
     this.notes.push({
       poolId: this.poolId,

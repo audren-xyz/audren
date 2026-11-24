@@ -235,6 +235,11 @@ fn ffi_conformance_matches_spec_vectors() {
         dyn_mask_72: dyn_m.dyn_mask_72,
         router_ix_data: vec![1, 2, 3, 4],
         change_memos: enc.memo_106,
+        payer: None,
+        escrow_in_ata: None,
+        escrow_out_ata: None,
+        vault_in_ata: None,
+        vault_out_ata: None,
     })
     .unwrap();
     assert_eq!(to_hex(&ctx_exec), v["ctx_hashes"]["exec_fee_on_output_ctx_hash_hex"]);
@@ -448,12 +453,27 @@ fn ffi_conformance_matches_spec_vectors() {
     assert!(all_none_public_err.is_err(), "ASSET_MODE_PUBLIC with None accs must not panic");
 
     // page_kind > 3 & out-of-range PDA / interval indices MUST return Err (zero panic!)
-    assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 4, 0, 0, 0).is_err());
-    assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 0, 16, 0).is_err());
+    assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 4, 0, 0, 0, None).is_err());
+    assert!(build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 0, 16, 0, None).is_err());
+    let op_ix_0 = build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 2, 0, 0, 1, Some(0)).unwrap();
+    assert_eq!(op_ix_0.data.len(), 23, "OpenPage wire length must be 23 B (incl. max_payer_deficit)");
+    assert_eq!(&op_ix_0.data[15..23], &0u64.to_le_bytes());
+    let op_ix_max = build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 2, 0, 0, 1, None).unwrap();
+    assert_eq!(&op_ix_max.data[15..23], &u64::MAX.to_le_bytes());
     assert!(build_init_pool_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 0, 0, 0).is_err());
     assert!(build_init_root_history_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 257, 4).is_err());
     assert!(derive_lane_pda(pid.clone(), 0, 16).is_err());
     assert!(derive_escrow_pda(pid.clone(), 0, 16).is_err());
+
+    // Strict 0|1 boolean validation in prove_joinsplit_witness_bytes (L-5)
+    for bad_off in [144usize, 281usize, 2358usize] {
+        let mut bad_wit = vec![0u8; 4611];
+        bad_wit[bad_off] = 2;
+        assert!(
+            prove_joinsplit_witness_bytes(bad_wit, vec![0x11u8; 32]).is_err(),
+            "non-boolean byte at witness offset {bad_off} must be rejected"
+        );
+    }
 
     // Missing recipient / relayer_fee_recipient in ctx_hash MUST return Err (zero panic!)
     assert!(compute_transact_ctx_hash_ffi(FfiTransactCtxHashParams {
@@ -495,11 +515,17 @@ fn ffi_conformance_matches_spec_vectors() {
         dyn_mask_72: vec![0u8; 72],
         router_ix_data: vec![],
         change_memos: vec![],
+        payer: None,
+        escrow_in_ata: None,
+        escrow_out_ata: None,
+        vault_in_ata: None,
+        vault_out_ata: None,
     })
     .is_err());
 
-    // extra_writable_pubkeys promotes aliased readonly router account in both ctx_hash & ix builder
+    // extra_writable_pubkeys AND explicit payer/escrow/vault ATAs promote aliased readonly router accounts (H-10)
     let sibling_b58 = bs58::encode([0x99u8; 32]).into_string();
+    let escrow_in_b58 = bs58::encode([0xAAu8; 32]).into_string();
     let h_promoted = compute_exec_ctx_hash_ffi(FfiExecCtxHashParams {
         program_id: pid.clone(),
         pool_id: 0,
@@ -515,11 +541,18 @@ fn ffi_conformance_matches_spec_vectors() {
         asset_out: vec![2u8; 32],
         min_amount_out: 50,
         router_prog: bs58::encode([0x77u8; 32]).into_string(),
-        router_accounts: vec![FfiAccountMeta {
-            pubkey_b58: sibling_b58.clone(),
-            is_signer: false,
-            is_writable: false,
-        }],
+        router_accounts: vec![
+            FfiAccountMeta {
+                pubkey_b58: sibling_b58.clone(),
+                is_signer: false,
+                is_writable: false,
+            },
+            FfiAccountMeta {
+                pubkey_b58: escrow_in_b58.clone(),
+                is_signer: false,
+                is_writable: false,
+            },
+        ],
         extra_writable_pubkeys: vec![sibling_b58.clone()],
         out_stealth_owner: vec![3u8; 32],
         out_blinding: vec![4u8; 32],
@@ -527,6 +560,11 @@ fn ffi_conformance_matches_spec_vectors() {
         dyn_mask_72: vec![6u8; 72],
         router_ix_data: vec![1, 2],
         change_memos: vec![],
+        payer: None,
+        escrow_in_ata: Some(escrow_in_b58.clone()),
+        escrow_out_ata: None,
+        vault_in_ata: None,
+        vault_out_ata: None,
     })
     .unwrap();
     let h_explicit = compute_exec_ctx_hash_ffi(FfiExecCtxHashParams {
@@ -544,11 +582,18 @@ fn ffi_conformance_matches_spec_vectors() {
         asset_out: vec![2u8; 32],
         min_amount_out: 50,
         router_prog: bs58::encode([0x77u8; 32]).into_string(),
-        router_accounts: vec![FfiAccountMeta {
-            pubkey_b58: sibling_b58.clone(),
-            is_signer: false,
-            is_writable: true,
-        }],
+        router_accounts: vec![
+            FfiAccountMeta {
+                pubkey_b58: sibling_b58.clone(),
+                is_signer: false,
+                is_writable: true,
+            },
+            FfiAccountMeta {
+                pubkey_b58: escrow_in_b58.clone(),
+                is_signer: false,
+                is_writable: true,
+            },
+        ],
         extra_writable_pubkeys: vec![],
         out_stealth_owner: vec![3u8; 32],
         out_blinding: vec![4u8; 32],
@@ -556,6 +601,11 @@ fn ffi_conformance_matches_spec_vectors() {
         dyn_mask_72: vec![6u8; 72],
         router_ix_data: vec![1, 2],
         change_memos: vec![],
+        payer: None,
+        escrow_in_ata: None,
+        escrow_out_ata: None,
+        vault_in_ata: None,
+        vault_out_ata: None,
     })
     .unwrap();
     assert_eq!(h_promoted, h_explicit);
@@ -829,11 +879,18 @@ fn ffi_wave2_root_snapshot_auto_open_pages_and_bump_aware_cu_exports() {
             page_kind: 2,
             page_seq: 1,
             pda_b58: String::new(),
+            mandatory: false,
         }],
     )
     .unwrap();
     assert_eq!(filtered_by_coord.len(), 1);
     assert_eq!(filtered_by_coord[0].page_kind, 3);
+    assert!(!filtered_by_coord[0].mandatory, "90% lookahead must set mandatory = false");
+
+    // Exact rollover sets mandatory = true
+    let exact_rollover = plan_auto_open_pages(pid.clone(), 0, 0, 96, 600, 1, 1, vec![]).unwrap();
+    assert_eq!(exact_rollover.len(), 2);
+    assert!(exact_rollover.iter().all(|s| s.mandatory));
 
     // Custom staging/localnet program_id derives custom-program PDAs and filters against them
     let custom_pid = solana_address::Address::new_from_array([0x42u8; 32]).to_string();
@@ -878,6 +935,7 @@ fn ffi_wave2_root_snapshot_auto_open_pages_and_bump_aware_cu_exports() {
             page_kind: 2,
             page_seq: 1,
             pda_b58: String::new(),
+            mandatory: false,
         }],
     )
     .unwrap();
@@ -901,6 +959,7 @@ fn ffi_wave2_root_snapshot_auto_open_pages_and_bump_aware_cu_exports() {
             page_kind: 4,
             page_seq: 1,
             pda_b58: String::new(),
+            mandatory: false,
         }]
     )
     .is_err());
@@ -916,6 +975,7 @@ fn ffi_wave2_root_snapshot_auto_open_pages_and_bump_aware_cu_exports() {
             page_kind: 2,
             page_seq: 1,
             pda_b58: "not-valid-base58!!!".to_string(),
+            mandatory: false,
         }]
     )
     .is_err());

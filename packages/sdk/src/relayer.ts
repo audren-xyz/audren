@@ -16,6 +16,7 @@ export type RelayOperation = 'transfer' | 'withdraw' | 'exec_escrow';
 
 export interface RelayRentSchedule {
   nullifierRentLamports: string;
+  nfPageRentPerNfLamports?: string;
   noteRentPerLeafLamports: string;
   pageRentPerNoteLamports?: string;
   ataRentLamports: string;
@@ -42,6 +43,21 @@ export interface RelayInfoResponse {
   rootHistory?: RelayRootHistoryInfo | null;
   balanceSol: number | null;
   rentSchedule: RelayRentSchedule | null;
+  supportedOperations?: {
+    transfer?: {
+      maxBatchSize?: number;
+      shieldedCm2Fee?: boolean;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  policy?: {
+    baseSwapFeeBps?: number;
+    maxSelfPayBps?: number;
+    microSwapFeeBps?: number;
+    selfPayMarginBps?: number;
+    [key: string]: unknown;
+  };
   aggregators?: unknown;
   allowedPreIxPrograms?: string[];
   [key: string]: unknown;
@@ -50,7 +66,8 @@ export interface RelayInfoResponse {
 export interface RelayFeeQuoteRequest {
   cluster?: RelayCluster;
   op: RelayOperation;
-  mint: string;
+  /** Required for `withdraw` / `exec_escrow` and priced self-pay transfers; omit on sponsored transfers to avoid revealing hidden shielded mints. */
+  mint?: string;
   amount?: string;
   unwrapWsol?: boolean;
   feeOnOutput?: boolean;
@@ -76,6 +93,8 @@ export interface RelayFeeQuoteResponse {
   feeRecipientExists: boolean;
   needsFeeAtaSetup: boolean;
   relayerFee: string;
+  /** Minimum flat fee floor in base units of `feeMint` (independent of `amount` / percentage bps). */
+  minFlatFeeUnits?: string;
   feeBps: number;
   estimatedRelayCostLamports: string;
   estimatedRelayCostUsd: number | null;
@@ -264,8 +283,10 @@ export class AudrenRelayClient {
   async getFeeQuote(params: RelayFeeQuoteRequest): Promise<RelayFeeQuoteResponse> {
     const query: Record<string, string> = {
       op: params.op,
-      mint: params.mint,
     };
+    if (params.mint) {
+      query.mint = params.mint;
+    }
     // Privacy invariant: NEVER transmit private transfer amounts to the relayer.
     if (params.op !== 'transfer' && params.amount !== undefined) {
       query.amount = params.amount;

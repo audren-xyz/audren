@@ -270,7 +270,7 @@ RustBuffer uniffi_audren_ffi_fn_func_build_init_root_history_ix(RustBuffer progr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_IX
 #define UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_OPEN_PAGE_IX
-RustBuffer uniffi_audren_ffi_fn_func_build_open_page_ix(RustBuffer program_id, RustBuffer payer, uint8_t page_kind, uint32_t pool_id, uint8_t lane_id, uint64_t page_seq, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_audren_ffi_fn_func_build_open_page_ix(RustBuffer program_id, RustBuffer payer, uint8_t page_kind, uint32_t pool_id, uint8_t lane_id, uint64_t page_seq, RustBuffer max_payer_deficit, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_AUDREN_FFI_FN_FUNC_BUILD_SET_PAUSED_IX

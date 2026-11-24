@@ -1551,7 +1551,7 @@
         "kind": "instructionNode",
         "name": "openPage",
         "docs": [
-          "Idempotent, sequence-bounded, pause-exempt, LaneRentVault-subsidized page opener."
+          "Idempotent, >=90%-lookahead-gated, pause-exempt, LaneRentVault-subsidized page opener with explicit max_payer_deficit protection against TOCTOU drains."
         ],
         "discriminators": [
           {
@@ -1579,7 +1579,7 @@
             "isSigner": true,
             "isOptional": false,
             "docs": [
-              "Permissionless cranker / fallback rent payer."
+              "Permissionless cranker / bounded fallback rent payer."
             ]
           },
           {
@@ -1686,6 +1686,18 @@
               "format": "u64",
               "endian": "le"
             }
+          },
+          {
+            "kind": "instructionArgumentNode",
+            "name": "maxPayerDeficit",
+            "type": {
+              "kind": "numberTypeNode",
+              "format": "u64",
+              "endian": "le"
+            },
+            "docs": [
+              "Maximum lamports payer consents to cover if LaneRentVault cannot subsidize full page rent (pass 0 for proactive >=90% lookaheads)."
+            ]
           }
         ]
       },
@@ -3698,9 +3710,9 @@
         "kind": "errorNode",
         "name": "insufficientVaultBalance",
         "code": 6017,
-        "message": "Custody vault holds insufficient balance for outflow.",
+        "message": "Custody vault or LaneRentVault holds insufficient balance (or OpenPage payer_deficit exceeds max_payer_deficit).",
         "docs": [
-          "Custody vault holds insufficient balance for outflow."
+          "Custody vault or LaneRentVault holds insufficient balance (or OpenPage payer_deficit exceeds max_payer_deficit)."
         ]
       },
       {
@@ -3806,9 +3818,9 @@
         "kind": "errorNode",
         "name": "pageSeqOutOfRange",
         "code": 6029,
-        "message": "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage).",
+        "message": "OpenPage sequence exceeds allowed lookahead bound (cur_seq, or cur_seq + 1 only at >= 90% occupancy: Subtree >= 230/256, Subroot >= 280/300, Memo >= 86/96, Nullifier >= 540/600; cur_seq + 2 rejected).",
         "docs": [
-          "OpenPage sequence exceeds allowed lookahead bound (cur_seq + 2, or cur_seq + 1 at subroot slot >= 280 for SubtreeRootPage)."
+          "OpenPage sequence exceeds allowed lookahead bound (cur_seq, or cur_seq + 1 only at >= 90% occupancy: Subtree >= 230/256, Subroot >= 280/300, Memo >= 86/96, Nullifier >= 540/600; cur_seq + 2 rejected)."
         ]
       },
       {

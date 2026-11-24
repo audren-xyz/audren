@@ -57,6 +57,8 @@ export interface Env {
   SELF_PAY_MARGIN_BPS?: string
   MAX_DAILY_SPONSORED_SOL_MAINNET?: string
   MAX_DAILY_SPONSORED_SOL_DEVNET?: string
+  MAX_DAILY_REVERT_BURN_SOL_MAINNET?: string
+  MAX_DAILY_REVERT_BURN_SOL_DEVNET?: string
   SPONSORED_PER_IP_PER_HOUR_MAINNET?: string
   SPONSORED_PER_IP_PER_DAY_MAINNET?: string
   SPONSORED_COOLDOWN_SEC_MAINNET?: string
@@ -90,6 +92,8 @@ export interface RelayPolicyConfig {
   /** Basis points multiplier over raw lamport cost (11000 = 1.10x). */
   selfPayMarginBps: number
   maxDailySponsoredLamports: Record<Cluster, bigint>
+  /** Independent daily global revert-burn ceiling so self-pay-only relays (`MAX_DAILY_SPONSORED_SOL_*=0`) do not halt on a single revert. */
+  maxDailyRevertBurnLamports: Record<Cluster, bigint>
   sponsoredPerIpPerHour: Record<Cluster, number>
   sponsoredPerIpPerDay: Record<Cluster, number>
   sponsoredCooldownSec: Record<Cluster, number>
@@ -105,12 +109,13 @@ const VALID_AGGREGATORS: readonly AggregatorId[] = ['jupiter', 'bedrock', 'dflow
  * Default zero-signer DeFi refresh/oracle crank programs permitted in `preInstructions`
  * immediately before Audren Tag 6 (`ExecViaEscrow`):
  *   - Kamino Lending (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`)
- *   - Kamino Vaults (`kvauTFR8qm1dhniz6pYuBZkuene3Hfrs1VQhVRgCNrr`)
+ *   - Kamino Vaults (`KvauGMspG5k6rtzrqqn7WNn3oZdyKqLKwK2XWQ8FLjd` + legacy `kvauTFR8qm1dhniz6pYuBZkuene3Hfrs1VQhVRgCNrr`)
  *   - Pyth Solana Receiver (`rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ`)
  *   - Sanctum S Controller (`5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx`)
  */
 export const DEFAULT_ALLOWED_PRE_IX_PROGRAMS: readonly string[] = [
   'KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD',
+  'KvauGMspG5k6rtzrqqn7WNn3oZdyKqLKwK2XWQ8FLjd',
   'kvauTFR8qm1dhniz6pYuBZkuene3Hfrs1VQhVRgCNrr',
   'rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ',
   '5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx',
@@ -139,7 +144,9 @@ export const DEFAULT_AUDITED_SWAP_ROUTER_PROGRAMS: readonly string[] = [
 /**
  * Default liquid, oracle-vetted SPL / Token-2022 mints permitted to earn relayer `self_paying`
  * fee credit and eligible for automated treasury refill (overrideable via `SELF_PAY_FEE_MINTS`):
- *   WSOL, USDC, USDT, JitoSOL, mSOL, bSOL, JUP, PYUSD, EURC, cbBTC, WBTC, WETH.
+ *   WSOL, USDC, USDT, JitoSOL, mSOL, bSOL, JUP, EURC, cbBTC, WBTC, WETH.
+ * (PYUSD is intentionally excluded because Mainnet PYUSD carries `PermanentDelegate` +
+ * `TransferHook` extensions rejected by `parseMintSafetyInfo`.)
  */
 export const DEFAULT_SELF_PAY_FEE_MINTS: readonly string[] = [
   'So11111111111111111111111111111111111111112', // WSOL
@@ -149,7 +156,6 @@ export const DEFAULT_SELF_PAY_FEE_MINTS: readonly string[] = [
   'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So', // mSOL
   'bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1', // bSOL
   'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN', // JUP
-  '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // PYUSD
   'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', // EURC
   'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij', // cbBTC
   '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', // WBTC
@@ -158,16 +164,16 @@ export const DEFAULT_SELF_PAY_FEE_MINTS: readonly string[] = [
 
 /**
  * Known regulated fiat-backed stablecoins permitted to carry an on-chain SPL `FreezeAuthority`
- * while remaining eligible for self-pay fee settlement (USDC, USDT, PYUSD, EURC).
+ * while remaining eligible for self-pay fee settlement (USDC, USDT, EURC).
  */
 export const TRUSTED_FREEZE_AUTHORITY_MINTS: ReadonlySet<string> = new Set([
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
   'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
-  '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // PYUSD
   'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', // EURC
 ])
 
 function parseNum(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback
   const n = Number(raw)
   if (!Number.isFinite(n)) return fallback
   return Math.min(Math.max(n, min), max)
@@ -217,6 +223,23 @@ export function loadPolicyConfig(env: Env): RelayPolicyConfig {
     .map((s) => s.trim())
     .filter(Boolean)
 
+  const maxDailySponsoredMainnet = parseSolToLamports(env.MAX_DAILY_SPONSORED_SOL_MAINNET, 0.05)
+  const maxDailySponsoredDevnet = parseSolToLamports(env.MAX_DAILY_SPONSORED_SOL_DEVNET, 1.0)
+  const defaultRevertBurnMainnet =
+    maxDailySponsoredMainnet > 50_000_000n ? maxDailySponsoredMainnet : 50_000_000n
+  const defaultRevertBurnDevnet =
+    maxDailySponsoredDevnet > 250_000_000n ? maxDailySponsoredDevnet : 250_000_000n
+  const maxDailyRevertBurnMainnet =
+    env.MAX_DAILY_REVERT_BURN_SOL_MAINNET !== undefined &&
+    env.MAX_DAILY_REVERT_BURN_SOL_MAINNET.trim() !== ''
+      ? parseSolToLamports(env.MAX_DAILY_REVERT_BURN_SOL_MAINNET, 0.05)
+      : defaultRevertBurnMainnet
+  const maxDailyRevertBurnDevnet =
+    env.MAX_DAILY_REVERT_BURN_SOL_DEVNET !== undefined &&
+    env.MAX_DAILY_REVERT_BURN_SOL_DEVNET.trim() !== ''
+      ? parseSolToLamports(env.MAX_DAILY_REVERT_BURN_SOL_DEVNET, 0.25)
+      : defaultRevertBurnDevnet
+
   return {
     defaultAggregator,
     enabledAggregators: new Set(rawEnabled.length > 0 ? rawEnabled : ['jupiter']),
@@ -229,8 +252,12 @@ export function loadPolicyConfig(env: Env): RelayPolicyConfig {
     allowMicroSwapSubsidy: (env.ALLOW_MICRO_SWAP_SUBSIDY ?? 'true').toLowerCase() !== 'false',
     selfPayMarginBps: Math.trunc(parseNum(env.SELF_PAY_MARGIN_BPS, 11_000, 10_000, 20_000)),
     maxDailySponsoredLamports: {
-      mainnet: parseSolToLamports(env.MAX_DAILY_SPONSORED_SOL_MAINNET, 0.05),
-      devnet: parseSolToLamports(env.MAX_DAILY_SPONSORED_SOL_DEVNET, 1.0),
+      mainnet: maxDailySponsoredMainnet,
+      devnet: maxDailySponsoredDevnet,
+    },
+    maxDailyRevertBurnLamports: {
+      mainnet: maxDailyRevertBurnMainnet,
+      devnet: maxDailyRevertBurnDevnet,
     },
     sponsoredPerIpPerHour: {
       mainnet: Math.trunc(parseNum(env.SPONSORED_PER_IP_PER_HOUR_MAINNET, 12, 1, 500)),
