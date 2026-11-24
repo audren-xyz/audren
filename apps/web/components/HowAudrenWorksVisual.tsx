@@ -56,7 +56,7 @@ const FLOWS: FlowDefinition[] = [
     tabSub: 'Anyone pays your aud1… in any token',
     exampleHeadline: 'Alice pays your aud1… address 500 USDC, signing with her regular Phantom wallet',
     exampleNote:
-      'Alice does not need an Audren account or a zero-knowledge proof: an SDK integration builds the deposit to your address and her wallet only signs it. (The Audren web app currently shields only into your own vault.) Works for native SOL, classic SPL tokens, and supported Token-2022 mints.',
+      'Alice does not need an Audren account or a zero-knowledge proof: any wallet or client can build Tag 3 Deposit directly from the open on-chain IDL (or via our optional SDKs) and her wallet only signs it. (The Audren web app currently shields only into your own vault.) Works for native SOL, classic SPL tokens, and supported Token-2022 mints.',
     txHref: solscanTx(AUDREN.mainnet.depositTx, 'mainnet'),
     txLabel: 'Inspect real Mainnet deposit',
     demoHref: '/demo',
@@ -205,10 +205,10 @@ const FLOWS: FlowDefinition[] = [
   {
     id: 'private-swap',
     tabTitle: 'Shielded DeFi',
-    tabSub: 'ExecViaEscrow: private-balance swaps in 1 tx',
-    exampleHeadline: 'Swap from your Private Balance in 1 tx (lending and vaults via the SDK)',
+    tabSub: 'ExecViaEscrow: private-balance DeFi in 1 tx',
+    exampleHeadline: 'Swap, lend, or enter yield vaults from your Private Balance in 1 tx',
     exampleNote:
-      'Tag 6 ExecViaEscrow can call any compatible Token A → Token B program. The hosted relay quotes swaps through Jupiter, DFlow, and OKX (reaching Raydium, Orca, Meteora, LSTs such as JitoSOL, and JLP), and self-hosted relays can add Titan. Kamino Lending supply/redeem (USDC ⇄ cUSDC) and Kamino Yield Vault deposit/withdraw (Prime USDC shares) are also exercised on Mainnet through the SDK’s generic builder and hosted relay; the web demo UI itself focuses on swaps. The DeFi call, its mints, amounts, and the resulting note remain public.',
+      'Tag 6 ExecViaEscrow is a permissionless on-chain instruction that calls any compatible Token A → Token B Solana program. The hosted relay quotes swaps through Jupiter, DFlow, and OKX (reaching Raydium, Orca, Meteora, LSTs such as JitoSOL, and JLP), and self-hosted relays can add Titan. Kamino Lending supply/redeem (USDC ⇄ cUSDC) and Kamino Yield Vault deposit/withdraw (Prime USDC shares) are also live and verified on Mainnet via Tag 6 and the hosted relay. Any wallet or raw client can build Tag 6 directly from the open on-chain IDL (the official SDKs are optional convenience wrappers; the reference web demo UI focuses on swaps). The DeFi call, its mints, amounts, and resulting note remain public.',
     txHref: solscanTx(AUDREN.mainnet.swapTx, 'mainnet'),
     txLabel: 'Inspect a relayed ExecViaEscrow swap (0 user signers)',
     demoHref: '/demo',
@@ -235,7 +235,7 @@ const FLOWS: FlowDefinition[] = [
       {
         actor: 'Protocol-agnostic DeFi CPI',
         title: 'Execute one compatible Token A → Token B program call',
-        shortLabel: 'Aggregator swap today · other one-call programs via SDK',
+        shortLabel: 'DEX swaps, lending, or vaults via Tag 6 CPI',
         packetLabel: 'DeFi Fill ≥ min_out',
         detail:
           'Inside the same Solana Transaction v1, Audren invokes the target Solana program via PDA CPI, leaving >1.11M CU for multi-hop aggregator routes or other single-call programs. If net output falls below min_amount_out, the entire transaction reverts cleanly.',

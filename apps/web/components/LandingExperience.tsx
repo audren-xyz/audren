@@ -43,7 +43,7 @@ const POOL_CASES: readonly PoolCase[] = [
     stageMeta: 'Global MASP · Transact (Tag 5)',
     title: 'Pay privately with existing tokens.',
     detail:
-      'Pay any reusable Bech32m aud1… address with SOL, Classic SPL, or transferable Token-2022 inside a single global Multi-Asset Shielded Pool (4-ary Depth-20 Merkle tree, 1.099T-note capacity at 16 lanes; 4 active today). A 192-byte Groth16 proof hides which of the pool’s notes you spent (the pool is young, so that set is small today) and creates fresh one-time stealth outputs with hidden asset and amount. Timing and external information can still create links.',
+      'Pay any reusable Bech32m aud1… address with native SOL, Classic SPL, or transferable Token-2022 inside one shared 4-ary Depth-20 Multi-Asset Shielded Pool (1.099T-note capacity across 16 lanes; 4 active today). Every relayed transfer hides which pool notes you spent, creates fresh one-time stealth outputs, and conceals token and amount inside opaque 32-byte Poseidon5 commitments with instant spendability on ~150ms Alpenglow finality.',
     steps: [
       {
         phase: 'Input',
@@ -62,7 +62,7 @@ const POOL_CASES: readonly PoolCase[] = [
       },
     ],
     resultText:
-      'Private Transact settles in ~205k CU (235k budget) with inline GlobalRootHistory update (~150ms Alpenglow finality), hidden inputs, stealth recipient, hidden asset, and hidden amount.',
+      'Private Transact settles in ~200k–205k CU (235k budget) with inline GlobalRootHistory update (~150ms Alpenglow finality), hidden inputs, stealth recipient, hidden asset, and hidden amount.',
     hiddenLabel: 'Which pool note was spent, recipient, token, and amount',
     publicLabel: 'GlobalRootHistory ring index, lane append slot, timing, and fee payer',
     txHref: solscanTx(AUDREN.mainnet.transferTx),
@@ -73,9 +73,9 @@ const POOL_CASES: readonly PoolCase[] = [
     id: 'swap',
     tab: 'Shielded DeFi',
     stageMeta: 'Isolated escrow CPI · ExecViaEscrow (Tag 6)',
-    title: 'Swap privately through DeFi and return to the pool.',
+    title: 'Swap, lend, and earn yield from private balances in one transaction.',
     detail:
-      'ExecViaEscrow spends a private note through a shared escrow into one Token A → Token B Solana program call and reshields the output in the same transaction. The app and hosted relay ship aggregator swaps (Jupiter, DFlow, OKX), reaching LSTs and JLP, while Kamino Lending supply/redeem (USDC ⇄ cUSDC) and Kamino Yield Vault deposit/withdraw (Prime USDC shares) are exercised on Mainnet through the SDK’s generic builder and hosted relay. Relayer fees settle from input or output tokens (EXEC_FLAG_FEE_ON_OUTPUT); the external DeFi call, its mints, amounts, and the output note remain public.',
+      'ExecViaEscrow spends a private note through an isolated sharded escrow PDA into any compatible Token A → Token B Solana program call and reshields the exact net output in the same transaction. Verified on Mainnet across Jupiter and DFlow swaps (OKX also quoted on the hosted relay), JitoSOL, JLP, Kamino Lending (USDC ⇄ cUSDC), and Kamino Prime USDC Yield Vault. Any wallet or client can call Tag 6 directly from the open on-chain IDL (the official SDKs are optional convenience wrappers; the reference web demo currently exposes swaps). Relayer fees settle from input or output tokens (EXEC_FLAG_FEE_ON_OUTPUT); the external DeFi call, its mints, amounts, and output note remain public.',
     steps: [
       {
         phase: 'Escrow out',
@@ -85,7 +85,7 @@ const POOL_CASES: readonly PoolCase[] = [
       {
         phase: 'External CPI',
         headline: 'One external program call',
-        detail: 'Aggregator route (other programs via SDK)',
+        detail: 'Any compatible DEX, lending, or vault program',
       },
       {
         phase: 'Reshield',
@@ -188,7 +188,7 @@ function PrivacyComparisonCard() {
       ref={ref}
       className={styles.comparison}
       data-play={!hydrated ? 'static' : started ? 'on' : 'off'}
-      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances and default confidential rings, and Audren shielded pool transfer"
+      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances and Helius default ring, and Audren shielded pool transfer"
     >
       <figcaption className={styles.figureHeader}>
         <div>
@@ -232,8 +232,8 @@ function PrivacyComparisonCard() {
 
         <div className={styles.comparisonRow} style={at(0.7)}>
           <div className={styles.rowName}>
-            <span className={styles.rowTitle}>Confidential / Rings</span>
-            <span className={styles.rowMeta}>Default rings · CB on Token&#8209;2022 only</span>
+            <span className={styles.rowTitle}>Token&#8209;2022 CB / Helius</span>
+            <span className={styles.rowMeta}>Wallets public · Helius default ring</span>
           </div>
           <div className={styles.people}>
             <span>Wallet A</span>
@@ -248,7 +248,7 @@ function PrivacyComparisonCard() {
               420.00
             </span>
             <span className={styles.visuallyHidden}>
-              Amount hidden; mint public on Token-2022 or encrypted in default rings
+              Amount hidden; sender and recipient wallets stay public; mint public on Token-2022 or encrypted in Helius default ring
             </span>
           </div>
         </div>
@@ -511,12 +511,13 @@ export function LandingExperience() {
         {/* HERO */}
         <section className={`container ${styles.hero}`}>
           <div className={styles.heroCopy}>
-            <h1>Private payments on Solana with your existing tokens.</h1>
+            <h1>Private payments and shielded DeFi on Solana, with your existing tokens.</h1>
             <p>
-              Deposit SOL, Classic SPL, or transferable Token-2022 assets into one shared pool
-              without a wrapper token. Make private payments, swap through Solana DEX aggregators via
-              an isolated escrow, or fund fresh wallets directly with self-paying fees and atomic
-              WSOL unwrap. Your spending keys stay on your device.
+              Shield native SOL, Classic SPL, and transferable Token-2022 inside one global pool
+              with no wrapper token and no protocol fee. Hide spent notes, recipient, token, and
+              amount by default (and your sender wallet when relayed), spend immediately on ~150ms
+              Alpenglow finality with zero indexers or cranks, and run 1-transaction Mainnet swaps,
+              lending, and yield vaults while spending keys stay strictly on your device.
             </p>
             <div className={styles.actions}>
               <Link href="/demo" className="btn-ink">
@@ -531,10 +532,10 @@ export function LandingExperience() {
           <PrivacyComparisonCard />
 
           <p className={styles.heroBoundary}>
-            Private transfers conceal which note was spent, the recipient, token, and amount, and
-            the sender when a relay pays the fee. Deposits, external DeFi CPI legs, public
-            withdrawals, stateful session-wallet positions, and the fee payer remain public.
-            Timing and outside information can still create links.{' '}
+            Relayed private transfers conceal which note was spent, the recipient, token, amount,
+            and sender wallet. Deposits, external DeFi CPI legs, public withdrawals, stateful
+            session-wallet positions, and the fee payer remain public; timing and outside
+            information can still create links.{' '}
             <Link href="/faq">Read the privacy model</Link>.
           </p>
         </section>
@@ -543,10 +544,10 @@ export function LandingExperience() {
         <section className={styles.assetBand} aria-label="Supported Solana assets">
           <div className={`container ${styles.assetBandInner}`}>
             <div className={styles.assetLead}>
-              <p className={styles.assetHeading}>No wrapper token or mint allowlist.</p>
+              <p className={styles.assetHeading}>No wrapper token. No mint allowlist. No protocol fee.</p>
               <p className={styles.assetNote}>
-                Works with existing Solana assets without a bridge. Token issuer restrictions still
-                apply.
+                Native Solana assets enter one unified global pool without bridging or minting
+                wrapped IOUs. Token issuer mint controls still apply.
               </p>
             </div>
             <div className={styles.assetTypes}>
@@ -560,11 +561,13 @@ export function LandingExperience() {
         {/* SHARED VAULT & GLOBAL MASP */}
         <section className={`container ${styles.lifeSection}`} id="use-cases">
           <div className={styles.sectionIntro}>
-            <h2>Deposit once to pay privately, use DeFi, or exit on demand.</h2>
+            <h2>Deposit once. Pay privately, use live DeFi, or exit anytime.</h2>
             <p>
-              Public vaults hold the pooled assets while private notes authorize spending. Proofs
-              hide which of the pool’s notes was spent. Public amounts,
-              timing, and outside information can still connect activity.
+              Every deposit, private send, and DeFi settlement updates inline{' '}
+              <code>GlobalRootHistory</code> in the same transaction for instant spendability on
+              confirmation with zero background cranks. Public vaults hold the pooled tokens while
+              client-side Groth16 proofs authorize spends; public entry/exit amounts and timing
+              still matter.
             </p>
           </div>
 
@@ -625,8 +628,9 @@ export function LandingExperience() {
             <span className={styles.noteLead}>
               More TVL does not automatically mean more privacy.
             </span>{' '}
-            More independently owned, plausible activity may help. Dollars alone do not establish
-            that. Timing, public amounts, and input-count selection still matter.
+            Pool #0 is early, so its effective anonymity set grows with independently owned,
+            plausible activity rather than raw dollar TVL alone. Timing, public entry/exit amounts,
+            and input-count selection still matter.
           </p>
         </section>
 
@@ -634,14 +638,15 @@ export function LandingExperience() {
         <section className={styles.defiSection} id="defi-primitives">
           <div className="container">
             <div className={styles.sectionIntro}>
-              <h2>One escrow primitive for open Solana DeFi.</h2>
+              <h2>One permissionless escrow primitive for composable Solana DeFi.</h2>
               <p>
-                <code>ExecViaEscrow</code> (Tag 6) runs one SPL or Token-2022{' '}
-                <code>Token A → Token B</code> Solana program call through 16 shared escrow PDAs
-                and reshields the exact net vault delta on-chain (~165k–238k CU base / 285k budget,
-                leaving &gt;1.11M CU for DeFi). Aggregator swaps ship in the app today; any program that takes the
-                input and returns the output in that one call fits the same instruction through
-                the SDK. Stateful protocols use self-funded session wallets.
+                <code>ExecViaEscrow</code> (Tag 6) runs any compatible SPL or Token-2022{' '}
+                <code>Token A → Token B</code> Solana program call through 16 isolated escrow PDAs
+                and reshields the exact net output on-chain (~165k–238k CU base / 285k budget,
+                leaving &gt;1.11M CU for DeFi). No per-protocol circuits and no SDK lock-in: any
+                wallet, frontend, or raw client can call Tag 6 directly from the open on-chain IDL,
+                or use our optional SDKs for faster integration. Stateful protocols use
+                self-funded, zero-dust session wallets.
               </p>
             </div>
 
@@ -651,11 +656,12 @@ export function LandingExperience() {
               <article className={styles.defiCell} data-flow="dex">
                 <h3>DEX aggregators</h3>
                 <p>
-                  Live in the app: route through Jupiter, DFlow, or OKX DEX (reaching AMMs
-                  such as Raydium, Orca, and Meteora); SDK integrations can target other routers.
-                  Every call binds its <code>router_accounts</code>, <code>min_amount_out</code>,
-                  and relayer fee into <code>ctx_hash</code>; the fee can come from the input or,
-                  with <code>EXEC_FLAG_FEE_ON_OUTPUT</code>, from the output.
+                  Live on Mainnet and in the web app: route through Jupiter, DFlow, or OKX DEX
+                  (reaching AMMs such as Raydium, Orca, and Meteora), or target any other CPI-safe
+                  router directly on-chain. Every call cryptographically binds{' '}
+                  <code>router_accounts</code>, <code>min_amount_out</code>, and relayer fee into{' '}
+                  <code>ctx_hash</code>, with input-leg or output-leg fees via{' '}
+                  <code>EXEC_FLAG_FEE_ON_OUTPUT</code>.
                 </p>
                 <span className={styles.defiFlowTag}>
                   Tag 6 · WSOL or SPL → Any SPL → Shielded note
@@ -665,12 +671,12 @@ export function LandingExperience() {
               <article className={styles.defiCell} data-flow="lend">
                 <h3>Lending supply</h3>
                 <p>
-                  Exercised on Mainnet through the SDK&rsquo;s generic builder and hosted relay:
-                  supply USDC to Kamino Lending (<code>KLend2g3c…</code>) in one escrow-signed call
-                  (with zero-signer <code>refreshReserve</code>), reshielding interest-bearing{' '}
-                  <code>cUSDC</code> privately and redeeming back via{' '}
-                  <code>EXEC_FLAG_FEE_ON_OUTPUT</code>. Driven through the SDK; the web demo UI
-                  focuses on swaps.
+                  Live and verified on Mainnet with Kamino Lending (<code>KLend2g3c…</code>):
+                  supply shielded USDC in one escrow-signed call (with zero-signer{' '}
+                  <code>refreshReserve</code>), hold interest-bearing <code>cUSDC</code> privately,
+                  and redeem back via <code>EXEC_FLAG_FEE_ON_OUTPUT</code>. Any client can call
+                  Tag 6 directly against the on-chain IDL or use the optional SDKs (our web demo UI
+                  currently exposes swaps).
                 </p>
                 <span className={styles.defiFlowTag}>
                   Tag 6 · USDC → Kamino Lending → cUSDC note
@@ -680,11 +686,11 @@ export function LandingExperience() {
               <article className={styles.defiCell} data-flow="vault">
                 <h3>Yield and compounding vaults</h3>
                 <p>
-                  Exercised on Mainnet through the SDK&rsquo;s generic builder and hosted relay:
-                  enter or exit single-call share vaults such as Kamino Prime USDC Vault (
-                  <code>KvauGMsp…</code>), sweeping minted shares straight into a fresh stealth note
-                  and redeeming back via <code>EXEC_FLAG_FEE_ON_OUTPUT</code>. Vaults with
-                  withdrawal queues or cooldowns do not fit.
+                  Live and verified on Mainnet with Kamino Prime USDC Vault (<code>KvauGMsp…</code>
+                  ): enter or exit single-call share vaults directly from a shielded note, sweeping
+                  exact minted shares into a fresh stealth note and withdrawing back via{' '}
+                  <code>EXEC_FLAG_FEE_ON_OUTPUT</code>. Call directly on-chain or via the optional
+                  SDKs; vaults with withdrawal queues or cooldowns do not fit.
                 </p>
                 <span className={styles.defiFlowTag}>
                   Tag 6 · USDC → Kamino Vault → Share token note
@@ -694,10 +700,11 @@ export function LandingExperience() {
               <article className={styles.defiCell} data-flow="stake">
                 <h3>Liquid staking tokens</h3>
                 <p>
-                  Swap shielded SOL (held as WSOL) into liquid staking tokens such as{' '}
-                  <code>JitoSOL</code> or <code>mSOL</code> through an aggregator route, and hold or
-                  unwind them inside the pool. Direct stake-pool deposits need native SOL from a
-                  signer, so they go through aggregator routes instead.
+                  Live and verified on Mainnet: swap shielded SOL (held as WSOL) into liquid
+                  staking tokens such as <code>JitoSOL</code> or <code>mSOL</code> through an
+                  aggregator route, and hold or unwind them back into shielded SOL with{' '}
+                  <code>EXEC_FLAG_FEE_ON_OUTPUT</code>. Direct stake-pool deposits need native SOL
+                  from a signer, so they go through aggregator routes instead.
                 </p>
                 <span className={styles.defiFlowTag}>
                   Tag 6 · WSOL → Aggregator LST route → LST note
@@ -707,9 +714,10 @@ export function LandingExperience() {
               <article className={styles.defiCell} data-flow="lp">
                 <h3>Perp LP tokens</h3>
                 <p>
-                  Buy or sell pooled liquidity tokens such as Jupiter <code>JLP</code> through an
-                  aggregator route. Tokenized funds fit only when minting is permissionless and
-                  settles in one call; most RWA tokens restrict who may hold them.
+                  Live and verified on Mainnet: buy or sell pooled liquidity tokens such as Jupiter{' '}
+                  <code>JLP</code> in one atomic transaction and hold them privately inside Pool #0.
+                  Tokenized funds fit whenever minting is permissionless and settles in one call;
+                  most RWA tokens restrict who may hold them.
                 </p>
                 <span className={styles.defiFlowTag}>
                   Tag 6 · USDC → Aggregator route → JLP note
@@ -719,12 +727,13 @@ export function LandingExperience() {
               <article className={`${styles.defiCell} ${styles.defiCellSession}`} data-flow="session">
                 <h3>Borrowing and perps via session wallets</h3>
                 <p>
-                  Fund deterministic session wallets (<code>B₀, B₁…</code>) from zero prior SOL via
-                  self-paying <code>Transact(WITHDRAW_FLAG_UNWRAP_WSOL)</code>, trade or borrow on
-                  stateful protocols, then sweep every remaining lamport back with zero-dust{' '}
-                  <code>Deposit(DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code>. The
-                  exit, the positions opened by <code>Bᵢ</code>, and the sweep are public and
-                  linked through <code>Bᵢ</code>.
+                  Live and verified on Mainnet: fund deterministic session wallets (
+                  <code>B₀, B₁…</code>) from zero prior SOL via relayed{' '}
+                  <code>Transact(WITHDRAW_FLAG_UNWRAP_WSOL)</code>, trade or borrow on stateful
+                  protocols, then sweep every remaining lamport back with zero-dust{' '}
+                  <code>Deposit(DEPOSIT_FLAG_NATIVE_SOL | DEPOSIT_FLAG_FEE_FROM_AMOUNT)</code>{' '}
+                  leaving 0 lamports behind. The exit, positions opened by <code>Bᵢ</code>, and
+                  sweep remain public and linked through <code>Bᵢ</code>.
                 </p>
                 <span className={styles.defiFlowTag}>
                   Tag 5 + Tag 3 · Unwrap exit → Session Bᵢ → 0-dust sweep
@@ -746,80 +755,184 @@ export function LandingExperience() {
         {/* COMPARISON */}
         <section className={`container ${styles.cardsSection}`} id="why-audren">
           <div className={styles.sectionIntro}>
-            <h2>How Audren compares on assets, fields, and infrastructure.</h2>
+            <h2>Why Audren: default 4-field privacy, zero indexers, and live Solana DeFi.</h2>
             <p>
-              Different privacy designs make different engineering tradeoffs. Compare what stays
-              hidden, which tokens work without wrapping, and what infrastructure you need to run.
+              Other approaches leave wallets public by default, split tokens into isolated pools,
+              gate liveness behind indexers, Foresters, enclaves, or MPC committees, or trap assets
+              on separate chains. Compare Audren directly against every major privacy architecture.
             </p>
           </div>
 
-          <div className={styles.compareGrid}>
-            <article className={styles.compareCol}>
-              <h3>Confidential Balances</h3>
-              <p className={styles.colLead}>
-                Native Token-2022 extension that encrypts transfer amounts at the token-program
-                layer.
-              </p>
-              <ul className={styles.colList}>
-                <li>Configured Token-2022 mints only; not native SOL or existing Classic SPL balances</li>
-                <li>Sender wallet, recipient wallet, and token mint remain public</li>
-                <li>Ordinary public DEX routes expose trade amounts and assets</li>
-              </ul>
-            </article>
+          <div
+            className={styles.landingMatrixWrap}
+            role="region"
+            aria-label="Head-to-head privacy architecture comparison"
+            tabIndex={0}
+          >
+            <table className={styles.landingMatrix}>
+              <thead>
+                <tr>
+                  <th scope="col">Protocol / model</th>
+                  <th scope="col">Default transfer privacy</th>
+                  <th scope="col">Asset scope</th>
+                  <th scope="col">Infrastructure &amp; cost</th>
+                  <th scope="col">Live DeFi &amp; exits</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className={styles.landingMatrixAudren}>
+                  <th scope="row">
+                    <span className={styles.matrixModel}>Audren Global MASP</span>
+                    <span className={styles.matrixSub}>Permissionless Solana L1 program</span>
+                  </th>
+                  <td>
+                    <span className={styles.matrixGood}>All 4 fields hidden by default</span>{' '}
+                    (spent note, stealth recipient, token, amount; sender hidden when relayed)
+                  </td>
+                  <td>
+                    <span className={styles.matrixGood}>One shared 4²⁰ pool</span> across native
+                    SOL, Classic SPL, and transferable Token-2022 (no wrapper token)
+                  </td>
+                  <td>
+                    <span className={styles.matrixGood}>Ordinary Solana RPC only</span> · zero
+                    indexer, zero Forester, zero cranks, 3.93 MB local key · 0 protocol fee
+                    (permanent SysvarRent ~0.0007–0.0036 SOL/tx)
+                  </td>
+                  <td>
+                    <span className={styles.matrixGood}>Live on Mainnet in 1 tx</span> (Jupiter,
+                    DFlow, JitoSOL, JLP, Kamino Lending &amp; Vaults; OKX quoted on relay) · full
+                    exits bypass pause
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">
+                    <span className={styles.matrixModel}>Confidential Balances</span>
+                    <span className={styles.matrixSub}>Native Solana Token-2022 extension</span>
+                  </th>
+                  <td>
+                    <span className={styles.matrixGap}>Amount only</span> · sender wallet,
+                    recipient wallet, and mint stay public
+                  </td>
+                  <td>Configured Token-2022 mints only (no native SOL, no Classic SPL)</td>
+                  <td>Native token extension; optional issuer auditor key can decrypt amounts</td>
+                  <td>Must withdraw to public balance before using Solana DeFi</td>
+                </tr>
+                <tr>
+                  <th scope="row">
+                    <span className={styles.matrixModel}>Helius Privacy Rings</span>
+                    <span className={styles.matrixSub}>Third-party Helius protocol (not native Solana)</span>
+                  </th>
+                  <td>
+                    <span className={styles.matrixGap}>Wallets stay public</span> in the live
+                    default ring (anonymous Custom Rings still in audit)
+                  </td>
+                  <td>SOL, Classic SPL, and Token-2022</td>
+                  <td>
+                    Requires Photon indexer, permissioned Forester tree operator, and 5,000-lamport
+                    fee per tree updated
+                  </td>
+                  <td>
+                    Requires per-app custom ZK circuits for private CPI (no built-in sharded-escrow
+                    measured-delta CPI) · <code>pause_tree</code> halts exits
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">
+                    <span className={styles.matrixModel}>Privacy Cash</span>
+                    <span className={styles.matrixSub}>Per-asset Merkle pools</span>
+                  </th>
+                  <td>
+                    <span className={styles.matrixGap}>Token mint exposed by pool</span> · separate
+                    Merkle tree per supported asset
+                  </td>
+                  <td>Supported tokens split across isolated single-asset trees</td>
+                  <td>Local Groth16 proofs over fragmented per-asset pools</td>
+                  <td>Multi-tx withdraw → ephemeral wallet → Jupiter → reshield</td>
+                </tr>
+                <tr>
+                  <th scope="row">
+                    <span className={styles.matrixModel}>Nimbus &amp; Arcium</span>
+                    <span className={styles.matrixSub}>Hardware enclaves / MPC committees</span>
+                  </th>
+                  <td>
+                    <span className={styles.matrixGap}>Hardware or committee boundary</span> ·
+                    privacy/liveness tied to attesters or MPC nodes
+                  </td>
+                  <td>Solana pool via enclave attesters (Nimbus) or MXE encrypted compute (Arcium)</td>
+                  <td>
+                    Relies on enclave attesters (Nimbus) or all-node liveness in detect-and-abort
+                    MPC (Arcium)
+                  </td>
+                  <td>
+                    Liveness depends on enclave/committee availability (Nimbus exits via a 48-hour
+                    delayed escape hatch)
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">
+                    <span className={styles.matrixModel}>Monero &amp; Zcash</span>
+                    <span className={styles.matrixSub}>Dedicated privacy L1 chains</span>
+                  </th>
+                  <td>Strong native L1 privacy on their own separate networks</td>
+                  <td>
+                    <span className={styles.matrixGap}>No native Solana assets</span> · cannot
+                    shield SOL, USDC, or SPL without bridges
+                  </td>
+                  <td>Separate wallet, chain, and bridge trust assumptions</td>
+                  <td>No direct atomic access to Solana DEX, lending, or yield liquidity</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
 
-            <article className={styles.compareCol}>
-              <h3>Solana Privacy Rings</h3>
+          <div className={styles.compareGrid}>
+            <article className={`${styles.compareCol} ${styles.compareColAudren}`}>
+              <h3>All 4 fields hidden today</h3>
               <p className={styles.colLead}>
-                Helius’s pool for existing Solana assets with self-custody, and program and circuit
-                audits by Certora, zkSecurity, and OtterSec.
+                No waiting for anonymous modes and no asset-fragmented pools. One shared 4
+                <sup>20</sup> global tree mixes SOL, Classic SPL, and transferable Token-2022 under
+                uniform padded 2-in/3-out proofs by default.
               </p>
               <ul className={styles.colList}>
-                <li>
-                  Default ring encrypts token and amount but shows sender and recipient wallets;
-                  anonymous Custom Rings are still in audit
-                </li>
-                <li>
-                  Photon indexer (self-hostable), permissioned Forester tree maintenance, and local
-                  or GPU proving, with a 5,000-lamport fee per state tree updated
-                </li>
-                <li>
-                  Apps can add their own proofs via CPI to keep DeFi amounts private; Jupiter, DFlow,
-                  and Titan integrations are announced
-                </li>
+                <li>Hides spent notes, one-time stealth recipient, token mint, and amount</li>
+                <li>Zero protocol fee and zero on-chain recipient registration</li>
+                <li>Mode 1 single-note receipts and Mode 2 FullViewingKey when disclosure is needed</li>
               </ul>
             </article>
 
             <article className={`${styles.compareCol} ${styles.compareColAudren}`}>
-              <h3>Audren</h3>
+              <h3>Zero indexer. Zero Forester. Zero cranks.</h3>
               <p className={styles.colLead}>
-                One 4<sup>20</sup> global Multi-Asset Shielded Pool with one 3.93 MB local Groth16
-                proving key, ordinary Solana RPC discovery, and no wrapper token.
+                Every note-appending instruction updates inline <code>GlobalRootHistory</code>{' '}
+                (128-entry recent <code>slot_ring</code> + 89-entry stable <code>epoch_ring</code>)
+                for instant spendability on ~150ms Alpenglow finality.
+              </p>
+              <ul className={styles.colList}>
+                <li>Syncs over ordinary Solana RPC (~1.28 MB kept at 10M notes)</li>
+                <li>Auto-prepended idempotent OpenPage eliminates crank operators</li>
+                <li>100% full exits (including atomic WSOL unwrap) always bypass pause</li>
+              </ul>
+            </article>
+
+            <article className={`${styles.compareCol} ${styles.compareColAudren}`}>
+              <h3>Live Mainnet DeFi, no SDK required</h3>
+              <p className={styles.colLead}>
+                One permissionless <code>ExecViaEscrow</code> instruction composes atomically in 1
+                transaction with unmodified Mainnet liquidity (~165k–238k CU base + route).
               </p>
               <ul className={styles.colList}>
                 <li>
-                  Default 4-field confidentiality (spent notes, stealth recipient, token, amount)
-                  across SOL, Classic SPL, and transferable Token-2022
+                  Verified Mainnet txs across Jupiter, DFlow, JitoSOL, JLP, Kamino Lending, and
+                  Kamino Prime USDC Vault (hosted relay also quotes OKX)
                 </li>
                 <li>
-                  Zero mandatory indexer, Forester, or background cranks (~1.28 MB kept at 10M
-                  notes): inline GlobalRootHistory (128-entry recent slot_ring + 89-entry stable
-                  epoch_ring) gives instant spendability on confirmation (~150ms Alpenglow
-                  finality) with auto-prepended idempotent OpenPage, and full exits including
-                  atomic WSOL unwrap bypass pause
+                  Call the program directly via the on-chain Codama/Anchor IDL, or use our optional
+                  Rust, TypeScript, Swift, and Kotlin SDKs
                 </li>
                 <li>
-                  Atomic ExecViaEscrow CPI (~165k–238k CU base / 285k budget) reaches live
-                  aggregator liquidity today without per-protocol circuits (external DeFi leg stays
-                  public)
-                </li>
-                <li>
-                  No protocol fee and no on-chain sign-up to receive. Each spend pays permanent
-                  nullifier and page rent (~0.0007–0.0036 SOL at current rent), read live from
-                  Solana, so rent cuts (6,960 → 5,080 lamports per byte so far) lower it with no
-                  program upgrade
-                </li>
-                <li>
-                  Pre-audit release; the Phase-2 ceremony has only Audren’s contributions so far
+                  Zero protocol fee; spends pay permanent nullifier and page rent (~0.0007–0.0036
+                  SOL at current <code>SysvarRent</code>), dropping automatically whenever Solana
+                  lowers rent
                 </li>
               </ul>
             </article>
@@ -929,11 +1042,12 @@ export function LandingExperience() {
           <aside className={styles.trustAside}>
             <h3>Pre-audit and trust boundaries</h3>
             <p>
-              Audren is Apache-2.0 open source and currently in pre-audit release with a mutable BPF
-              upgrade authority, held together with the pool authority by one operator key (not a
-              multisig). An audit does not automatically remove that authority. Token
-              issuers retain their own mint controls (such as freeze authority). Public vault
-              balances show held assets; they do not independently prove all private liabilities.
+              Audren is Apache-2.0 open source and currently in pre-audit release: its Phase-2
+              BGM17 ceremony has only Audren’s own contributions so far, and both the BPF upgrade
+              authority and pool authority remain held by one operator key (not a multisig). An
+              audit does not automatically remove that authority. Token issuers retain their own
+              mint controls (such as freeze authority). Public vault balances show held assets;
+              they do not independently prove all private liabilities.
             </p>
             <Link href="/architecture">
               Read the security model and specification <ArrowRight size={14} />
@@ -945,11 +1059,12 @@ export function LandingExperience() {
         <section className={styles.closing}>
           <div className={`container ${styles.closingInner}`}>
             <div>
-              <h2>Use Audren directly, or integrate without permission.</h2>
+              <h2>Use Audren directly, or build permissionlessly on-chain.</h2>
               <p>
                 Run private transfers, shielded DeFi via ExecViaEscrow, and self-paying WSOL
-                withdrawals in your browser, or integrate the Rust, TypeScript, Swift (iOS), and
-                Kotlin (Android) SDKs into your own wallet or app.
+                withdrawals in your browser, call the on-chain program directly through its open
+                Codama and Anchor IDLs, or use the optional Rust, TypeScript, Swift (iOS), and
+                Kotlin (Android) SDKs when you want faster integration.
               </p>
             </div>
             <div className={styles.actions}>

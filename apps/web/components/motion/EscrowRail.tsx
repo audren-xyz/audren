@@ -35,7 +35,7 @@ export const RAIL_FLOWS: readonly RailFlow[] = [
     stopNotes: ['1 of 16, signs the CPI', 'Kamino Lending USDC'],
     chips: ['sealed note', '100 USDC', 'cUSDC', 'sealed note'],
     caption:
-      'Exercised on Mainnet through the SDK and hosted relay: supply USDC to Kamino Lending in one escrow-signed call, keep interest-bearing cUSDC as a private note, and redeem back the same way.',
+      'Live on Mainnet via Tag 6 ExecViaEscrow: supply USDC to Kamino Lending in one escrow-signed call, keep interest-bearing cUSDC as a private note, and redeem back the same way.',
   },
   {
     id: 'vault',
@@ -44,7 +44,7 @@ export const RAIL_FLOWS: readonly RailFlow[] = [
     stopNotes: ['1 of 16, signs the CPI', 'Kamino Prime USDC'],
     chips: ['sealed note', '100 USDC', 'vault shares', 'sealed note'],
     caption:
-      'Exercised on Mainnet through the SDK and hosted relay: enter a single-call yield vault such as Kamino Prime USDC, hold the minted shares privately, and withdraw back to shielded USDC the same way.',
+      'Live on Mainnet via Tag 6 ExecViaEscrow: enter a single-call yield vault such as Kamino Prime USDC, hold the minted shares privately, and withdraw back to shielded USDC the same way.',
   },
   {
     id: 'stake',

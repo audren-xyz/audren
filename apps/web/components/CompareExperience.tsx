@@ -47,9 +47,9 @@ const MODE_META: Record<
         assets: 'Configured Token-2022 mints only; an optional issuer auditor key can decrypt amounts',
       },
       {
-        method: 'Solana Privacy Rings',
-        sub: 'Helius · default ring (anonymous Custom Rings in audit)',
-        senderRecipient: { text: 'Public in the default ring; hidden in anonymous Custom Rings once live', state: 'partial' },
+        method: 'Helius Privacy Rings',
+        sub: 'Helius (third-party protocol, not native Solana) · default ring',
+        senderRecipient: { text: 'Public in the live default ring; anonymous Custom Rings still in audit', state: 'partial' },
         token: { text: 'Encrypted', state: 'hidden' },
         amount: { text: 'Encrypted', state: 'hidden' },
         assets: 'SOL, classic SPL, Token-2022',
@@ -68,7 +68,7 @@ const MODE_META: Record<
   'entry-exit': {
     label: 'Deposit & withdraw',
     headline: 'Public entry and exit boundaries, nullifier cost, and pause behavior',
-    note: 'Deposits and withdrawals touch ordinary Solana accounts by design. Concealing the spent note on withdrawal does not prevent timing, public amounts, or outside information from creating links. Solana Privacy Rings charges a default 5,000-lamport fee per state tree an instruction updates, and its pause_tree halts withdrawals; Audren pays permanent nullifier and page rent on-chain (~0.0007–0.0036 SOL/tx at current rent, tracking SysvarRent) and keeps full 100% withdrawals (including atomic WSOL unwrap) available during SetPaused.',
+    note: 'Deposits and withdrawals touch ordinary Solana accounts by design. Concealing the spent note on withdrawal does not prevent timing, public amounts, or outside information from creating links. Helius Privacy Rings charges a default 5,000-lamport fee per state tree an instruction updates, and its pause_tree halts withdrawals; Audren charges zero protocol fee, pays permanent nullifier and page rent on-chain (~0.0007–0.0036 SOL/tx at current rent, tracking SysvarRent), and keeps full 100% withdrawals (including atomic WSOL unwrap) available during SetPaused.',
     col5Header: 'Assets, rent & pause',
     rows: [
       {
@@ -88,8 +88,8 @@ const MODE_META: Record<
         assets: 'Configured Token-2022 mints; issuer mint controls apply',
       },
       {
-        method: 'Solana Privacy Rings',
-        sub: 'Helius · public SPL interface deposit / withdrawal',
+        method: 'Helius Privacy Rings',
+        sub: 'Helius (third-party protocol) · public SPL boundary',
         senderRecipient: { text: 'Public SPL boundary; default ring exposes participants', state: 'partial' },
         token: { text: 'Public at entry & exit', state: 'public' },
         amount: { text: 'Public at entry & exit', state: 'public' },
@@ -110,14 +110,14 @@ const MODE_META: Record<
         senderRecipient: { text: 'Depositor wallet and exit recipient public; the exit proof hides which note was spent', state: 'partial' },
         token: { text: 'Public at entry & exit', state: 'public' },
         amount: { text: 'Public at entry & exit (change hidden)', state: 'public' },
-        assets: 'SOL (WSOL), classic SPL, Token-2022 · issuer freeze / delegate controls apply to the shared vault · permanent rent ~0.0007–0.0036 SOL/tx · full exits incl. atomic WSOL unwrap bypass SetPaused',
+        assets: 'SOL (WSOL), classic SPL, Token-2022 · zero protocol fee · issuer freeze / delegate controls apply to the shared vault · permanent rent ~0.0007–0.0036 SOL/tx · full exits incl. atomic WSOL unwrap bypass SetPaused',
       },
     ],
   },
   swap: {
     label: 'Shielded DeFi',
-    headline: 'Composing with public Solana DeFi vs. app-specific private DeFi',
-    note: 'Two architectural paths exist for shielded DeFi on Solana. Solana Privacy Rings lets apps pair an app-specific ZK proof with the pool proof via CPI, which can keep swap amounts and prices private and can share liquidity; Helius lists Jupiter, DFlow, and Titan integrations as in progress. Audren takes the protocol-agnostic path: atomic ExecViaEscrow (Tag 6) reaches existing aggregator liquidity today (Jupiter, DFlow, and OKX on the hosted relay; Titan on self-hosted relays) in one transaction (~165k–238k CU base / 285k budget plus the route), keeping the external DeFi pair and amount public while hiding which pool note funded it (plus deterministic Bᵢ session wallets for stateful borrowing or perps).',
+    headline: 'Composing with live Solana DeFi vs. custom per-app circuits',
+    note: 'Two architectural paths exist for shielded DeFi on Solana. Helius Privacy Rings requires each app to build custom ZK proofs for private DeFi CPI (where amounts and prices stay hidden), while public withdraw → swap → deposit flows lack a built-in sharded-escrow measured-delta CPI (its public deposit takes a fixed amount and its live default ring exposes wallets). Audren takes the permissionless, protocol-agnostic path: atomic ExecViaEscrow (Tag 6) composes directly with unmodified Mainnet liquidity in one transaction (~165k–238k CU base / 285k budget plus the route), with verified Mainnet transactions across Jupiter, DFlow, JitoSOL, JLP, Kamino Lending (USDC ⇄ cUSDC), and Kamino Prime USDC Yield Vault (and OKX quoted on the hosted relay), keeping the external DeFi pair and amount public while hiding which pool note funded it (plus deterministic Bᵢ session wallets with zero-dust sweeps for stateful borrowing or perps).',
     col5Header: 'Liquidity & execution',
     rows: [
       {
@@ -137,12 +137,12 @@ const MODE_META: Record<
         assets: 'Public SPL liquidity after unwrapping',
       },
       {
-        method: 'Solana Privacy Rings',
-        sub: 'Helius · app-specific ZK programs via CPI',
-        senderRecipient: { text: 'Public in the default ring; anonymous Custom Rings in audit', state: 'partial' },
-        token: { text: 'Can stay private inside app-specific ZK programs', state: 'hidden' },
-        amount: { text: 'Can stay private inside app-specific ZK programs', state: 'hidden' },
-        assets: 'Each app adds its own proof; Jupiter, DFlow, Titan integrations announced',
+        method: 'Helius Privacy Rings',
+        sub: 'Helius (third-party protocol) · per-app custom ZK CPIs',
+        senderRecipient: { text: 'Public in the live default ring; anonymous Custom Rings in audit', state: 'partial' },
+        token: { text: 'Can stay private inside custom app-specific ZK programs', state: 'hidden' },
+        amount: { text: 'Can stay private inside custom app-specific ZK programs', state: 'hidden' },
+        assets: 'Custom ZK circuits required for private CPI; public swap composition lacks built-in sharded-escrow measured-delta reshielding',
       },
       {
         method: 'Privacy Cash',
@@ -159,7 +159,7 @@ const MODE_META: Record<
         senderRecipient: { text: 'Pool proof hides the funding note · shared escrow signs (or Bᵢ session) · fresh stealth note', state: 'partial' },
         token: { text: 'Public external DeFi mints', state: 'public' },
         amount: { text: 'Public external DeFi amounts (optional hidden change)', state: 'public' },
-        assets: 'Aggregator liquidity today (Jupiter, DFlow, OKX on the hosted relay) in 1 tx (~165k–238k CU base + route) + stateful Bᵢ sessions',
+        assets: 'Verified on Mainnet in 1 tx across Jupiter, DFlow, JitoSOL, JLP, Kamino Lending & Kamino Vaults (OKX quoted on relay; ~165k–238k CU base + route) + zero-dust Bᵢ sessions',
       },
     ],
   },
@@ -175,29 +175,29 @@ interface PeerComparison {
 
 const PEER_COMPARISONS: readonly PeerComparison[] = [
   {
-    tag: 'Shielded rings on Solana',
-    name: 'Audren vs. Solana Privacy Rings (Helius)',
-    lead: 'Both shield existing SOL, SPL, and Token-2022 assets on Solana, while making different bets on default visibility, prover infrastructure, fees, DeFi, and maturity.',
+    tag: 'Third-party ring protocol',
+    name: 'Audren vs. Helius Privacy Rings',
+    lead: 'Helius Privacy Rings is a third-party Helius protocol (not native Solana). Both shield existing SOL, SPL, and Token-2022 assets, while diverging sharply on default privacy, infrastructure dependencies, DeFi composability, and pause-immune exits.',
     comparisons: [
       {
         label: 'Default visibility',
-        text: 'The live default ring encrypts token and amount while leaving sender and recipient wallets public; anonymous Custom Rings are in audit, targeted for Q4 2026. Audren hides the spent notes, stealth recipient, token, and amount by default among all notes in one shared pool.',
+        text: 'Helius’s live default ring encrypts token and amount while leaving sender and recipient wallets public; anonymous Custom Rings remain in audit. Audren hides spent notes, stealth recipient, token, and amount by default today across one shared pool.',
       },
       {
         label: 'Proving & state discovery',
-        text: 'Solana Privacy Rings uses a Photon indexer (anyone can run one), a permissioned Forester for tree maintenance, and local or remote GPU proving. Audren proves locally from one frozen 3.93 MB key and syncs directly from ordinary Solana RPC with no indexer or Forester, at the cost of downloading full pages as the pool grows.',
+        text: 'Helius Privacy Rings depends on a Photon indexer (self-hostable), a permissioned Forester for tree maintenance, and local or remote GPU proving. Audren proves locally from one frozen 3.93 MB key and syncs directly from ordinary Solana RPC with zero indexer and zero Forester (at the cost of downloading full pages as the pool grows).',
       },
       {
         label: 'DeFi composability',
-        text: 'Apps on Solana Privacy Rings can combine private transfers with other programs via CPI and keep swap amounts private with their own proofs; Jupiter, DFlow, and Titan integrations are announced. Audren’s atomic ExecViaEscrow routes through existing aggregator liquidity today while keeping the external DeFi leg public.',
+        text: 'Helius Privacy Rings requires each DeFi app to add custom ZK proofs for private DeFi CPI (where trade amounts stay hidden), while public withdraw → swap → deposit flows lack a built-in sharded-escrow measured-delta CPI and the live default ring exposes wallets. Audren’s atomic ExecViaEscrow composes permissionlessly in one transaction with unmodified Mainnet liquidity across Jupiter, DFlow, JitoSOL, JLP, Kamino Lending, and Kamino Prime USDC Vault (with OKX also quoted on the hosted relay, keeping the external DeFi leg public).',
       },
       {
-        label: 'Rent, fan-in & instant spendability',
-        text: 'Solana Privacy Rings charges a default 5,000-lamport fee per state tree updated, supports high-fan-in merges, and its pause_tree halts withdrawals. Audren pays permanent nullifier and page rent (~0.0007–0.0036 SOL/tx at current rent) with 2-in/3-out spends (up to 4 parallel 2 → 1 merges per Solana Transaction v1 across distinct lanes), updates GlobalRootHistory inline for instant spendability on confirmation (~150ms Alpenglow finality) with zero cranks (auto-prepended OpenPage), and keeps full exits available during pause.',
+        label: 'Fees, instant spendability & exits',
+        text: 'Helius Privacy Rings charges a default 5,000-lamport fee per state tree updated and its pause_tree halts withdrawals. Audren charges zero protocol fee, pays live Solana SysvarRent for permanent nullifier and page storage (~0.0007–0.0036 SOL/tx at current rent), updates GlobalRootHistory inline for instant spendability on ~150ms Alpenglow finality with zero cranks (auto-prepended OpenPage), and keeps full 100% exits (including atomic WSOL unwrap) executable even during SetPaused.',
       },
       {
         label: 'Review & maturity',
-        text: 'Solana Privacy Rings’ program and circuits have published audits by Certora, zkSecurity, and OtterSec, and a trusted setup with 15 contributions per circuit. Audren has no independent audit yet, and its Phase-2 setup has only Audren’s own contributions so far.',
+        text: 'Helius’s program and circuits have published audits by Certora, zkSecurity, and OtterSec and a 15-contribution trusted setup per circuit. Audren is Apache-2.0 open source with a verified Mainnet Docker build (verify.osec.io), an independent audit pending, and a Phase-2 setup with only Audren’s contributions so far.',
       },
     ],
     sources: [
@@ -205,7 +205,6 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
       { label: 'Helius architecture', href: 'https://www.helius.dev/docs/privacy/concepts/architecture' },
       { label: 'Helius security evidence', href: 'https://www.helius.dev/docs/privacy/security' },
       { label: 'Helius deployments', href: 'https://www.helius.dev/docs/privacy/addresses' },
-      { label: 'Helius launch post', href: 'https://www.helius.dev/blog/solana-privacy-rings' },
     ],
   },
   {
@@ -219,7 +218,7 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
       },
       {
         label: 'DeFi execution',
-        text: 'Privacy Cash withdraws to an ephemeral wallet, trades on Jupiter, and reshields across multiple transactions. Audren settles aggregator swaps atomically in one transaction via ExecViaEscrow (~165k–238k CU base / 285k budget plus the route), plus deterministic Bᵢ session wallets for stateful protocols.',
+        text: 'Privacy Cash withdraws to an ephemeral wallet, trades on Jupiter, and reshields across multiple transactions. Audren settles aggregator swaps, Kamino Lending supply/redeem, and Kamino Yield Vault deposit/withdraw atomically in one transaction via ExecViaEscrow (~165k–238k CU base / 285k budget plus the route), plus deterministic Bᵢ session wallets with zero-dust sweeps for stateful protocols.',
       },
       {
         label: 'Sync & local state',
@@ -246,7 +245,7 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
       },
       {
         label: 'DeFi liquidity',
-        text: 'Dedicated privacy chains have limited on-chain DeFi. Audren composes atomically with Solana DEX aggregator routes via ExecViaEscrow, and with stateful protocols through deterministic session wallets.',
+        text: 'Dedicated privacy chains have limited on-chain DeFi. Audren composes atomically in one transaction with live Solana DEX aggregators, Kamino Lending, and Kamino Yield Vaults via ExecViaEscrow, and with stateful protocols through zero-dust deterministic session wallets.',
       },
       {
         label: 'Proof system & setup',
@@ -613,19 +612,19 @@ export function CompareExperience() {
                 <h3>Live DeFi &amp; pause-immune exits</h3>
                 <p className={styles.cellLead}>
                   Send uniformly padded private transfers, batch up to 4 parallel 2 → 1 private{' '}
-                  <code>Transact</code> merges per Solana Transaction v1, swap through aggregator
-                  routes via atomic <code>ExecViaEscrow</code> (~165k–238k CU base + route), fund deterministic session
-                  wallets, or exit 100% (including atomic WSOL unwrap) even during{' '}
-                  <code>SetPaused</code>.
+                  <code>Transact</code> merges per Solana Transaction v1, execute DEX swaps, Kamino
+                  Lending, and Kamino Yield Vault calls atomically via <code>ExecViaEscrow</code>{' '}
+                  (~165k–238k CU base + route), fund zero-dust deterministic session wallets, or
+                  exit 100% (including atomic WSOL unwrap) even during <code>SetPaused</code>.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
                 <span className={styles.cellIndex}>Openness</span>
-                <h3>Open integration</h3>
+                <h3>Permissionless on-chain IDL</h3>
                 <p className={styles.cellLead}>
-                  Integrate the Apache-2.0 source, run a compatible client, or host your own
-                  zero-crank relay without an Audren account. Hosted services apply their own
-                  policies.
+                  Call the Apache-2.0 on-chain program directly from its published Codama and
+                  Anchor IDLs with any client, drop in our optional Rust/TS/Swift/Kotlin SDKs for
+                  convenience, or host your own zero-crank relay without an Audren account.
                 </p>
               </div>
               <div className={styles.ledgerCell}>
