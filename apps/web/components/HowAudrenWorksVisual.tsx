@@ -134,7 +134,7 @@ const FLOWS: FlowDefinition[] = [
     exampleNote:
       'This relayed private transfer hides which notes were spent, uses a fresh recipient key, and hides the token and amount from on-chain observers. The relay sees your IP and the token it quotes a fee for; the relay fee payer and transaction metadata are public.',
     txHref: solscanTx(AUDREN.mainnet.transferTx, 'mainnet'),
-    txLabel: 'Inspect a self-paid Mainnet private send',
+    txLabel: 'Inspect a relayed Mainnet private send (0 user signers)',
     demoHref: '/demo',
     demoLabel: 'Try Private Send live',
     steps: [
@@ -208,7 +208,7 @@ const FLOWS: FlowDefinition[] = [
     tabSub: 'ExecViaEscrow: private-balance swaps in 1 tx',
     exampleHeadline: 'Swap from your Private Balance in 1 tx (lending and vaults via the SDK)',
     exampleNote:
-      'Tag 6 ExecViaEscrow can call any compatible Token A → Token B program. The hosted relay quotes swaps through Jupiter, DFlow, and OKX, and self-hosted relays can add Titan (aggregators that route across DEXs such as Raydium, Orca, and Meteora); LSTs are bought through those aggregator routes. Lending supply or vault deposits can be targeted with the SDK’s generic builder when the target program fits one escrow-signed call; they are not in the app and have not yet been exercised on Mainnet. The DeFi call, its mints, amounts, and the resulting note remain public.',
+      'Tag 6 ExecViaEscrow can call any compatible Token A → Token B program. The hosted relay quotes swaps through Jupiter, DFlow, and OKX (reaching Raydium, Orca, Meteora, LSTs such as JitoSOL, and JLP), and self-hosted relays can add Titan. Kamino Lending supply/redeem (USDC ⇄ cUSDC) and Kamino Yield Vault deposit/withdraw (Prime USDC shares) are also exercised on Mainnet through the SDK’s generic builder and hosted relay; the web demo UI itself focuses on swaps. The DeFi call, its mints, amounts, and the resulting note remain public.',
     txHref: solscanTx(AUDREN.mainnet.swapTx, 'mainnet'),
     txLabel: 'Inspect a relayed ExecViaEscrow swap (0 user signers)',
     demoHref: '/demo',
@@ -262,7 +262,7 @@ const FLOWS: FlowDefinition[] = [
         label: 'Your public wallet',
         visibility: 'hidden',
         badge: 'Absent',
-        value: 'Relayer paid gas (it can be reimbursed from the input or output; this swap paid no relay fee); shared escrow PDA signed the DeFi CPI',
+        value: 'Relayer paid gas and was reimbursed from the input WSOL (or from output via EXEC_FLAG_FEE_ON_OUTPUT); shared escrow PDA signed the DeFi CPI',
       },
       {
         label: 'Public unshield step',
@@ -292,7 +292,7 @@ const FLOWS: FlowDefinition[] = [
     exampleNote:
       'Export a Mode 1 SelectiveDisclosureProof (1 Poseidon5 check) or Mode 2 FullViewingKey, exit with self-paying native fees and atomic WSOL → SOL unwrap, or fund a deterministic session wallet (B_0, B_1…) for stateful borrow or perp protocols and sweep every remaining lamport back with zero dust.',
     txHref: solscanTx(AUDREN.mainnet.withdrawTx, 'mainnet'),
-    txLabel: 'Inspect a self-paid Mainnet withdrawal',
+    txLabel: 'Inspect a relayed self-paying Mainnet withdrawal',
     demoHref: '/demo?mode=sandbox',
     demoLabel: 'Test Receipts & Exit Flows',
     steps: [

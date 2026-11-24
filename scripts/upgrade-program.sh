@@ -671,10 +671,28 @@ EOF
 
   if gh release view "$tag" --repo "$REPO_OWNER_NAME" >/dev/null 2>&1; then
     echo "Updating existing GitHub Release ${tag} on ${REPO_OWNER_NAME}..."
-    gh release edit "$tag" \
-      --repo "$REPO_OWNER_NAME" \
-      --title "Audren ${tag}" \
-      --notes-file "$notes_file"
+    if gh release edit --help >/dev/null 2>&1; then
+      gh release edit "$tag" \
+        --repo "$REPO_OWNER_NAME" \
+        --target "$commit" \
+        --title "Audren ${tag}" \
+        --notes-file "$notes_file"
+    else
+      local rel_id patch_json
+      rel_id="$(gh api "repos/${REPO_OWNER_NAME}/releases/tags/${tag}" --jq '.id')"
+      [[ "$rel_id" =~ ^[0-9]+$ ]] || {
+        echo "Error: failed to resolve numeric GitHub release ID for ${tag} (got '${rel_id}')." >&2
+        exit 1
+      }
+      patch_json="${tmp_dir}/release-patch.json"
+      python3 - "$notes_file" "$tag" "$commit" "$patch_json" <<'PY'
+import json, pathlib, sys
+notes = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+payload = {"name": f"Audren {sys.argv[2]}", "body": notes, "target_commitish": sys.argv[3]}
+pathlib.Path(sys.argv[4]).write_text(json.dumps(payload), encoding="utf-8")
+PY
+      gh api -X PATCH "repos/${REPO_OWNER_NAME}/releases/${rel_id}" --input "$patch_json" >/dev/null
+    fi
     gh release upload "$tag" \
       --repo "$REPO_OWNER_NAME" \
       --clobber \

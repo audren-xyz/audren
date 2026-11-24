@@ -32,18 +32,19 @@ export const RAIL_FLOWS: readonly RailFlow[] = [
     id: 'lend',
     tab: 'Lending',
     stops: ['Escrow shard', 'Lending reserve'],
-    stopNotes: ['1 of 16, signs the CPI', 'Supplies USDC'],
-    chips: ['sealed note', '100 USDC', 'collateral token', 'sealed note'],
+    stopNotes: ['1 of 16, signs the CPI', 'Kamino Lending USDC'],
+    chips: ['sealed note', '100 USDC', 'cUSDC', 'sealed note'],
     caption:
-      'Possible through the SDK (not yet exercised on Mainnet): supply to a lending reserve in one escrow-signed call and keep its interest-bearing collateral token as a private note.',
+      'Exercised on Mainnet through the SDK and hosted relay: supply USDC to Kamino Lending in one escrow-signed call, keep interest-bearing cUSDC as a private note, and redeem back the same way.',
   },
   {
     id: 'vault',
     tab: 'Yield vault',
     stops: ['Escrow shard', 'Yield vault'],
-    stopNotes: ['1 of 16, signs the CPI', 'Deposits the asset'],
+    stopNotes: ['1 of 16, signs the CPI', 'Kamino Prime USDC'],
     chips: ['sealed note', '100 USDC', 'vault shares', 'sealed note'],
-    caption: 'Possible through the SDK (not yet exercised on Mainnet): enter a vault that mints share tokens in one call, and hold the shares privately until you exit the same way.',
+    caption:
+      'Exercised on Mainnet through the SDK and hosted relay: enter a single-call yield vault such as Kamino Prime USDC, hold the minted shares privately, and withdraw back to shielded USDC the same way.',
   },
   {
     id: 'stake',

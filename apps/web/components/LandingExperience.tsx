@@ -66,7 +66,7 @@ const POOL_CASES: readonly PoolCase[] = [
     hiddenLabel: 'Which pool note was spent, recipient, token, and amount',
     publicLabel: 'GlobalRootHistory ring index, lane append slot, timing, and fee payer',
     txHref: solscanTx(AUDREN.mainnet.transferTx),
-    txLabel: 'Inspect a self-paid Mainnet private send (economy 1-in/2-out shape)',
+    txLabel: 'Inspect a relayed Mainnet private send (uniform 2-in/3-out shape)',
     tone: 'pool',
   },
   {
@@ -75,7 +75,7 @@ const POOL_CASES: readonly PoolCase[] = [
     stageMeta: 'Isolated escrow CPI · ExecViaEscrow (Tag 6)',
     title: 'Swap privately through DeFi and return to the pool.',
     detail:
-      'ExecViaEscrow spends a private note through a shared escrow into one Token A → Token B Solana program call and reshields the output in the same transaction. The app and hosted relay ship aggregator swaps today (Jupiter, DFlow, OKX), which also reach LSTs and JLP; lending supply and vault deposits can target the same instruction through the SDK’s generic builder but have not yet been exercised on Mainnet. Relayer fees settle from input or output tokens (EXEC_FLAG_FEE_ON_OUTPUT); the external DeFi call, its mints, amounts, and the output note remain public.',
+      'ExecViaEscrow spends a private note through a shared escrow into one Token A → Token B Solana program call and reshields the output in the same transaction. The app and hosted relay ship aggregator swaps (Jupiter, DFlow, OKX), reaching LSTs and JLP, while Kamino Lending supply/redeem (USDC ⇄ cUSDC) and Kamino Yield Vault deposit/withdraw (Prime USDC shares) are exercised on Mainnet through the SDK’s generic builder and hosted relay. Relayer fees settle from input or output tokens (EXEC_FLAG_FEE_ON_OUTPUT); the external DeFi call, its mints, amounts, and the output note remain public.',
     steps: [
       {
         phase: 'Escrow out',
@@ -130,7 +130,7 @@ const POOL_CASES: readonly PoolCase[] = [
     hiddenLabel: 'Which historical pool note funded the payout or session wallet',
     publicLabel: 'Destination wallet, token, payout amount, fee payer, and any DeFi positions opened',
     txHref: solscanTx(AUDREN.mainnet.withdrawTx),
-    txLabel: 'Inspect a self-paid full withdrawal',
+    txLabel: 'Inspect a relayed self-paying full withdrawal',
     tone: 'exit',
   },
   {
@@ -665,25 +665,29 @@ export function LandingExperience() {
               <article className={styles.defiCell} data-flow="lend">
                 <h3>Lending supply</h3>
                 <p>
-                  Possible through the SDK&rsquo;s generic builder: supply USDC or WSOL to a lending
-                  reserve in one escrow-signed call and reshield its interest-bearing collateral
-                  token. Not in the app and not yet exercised on Mainnet.
+                  Exercised on Mainnet through the SDK&rsquo;s generic builder and hosted relay:
+                  supply USDC to Kamino Lending (<code>KLend2g3c…</code>) in one escrow-signed call
+                  (with zero-signer <code>refreshReserve</code>), reshielding interest-bearing{' '}
+                  <code>cUSDC</code> privately and redeeming back via{' '}
+                  <code>EXEC_FLAG_FEE_ON_OUTPUT</code>. Driven through the SDK; the web demo UI
+                  focuses on swaps.
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 6 · USDC → Reserve deposit → Collateral token note
+                  Tag 6 · USDC → Kamino Lending → cUSDC note
                 </span>
               </article>
 
               <article className={styles.defiCell} data-flow="vault">
                 <h3>Yield and compounding vaults</h3>
                 <p>
-                  Possible through the SDK&rsquo;s generic builder: enter or exit vaults that mint and
-                  redeem share tokens in a single call, sweeping the exact shares into a fresh
-                  stealth note. Not yet exercised on Mainnet; vaults with withdrawal queues or
-                  cooldowns do not fit.
+                  Exercised on Mainnet through the SDK&rsquo;s generic builder and hosted relay:
+                  enter or exit single-call share vaults such as Kamino Prime USDC Vault (
+                  <code>KvauGMsp…</code>), sweeping minted shares straight into a fresh stealth note
+                  and redeeming back via <code>EXEC_FLAG_FEE_ON_OUTPUT</code>. Vaults with
+                  withdrawal queues or cooldowns do not fit.
                 </p>
                 <span className={styles.defiFlowTag}>
-                  Tag 6 · Asset → Vault deposit → Share token note
+                  Tag 6 · USDC → Kamino Vault → Share token note
                 </span>
               </article>
 
@@ -854,10 +858,9 @@ export function LandingExperience() {
           <div>
             <h2>Inspect settled Mainnet transactions directly.</h2>
             <p>
-              Open a relayed private DEX swap (0 user signers) and operator test deposit, private
-              transfer, and full withdrawal transactions on Solscan. Those three are self-paid by
-              the same operator wallet, so they are deliberately linkable. Or inspect the program
-              account{' '}
+              Open settled Mainnet transactions on Solscan: a Native SOL deposit plus relayed (0
+              user signers) private transfer, DEX swap, Kamino Lending supply, Kamino Yield Vault
+              deposit, and self-paying full withdrawal. Or inspect the program account{' '}
               <code>
                 {AUDREN.programId.slice(0, 8)}…{AUDREN.programId.slice(-6)}
               </code>
@@ -868,20 +871,23 @@ export function LandingExperience() {
               <div className={styles.linkGroup}>
                 <span className={styles.linkGroupLabel}>Mainnet transactions</span>
                 <div className={styles.proofLinks}>
-                  {(['deposit', 'transfer', 'swap', 'withdraw'] as const).map((kind) => (
+                  {(
+                    [
+                      ['depositTx', 'Deposit'],
+                      ['transferTx', 'Private transfer'],
+                      ['swapTx', 'Private DEX swap'],
+                      ['lendingSupplyTx', 'Kamino Lending'],
+                      ['vaultDepositTx', 'Kamino Vault'],
+                      ['withdrawTx', 'Full withdrawal'],
+                    ] as const
+                  ).map(([key, label]) => (
                     <a
-                      key={kind}
-                      href={solscanTx(AUDREN.mainnet[`${kind}Tx`])}
+                      key={key}
+                      href={solscanTx(AUDREN.mainnet[key])}
                       target="_blank"
                       rel="noreferrer"
                     >
-                      {kind === 'transfer'
-                        ? 'Private transfer'
-                        : kind === 'swap'
-                          ? 'Private DEX swap'
-                          : kind === 'withdraw'
-                            ? 'Full withdrawal'
-                            : 'Deposit'}
+                      {label}
                       <ArrowUpRight size={13} />
                     </a>
                   ))}
