@@ -2,10 +2,13 @@
 //! zero `realloc`, SIMD-0460 compliant).
 
 use crate::{
-    Bytes32, EPOCH_RING_LEN, LANE_DEPTH_4ARY, NUM_LANES, ROOT_ENTRY_LEN, SLOT_RING_LEN,
+    Bytes32, EPOCH_RING_LEN, LANE_DEPTH_4ARY, MAX_ROOT_EPOCH_INTERVAL, NUM_LANES,
+    PROTOCOL_VERSION, ROOT_ENTRY_LEN, SLOT_RING_LEN,
 };
 #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-use crate::{MAX_ROOT_EPOCH_INTERVAL, ROOT_RING_EPOCH, ROOT_RING_SLOT, ZERO_HASHES_4ARY};
+use crate::{ROOT_RING_EPOCH, ROOT_RING_SLOT, ZERO_HASHES_4ARY};
+#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
+use alloc::boxed::Box;
 
 /// Solana maximum CPI account creation size (`10 KiB`).
 pub const MAX_CPI_ACCOUNT_ALLOC: usize = 10_240;
@@ -237,17 +240,24 @@ impl PoolState {
         if data.len() != POOL_STATE_LEN || data[PL_OFF_MAGIC..PL_OFF_MAGIC + 8] != POOL_MAGIC {
             return None;
         }
+        let version = data[PL_OFF_VERSION];
+        let paused_raw = data[PL_OFF_PAUSED];
         let active_lanes = data[PL_OFF_ACTIVE_LANES];
-        if (active_lanes as usize) > NUM_LANES {
+        let root_epoch_interval = read_u64(data, PL_OFF_ROOT_EPOCH_INTERVAL);
+        if version != PROTOCOL_VERSION
+            || paused_raw > 1
+            || (active_lanes as usize) > NUM_LANES
+            || !(1..=MAX_ROOT_EPOCH_INTERVAL).contains(&root_epoch_interval)
+        {
             return None;
         }
         Some(Self {
-            version: data[PL_OFF_VERSION],
+            version,
             bump: data[PL_OFF_BUMP],
-            paused: data[PL_OFF_PAUSED] != 0,
+            paused: paused_raw != 0,
             active_lanes,
             pool_id: read_u32(data, PL_OFF_POOL_ID),
-            root_epoch_interval: read_u64(data, PL_OFF_ROOT_EPOCH_INTERVAL),
+            root_epoch_interval,
             authority: read_32(data, PL_OFF_AUTHORITY),
             vault_auth_bump: data[PL_OFF_VAULT_AUTH_BUMP],
             note_rent_fee: read_u64(data, PL_OFF_NOTE_RENT_FEE),
@@ -275,13 +285,17 @@ impl LaneTreeHeader {
         if data.len() != LANE_STATE_LEN || data[LN_OFF_MAGIC..LN_OFF_MAGIC + 8] != LANE_MAGIC {
             return None;
         }
+        let version = data[LN_OFF_VERSION];
         let lane_id = data[LN_OFF_LANE_ID];
         let next_leaf = read_u64(data, LN_OFF_NEXT_LEAF);
-        if (lane_id as usize) >= NUM_LANES || next_leaf > MAX_LEAVES_PER_LANE {
+        if version != PROTOCOL_VERSION
+            || (lane_id as usize) >= NUM_LANES
+            || next_leaf > MAX_LEAVES_PER_LANE
+        {
             return None;
         }
         Some(Self {
-            version: data[LN_OFF_VERSION],
+            version,
             lane_id,
             bump: data[LN_OFF_BUMP],
             rent_bump: data[LN_OFF_RENT_BUMP],
@@ -378,10 +392,18 @@ pub struct GlobalRootHistory {
 
 #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
 impl GlobalRootHistory {
+    /// Decode `GlobalRootHistory` directly into a heap-allocated `Box<Self>` so callers on
+    /// stack-constrained mobile worker threads never hold multiple 10 KiB copies on the stack.
+    #[inline(never)]
+    pub fn decode_boxed(data: &[u8]) -> Option<Box<Self>> {
+        Self::decode(data).map(Box::new)
+    }
+
     pub fn decode(data: &[u8]) -> Option<Self> {
         if data.len() != ROOT_HISTORY_LEN || data[RT_OFF_MAGIC..RT_OFF_MAGIC + 8] != ROOTS_MAGIC {
             return None;
         }
+        let version = data[RT_OFF_VERSION];
         let slot_cursor = read_u16(data, RT_OFF_SLOT_CURSOR);
         let epoch_cursor = read_u16(data, RT_OFF_EPOCH_CURSOR);
         let slot_count = read_u16(data, RT_OFF_SLOT_COUNT);
@@ -389,7 +411,8 @@ impl GlobalRootHistory {
         let same_slot_bumped_raw = data[RT_OFF_SAME_SLOT_BUMPED];
         let epoch_interval = read_u64(data, RT_OFF_EPOCH_INTERVAL);
 
-        if slot_count < 1
+        if version != PROTOCOL_VERSION
+            || slot_count < 1
             || (slot_count as usize) > SLOT_RING_LEN
             || slot_cursor >= slot_count
             || epoch_count < 1
@@ -665,24 +688,50 @@ mod tests {
 
     #[test]
     fn decoders_enforce_strict_protocol_bounds() {
-        // PoolState: active_lanes <= NUM_LANES (16)
+        // PoolState: strict version, paused (0|1), active_lanes <= 16, and root_epoch_interval (1..=256)
         let mut pool = [0u8; POOL_STATE_LEN];
         pool[0..8].copy_from_slice(&POOL_MAGIC);
+        pool[PL_OFF_VERSION] = PROTOCOL_VERSION;
         pool[PL_OFF_ACTIVE_LANES] = NUM_LANES as u8;
         pool[PL_OFF_ROOT_EPOCH_INTERVAL..PL_OFF_ROOT_EPOCH_INTERVAL + 8]
             .copy_from_slice(&DEFAULT_ROOT_EPOCH_INTERVAL.to_le_bytes());
         let decoded_pool = PoolState::decode(&pool).expect("valid pool must decode");
         assert_eq!(decoded_pool.root_epoch_interval, DEFAULT_ROOT_EPOCH_INTERVAL);
-        pool[PL_OFF_ACTIVE_LANES] = (NUM_LANES + 1) as u8;
-        assert!(PoolState::decode(&pool).is_none());
 
-        // LaneTreeHeader: lane_id < NUM_LANES and next_leaf <= MAX_LEAVES_PER_LANE (1 << 36)
+        let mut bad_pool = pool;
+        bad_pool[PL_OFF_ACTIVE_LANES] = (NUM_LANES + 1) as u8;
+        assert!(PoolState::decode(&bad_pool).is_none());
+
+        let mut bad_pool = pool;
+        bad_pool[PL_OFF_PAUSED] = 2;
+        assert!(PoolState::decode(&bad_pool).is_none());
+
+        let mut bad_pool = pool;
+        bad_pool[PL_OFF_VERSION] = 0;
+        assert!(PoolState::decode(&bad_pool).is_none());
+
+        let mut bad_pool = pool;
+        bad_pool[PL_OFF_ROOT_EPOCH_INTERVAL..PL_OFF_ROOT_EPOCH_INTERVAL + 8]
+            .copy_from_slice(&0u64.to_le_bytes());
+        assert!(PoolState::decode(&bad_pool).is_none());
+
+        let mut bad_pool = pool;
+        bad_pool[PL_OFF_ROOT_EPOCH_INTERVAL..PL_OFF_ROOT_EPOCH_INTERVAL + 8]
+            .copy_from_slice(&(MAX_ROOT_EPOCH_INTERVAL + 1).to_le_bytes());
+        assert!(PoolState::decode(&bad_pool).is_none());
+
+        // LaneTreeHeader: strict version, lane_id < NUM_LANES and next_leaf <= MAX_LEAVES_PER_LANE (1 << 36)
         let mut lane = [0u8; LANE_STATE_LEN];
         lane[0..8].copy_from_slice(&LANE_MAGIC);
+        lane[LN_OFF_VERSION] = PROTOCOL_VERSION;
         lane[LN_OFF_LANE_ID] = (NUM_LANES - 1) as u8;
         lane[LN_OFF_NEXT_LEAF..LN_OFF_NEXT_LEAF + 8]
             .copy_from_slice(&MAX_LEAVES_PER_LANE.to_le_bytes());
         assert!(LaneTreeHeader::decode(&lane).is_some());
+
+        let mut bad_lane = lane;
+        bad_lane[LN_OFF_VERSION] = 0;
+        assert!(LaneTreeHeader::decode(&bad_lane).is_none());
 
         lane[LN_OFF_LANE_ID] = NUM_LANES as u8;
         assert!(LaneTreeHeader::decode(&lane).is_none());
@@ -691,14 +740,17 @@ mod tests {
             .copy_from_slice(&(MAX_LEAVES_PER_LANE + 1).to_le_bytes());
         assert!(LaneTreeHeader::decode(&lane).is_none());
 
-        // GlobalRootHistory: strict cursor, count, same_slot_bumped, epoch_interval, and lane_counts bounds
+        // GlobalRootHistory: strict version, cursor, count, same_slot_bumped, epoch_interval, and lane_counts bounds
         let base = make_valid_root_history();
-        let decoded = GlobalRootHistory::decode(&base).expect("valid root history must decode");
+        let decoded = GlobalRootHistory::decode_boxed(&base).expect("valid root history must decode");
         assert_eq!(decoded.slot_count, 1);
         assert_eq!(decoded.epoch_count, 1);
         assert_eq!(decoded.epoch_interval, DEFAULT_ROOT_EPOCH_INTERVAL);
         assert_eq!(decode_slot_ring_entry(&base, 0), Some(decoded.latest_entry()));
         assert_eq!(decode_epoch_ring_entry(&base, 0), Some(decoded.stable_entry()));
+        let mut bad_ver = base;
+        bad_ver[RT_OFF_VERSION] = 0;
+        assert!(GlobalRootHistory::decode(&bad_ver).is_none());
         assert!(decode_slot_ring_entry(&base, SLOT_RING_LEN).is_none());
         assert!(decode_epoch_ring_entry(&base, EPOCH_RING_LEN).is_none());
 

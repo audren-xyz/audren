@@ -4772,6 +4772,297 @@ fn litesvm_r1_frozen_escrow_ata_and_confidential_transfer_ext_blocked() {
     );
 
     // =========================================================================
+    // Audit Hardening: Non-in/out watched escrow ATA balance & lamport guards
+    // =========================================================================
+    // Mode 13: Router tries to sweep unsolicited tokens from an unrelated third-party escrow ATA -> Custom(6032)!
+    let other_mint = create_spl_mint(&mut svm, &payer, 6);
+    let esc0_other = create_canonical_ata(&mut svm, &payer, esc0, other_mint, spl_token_id());
+    let attacker_other =
+        create_canonical_ata(&mut svm, &payer, attacker.pubkey(), other_mint, spl_token_id());
+    mint_to(&mut svm, &payer, spl_token_id(), other_mint, esc0_other, 50_000);
+    let sweep_other_data = dex_swap_spl_to_spl_data(13, 50_000_000, 50_000_000, 6, 6);
+    let sweep_other_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_out, false),
+        AudrenAccountMeta::writable(esc0_out, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(out_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::writable(esc0_other, false),
+        AudrenAccountMeta::readonly(other_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::writable(attacker_other, false),
+    ];
+    let ctx_m13 = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &router_id,
+        &sweep_other_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &sweep_other_data,
+        &[],
+    );
+    let b_m13 = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_m13,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x73; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_m13.proof_192,
+                &b_m13.nf0,
+                &b_m13.nf1,
+                &b_m13.cm0,
+                &b_m13.cm1,
+                &b_m13.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &sweep_other_data,
+                sweep_other_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6032,
+        "Mode 13: router sweep of unrelated third-party escrow ATA balance MUST be rejected (6032)",
+    );
+    assert_eq!(token_balance(&svm, &esc0_other), 50_000);
+
+    // Mode 14: Router closes + cleanly recreates an empty unrelated escrow ATA to skim excess
+    //          lamports (owner/mint/amount/len stay identical -> caught ONLY by lamport guard!)
+    let skim_mint = create_spl_mint(&mut svm, &payer, 6);
+    let esc0_skim = create_canonical_ata(&mut svm, &payer, esc0, skim_mint, spl_token_id());
+    expect_ok(
+        send_v1(
+            &mut svm,
+            &payer,
+            &[],
+            &[
+                sys_ix::transfer(&payer.pubkey(), &esc0_skim, 100_000),
+                sys_ix::transfer(&payer.pubkey(), &esc0, 3_000_000),
+            ],
+            100_000,
+        ),
+        "fund excess lamports on esc0_skim and rent float on esc0",
+    );
+    let skim_lamports_before = svm.get_account(&esc0_skim).unwrap().lamports;
+    let skim_data = dex_swap_spl_to_spl_data(14, 50_000_000, 50_000_000, 6, 6);
+    let skim_accs = vec![
+        AudrenAccountMeta::writable(esc0, false),
+        AudrenAccountMeta::writable(esc0_usdc, false),
+        AudrenAccountMeta::writable(dex_usdc, false),
+        AudrenAccountMeta::writable(dex_pool, false),
+        AudrenAccountMeta::writable(dex_out, false),
+        AudrenAccountMeta::writable(esc0_out, false),
+        AudrenAccountMeta::readonly(usdc_mint, false),
+        AudrenAccountMeta::readonly(out_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::writable(esc0_skim, false),
+        AudrenAccountMeta::readonly(skim_mint, false),
+        AudrenAccountMeta::readonly(spl_token_id(), false),
+        AudrenAccountMeta::writable(attacker.pubkey(), false),
+        AudrenAccountMeta::readonly(sys_program_id(), false),
+        AudrenAccountMeta::readonly(ata_program_id(), false),
+    ];
+    let ctx_m14 = compute_exec_ctx_hash(
+        &program_id,
+        POOL_ID,
+        VK_ID_DEFAULT,
+        1,
+        0,
+        0,
+        false,
+        &fr_to_be_bytes(&asset_usdc),
+        50_000_000,
+        0,
+        None,
+        &fr_to_be_bytes(&asset_out),
+        1,
+        &router_id,
+        &skim_accs,
+        &[],
+        &ost1,
+        &obl1,
+        &dhead1,
+        &dmask1,
+        &skim_data,
+        &[],
+    );
+    let b_m14 = prover.build_and_prove(
+        sr,
+        asset_usdc,
+        asset_usdc,
+        50_000_000,
+        0,
+        ctx_m14,
+        true,
+        [
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: tw_u,
+                asset_id: asset_usdc,
+                amount: 100_000_000,
+                blinding: bl_u,
+                is_dummy: false,
+                merkle_path: path_u.clone(),
+            },
+            JoinSplitInputWitness {
+                spend_sk: alice.spend_sk,
+                tweak: Fr::from(0u64),
+                asset_id: asset_usdc,
+                amount: 0,
+                blinding: Fr::from(10u64),
+                is_dummy: true,
+                merkle_path: MerklePath4Ary::default(),
+            },
+        ],
+        [
+            JoinSplitOutputWitness {
+                stealth_owner: derive_stealth_owner(alice.spend_pk, Fr::from(11u64)),
+                asset_id: asset_usdc,
+                amount: 50_000_000,
+                blinding: Fr::from(12u64),
+            },
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(2u64)),
+            JoinSplitOutputWitness::dummy(asset_usdc, Fr::from(3u64)),
+        ],
+        [0x74; 32],
+    );
+    expect_err_code(
+        send_v1(
+            &mut svm,
+            &relayer,
+            &[],
+            &[to_svm_ix(&build_exec_via_escrow(
+                program_id,
+                relayer.pubkey(),
+                POOL_ID,
+                VK_ID_DEFAULT,
+                rk_r1,
+                ri_r1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false,
+                (usdc_mint, vault_usdc, esc0_usdc, spl_token_id()),
+                (out_mint, vault_out, esc0_out, spl_token_id()),
+                0,
+                None,
+                (None, None, None),
+                &b_m14.proof_192,
+                &b_m14.nf0,
+                &b_m14.nf1,
+                &b_m14.cm0,
+                &b_m14.cm1,
+                &b_m14.cm2,
+                50_000_000,
+                1,
+                &ost1,
+                &obl1,
+                &dhead1,
+                &dmask1,
+                router_id,
+                &skim_data,
+                skim_accs,
+                &[],
+                &[],
+            ))],
+            400_000,
+        ),
+        6032,
+        "Mode 14: close+recreate excess-lamport skim on watched escrow ATA MUST be rejected (6032)",
+    );
+    assert_eq!(svm.get_account(&esc0_skim).unwrap().lamports, skim_lamports_before);
+
+    // =========================================================================
     // R1-P2: Token-2022 `ConfidentialTransferAccount` (`TLV 5`) on escrow & vault ATAs
     // =========================================================================
     let ct_mint_kp = Keypair::new();

@@ -39,7 +39,6 @@ import {
 } from './layout.ts';
 
 const MAX_SUBROOTS_PER_LANE = MAX_LEAVES_PER_LANE / BigInt(SUBTREE_LEAVES);
-const MAX_SUBROOT_GAP = 65_536;
 const U32_MAX = 0xffff_ffff;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
@@ -587,6 +586,10 @@ export class CompactWalletStore {
   /**
    * Ingest one or more `SubtreeRootPage` accounts (`9,664 B`, 300 finalized subroots each)
    * without downloading sealed `SubtreePage` accounts for subtrees containing no owned notes.
+   *
+   * Validates every page in sorted sequence order and enforces strict contiguity (zero
+   * zero-filled gaps, zero sparse amplification DoS, zero partial mutation on error) BEFORE
+   * writing any subroots into `finalizedSubroots`.
    */
   ingestSubrootPages(params: {
     laneId: number;
@@ -610,43 +613,91 @@ export class CompactWalletStore {
             : finalizedCount
         : MAX_SUBROOTS_PER_LANE;
     const srPerPageBig = BigInt(SUBROOTS_PER_PAGE);
-    for (const { rootPageSeq, raw } of subrootPages) {
-      const dec = decodeSubtreeRootPage(raw);
-      if (typeof rootPageSeq !== 'bigint' || rootPageSeq < 0n) {
-        throw new RangeError(`Invalid SubtreeRootPage rootPageSeq=${String(rootPageSeq)}`);
+
+    const dedupPages = new Map<bigint, ReturnType<typeof decodeSubtreeRootPage>>();
+    for (const entry of subrootPages) {
+      if (typeof entry.rootPageSeq !== 'bigint' || entry.rootPageSeq < 0n) {
+        throw new RangeError(`Invalid SubtreeRootPage rootPageSeq=${String(entry.rootPageSeq)}`);
       }
-      if (dec.poolId !== this.poolId || dec.laneId !== laneId || dec.rootPageSeq !== rootPageSeq) {
+      const dec = decodeSubtreeRootPage(entry.raw);
+      if (
+        dec.poolId !== this.poolId ||
+        dec.laneId !== laneId ||
+        dec.rootPageSeq !== entry.rootPageSeq
+      ) {
         throw new Error(
-          `SubtreeRootPage header mismatch (expected pool=${this.poolId}, lane=${laneId}, seq=${rootPageSeq}; got pool=${dec.poolId}, lane=${dec.laneId}, seq=${dec.rootPageSeq})`,
+          `SubtreeRootPage header mismatch (expected pool=${this.poolId}, lane=${laneId}, seq=${entry.rootPageSeq}; got pool=${dec.poolId}, lane=${dec.laneId}, seq=${dec.rootPageSeq})`,
         );
       }
+      const baseIdxBig = entry.rootPageSeq * srPerPageBig;
+      if (baseIdxBig > MAX_SUBROOTS_PER_LANE) {
+        throw new RangeError(`SubtreeRootPage rootPageSeq out of range: ${entry.rootPageSeq}`);
+      }
+      const baseIdx = Number(baseIdxBig);
+      for (let i = 0; i < dec.roots.length; i++) {
+        frFromBeBytesStrict(dec.roots[i]!);
+        const subIdx = baseIdx + i;
+        if (
+          subIdx < lane.finalizedSubroots.length &&
+          !bytesEqual(lane.finalizedSubroots[subIdx]!, dec.roots[i]!)
+        ) {
+          throw new Error(
+            `SubtreeRootPage subroot mismatch against persisted finalizedSubroots at index ${subIdx}`,
+          );
+        }
+      }
+      const existing = dedupPages.get(entry.rootPageSeq);
+      if (existing) {
+        const overlap = Math.min(existing.roots.length, dec.roots.length);
+        for (let i = 0; i < overlap; i++) {
+          if (!bytesEqual(existing.roots[i]!, dec.roots[i]!)) {
+            throw new Error(
+              `Conflicting duplicate SubtreeRootPage entries at seq=${entry.rootPageSeq}`,
+            );
+          }
+        }
+        if (dec.roots.length > existing.roots.length) {
+          dedupPages.set(entry.rootPageSeq, dec);
+        }
+      } else {
+        dedupPages.set(entry.rootPageSeq, dec);
+      }
+    }
+    const sortedSeqs = [...dedupPages.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    let runningLen = lane.finalizedSubroots.length;
+    const validated: Array<{ baseIdx: number; roots: Uint8Array[] }> = [];
+    for (const rootPageSeq of sortedSeqs) {
+      const dec = dedupPages.get(rootPageSeq)!;
       const baseIdxBig = rootPageSeq * srPerPageBig;
       if (baseIdxBig > MAX_SUBROOTS_PER_LANE) {
         throw new RangeError(`SubtreeRootPage rootPageSeq out of range: ${rootPageSeq}`);
       }
       const baseIdx = Number(baseIdxBig);
-      if (baseIdx > lane.finalizedSubroots.length + MAX_SUBROOT_GAP) {
-        throw new RangeError(`SubtreeRootPage page_seq jump exceeds limit: ${rootPageSeq}`);
+      if (baseIdx > runningLen) {
+        throw new RangeError(
+          `SubtreeRootPage page_seq jump exceeds limit (sequence gap): ${rootPageSeq}`,
+        );
       }
       const endIdxBig =
         baseIdxBig + BigInt(dec.roots.length) < maxRootsBig
           ? baseIdxBig + BigInt(dec.roots.length)
           : maxRootsBig;
       if (endIdxBig <= baseIdxBig) continue;
-      const lastSubIdx = Number(endIdxBig - 1n);
-      if (lastSubIdx > lane.finalizedSubroots.length + MAX_SUBROOT_GAP) {
-        throw new RangeError(`SubtreeRootPage page_seq jump exceeds limit: ${rootPageSeq}`);
-      }
       const writeCnt = Number(endIdxBig - baseIdxBig);
+      const roots: Uint8Array[] = [];
       for (let i = 0; i < writeCnt; i++) {
         frFromBeBytesStrict(dec.roots[i]!);
+        roots.push(new Uint8Array(dec.roots[i]!));
       }
-      for (let i = 0; i < writeCnt; i++) {
-        const subIdx = baseIdx + i;
-        while (lane.finalizedSubroots.length < subIdx) {
-          lane.finalizedSubroots.push(new Uint8Array(32));
-        }
-        lane.finalizedSubroots[subIdx] = new Uint8Array(dec.roots[i]!);
+      const endIdx = Number(endIdxBig);
+      if (endIdx > runningLen) runningLen = endIdx;
+      validated.push({ baseIdx, roots });
+    }
+
+    for (const { baseIdx, roots } of validated) {
+      for (let i = 0; i < roots.length; i++) {
+        lane.finalizedSubroots[baseIdx + i] = roots[i]!;
       }
     }
   }
@@ -668,24 +719,100 @@ export class CompactWalletStore {
     });
   }
 
-  /**
-   * Stream `NullifierPage`s in ascending sequence order against an `O(owned_unspent_notes)`
-   * lookup map (across all lanes), marking matching notes `spent = true`, advancing
-   * `nextNfIndex`, and immediately discarding every stranger prefix.
-   */
-  ingestNullifierPages(params: {
+  private _validateNullifierPages(params: {
     laneId: number;
     nfPages: ReadonlyArray<{ pageSeq: bigint; raw: Uint8Array }>;
     maxNfIndex?: bigint;
-  }): number {
+  }): Array<{
+    pageBase: bigint;
+    startSlot: number;
+    limitSlot: number;
+    prefixes: Uint8Array[];
+  }> {
     const { laneId, nfPages, maxNfIndex } = params;
     if (!Number.isInteger(laneId) || laneId < 0 || laneId >= NUM_LANES) {
       throw new RangeError(`Invalid laneId ${String(laneId)}`);
     }
-    if (maxNfIndex !== undefined && (typeof maxNfIndex !== 'bigint' || maxNfIndex < 0n || maxNfIndex > U64_MAX)) {
+    if (
+      maxNfIndex !== undefined &&
+      (typeof maxNfIndex !== 'bigint' || maxNfIndex < 0n || maxNfIndex > U64_MAX)
+    ) {
       throw new RangeError(`NullifierPage maxNfIndex out of range: ${String(maxNfIndex)}`);
     }
-    if (nfPages.length === 0) return 0;
+    if (nfPages.length === 0) return [];
+    const lane = this.lanes[laneId]!;
+
+    for (const entry of nfPages) {
+      if (typeof entry.pageSeq !== 'bigint' || entry.pageSeq < 0n || entry.pageSeq > U64_MAX) {
+        throw new RangeError(`NullifierPage pageSeq out of range: ${String(entry.pageSeq)}`);
+      }
+    }
+    const sortedNfPages = [...nfPages].sort((a, b) =>
+      a.pageSeq < b.pageSeq ? -1 : a.pageSeq > b.pageSeq ? 1 : 0,
+    );
+
+    let runningNfIndex = lane.nextNfIndex;
+    const validated: Array<{
+      pageBase: bigint;
+      startSlot: number;
+      limitSlot: number;
+      prefixes: Uint8Array[];
+    }> = [];
+    for (const { pageSeq, raw } of sortedNfPages) {
+      const nfPage = decodeNullifierPage(raw);
+      if (nfPage.poolId !== this.poolId || nfPage.laneId !== laneId || nfPage.pageSeq !== pageSeq) {
+        throw new Error(
+          `NullifierPage header mismatch (expected pool=${this.poolId}, lane=${laneId}, seq=${pageSeq}; got pool=${nfPage.poolId}, lane=${nfPage.laneId}, seq=${nfPage.pageSeq})`,
+        );
+      }
+      const pageBase = pageSeq * BigInt(NF_PER_PAGE);
+      if (pageBase + BigInt(nfPage.count) > U64_MAX) {
+        throw new RangeError(`NullifierPage pageSeq overflow: ${pageSeq}`);
+      }
+      if (pageBase > runningNfIndex) {
+        throw new RangeError(
+          `NullifierPage sequence gap: pageSeq=${pageSeq} starts at ${pageBase} > nextNfIndex=${runningNfIndex}`,
+        );
+      }
+      const startSlot =
+        runningNfIndex > pageBase
+          ? Number(
+              runningNfIndex - pageBase > BigInt(NF_PER_PAGE)
+                ? BigInt(NF_PER_PAGE)
+                : runningNfIndex - pageBase,
+            )
+          : 0;
+      let limitSlot = nfPage.count;
+      if (maxNfIndex !== undefined) {
+        const capSlots =
+          maxNfIndex > pageBase
+            ? Number(
+                maxNfIndex - pageBase > BigInt(NF_PER_PAGE)
+                  ? BigInt(NF_PER_PAGE)
+                  : maxNfIndex - pageBase,
+              )
+            : 0;
+        if (capSlots < limitSlot) limitSlot = capSlots;
+      }
+      if (limitSlot > startSlot) {
+        const endIdx = pageBase + BigInt(limitSlot);
+        if (endIdx > runningNfIndex) runningNfIndex = endIdx;
+      }
+      validated.push({ pageBase, startSlot, limitSlot, prefixes: nfPage.prefixes });
+    }
+    return validated;
+  }
+
+  private _applyValidatedNullifierPages(
+    laneId: number,
+    validated: ReadonlyArray<{
+      pageBase: bigint;
+      startSlot: number;
+      limitSlot: number;
+      prefixes: Uint8Array[];
+    }>,
+  ): number {
+    if (validated.length === 0) return 0;
     const lane = this.lanes[laneId]!;
 
     // Build an O(owned_unspent_notes) prefix lookup table across ALL lanes.
@@ -701,47 +828,11 @@ export class CompactWalletStore {
       }
     }
 
-    const sortedNfPages = [...nfPages].sort((a, b) =>
-      a.pageSeq < b.pageSeq ? -1 : a.pageSeq > b.pageSeq ? 1 : 0,
-    );
     let newlySpent = 0;
-    for (const { pageSeq, raw } of sortedNfPages) {
-      const nfPage = decodeNullifierPage(raw);
-      if (typeof pageSeq !== 'bigint' || pageSeq < 0n || pageSeq > U64_MAX) {
-        throw new RangeError(`NullifierPage pageSeq out of range: ${String(pageSeq)}`);
-      }
-      if (nfPage.poolId !== this.poolId || nfPage.laneId !== laneId || nfPage.pageSeq !== pageSeq) {
-        throw new Error(
-          `NullifierPage header mismatch (expected pool=${this.poolId}, lane=${laneId}, seq=${pageSeq}; got pool=${nfPage.poolId}, lane=${nfPage.laneId}, seq=${nfPage.pageSeq})`,
-        );
-      }
-      const pageBase = pageSeq * BigInt(NF_PER_PAGE);
-      if (pageBase + BigInt(nfPage.count) > U64_MAX) {
-        throw new RangeError(`NullifierPage pageSeq overflow: ${pageSeq}`);
-      }
-      const startSlot =
-        lane.nextNfIndex > pageBase
-          ? Number(
-              lane.nextNfIndex - pageBase > BigInt(NF_PER_PAGE)
-                ? BigInt(NF_PER_PAGE)
-                : lane.nextNfIndex - pageBase,
-            )
-          : 0;
-      let limitSlot = nfPage.count;
-      if (maxNfIndex !== undefined) {
-        const capSlots =
-          maxNfIndex > pageBase
-            ? Number(
-                maxNfIndex - pageBase > BigInt(NF_PER_PAGE)
-                  ? BigInt(NF_PER_PAGE)
-                  : maxNfIndex - pageBase,
-              )
-            : 0;
-        if (capSlots < limitSlot) limitSlot = capSlots;
-      }
+    for (const { pageBase, startSlot, limitSlot, prefixes } of validated) {
       for (let slot = startSlot; slot < limitSlot; slot++) {
         if (unspentByPrefix.size > 0) {
-          const prefHex = bytesToHex(nfPage.prefixes[slot]!);
+          const prefHex = bytesToHex(prefixes[slot]!);
           const matched = unspentByPrefix.get(prefHex);
           if (matched) {
             for (const note of matched) {
@@ -758,6 +849,23 @@ export class CompactWalletStore {
       }
     }
     return newlySpent;
+  }
+
+  /**
+   * Stream `NullifierPage`s in ascending sequence order against an `O(owned_unspent_notes)`
+   * lookup map (across all lanes), marking matching notes `spent = true`, advancing
+   * `nextNfIndex`, and immediately discarding every stranger prefix.
+   *
+   * Pre-validates every page header, bounds, and strict contiguity (`pageBase <= runningNfIndex`)
+   * BEFORE mutating any note or advancing `nextNfIndex`.
+   */
+  ingestNullifierPages(params: {
+    laneId: number;
+    nfPages: ReadonlyArray<{ pageSeq: bigint; raw: Uint8Array }>;
+    maxNfIndex?: bigint;
+  }): number {
+    const validated = this._validateNullifierPages(params);
+    return this._applyValidatedNullifierPages(params.laneId, validated);
   }
 
   /**
@@ -813,7 +921,10 @@ export class CompactWalletStore {
     }
     const lane = this.lanes[laneId]!;
 
-    const pageLeavesMap = new Map<bigint, Uint8Array[]>();
+    // Phase 1: Pre-validate ALL SubtreePages (headers, counts, canonical BN254 Fr on BOTH sealed
+    // and unsealed leaves, and contiguous sealed pageSeq), ALL MemoPages, held frontier leaves,
+    // FVK scalars, and ALL NullifierPages BEFORE mutating ANY store state (100% atomic on error).
+    const pageLeavesMap = new Map<bigint, { leaves: Uint8Array[]; frLeaves: bigint[] }>();
     for (const { pageSeq, raw } of subtreePages) {
       const dec = decodeSubtreePage(raw);
       if (typeof pageSeq !== 'bigint' || pageSeq < 0n || pageSeq > U64_MAX) {
@@ -824,9 +935,51 @@ export class CompactWalletStore {
           `SubtreePage header mismatch (expected pool=${this.poolId}, lane=${laneId}, seq=${pageSeq}; got pool=${dec.poolId}, lane=${dec.laneId}, seq=${dec.pageSeq})`,
         );
       }
+      const frLeaves = dec.leaves.map((b) => frFromBeBytesStrict(b));
+      // Enforce append-only prefix immutability against persisted frontier & prevSealed leaves
+      if (lane.frontierLeaves.length > 0 && pageSeq === lane.frontierSubSeq) {
+        const prefixLen = Math.min(dec.leaves.length, lane.frontierLeaves.length);
+        for (let i = 0; i < prefixLen; i++) {
+          if (!bytesEqual(dec.leaves[i]!, lane.frontierLeaves[i]!)) {
+            throw new Error(
+              'SubtreePage frontier prefix mismatch against persisted frontierLeaves',
+            );
+          }
+        }
+      }
+      if (lane.prevSealedLeaves.length > 0 && lane.prevSealedSubSeq === pageSeq) {
+        const prefixLen = Math.min(dec.leaves.length, lane.prevSealedLeaves.length);
+        for (let i = 0; i < prefixLen; i++) {
+          if (!bytesEqual(dec.leaves[i]!, lane.prevSealedLeaves[i]!)) {
+            throw new Error(
+              'SubtreePage prefix mismatch against persisted prevSealedLeaves',
+            );
+          }
+        }
+      }
+      // Enforce immutability against already-persisted `finalizedSubroots[pageSeq]`
+      if (dec.leaves.length === SUBTREE_LEAVES && pageSeq < BigInt(lane.finalizedSubroots.length)) {
+        const seqNum = Number(pageSeq);
+        const subroot = frToBeBytes(computeSubtree256Root(frLeaves, SUBTREE_LEAVES));
+        if (!bytesEqual(subroot, lane.finalizedSubroots[seqNum]!)) {
+          throw new Error(
+            `SubtreePage subroot mismatch against persisted finalizedSubroots at seq=${pageSeq}`,
+          );
+        }
+      }
       const existing = pageLeavesMap.get(pageSeq);
-      if (!existing || dec.leaves.length > existing.length) {
-        pageLeavesMap.set(pageSeq, dec.leaves);
+      if (existing) {
+        const overlap = Math.min(existing.leaves.length, dec.leaves.length);
+        for (let i = 0; i < overlap; i++) {
+          if (!bytesEqual(existing.leaves[i]!, dec.leaves[i]!)) {
+            throw new Error(`Conflicting duplicate SubtreePage entries at seq=${pageSeq}`);
+          }
+        }
+        if (dec.leaves.length > existing.leaves.length) {
+          pageLeavesMap.set(pageSeq, { leaves: dec.leaves, frLeaves });
+        }
+      } else {
+        pageLeavesMap.set(pageSeq, { leaves: dec.leaves, frLeaves });
       }
     }
 
@@ -850,6 +1003,56 @@ export class CompactWalletStore {
       }
     }
 
+    if (!Array.isArray(nfPages)) {
+      throw new RangeError('ingestLanePages requires nfPages array');
+    }
+    const validatedNfPages = this._validateNullifierPages({ laneId, nfPages });
+
+    const sortedSeqs = [...pageLeavesMap.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    let runningSubrootLen = lane.finalizedSubroots.length;
+    const validatedSealed = new Map<bigint, { frLeaves: bigint[]; subroot: Uint8Array }>();
+    for (const seq of sortedSeqs) {
+      const { leaves, frLeaves } = pageLeavesMap.get(seq)!;
+      if (leaves.length < SUBTREE_LEAVES && seq < BigInt(lane.finalizedSubroots.length)) {
+        const hasFullHeldCopy =
+          (seq === lane.frontierSubSeq && lane.frontierLeaves.length === SUBTREE_LEAVES) ||
+          (lane.prevSealedSubSeq === seq && lane.prevSealedLeaves.length === SUBTREE_LEAVES);
+        if (!hasFullHeldCopy) {
+          throw new Error(
+            `Truncated SubtreePage at seq=${seq} cannot be verified against persisted finalizedSubroots`,
+          );
+        }
+      }
+      if (leaves.length === SUBTREE_LEAVES) {
+        if (seq < 0n || seq >= MAX_SUBROOTS_PER_LANE) {
+          throw new RangeError(`SubtreePage pageSeq out of range: ${seq}`);
+        }
+        const seqNum = Number(seq);
+        if (seqNum > runningSubrootLen) {
+          throw new RangeError(
+            `SubtreePage page_seq jump exceeds limit (sequence gap): ${seq}`,
+          );
+        }
+        const subroot = frToBeBytes(computeSubtree256Root(frLeaves, SUBTREE_LEAVES));
+        if (seqNum + 1 > runningSubrootLen) runningSubrootLen = seqNum + 1;
+        validatedSealed.set(seq, { frLeaves, subroot });
+      }
+    }
+
+    const suppliedFrontier = pageLeavesMap.get(lane.frontierSubSeq);
+    const heldSealed =
+      lane.frontierLeaves.length === SUBTREE_LEAVES &&
+      (!suppliedFrontier || suppliedFrontier.leaves.length < SUBTREE_LEAVES);
+    const heldFrLeaves = heldSealed
+      ? lane.frontierLeaves.map((b) => frFromBeBytesStrict(b))
+      : null;
+
+    if (memoMap.size > 0) {
+      frFromBeBytesStrict(fvk.spendPk);
+      frFromBeBytesStrict(fvk.nk);
+    }
+
+    // Phase 2: All inputs validated cleanly — commit memos, subroots, freezes, frontiers, & NFs.
     let discovered = 0;
     for (;;) {
       const leafIdx = lane.nextMemoLeaf;
@@ -861,7 +1064,7 @@ export class CompactWalletStore {
 
       const sSeq = leafIdx / BigInt(SUBTREE_LEAVES);
       const sSlot = Number(leafIdx % BigInt(SUBTREE_LEAVES));
-      const supplied = pageLeavesMap.get(sSeq);
+      const supplied = pageLeavesMap.get(sSeq)?.leaves;
       const bestLeaves =
         sSeq === lane.frontierSubSeq
           ? supplied && supplied.length > lane.frontierLeaves.length
@@ -921,14 +1124,9 @@ export class CompactWalletStore {
       }
     };
 
-    const suppliedFrontier = pageLeavesMap.get(lane.frontierSubSeq);
-    if (
-      lane.frontierLeaves.length === SUBTREE_LEAVES &&
-      (!suppliedFrontier || suppliedFrontier.length < SUBTREE_LEAVES)
-    ) {
+    if (heldSealed && heldFrLeaves) {
       const heldSeq = lane.frontierSubSeq;
-      const frLeaves = lane.frontierLeaves.map((b) => frFromBeBytesStrict(b));
-      freezeNotesInPage(heldSeq, lane.frontierLeaves, frLeaves);
+      freezeNotesInPage(heldSeq, lane.frontierLeaves, heldFrLeaves);
       const pageEndLeaf = (heldSeq + 1n) * BigInt(SUBTREE_LEAVES);
       if (lane.nextMemoLeaf >= pageEndLeaf) {
         lane.prevSealedSubSeq = heldSeq;
@@ -938,23 +1136,12 @@ export class CompactWalletStore {
       }
     }
 
-    const sortedSeqs = [...pageLeavesMap.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (const seq of sortedSeqs) {
-      const leaves = pageLeavesMap.get(seq)!;
+      const { leaves } = pageLeavesMap.get(seq)!;
       const memoSubSeq = lane.nextMemoLeaf / BigInt(SUBTREE_LEAVES);
       if (leaves.length === SUBTREE_LEAVES) {
-        if (seq < 0n || seq >= MAX_SUBROOTS_PER_LANE) {
-          throw new RangeError(`SubtreePage pageSeq out of range: ${seq}`);
-        }
         const seqNum = Number(seq);
-        if (seqNum > lane.finalizedSubroots.length + MAX_SUBROOT_GAP) {
-          throw new RangeError(`SubtreePage pageSeq jump exceeds limit: ${seq}`);
-        }
-        const frLeaves = leaves.map((b) => frFromBeBytesStrict(b));
-        const subroot = frToBeBytes(computeSubtree256Root(frLeaves, SUBTREE_LEAVES));
-        while (lane.finalizedSubroots.length < seqNum) {
-          lane.finalizedSubroots.push(new Uint8Array(32));
-        }
+        const { frLeaves, subroot } = validatedSealed.get(seq)!;
         lane.finalizedSubroots[seqNum] = subroot;
         freezeNotesInPage(seq, leaves, frLeaves);
 
@@ -976,6 +1163,7 @@ export class CompactWalletStore {
           lane.frontierLeaves = leaves.map((b) => new Uint8Array(b));
         }
       } else if (
+        seq >= BigInt(lane.finalizedSubroots.length) &&
         seq >= lane.frontierSubSeq &&
         seq <= memoSubSeq &&
         (seq > lane.frontierSubSeq || leaves.length > lane.frontierLeaves.length)
@@ -985,10 +1173,7 @@ export class CompactWalletStore {
       }
     }
 
-    if (!Array.isArray(nfPages)) {
-      throw new RangeError('ingestLanePages requires nfPages array');
-    }
-    this.ingestNullifierPages({ laneId, nfPages });
+    this._applyValidatedNullifierPages(laneId, validatedNfPages);
     return discovered;
   }
 
@@ -1331,16 +1516,22 @@ export class CompactWalletStore {
       if (Array.isArray(l.prevSealedLeaves) && l.prevSealedLeaves.length > SUBTREE_LEAVES) {
         throw new Error('Invalid CompactWalletStore JSON: lane leaves exceed SUBTREE_LEAVES');
       }
-      const finalizedSubroots = l.finalizedSubroots.map((h, i) =>
-        hexToBytesExact(h, 32, `lane[${laneIdx}].finalizedSubroots[${i}]`),
-      );
-      const frontierLeaves = l.frontierLeaves.map((h, i) =>
-        hexToBytesExact(h, 32, `lane[${laneIdx}].frontierLeaves[${i}]`),
-      );
+      const finalizedSubroots = l.finalizedSubroots.map((h, i) => {
+        const b = hexToBytesExact(h, 32, `lane[${laneIdx}].finalizedSubroots[${i}]`);
+        frFromBeBytesStrict(b);
+        return b;
+      });
+      const frontierLeaves = l.frontierLeaves.map((h, i) => {
+        const b = hexToBytesExact(h, 32, `lane[${laneIdx}].frontierLeaves[${i}]`);
+        frFromBeBytesStrict(b);
+        return b;
+      });
       const prevSealedLeaves = Array.isArray(l.prevSealedLeaves)
-        ? l.prevSealedLeaves.map((h, i) =>
-            hexToBytesExact(h, 32, `lane[${laneIdx}].prevSealedLeaves[${i}]`),
-          )
+        ? l.prevSealedLeaves.map((h, i) => {
+            const b = hexToBytesExact(h, 32, `lane[${laneIdx}].prevSealedLeaves[${i}]`);
+            frFromBeBytesStrict(b);
+            return b;
+          })
         : [];
       const frontierSubSeq = parseU64Decimal(
         l.frontierSubSeq,
@@ -1377,6 +1568,7 @@ export class CompactWalletStore {
         nextNfIndex,
       };
     });
+    const seenNotes = new Set<string>();
     store.notes = raw.notes.map((noteRaw, noteIdx) => {
       if (!noteRaw || typeof noteRaw !== 'object' || Array.isArray(noteRaw)) {
         throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}]`);
@@ -1407,6 +1599,13 @@ export class CompactWalletStore {
       if (leafIndex >= MAX_LEAVES_PER_LANE) {
         throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}].leafIndex out of range`);
       }
+      const noteKey = `${n.laneId}:${leafIndex.toString()}`;
+      if (seenNotes.has(noteKey)) {
+        throw new Error(
+          `Invalid CompactWalletStore JSON: duplicate note at (laneId=${n.laneId}, leafIndex=${leafIndex})`,
+        );
+      }
+      seenNotes.add(noteKey);
       const globalLeafIndex = parseU64Decimal(
         n.globalLeafIndex,
         `note[${noteIdx}].globalLeafIndex`,
@@ -1453,9 +1652,15 @@ export class CompactWalletStore {
               `Invalid CompactWalletStore JSON note[${noteIdx}].frozenIntraSiblings[${h}]`,
             );
           }
-          return lvl.map((entry, k) =>
-            hexToBytesExact(entry, 32, `note[${noteIdx}].frozenIntraSiblings[${h}][${k}]`),
-          );
+          return lvl.map((entry, k) => {
+            const b = hexToBytesExact(
+              entry,
+              32,
+              `note[${noteIdx}].frozenIntraSiblings[${h}][${k}]`,
+            );
+            frFromBeBytesStrict(b);
+            return b;
+          });
         });
         if (
           !Array.isArray(n.frozenIntraPositions) ||
@@ -1474,6 +1679,16 @@ export class CompactWalletStore {
           return p;
         });
       }
+      const tweak = hexToBytesExact(n.tweak, 32, `note[${noteIdx}].tweak`);
+      const blinding = hexToBytesExact(n.blinding, 32, `note[${noteIdx}].blinding`);
+      const stealthOwner = hexToBytesExact(n.stealthOwner, 32, `note[${noteIdx}].stealthOwner`);
+      const commitment = hexToBytesExact(n.commitment, 32, `note[${noteIdx}].commitment`);
+      const nullifier = hexToBytesExact(n.nullifier, 32, `note[${noteIdx}].nullifier`);
+      frFromBeBytesStrict(tweak);
+      frFromBeBytesStrict(blinding);
+      frFromBeBytesStrict(stealthOwner);
+      frFromBeBytesStrict(commitment);
+      frFromBeBytesStrict(nullifier);
       return {
         poolId: n.poolId,
         laneId: n.laneId,
@@ -1481,11 +1696,11 @@ export class CompactWalletStore {
         globalLeafIndex,
         mint: hexToBytesExact(n.mint, 32, `note[${noteIdx}].mint`),
         amount,
-        tweak: hexToBytesExact(n.tweak, 32, `note[${noteIdx}].tweak`),
-        blinding: hexToBytesExact(n.blinding, 32, `note[${noteIdx}].blinding`),
-        stealthOwner: hexToBytesExact(n.stealthOwner, 32, `note[${noteIdx}].stealthOwner`),
-        commitment: hexToBytesExact(n.commitment, 32, `note[${noteIdx}].commitment`),
-        nullifier: hexToBytesExact(n.nullifier, 32, `note[${noteIdx}].nullifier`),
+        tweak,
+        blinding,
+        stealthOwner,
+        commitment,
+        nullifier,
         paymentId,
         isDynamic: n.isDynamic,
         spent: n.spent,

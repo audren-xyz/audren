@@ -663,6 +663,93 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
                     };
                     invoke(&ix, &[escrow_in_ata, attacker, escrow])
                 }
+                // Mode 13: Sweep unsolicited tokens from an unrelated `other_escrow_ata`!
+                13 => {
+                    // accounts[10]=other_ata (wr), [11]=other_mint (ro), [12]=other_tp (ro), [13]=attacker_ata (wr)
+                    if accounts.len() < 14 {
+                        return Err(ProgramError::NotEnoughAccountKeys);
+                    }
+                    let other_ata = &accounts[10];
+                    let other_mint = &accounts[11];
+                    let other_tp = &accounts[12];
+                    let attacker_ata = &accounts[13];
+                    let mut ix_data = [0u8; 10];
+                    ix_data[0] = TOKEN_IX_TRANSFER_CHECKED;
+                    ix_data[1..9].copy_from_slice(&50_000u64.to_le_bytes());
+                    ix_data[9] = 6;
+                    let metas = [
+                        InstructionAccount::writable(other_ata.address()),
+                        InstructionAccount::readonly(other_mint.address()),
+                        InstructionAccount::writable(attacker_ata.address()),
+                        InstructionAccount::readonly_signer(escrow.address()),
+                    ];
+                    let ix = InstructionView {
+                        program_id: other_tp.address(),
+                        accounts: &metas,
+                        data: &ix_data,
+                    };
+                    invoke(&ix, &[other_ata, other_mint, attacker_ata, escrow])
+                }
+                // Mode 14: Close `other_escrow_ata` (pocketing excess lamports into `attacker`) and
+                //          re-create it cleanly with base rent (leaving owner/mint/amount/len intact,
+                //          caught strictly by `WatchedEscrowSnap` lamport non-decrease check)!
+                14 => {
+                    // accounts[10]=other_ata (wr), [11]=other_mint (ro), [12]=other_tp (ro),
+                    //          [13]=attacker (wr), [14]=sys_prog (ro), [15]=ata_prog (ro)
+                    if accounts.len() < 16 {
+                        return Err(ProgramError::NotEnoughAccountKeys);
+                    }
+                    let other_ata = &accounts[10];
+                    let other_mint = &accounts[11];
+                    let other_tp = &accounts[12];
+                    let attacker = &accounts[13];
+                    let sys_prog = &accounts[14];
+                    let ata_prog = &accounts[15];
+
+                    let escrow_before = escrow.lamports();
+                    let close_data = [TOKEN_IX_CLOSE_ACCOUNT];
+                    let close_metas = [
+                        InstructionAccount::writable(other_ata.address()),
+                        InstructionAccount::writable(attacker.address()),
+                        InstructionAccount::readonly_signer(escrow.address()),
+                    ];
+                    invoke(
+                        &InstructionView {
+                            program_id: other_tp.address(),
+                            accounts: &close_metas,
+                            data: &close_data,
+                        },
+                        &[other_ata, attacker, escrow],
+                    )?;
+
+                    let create_data = [1u8]; // CreateIdempotent
+                    let create_metas = [
+                        InstructionAccount::writable_signer(escrow.address()),
+                        InstructionAccount::writable(other_ata.address()),
+                        InstructionAccount::readonly(escrow.address()),
+                        InstructionAccount::readonly(other_mint.address()),
+                        InstructionAccount::readonly(sys_prog.address()),
+                        InstructionAccount::readonly(other_tp.address()),
+                    ];
+                    invoke(
+                        &InstructionView {
+                            program_id: ata_prog.address(),
+                            accounts: &create_metas,
+                            data: &create_data,
+                        },
+                        &[escrow, other_ata, escrow, other_mint, sys_prog, other_tp],
+                    )?;
+
+                    let spent = escrow_before.saturating_sub(accounts[0].lamports());
+                    if spent > 0 {
+                        let (left, right) = accounts.split_at_mut(3);
+                        let esc_m = &mut left[0];
+                        let pool_m = &mut right[0];
+                        pool_m.set_lamports(pool_m.lamports() - spent);
+                        esc_m.set_lamports(esc_m.lamports() + spent);
+                    }
+                    Ok(())
+                }
                 _ => Err(ProgramError::InvalidInstructionData),
             }
         }

@@ -135,7 +135,7 @@ pub fn constrain_merkle_root_4ary(
 /// and zero-padding any tail slots with `ZERO_4[0] = 0`.
 pub fn compute_subtree_256_root(leaves: &[Fr], valid_len: usize) -> Fr {
     assert!(valid_len <= SUBTREE_LEAVES);
-    let mut level = [Fr::from(0u64); SUBTREE_LEAVES];
+    let mut level = vec![Fr::from(0u64); SUBTREE_LEAVES];
     for (i, slot) in level.iter_mut().enumerate().take(valid_len) {
         *slot = leaves[i];
     }
@@ -163,7 +163,7 @@ pub fn extract_intra_subtree_siblings(
     target_offset: usize,
 ) -> ([[Fr; 3]; SUBTREE_LEVELS_4ARY], [u8; SUBTREE_LEVELS_4ARY]) {
     assert!(target_offset < valid_len && valid_len <= SUBTREE_LEAVES);
-    let mut page_nodes = [Fr::from(0u64); SUBTREE_LEAVES];
+    let mut page_nodes = vec![Fr::from(0u64); SUBTREE_LEAVES];
     page_nodes[..valid_len].copy_from_slice(&page_leaves[..valid_len]);
     let mut siblings = [[Fr::from(0u64); 3]; SUBTREE_LEVELS_4ARY];
     let mut positions = [0u8; SUBTREE_LEVELS_4ARY];

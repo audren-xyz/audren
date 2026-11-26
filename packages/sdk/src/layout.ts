@@ -59,6 +59,7 @@ import {
   PL_OFF_VERSION,
   POOL_MAGIC,
   POOL_STATE_LEN,
+  PROTOCOL_VERSION,
   ROOTS_MAGIC,
   ROOT_ENTRY_LEN,
   ROOT_HISTORY_LEN,
@@ -272,19 +273,33 @@ export function decodePoolState(data: Uint8Array): DecodedPoolState {
   if (!(data instanceof Uint8Array) || data.byteLength !== POOL_STATE_LEN || !checkMagic(data, POOL_MAGIC)) {
     throw new Error(`Invalid PoolState account (len=${data instanceof Uint8Array ? data.byteLength : String(data)})`);
   }
+  const version = data[PL_OFF_VERSION]!;
+  if (version !== PROTOCOL_VERSION) {
+    throw new Error(`Invalid PoolState version=${version} (expected ${PROTOCOL_VERSION})`);
+  }
+  const pausedRaw = data[PL_OFF_PAUSED]!;
+  if (pausedRaw > 1) {
+    throw new Error(`Invalid PoolState paused=${pausedRaw} (expected 0 or 1)`);
+  }
   const activeLanes = data[PL_OFF_ACTIVE_LANES]!;
   if (activeLanes > NUM_LANES) {
     throw new Error(`Invalid PoolState activeLanes=${activeLanes} (max ${NUM_LANES})`);
   }
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const rootEpochInterval = dv.getBigUint64(PL_OFF_ROOT_EPOCH_INTERVAL, true);
+  if (rootEpochInterval < 1n || rootEpochInterval > MAX_ROOT_EPOCH_INTERVAL) {
+    throw new Error(
+      `Invalid PoolState rootEpochInterval=${rootEpochInterval} (expected 1..=${MAX_ROOT_EPOCH_INTERVAL})`,
+    );
+  }
   const authorityBytes = data.slice(PL_OFF_AUTHORITY, PL_OFF_AUTHORITY + 32);
   return {
-    version: data[PL_OFF_VERSION]!,
+    version,
     bump: data[PL_OFF_BUMP]!,
-    paused: data[PL_OFF_PAUSED]! !== 0,
+    paused: pausedRaw !== 0,
     activeLanes,
     poolId: dv.getUint32(PL_OFF_POOL_ID, true),
-    rootEpochInterval: dv.getBigUint64(PL_OFF_ROOT_EPOCH_INTERVAL, true),
+    rootEpochInterval,
     authority: base58Encode(authorityBytes),
     authorityBytes,
     vaultAuthBump: data[PL_OFF_VAULT_AUTH_BUMP]!,
@@ -298,6 +313,10 @@ export function decodeLaneHeader(data: Uint8Array): DecodedLaneHeader {
   if (!(data instanceof Uint8Array) || data.byteLength !== LANE_STATE_LEN || !checkMagic(data, LANE_MAGIC)) {
     throw new Error(`Invalid LaneTreeState account (len=${data instanceof Uint8Array ? data.byteLength : String(data)})`);
   }
+  const version = data[LN_OFF_VERSION]!;
+  if (version !== PROTOCOL_VERSION) {
+    throw new Error(`Invalid LaneTreeState version=${version} (expected ${PROTOCOL_VERSION})`);
+  }
   const laneId = data[LN_OFF_LANE_ID]!;
   if (laneId >= NUM_LANES) {
     throw new Error(`Invalid LaneTreeState laneId=${laneId} (max ${NUM_LANES - 1})`);
@@ -308,7 +327,7 @@ export function decodeLaneHeader(data: Uint8Array): DecodedLaneHeader {
     throw new Error(`Invalid LaneTreeState nextLeaf=${nextLeaf} (max ${MAX_LEAVES_PER_LANE})`);
   }
   return {
-    version: data[LN_OFF_VERSION]!,
+    version,
     laneId,
     bump: data[LN_OFF_BUMP]!,
     rentBump: data[LN_OFF_RENT_BUMP]!,
@@ -365,6 +384,10 @@ export function decodeEpochRingEntry(data: Uint8Array, idx: number): RootEntry {
 export function decodeGlobalRootHistory(data: Uint8Array): DecodedGlobalRootHistory {
   if (!(data instanceof Uint8Array) || data.byteLength !== ROOT_HISTORY_LEN || !checkMagic(data, ROOTS_MAGIC)) {
     throw new Error(`Invalid GlobalRootHistory account (len=${data instanceof Uint8Array ? data.byteLength : String(data)})`);
+  }
+  const version = data[RT_OFF_VERSION]!;
+  if (version !== PROTOCOL_VERSION) {
+    throw new Error(`Invalid GlobalRootHistory version=${version} (expected ${PROTOCOL_VERSION})`);
   }
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const slotCursor = dv.getUint16(RT_OFF_SLOT_CURSOR, true);

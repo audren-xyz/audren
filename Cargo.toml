@@ -24,3 +24,12 @@ codegen-units = 1
 
 [profile.dev]
 overflow-checks = true
+
+# Optimize BN254 Poseidon parameter table construction and field bigint helpers in dev/test builds
+# so `light_poseidon::get_poseidon_parameters` (~1.21 MiB unoptimized stack frame) never overflows
+# 2 MiB Rust worker threads or 512 KiB / 1 MiB mobile FFI dev-build stacks.
+[profile.dev.package.light-poseidon]
+opt-level = 2
+
+[profile.dev.package.ark-ff]
+opt-level = 2

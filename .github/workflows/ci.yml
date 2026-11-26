@@ -64,6 +64,7 @@ jobs:
           cargo test -p audren-core
           cargo test -p audren-circuits --release
           cargo run -p audren-circuits --release --bin ceremony -- verify --transcript ceremony/transcript.json --pk crates/audren-circuits/params/audren_joinsplit.pk --vk-rs program/src/vk_generated.rs
+          cargo test -p audren-client --release --lib
           cargo test -p audren-client --release --test conformance_vectors
           cargo test -p audren-ffi --release --test conformance_ffi
       - name: Verify wasm32 Groth16 prover builds cleanly

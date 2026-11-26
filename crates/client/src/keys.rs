@@ -32,6 +32,7 @@ use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as X25519Pub, StaticSecret as X25519Sec};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ClientError;
 
@@ -166,21 +167,41 @@ pub struct AudrenKeys {
     pub view_pk: [u8; 32],
 }
 
+impl std::fmt::Debug for AudrenKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudrenKeys")
+            .field("spend_sk", &"<redacted>")
+            .field("spend_pk", &bs58::encode(fr_to_be_bytes(&self.spend_pk)).into_string())
+            .field("nk", &"<redacted>")
+            .field("view_sk", &"<redacted>")
+            .field("view_pk", &bs58::encode(self.view_pk).into_string())
+            .finish()
+    }
+}
+
+impl Drop for AudrenKeys {
+    fn drop(&mut self) {
+        self.spend_sk.zeroize();
+        self.nk.zeroize();
+        self.view_sk.zeroize();
+    }
+}
+
 impl AudrenKeys {
     /// Derive `(spend_sk, spend_pk, nk, view_sk, view_pk)` from a 32-byte master seed via HKDF-SHA256.
     pub fn from_seed(seed: &[u8; 32]) -> Self {
         let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_ROOT), seed);
 
-        let mut spend_raw = [0u8; 32];
-        hk.expand(HKDF_INFO_SPEND_SK, &mut spend_raw)
+        let mut spend_raw = Zeroizing::new([0u8; 32]);
+        hk.expand(HKDF_INFO_SPEND_SK, &mut *spend_raw)
             .expect("32-byte HKDF expand");
-        let spend_masked = audren_core::mask_to_fr_be(spend_raw);
-        let spend_sk = Fr::from_be_bytes_mod_order(&spend_masked);
+        let spend_masked = Zeroizing::new(audren_core::mask_to_fr_be(*spend_raw));
+        let spend_sk = Fr::from_be_bytes_mod_order(&*spend_masked);
 
-        let mut view_sk = [0u8; 32];
-        hk.expand(HKDF_INFO_VIEW_SK, &mut view_sk)
+        let mut view_sk = Zeroizing::new([0u8; 32]);
+        hk.expand(HKDF_INFO_VIEW_SK, &mut *view_sk)
             .expect("32-byte HKDF expand");
-        let vsec = X25519Sec::from(view_sk);
+        let vsec = X25519Sec::from(*view_sk);
         let vpub = X25519Pub::from(&vsec);
 
         Self {
@@ -198,16 +219,16 @@ impl AudrenKeys {
             return Self::from_seed(seed);
         }
         let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_SUBACCOUNT), seed);
-        let mut child = [0u8; 32];
-        hk.expand(&account_index.to_le_bytes(), &mut child)
+        let mut child = Zeroizing::new([0u8; 32]);
+        hk.expand(&account_index.to_le_bytes(), &mut *child)
             .expect("32-byte HKDF expand");
         Self::from_seed(&child)
     }
 
     /// Generate a fresh random Audren keypair.
     pub fn random<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
-        let mut seed = [0u8; 32];
-        rng.fill_bytes(&mut seed);
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(&mut *seed);
         Self::from_seed(&seed)
     }
 
@@ -240,14 +261,14 @@ impl AudrenKeys {
     /// and transactions executed BY that session wallet on external DeFi protocols remain public on Solana.
     pub fn derive_defi_session_keypair(seed: &[u8; 32], session_index: u32) -> DefiSessionKeypair {
         let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_DEFI_SESSION), seed);
-        let mut secret_seed = [0u8; 32];
-        hk.expand(&session_index.to_le_bytes(), &mut secret_seed)
+        let mut secret_seed = Zeroizing::new([0u8; 32]);
+        hk.expand(&session_index.to_le_bytes(), &mut *secret_seed)
             .expect("32-byte HKDF expand");
         let signing = SigningKey::from_bytes(&secret_seed);
         let pubkey = signing.verifying_key().to_bytes();
         DefiSessionKeypair {
             session_index,
-            secret_seed,
+            secret_seed: *secret_seed,
             pubkey,
         }
     }
@@ -260,6 +281,12 @@ pub struct DefiSessionKeypair {
     pub session_index: u32,
     pub secret_seed: [u8; 32],
     pub pubkey: [u8; 32],
+}
+
+impl Drop for DefiSessionKeypair {
+    fn drop(&mut self) {
+        self.secret_seed.zeroize();
+    }
 }
 
 impl std::fmt::Debug for DefiSessionKeypair {
@@ -493,27 +520,42 @@ fn derive_view_tag(shared: &[u8; 32]) -> [u8; 2] {
     [vt_raw[0], vt_raw[1]]
 }
 
-fn derive_static_memo_secrets(shared: &[u8; 32]) -> ([u8; 2], [u8; 32], [u8; 12], Fr, Fr) {
+fn derive_static_memo_secrets(
+    shared: &[u8; 32],
+) -> ([u8; 2], Zeroizing<[u8; 32]>, [u8; 12], Fr, Fr) {
     let view_tag = derive_view_tag(shared);
-    let aead_key = sha256_labeled(KDF_DOMAIN_MEMO_KEY, shared);
-    let nonce_raw = sha256_labeled(KDF_DOMAIN_MEMO_NONCE, shared);
+    let aead_key = Zeroizing::new(sha256_labeled(KDF_DOMAIN_MEMO_KEY, shared));
+    let mut nonce_raw = Zeroizing::new(sha256_labeled(KDF_DOMAIN_MEMO_NONCE, shared));
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_raw[0..12]);
+    nonce_raw.zeroize();
 
-    let tw_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_TWEAK, shared));
-    let bl_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_BLIND, shared));
-    let tweak = Fr::from_be_bytes_mod_order(&tw_raw);
-    let blinding = Fr::from_be_bytes_mod_order(&bl_raw);
+    let tw_raw = Zeroizing::new(audren_core::mask_to_fr_be(sha256_labeled(
+        KDF_DOMAIN_TWEAK,
+        shared,
+    )));
+    let bl_raw = Zeroizing::new(audren_core::mask_to_fr_be(sha256_labeled(
+        KDF_DOMAIN_BLIND,
+        shared,
+    )));
+    let tweak = Fr::from_be_bytes_mod_order(&*tw_raw);
+    let blinding = Fr::from_be_bytes_mod_order(&*bl_raw);
 
     (view_tag, aead_key, nonce, tweak, blinding)
 }
 
 fn derive_dynamic_memo_secrets(shared: &[u8; 32]) -> ([u8; 2], Fr, Fr, [u8; MEMO_CT_LEN]) {
     let view_tag = derive_view_tag(shared);
-    let tw_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_DYN_TWEAK, shared));
-    let bl_raw = audren_core::mask_to_fr_be(sha256_labeled(KDF_DOMAIN_DYN_BLIND, shared));
-    let dyn_tweak = Fr::from_be_bytes_mod_order(&tw_raw);
-    let dyn_blinding = Fr::from_be_bytes_mod_order(&bl_raw);
+    let tw_raw = Zeroizing::new(audren_core::mask_to_fr_be(sha256_labeled(
+        KDF_DOMAIN_DYN_TWEAK,
+        shared,
+    )));
+    let bl_raw = Zeroizing::new(audren_core::mask_to_fr_be(sha256_labeled(
+        KDF_DOMAIN_DYN_BLIND,
+        shared,
+    )));
+    let dyn_tweak = Fr::from_be_bytes_mod_order(&*tw_raw);
+    let dyn_blinding = Fr::from_be_bytes_mod_order(&*bl_raw);
 
     let mut dyn_mask = [0u8; MEMO_CT_LEN];
     for block_idx in 0u8..3u8 {
@@ -521,7 +563,7 @@ fn derive_dynamic_memo_secrets(shared: &[u8; 32]) -> ([u8; 2], Fr, Fr, [u8; MEMO
         h.update(KDF_DOMAIN_DYN_MASK);
         h.update(shared);
         h.update([block_idx]);
-        let digest: [u8; 32] = h.finalize().into();
+        let digest = Zeroizing::new(<[u8; 32]>::from(h.finalize()));
         let start = (block_idx as usize) * 32;
         let take = (MEMO_CT_LEN - start).min(32);
         dyn_mask[start..start + take].copy_from_slice(&digest[..take]);
@@ -553,12 +595,13 @@ pub fn encrypt_note_memo(
 /// Returns `(tweak, blinding, memo_106)` or `Err` if `recipient_view_pk` is a low-order X25519 point.
 pub fn encrypt_note_memo_with_payment_id(
     recipient_view_pk: &[u8; 32],
-    eph_secret_32: [u8; 32],
+    mut eph_secret_32: [u8; 32],
     amount: u64,
     mint_32: &[u8; 32],
     payment_id: [u8; MEMO_PAYMENT_ID_LEN],
 ) -> Result<(Fr, Fr, [u8; MEMO_ENTRY_WIRE_LEN]), ClientError> {
     let eph_sec = X25519Sec::from(eph_secret_32);
+    eph_secret_32.zeroize();
     let eph_pub = X25519Pub::from(&eph_sec);
     let shared = eph_sec.diffie_hellman(&X25519Pub::from(*recipient_view_pk));
     if !shared.was_contributory() {
@@ -566,7 +609,7 @@ pub fn encrypt_note_memo_with_payment_id(
     }
     let (vt, key, nonce, tweak, blinding) = derive_static_memo_secrets(shared.as_bytes());
 
-    let mut plain = [0u8; MEMO_PLAINTEXT_LEN];
+    let mut plain = Zeroizing::new([0u8; MEMO_PLAINTEXT_LEN]);
     plain[0..8].copy_from_slice(&amount.to_le_bytes());
     plain[8..40].copy_from_slice(mint_32);
     plain[40] = MEMO_VERSION_V1;
@@ -577,7 +620,7 @@ pub fn encrypt_note_memo_with_payment_id(
     aad[0..2].copy_from_slice(&vt);
     aad[2..34].copy_from_slice(eph_pub.as_bytes());
 
-    let cipher = ChaCha20Poly1305::new((&key).into());
+    let cipher = ChaCha20Poly1305::new((&*key).into());
     let ct = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -599,9 +642,10 @@ pub fn encrypt_note_memo_with_payment_id(
 /// (`0` plaintext markers at rest; uses `audren/v1/dyn_tweak`, `audren/v1/dyn_blind`, `audren/v1/dyn_mask`).
 pub fn prepare_dynamic_swap_memo(
     recipient_view_pk: &[u8; 32],
-    eph_secret_32: [u8; 32],
+    mut eph_secret_32: [u8; 32],
 ) -> Result<(Fr, Fr, [u8; DYN_MEMO_HEAD_LEN], [u8; MEMO_CT_LEN]), ClientError> {
     let eph_sec = X25519Sec::from(eph_secret_32);
+    eph_secret_32.zeroize();
     let eph_pub = X25519Pub::from(&eph_sec);
     let shared = eph_sec.diffie_hellman(&X25519Pub::from(*recipient_view_pk));
     if !shared.was_contributory() {
@@ -615,9 +659,37 @@ pub fn prepare_dynamic_swap_memo(
     Ok((dyn_tweak, dyn_blinding, head, dyn_mask))
 }
 
+/// Public fixed RFC 7748 clamped Curve25519 scalar `8 * (2^251 + 1)` (`gcd(2^251 + 1, L) = 1`
+/// and `gcd(2^251 + 1, L_twist) = 1`): multiplying any 32-byte Montgomery u-coordinate by this
+/// scalar maps all 12 low-order points (curve + twist) to `None` and maps any two non-zero
+/// `epk`s to the exact same 32-byte point iff they induce the same `x25519(view_sk, epk)` for
+/// every clamped `view_sk` (collapsing all 16 Curve25519 torsion + bit-255 + `u + p` variants
+/// completely publicly without touching `view_sk`).
+const PUBLIC_CANON_EPK_SCALAR: [u8; 32] = [
+    0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0x40,
+];
+
+/// Public, key-independent canonicalization of a Curve25519 ephemeral public key modulo cofactor 8
+/// and bit-255 / `u + p` non-canonicality. Returns `None` for `[0; 32]` and all 12 low-order points.
+pub fn canonicalize_public_epk(epk: &[u8; 32]) -> Option<[u8; 32]> {
+    if *epk == [0u8; 32] {
+        return None;
+    }
+    let canon_sec = X25519Sec::from(PUBLIC_CANON_EPK_SCALAR);
+    let shared = canon_sec.diffie_hellman(&X25519Pub::from(*epk));
+    if !shared.was_contributory() {
+        return None;
+    }
+    Some(*shared.as_bytes())
+}
+
 /// Fast X25519 + 2-byte view-tag prefilter for SoA `MemoPage` scanning (`1/65,536` false positives).
 /// Rejects low-order Curve25519 ephemeral public keys (`!shared.was_contributory()`).
 pub fn check_memo_view_tag(fvk: &FullViewingKey, view_tag: [u8; 2], epk: &[u8; 32]) -> bool {
+    if *epk == [0u8; 32] {
+        return false;
+    }
     let vsec = X25519Sec::from(fvk.view_sk);
     let shared = vsec.diffie_hellman(&X25519Pub::from(*epk));
     if !shared.was_contributory() {
@@ -626,18 +698,17 @@ pub fn check_memo_view_tag(fvk: &FullViewingKey, view_tag: [u8; 2], epk: &[u8; 3
     derive_view_tag(shared.as_bytes()) == view_tag
 }
 
-/// Decrypt or unmask a versioned `106 B` `MemoPage` entry AND **mandatorily verify** that
-/// `compute_note_commitment(stealth_owner, derive_asset_id(mint), amount, blinding) == onchain_cm_be`
-/// (from the local `SubtreePage` leaf) to block forged-memo balance poisoning.
-/// Rejects low-order Curve25519 points (`!shared.was_contributory()`), tampered AAD headers,
-/// unsupported memo versions, and non-zero dynamic swap padding bytes.
-pub fn try_decrypt_and_verify_memo_entry(
+const KDF_DOMAIN_HIT_DEDUP: &[u8] = b"audren/v1/hit_dedup";
+
+fn try_decrypt_memo_payload_with_dedup_tag(
     fvk: &FullViewingKey,
     view_tag: [u8; 2],
     epk: &[u8; 32],
     ct72: &[u8; MEMO_CT_LEN],
-    onchain_cm_be: &[u8; 32],
-) -> Option<DecryptedMemo> {
+) -> Option<(DecryptedMemo, Zeroizing<[u8; 32]>)> {
+    if *epk == [0u8; 32] {
+        return None;
+    }
     let vsec = X25519Sec::from(fvk.view_sk);
     let shared = vsec.diffie_hellman(&X25519Pub::from(*epk));
     if !shared.was_contributory() {
@@ -652,14 +723,15 @@ pub fn try_decrypt_and_verify_memo_entry(
     aad[0..2].copy_from_slice(&view_tag);
     aad[2..34].copy_from_slice(epk);
 
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    let candidate = if let Ok(plain) = cipher.decrypt(
+    let cipher = ChaCha20Poly1305::new((&*key).into());
+    let candidate = if let Ok(plain_vec) = cipher.decrypt(
         Nonce::from_slice(&nonce),
         Payload {
             msg: ct72.as_slice(),
             aad: aad.as_slice(),
         },
     ) {
+        let plain = Zeroizing::new(plain_vec);
         if plain.len() != MEMO_PLAINTEXT_LEN || plain[40] != MEMO_VERSION_V1 {
             return None;
         }
@@ -679,12 +751,13 @@ pub fn try_decrypt_and_verify_memo_entry(
             is_dynamic: false,
         }
     } else {
-        let (_, dyn_tweak, dyn_blinding, dyn_mask) =
+        let (_, dyn_tweak, dyn_blinding, mut dyn_mask) =
             derive_dynamic_memo_secrets(shared.as_bytes());
-        let mut unmasked = [0u8; MEMO_CT_LEN];
+        let mut unmasked = Zeroizing::new([0u8; MEMO_CT_LEN]);
         for i in 0..MEMO_CT_LEN {
             unmasked[i] = ct72[i] ^ dyn_mask[i];
         }
+        dyn_mask.zeroize();
         if unmasked[0..8] != DYN_MEMO_MAGIC || unmasked[48..72] != [0u8; 24] {
             return None;
         }
@@ -701,7 +774,40 @@ pub fn try_decrypt_and_verify_memo_entry(
             is_dynamic: true,
         }
     };
+    // Key cross-subtree Pass 1D hit deduplication on the X25519 shared secret (domain-separated)
+    // so all 16 Curve25519 torsion + bit-255 + non-canonical `epk` equivalents for `AUD1DYN1`
+    // dynamic swap memos collapse into a single deduplication entry.
+    let dedup_tag = Zeroizing::new(sha256_labeled(KDF_DOMAIN_HIT_DEDUP, shared.as_bytes()));
+    Some((candidate, dedup_tag))
+}
 
+/// Internal Pass 1C pre-filter for full `MemoPage` scans (`Strict` mode / incremental `Fast`):
+/// verifies AEAD / `AUD1DYN1` payload and returns `SHA256("audren/v1/hit_dedup" || shared)`
+/// (collapsing Curve25519 torsion + bit-255 `epk` malleability) without exposing any unverified
+/// note plaintext.
+pub(crate) fn compute_memo_scan_dedup_tag(
+    fvk: &FullViewingKey,
+    view_tag: [u8; 2],
+    epk: &[u8; 32],
+    ct72: &[u8; MEMO_CT_LEN],
+) -> Option<Zeroizing<[u8; 32]>> {
+    try_decrypt_memo_payload_with_dedup_tag(fvk, view_tag, epk, ct72).map(|(_, tag)| tag)
+}
+
+/// Decrypt or unmask a `106 B` `MemoPage` entry (`view_tag[2]`, `epk[32]`, `ct72[72]`) AND
+/// mandatorily verify
+/// `compute_note_commitment(stealth_owner, derive_asset_id(mint), amount, blinding) == onchain_cm_be`
+/// (from the local `SubtreePage` leaf) to block forged-memo balance poisoning.
+/// Rejects low-order Curve25519 points (`!shared.was_contributory()`), tampered AAD headers,
+/// unsupported memo versions, and non-zero dynamic swap padding bytes.
+pub fn try_decrypt_and_verify_memo_entry(
+    fvk: &FullViewingKey,
+    view_tag: [u8; 2],
+    epk: &[u8; 32],
+    ct72: &[u8; MEMO_CT_LEN],
+    onchain_cm_be: &[u8; 32],
+) -> Option<DecryptedMemo> {
+    let (candidate, _) = try_decrypt_memo_payload_with_dedup_tag(fvk, view_tag, epk, ct72)?;
     let stealth = fvk.stealth_owner(candidate.tweak).ok()?;
     let asset_id = derive_asset_id(&candidate.mint);
     let expected_cm =

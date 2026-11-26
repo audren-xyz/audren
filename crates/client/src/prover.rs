@@ -15,6 +15,7 @@ use audren_circuits::{
 use audren_core::instruction::GROTH16_PROOF_LEN;
 use rand::{CryptoRng, RngCore};
 use solana_address::Address;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ClientError;
 
@@ -78,9 +79,9 @@ impl AudrenProver {
         circuit: JoinSplit4AryCircuit,
         rng: &mut R,
     ) -> JoinSplitProofBundle {
-        let mut seed = [0u8; 32];
-        rng.fill_bytes(&mut seed);
-        self.prove_with_seed(circuit, seed)
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(&mut *seed);
+        self.prove_with_seed(circuit, *seed)
     }
 
     /// Generate a deterministic 192-byte compressed BN254 Groth16 proof from an explicit 32-byte seed,
@@ -90,11 +91,13 @@ impl AudrenProver {
     pub fn try_prove_with_seed(
         &self,
         circuit: JoinSplit4AryCircuit,
-        seed: [u8; 32],
+        mut seed: [u8; 32],
     ) -> Result<JoinSplitProofBundle, ClientError> {
         let public_inputs = circuit.public_inputs();
         let pub_hash = public_inputs.compute_hash();
-        let proof = try_prove_joinsplit(&self.pk, circuit, seed).map_err(|_| {
+        let prove_res = try_prove_joinsplit(&self.pk, circuit, seed);
+        seed.zeroize();
+        let proof = prove_res.map_err(|_| {
             ClientError::InvalidProofInput("unsatisfied joinsplit circuit witness")
         })?;
         if !verify_joinsplit_offchain(&self.vk, &proof, pub_hash) {

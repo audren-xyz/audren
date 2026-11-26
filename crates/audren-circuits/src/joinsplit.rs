@@ -27,7 +27,7 @@ use crate::{
     poseidon::{poseidon2, poseidon_hash_var},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct JoinSplitInputWitness {
     pub spend_sk: Fr,
     pub tweak: Fr,
@@ -38,7 +38,30 @@ pub struct JoinSplitInputWitness {
     pub merkle_path: MerklePath4Ary,
 }
 
-#[derive(Clone, Debug)]
+impl core::fmt::Debug for JoinSplitInputWitness {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("JoinSplitInputWitness")
+            .field("spend_sk", &"<redacted>")
+            .field("tweak", &"<redacted>")
+            .field("asset_id", &self.asset_id)
+            .field("amount", &self.amount)
+            .field("blinding", &"<redacted>")
+            .field("is_dummy", &self.is_dummy)
+            .finish_non_exhaustive()
+    }
+}
+
+impl JoinSplitInputWitness {
+    /// Overwrite secret witness scalars (`spend_sk`, `tweak`, `blinding`) in place using volatile
+    /// writes via `zeroize` so sensitive spend keys do not linger on the stack or WASM heap.
+    pub fn zeroize_secrets(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.spend_sk);
+        zeroize::Zeroize::zeroize(&mut self.tweak);
+        zeroize::Zeroize::zeroize(&mut self.blinding);
+    }
+}
+
+#[derive(Clone)]
 pub struct JoinSplitOutputWitness {
     pub stealth_owner: Fr,
     pub asset_id: Fr,
@@ -46,7 +69,22 @@ pub struct JoinSplitOutputWitness {
     pub blinding: Fr,
 }
 
+impl core::fmt::Debug for JoinSplitOutputWitness {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("JoinSplitOutputWitness")
+            .field("stealth_owner", &self.stealth_owner)
+            .field("asset_id", &self.asset_id)
+            .field("amount", &self.amount)
+            .field("blinding", &"<redacted>")
+            .finish()
+    }
+}
+
 impl JoinSplitOutputWitness {
+    pub fn zeroize_secrets(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.blinding);
+    }
+
     pub fn dummy(asset_id: Fr, blinding: Fr) -> Self {
         Self {
             stealth_owner: Fr::from(0u64),
@@ -62,7 +100,7 @@ impl JoinSplitOutputWitness {
 }
 
 /// Complete witness for a 2-in -> 3-out MASP `JoinSplit` (4-ary Depth-20 = `2^40` notes).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct JoinSplit4AryCircuit {
     pub public_input_hash: Fr,
     pub super_root: Fr,
@@ -76,6 +114,35 @@ pub struct JoinSplit4AryCircuit {
     pub omit_nf1: bool,
     pub inputs: [JoinSplitInputWitness; 2],
     pub outputs: [JoinSplitOutputWitness; 3],
+}
+
+impl core::fmt::Debug for JoinSplit4AryCircuit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("JoinSplit4AryCircuit")
+            .field("public_input_hash", &self.public_input_hash)
+            .field("super_root", &self.super_root)
+            .field("tx_asset_id", &self.tx_asset_id)
+            .field("public_asset_id", &self.public_asset_id)
+            .field("public_amount_out", &self.public_amount_out)
+            .field("relayer_fee_amount", &self.relayer_fee_amount)
+            .field("ctx_hash", &self.ctx_hash)
+            .field("omit_nf1", &self.omit_nf1)
+            .field("inputs", &self.inputs)
+            .field("outputs", &self.outputs)
+            .finish()
+    }
+}
+
+impl JoinSplit4AryCircuit {
+    /// Wipe all secret input/output witness scalars (`spend_sk`, `tweak`, `blinding`) in place.
+    pub fn zeroize_secrets(&mut self) {
+        for inp in &mut self.inputs {
+            inp.zeroize_secrets();
+        }
+        for out in &mut self.outputs {
+            out.zeroize_secrets();
+        }
+    }
 }
 
 impl JoinSplit4AryCircuit {

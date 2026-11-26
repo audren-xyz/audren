@@ -32,10 +32,12 @@ import {
   EPOCH_RING_LEN,
   LANE_DEPTH_4ARY,
   MAX_ROOT_EPOCH_INTERVAL,
+  MEMO_CT_LEN,
   MEMO_NOTES_PER_PAGE,
   MEMO_PAGE_HEADER_LEN,
   MEMO_PAGE_LEN,
   MEMO_PAGE_SCAN_SLICE_LEN,
+  MM_OFF_CIPHERTEXTS,
   NF_PAGE_HEADER_LEN,
   NF_PER_PAGE,
   NUM_LANES,
@@ -48,6 +50,8 @@ import {
   ZERO_HASHES_4ARY,
 } from './constants.ts';
 import {
+  canonicalizePublicEpk,
+  checkMemoPayloadForScan,
   checkMemoViewTag,
   tryDecryptAndVerifyMemoEntry,
   type DecryptedMemo,
@@ -99,6 +103,9 @@ import {
 const RPC_BATCH_CHUNK = 100;
 const utf8Encoder = new TextEncoder();
 const DECOY_DOMAIN_BYTES = utf8Encoder.encode('audren/v1/decoy');
+const DECOY_LARGE_DOMAIN_BYTES = utf8Encoder.encode('audren/v1/hrw_large_dyadic');
+const LARGE_HRW_HEIGHT = 62;
+const LN2_Q32 = 2_977_044_472n; // round(ln(2) * 2^32)
 const DECOY_SCOPE_SYNC_BYTES = utf8Encoder.encode('sync');
 const DECOY_SCOPE_WITNESS_PREFIX = utf8Encoder.encode('witness');
 
@@ -108,6 +115,8 @@ export const INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD = 25;
 export const INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD = 25;
 /** Minimum sealed `SubtreePage` anonymity set size when decoy-padding in `'strict'` mode. */
 export const STRICT_DECOY_SEALED_SUBTREE_TARGET = 16;
+/** Maximum publicly-duplicated `canonEpk` sealed `SubtreePage`s resolved per sync call in `'strict'` mode. */
+export const MAX_PUBLIC_DUP_SUBTREES = 64;
 /** Sealed-subtree count divisor for deterministic decoy epoch buckets (synced with Rust SDK). */
 export const DECOY_EPOCH_BUCKET_SIZE = 64;
 /** Maximum pages fetched per pass in a single `syncCompactStoreWithRpc` call (prevents untrusted-RPC OOM/hang). */
@@ -403,7 +412,240 @@ export function selectHrwSealedDecoys(params: {
     }
   }
 
+  preimage.fill(0);
   return top.map(({ laneId, pageSeq }) => ({ laneId, pageSeq }));
+}
+
+/**
+ * Hit-independent O(`targetSealed`) deterministic uniform decoy sampler across ALL sealed
+ * subtrees `[0 .. fc_l)` on ALL active lanes when `totalSealed > MAX_HRW_SEALED_SUBTREES`.
+ *
+ * Matches `crates/client/src/scanner.rs::select_large_pool_hrw_sealed_decoys` bit-for-bit.
+ */
+export function selectLargePoolHrwSealedDecoys(params: {
+  viewSk: Uint8Array;
+  scope: Uint8Array;
+  epochBucket: bigint;
+  sealedByLane: ReadonlyArray<{ laneId: number; sealedCount: bigint }>;
+  alreadySelected: ReadonlySet<string>;
+  targetSealed: number;
+}): Array<{ laneId: number; pageSeq: bigint }> {
+  if (!params || typeof params !== 'object') {
+    throw new RangeError('selectLargePoolHrwSealedDecoys params must be an object');
+  }
+  const { viewSk, scope, epochBucket, sealedByLane, alreadySelected, targetSealed } = params;
+  if (!(viewSk instanceof Uint8Array) || viewSk.byteLength !== 32) {
+    throw new RangeError(
+      `viewSk must be a 32-byte Uint8Array, got ${viewSk instanceof Uint8Array ? viewSk.byteLength : String(viewSk)}`,
+    );
+  }
+  if (!(scope instanceof Uint8Array)) {
+    throw new RangeError(`scope must be a Uint8Array, got ${String(scope)}`);
+  }
+  if (typeof epochBucket !== 'bigint' || epochBucket < 0n || epochBucket > U64_MAX) {
+    throw new RangeError(`epochBucket must be a u64 bigint, got ${String(epochBucket)}`);
+  }
+  if (!Array.isArray(sealedByLane)) {
+    throw new RangeError('sealedByLane must be an array');
+  }
+  if (!Number.isInteger(targetSealed) || targetSealed < 0) {
+    throw new RangeError(`targetSealed must be a non-negative integer, got ${String(targetSealed)}`);
+  }
+
+  const seenLanes = new Set<number>();
+  const fcByLane = new Array<bigint>(NUM_LANES).fill(0n);
+  const activeLanes: Array<{ laneId: number; sealedCount: bigint }> = [];
+  let totalSealed = 0n;
+  let alreadySealedCount = 0;
+  for (const entry of sealedByLane) {
+    if (!entry || typeof entry !== 'object') {
+      throw new RangeError('sealedByLane entries must be objects');
+    }
+    const { laneId, sealedCount } = entry;
+    if (!Number.isInteger(laneId) || laneId < 0 || laneId >= NUM_LANES) {
+      throw new RangeError(`sealedByLane laneId must be 0..${NUM_LANES - 1}, got ${String(laneId)}`);
+    }
+    if (seenLanes.has(laneId)) {
+      throw new RangeError(`Duplicate laneId ${laneId} in sealedByLane`);
+    }
+    seenLanes.add(laneId);
+    if (typeof sealedCount !== 'bigint' || sealedCount < 0n || sealedCount > U64_MAX) {
+      throw new RangeError(
+        `sealedCount must be a non-negative u64 bigint, got ${String(sealedCount)}`,
+      );
+    }
+    totalSealed += sealedCount;
+    if (totalSealed > U64_MAX) {
+      throw new RangeError('sealed subtree count overflow');
+    }
+    fcByLane[laneId] = sealedCount;
+    if (sealedCount > 0n) {
+      activeLanes.push({ laneId, sealedCount });
+    }
+    for (const key of alreadySelected) {
+      if (typeof key !== 'string') continue;
+      const sep = key.indexOf(':');
+      if (sep <= 0) continue;
+      const laneStr = key.slice(0, sep);
+      const seqStr = key.slice(sep + 1);
+      if (!DEC_UINT_RE.test(laneStr) || !DEC_UINT_RE.test(seqStr)) continue;
+      if (Number(laneStr) === laneId && BigInt(seqStr) < sealedCount) {
+        alreadySealedCount++;
+      }
+    }
+  }
+  if (totalSealed === 0n || totalSealed > 1n << BigInt(LARGE_HRW_HEIGHT)) return [];
+  activeLanes.sort((a, b) => a.laneId - b.laneId);
+
+  const cappedTarget = Number(
+    totalSealed < BigInt(targetSealed) ? totalSealed : BigInt(targetSealed),
+  );
+  const need = cappedTarget - alreadySealedCount;
+  if (need <= 0) return [];
+
+  const exp1Q32 = (raw: bigint): bigint => {
+    const rNz = raw === 0n ? 1n : raw;
+    let k = 0n;
+    let m = rNz;
+    const msb = 1n << 63n;
+    while ((m & msb) === 0n) {
+      m <<= 1n;
+      k++;
+    }
+    const gQ32 = ((1n << 64n) - m) >> 32n;
+    let term = 1n << 32n;
+    let sum = 0n;
+    for (let j = 1n; j <= 24n; j++) {
+      term = (term * gQ32) >> 32n;
+      sum += term / j;
+    }
+    return k * LN2_Q32 + sum;
+  };
+
+  interface DyadicHeapNode {
+    s: bigint;
+    laneId: number;
+    level: number;
+    nodeIdx: bigint;
+  }
+  const cmpNode = (a: DyadicHeapNode, b: DyadicHeapNode): number => {
+    if (a.s !== b.s) return a.s < b.s ? -1 : 1;
+    if (a.laneId !== b.laneId) return a.laneId - b.laneId;
+    if (a.level !== b.level) return a.level - b.level;
+    return a.nodeIdx < b.nodeIdx ? -1 : a.nodeIdx > b.nodeIdx ? 1 : 0;
+  };
+  const heap: DyadicHeapNode[] = [];
+  const heapPush = (node: DyadicHeapNode): void => {
+    heap.push(node);
+    let idx = heap.length - 1;
+    while (idx > 0) {
+      const parent = (idx - 1) >> 1;
+      if (cmpNode(heap[idx]!, heap[parent]!) < 0) {
+        const tmp = heap[idx]!;
+        heap[idx] = heap[parent]!;
+        heap[parent] = tmp;
+        idx = parent;
+      } else {
+        break;
+      }
+    }
+  };
+  const heapPop = (): DyadicHeapNode | undefined => {
+    if (heap.length === 0) return undefined;
+    const top = heap[0]!;
+    const last = heap.pop()!;
+    if (heap.length > 0) {
+      heap[0] = last;
+      let idx = 0;
+      const len = heap.length;
+      while (true) {
+        const l = idx * 2 + 1;
+        const r = l + 1;
+        let best = idx;
+        if (l < len && cmpNode(heap[l]!, heap[best]!) < 0) best = l;
+        if (r < len && cmpNode(heap[r]!, heap[best]!) < 0) best = r;
+        if (best === idx) break;
+        const tmp = heap[idx]!;
+        heap[idx] = heap[best]!;
+        heap[best] = tmp;
+        idx = best;
+      }
+    }
+    return top;
+  };
+
+  const preimageLen =
+    DECOY_LARGE_DOMAIN_BYTES.byteLength + 32 + 4 + scope.byteLength + 8 + 1 + 1 + 8;
+  const preimage = new Uint8Array(preimageLen);
+  const dv = new DataView(preimage.buffer);
+  let off = 0;
+  preimage.set(DECOY_LARGE_DOMAIN_BYTES, off);
+  off += DECOY_LARGE_DOMAIN_BYTES.byteLength;
+  preimage.set(viewSk, off);
+  off += 32;
+  dv.setUint32(off, scope.byteLength, true);
+  off += 4;
+  preimage.set(scope, off);
+  off += scope.byteLength;
+  dv.setBigUint64(off, epochBucket, true);
+  off += 8;
+  const laneOff = off;
+
+  const hashNode = (laneId: number, level: number, nodeIdx: bigint): Uint8Array => {
+    preimage[laneOff] = laneId & 0xff;
+    preimage[laneOff + 1] = level & 0xff;
+    dv.setBigUint64(laneOff + 2, nodeIdx, true);
+    return sha256(preimage);
+  };
+
+  const out: Array<{ laneId: number; pageSeq: bigint }> = [];
+  try {
+    for (const { laneId } of activeLanes) {
+      const digest = hashNode(laneId, LARGE_HRW_HEIGHT + 1, 0n);
+      const raw = new DataView(digest.buffer, digest.byteOffset, 8).getBigUint64(0, true);
+      heapPush({ s: exp1Q32(raw), laneId, level: LARGE_HRW_HEIGHT, nodeIdx: 0n });
+    }
+    while (out.length < need) {
+      const top = heapPop();
+      if (!top) break;
+      if (top.level === 0) {
+        const key = `${top.laneId}:${top.nodeIdx.toString()}`;
+        if (!alreadySelected.has(key)) {
+          out.push({ laneId: top.laneId, pageSeq: top.nodeIdx });
+        }
+        continue;
+      }
+      const digest = hashNode(top.laneId, top.level, top.nodeIdx);
+      const raw = new DataView(digest.buffer, digest.byteOffset, 8).getBigUint64(0, true);
+      const winnerRight = (digest[8]! & 1) !== 0;
+      const shift = BigInt(LARGE_HRW_HEIGHT + 1 - top.level);
+      const sLoser = top.s + (exp1Q32(raw) << shift);
+      const childLevel = top.level - 1;
+      const leftIdx = top.nodeIdx << 1n;
+      const rightIdx = leftIdx | 1n;
+      const fc = fcByLane[top.laneId]!;
+
+      heapPush({
+        s: winnerRight ? sLoser : top.s,
+        laneId: top.laneId,
+        level: childLevel,
+        nodeIdx: leftIdx,
+      });
+
+      const rightLo = rightIdx << BigInt(childLevel);
+      if (rightLo < fc) {
+        heapPush({
+          s: winnerRight ? top.s : sLoser,
+          laneId: top.laneId,
+          level: childLevel,
+          nodeIdx: rightIdx,
+        });
+      }
+    }
+  } finally {
+    preimage.fill(0);
+  }
+  return out;
 }
 
 export interface AccountBatchFetchOptions {
@@ -537,6 +779,14 @@ export async function fetchPoolAndLanes(
     lanes.push(hdr);
   }
   return { pool, lanes };
+}
+
+function bytes32Hex(b: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < b.byteLength; i++) {
+    out += b[i]!.toString(16).padStart(2, '0');
+  }
+  return out;
 }
 
 interface MemoHitCandidate {
@@ -703,8 +953,17 @@ export async function syncCompactStoreWithRpc(params: {
           `SubtreeRootPage header mismatch (expected pool=${poolId}, lane=${cursor.laneId}, seq=${rootPageSeq})`,
         );
       }
+      const existingSubroots = params.store.lanes[cursor.laneId]!.finalizedSubroots;
       for (let k = 0; k < dec.roots.length; k++) {
         frFromBeBytesStrict(dec.roots[k]!);
+        const subIdxBig = base + BigInt(k);
+        if (subIdxBig < BigInt(existingSubroots.length)) {
+          if (compareBytes32(existingSubroots[Number(subIdxBig)]!, dec.roots[k]!) !== 0) {
+            throw new Error(
+              `SubtreeRootPage subroot mismatch against persisted finalizedSubroots at index ${subIdxBig}`,
+            );
+          }
+        }
       }
       const startInPage = curLen > base ? Number(curLen - base) : 0;
       const avail = Math.min(dec.count, expectedOnPage);
@@ -817,6 +1076,22 @@ export async function syncCompactStoreWithRpc(params: {
     privacyMode === 'strict' &&
     isIncrementalMemoSync &&
     totalNewSubtrees <= BigInt(INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD);
+  const strictSubtreeAtomic = privacyMode === 'strict' && !fetchNewSubtreesUniformly;
+
+  // Pass 1B subtree-boundary alignment (`'strict'` non-uniform mode): when Pass 1B skips into the
+  // middle of a sealed `256`-leaf subtree (`skipTo < finalizedCount * 256`), align `startLeaf`
+  // down to the exact `256`-leaf boundary so distinct `MemoPage` skip points inside the same
+  // subtree can NEVER share `startSub` while scanning different subsets of leaves.
+  if (strictSubtreeAtomic) {
+    for (const laneHdr of lanes) {
+      const l = laneHdr.laneId;
+      const finalizedLeaves = (laneHdr.nextLeaf / subSize) * subSize;
+      const skipTo = scanStartLeafByLane.get(l);
+      if (skipTo !== undefined && skipTo < finalizedLeaves) {
+        scanStartLeafByLane.set(l, (skipTo / subSize) * subSize);
+      }
+    }
+  }
 
   // =========================================================================
   // PASS 1C: Lazily stream `MemoPage`s across ALL active lanes in 100-account windows
@@ -850,6 +1125,11 @@ export async function syncCompactStoreWithRpc(params: {
       stopped: false,
     });
   }
+
+  type PublicEpkSubtrees =
+    | { multi: false; laneId: number; subSeq: bigint }
+    | { multi: true; set: Map<string, { laneId: number; subSeq: bigint }> };
+  const publicEpkSubtrees = new Map<string, PublicEpkSubtrees>();
 
   let memoPagesFetched = 0;
   while (memoPagesFetched < MAX_SYNC_PAGES_PER_CALL) {
@@ -918,31 +1198,69 @@ export async function syncCompactStoreWithRpc(params: {
       );
       const limitSlot = Math.min(scan.count, maxForSnapshot);
 
-      if (
-        startSlot === 0 &&
-        birthdaySlot > 0n &&
-        scan.count === MEMO_NOTES_PER_PAGE &&
-        scan.closedSlot > 0n &&
-        scan.closedSlot < birthdaySlot
-      ) {
-        wm = pageBase + BigInt(limitSlot);
-        scannedWatermarkByLane.set(cursor.laneId, wm);
-        if (scan.count < maxForSnapshot) {
-          cursor.stopped = true;
-        }
-        continue;
-      }
-
+      // Never skip a mid-scan `MemoPage` via `closedSlot < birthdaySlot`: Pass 1B already skips
+      // pre-birthday prefixes via binary search, and honoring unauthenticated `closedSlot`
+      // mid-stream would let an adversarial RPC toggle single-page visibility while holding
+      // `actualEndSub` constant.
       const laneHits = hitsByLane.get(cursor.laneId)!;
+      const laneFc = cursor.nextLeaf / subSize;
       let pageMatched = false;
       for (let slot = startSlot; slot < limitSlot; slot++) {
-        if (checkMemoViewTag(params.fvk.viewSk, scan.viewTags[slot]!, scan.ephemeralPks[slot]!)) {
+        const vt = scan.viewTags[slot]!;
+        const epk = scan.ephemeralPks[slot]!;
+        const leafIdx = pageBase + BigInt(slot);
+        if (strictSubtreeAtomic) {
+          const subSeq = leafIdx / subSize;
+          if (subSeq < laneFc) {
+            const canonEpk = canonicalizePublicEpk(epk);
+            if (canonEpk) {
+              const canonHex = bytes32Hex(canonEpk);
+              const existing = publicEpkSubtrees.get(canonHex);
+              if (!existing) {
+                publicEpkSubtrees.set(canonHex, {
+                  multi: false,
+                  laneId: cursor.laneId,
+                  subSeq,
+                });
+              } else if (!existing.multi) {
+                if (existing.laneId !== cursor.laneId || existing.subSeq !== subSeq) {
+                  const set = new Map<string, { laneId: number; subSeq: bigint }>();
+                  set.set(`${existing.laneId}:${existing.subSeq.toString()}`, {
+                    laneId: existing.laneId,
+                    subSeq: existing.subSeq,
+                  });
+                  set.set(`${cursor.laneId}:${subSeq.toString()}`, {
+                    laneId: cursor.laneId,
+                    subSeq,
+                  });
+                  publicEpkSubtrees.set(canonHex, { multi: true, set });
+                }
+              } else {
+                existing.set.set(`${cursor.laneId}:${subSeq.toString()}`, {
+                  laneId: cursor.laneId,
+                  subSeq,
+                });
+              }
+            }
+          }
+        }
+        if (checkMemoViewTag(params.fvk.viewSk, vt, epk)) {
+          // When the full `10,240 B` `MemoPage` is already fetched (`'strict'` mode and
+          // incremental `'fast'` mode), verify AEAD / `AUD1DYN1` immediately to reject
+          // `1/65536` false positives and single-copy `(vt, epk, junkCt)` probes.
+          if (scan.hasCiphertexts && raw.byteLength === MEMO_PAGE_LEN) {
+            const ctOff = MM_OFF_CIPHERTEXTS + slot * MEMO_CT_LEN;
+            const ct72 = raw.subarray(ctOff, ctOff + MEMO_CT_LEN);
+            if (!checkMemoPayloadForScan(params.fvk.viewSk, vt, epk, ct72)) {
+              continue;
+            }
+          }
           pageMatched = true;
           laneHits.push({
             laneId: cursor.laneId,
             memoSeq: item.memoSeq,
             slot,
-            leafIdx: pageBase + BigInt(slot),
+            leafIdx,
           });
         }
       }
@@ -1001,7 +1319,11 @@ export async function syncCompactStoreWithRpc(params: {
     string,
     { laneId: number; subSeq: bigint; addr: string; addrBytes: Uint8Array }
   >();
-  const uniformNewSubtreeKeys = new Set<string>();
+  // Publicly-known, hit-independent sealed `SubtreePage`s (`uniformNewSubtrees` sealed pages +
+  // `hasScannedSealedFrontier` old frontiers): NEVER counted against the private 16-subtree decoy
+  // budget so neither `M = 1..16` returning frontiers nor `U = 1..25` uniform new subtrees can
+  // cannibalize decoys or create a 0-vs-1-note / 1-of-1 pinpoint oracle.
+  const publicSealedSubtrees = new Map<string, { laneId: number; subSeq: bigint }>();
   const addNeededSubtree = (laneId: number, subSeq: bigint): boolean => {
     const key = `${laneId}:${subSeq.toString()}`;
     if (neededSubtrees.has(key)) return false;
@@ -1018,13 +1340,16 @@ export async function syncCompactStoreWithRpc(params: {
   if (fetchNewSubtreesUniformly) {
     for (const laneHdr of lanes) {
       const l = laneHdr.laneId;
+      const finalizedCount = laneHdr.nextLeaf / subSize;
       const startLeaf = scanStartLeafByLane.get(l) ?? params.store.lanes[l]!.nextMemoLeaf;
       if (laneHdr.nextLeaf > 0n && startLeaf < laneHdr.nextLeaf) {
         const startSub = startLeaf / subSize;
         const endSub = (laneHdr.nextLeaf - 1n) / subSize;
         for (let s = startSub; s <= endSub; s++) {
           addNeededSubtree(l, s);
-          uniformNewSubtreeKeys.add(`${l}:${s.toString()}`);
+          if (s < finalizedCount) {
+            publicSealedSubtrees.set(`${l}:${s.toString()}`, { laneId: l, subSeq: s });
+          }
         }
       }
     }
@@ -1035,11 +1360,23 @@ export async function syncCompactStoreWithRpc(params: {
   const frontierRemByLane = new Map<number, number>();
   const startSubByLane = new Map<number, bigint>();
   const actualEndSubByLane = new Map<number, bigint>();
-  const watermarkPairs: Array<{ laneId: number; startLeaf: bigint }> = [];
-  const fullRangesByLane: Array<{ laneId: number; startSeq: bigint; sealedCount: bigint }> = [];
   const windowedRangesByLane: Array<{ laneId: number; startSeq: bigint; sealedCount: bigint }> = [];
   let totalSealedSubtrees = 0n;
   let windowSealedSubtrees = 0n;
+
+  // Public, note-independent non-lagging predicate across ALL locally persisted lanes:
+  // blocks O(log N) lagging-`nextLeaf` binary-search & decoy-domain shrink oracles on legacy
+  // `locallyFinalizedUnfrozen` notes.
+  let allLocalLanesNonLagging = true;
+  for (let l = 0; l < NUM_LANES; l++) {
+    const localLen = BigInt(params.store.lanes[l]!.finalizedSubroots.length);
+    if (localLen === 0n) continue;
+    const hdr = lanes.find((h) => h.laneId === l);
+    if (!hdr || hdr.nextLeaf / subSize < localLen) {
+      allLocalLanesNonLagging = false;
+      break;
+    }
+  }
 
   for (const laneHdr of lanes) {
     const l = laneHdr.laneId;
@@ -1052,99 +1389,241 @@ export async function syncCompactStoreWithRpc(params: {
     const scannedLeaf = scannedWatermarkByLane.get(l) ?? startLeaf;
     let actualEndSub = startSub;
     if (scannedLeaf > startLeaf) {
-      const ceilSub = (scannedLeaf + subSize - 1n) / subSize;
-      const cappedSub = ceilSub < finalizedCount ? ceilSub : finalizedCount;
+      // Subtree-boundary atomicity (`'strict'` non-uniform mode): only sealed subtrees whose full
+      // 256-leaf range was scanned (`(s + 1) * 256 <= scannedLeaf`) enter Pass 1D. Eliminates
+      // sub-subtree `MemoPage`-drop and `MM_OFF_COUNT` binary-search oracles.
+      const rawEndSub = strictSubtreeAtomic
+        ? scannedLeaf / subSize
+        : (scannedLeaf + subSize - 1n) / subSize;
+      const cappedSub = rawEndSub < finalizedCount ? rawEndSub : finalizedCount;
       actualEndSub = cappedSub > startSub ? cappedSub : startSub;
     }
     finalizedByLane.set(l, finalizedCount);
     frontierRemByLane.set(l, frontierRem);
     startSubByLane.set(l, startSub);
     actualEndSubByLane.set(l, actualEndSub);
-    watermarkPairs.push({ laneId: l, startLeaf });
-    fullRangesByLane.push({ laneId: l, startSeq: 0n, sealedCount: finalizedCount });
-    windowedRangesByLane.push({ laneId: l, startSeq: startSub, sealedCount: actualEndSub });
     totalSealedSubtrees += finalizedCount;
+  }
+
+  // Public, key-independent cross-subtree duplicate `canonEpk` resolution (`'strict'` non-uniform
+  // mode): if any Curve25519 `canonEpk` (collapsing all 16 torsion + bit-255 + `u + p` variants)
+  // appears in >= 2 distinct sealed subtrees inside `[startSub .. actualEndSub)`, BOTH 0-note and
+  // N-note wallets identically schedule up to `MAX_PUBLIC_DUP_SUBTREES` (64) such subtrees in
+  // `publicSealedSubtrees` (ascending `(laneId, subSeq)` order) and cap overflowing lanes'
+  // `actualEndSub` & `verifiedWatermark` at the minimum deferred duplicate `subSeq`.
+  const dupEndSubCap = new Map<number, bigint>();
+  if (strictSubtreeAtomic) {
+    const publicDupMap = new Map<string, { laneId: number; subSeq: bigint }>();
+    for (const tracker of publicEpkSubtrees.values()) {
+      if (!tracker.multi) continue;
+      const inWindow: Array<{ key: string; laneId: number; subSeq: bigint }> = [];
+      for (const [k, v] of tracker.set.entries()) {
+        const sStart = startSubByLane.get(v.laneId) ?? 0n;
+        const sEnd = actualEndSubByLane.get(v.laneId) ?? sStart;
+        if (v.subSeq >= sStart && v.subSeq < sEnd) {
+          inWindow.push({ key: k, laneId: v.laneId, subSeq: v.subSeq });
+        }
+      }
+      if (inWindow.length >= 2) {
+        for (const item of inWindow) {
+          publicDupMap.set(item.key, { laneId: item.laneId, subSeq: item.subSeq });
+        }
+      }
+    }
+    const sortedPublicDups = [...publicDupMap.values()].sort((a, b) =>
+      a.laneId !== b.laneId
+        ? a.laneId - b.laneId
+        : a.subSeq < b.subSeq
+          ? -1
+          : a.subSeq > b.subSeq
+            ? 1
+            : 0,
+    );
+    for (let idx = 0; idx < sortedPublicDups.length; idx++) {
+      const { laneId: lid, subSeq: s } = sortedPublicDups[idx]!;
+      if (idx < MAX_PUBLIC_DUP_SUBTREES) {
+        addNeededSubtree(lid, s);
+        publicSealedSubtrees.set(`${lid}:${s.toString()}`, { laneId: lid, subSeq: s });
+      } else {
+        const cur = dupEndSubCap.get(lid);
+        if (cur === undefined || s < cur) {
+          dupEndSubCap.set(lid, s);
+        }
+      }
+    }
+    for (const [lid, capSub] of dupEndSubCap.entries()) {
+      const sStart = startSubByLane.get(lid) ?? 0n;
+      const curEnd = actualEndSubByLane.get(lid) ?? sStart;
+      const minEnd = curEnd < capSub ? curEnd : capSub;
+      actualEndSubByLane.set(lid, minEnd > sStart ? minEnd : sStart);
+    }
+  }
+  publicEpkSubtrees.clear();
+
+  for (const laneHdr of lanes) {
+    const l = laneHdr.laneId;
+    const laneState = params.store.lanes[l]!;
+    const finalizedCount = finalizedByLane.get(l) ?? 0n;
+    const frontierRem = frontierRemByLane.get(l) ?? 0;
+    const startLeaf = scanStartLeafByLane.get(l) ?? laneState.nextMemoLeaf;
+    const startSub = startSubByLane.get(l) ?? 0n;
+    const scannedLeaf = scannedWatermarkByLane.get(l) ?? startLeaf;
+    const actualEndSub = actualEndSubByLane.get(l) ?? startSub;
+    windowedRangesByLane.push({ laneId: l, startSeq: startSub, sealedCount: actualEndSub });
     windowSealedSubtrees += actualEndSub - startSub;
 
     if (frontierRem > 0) {
       addNeededSubtree(l, finalizedCount);
     }
+    // Uniform sealed-frontier freeze (scheduled BEFORE hits/notes so it is registered in
+    // `publicSealedSubtrees`): ONLY when this wallet had previously memo-scanned leaves inside
+    // `frontierSubSeq` (`nextMemoLeaf > frontierSubSeq * 256 && frontierSubSeq >= startSub`) AND
+    // that frontier page has sealed on-chain (`frontierSubSeq < finalizedCount`), fetch it
+    // uniformly across BOTH 0-note and N-note wallets and mark it public so it never cannibalizes
+    // the private 16-subtree decoy budget.
+    const frontierSeq = laneState.frontierSubSeq;
+    const hasScannedSealedFrontier =
+      laneState.frontierLeaves.length > 0 &&
+      frontierSeq < finalizedCount &&
+      laneState.nextMemoLeaf > frontierSeq * subSize &&
+      frontierSeq >= startSub;
+    if (
+      hasScannedSealedFrontier &&
+      ((privacyMode === 'fast' && Boolean(lookupVerifiedSubroot(l, frontierSeq))) ||
+        (privacyMode === 'strict' && scannedLeaf > startLeaf && frontierSeq < actualEndSub))
+    ) {
+      addNeededSubtree(l, frontierSeq);
+      publicSealedSubtrees.set(`${l}:${frontierSeq.toString()}`, { laneId: l, subSeq: frontierSeq });
+    }
     const hits = hitsByLane.get(l);
     if (hits) {
       for (const hit of hits) {
         const hitSubSeq = hit.leafIdx / subSize;
+        if (strictSubtreeAtomic && hitSubSeq < finalizedCount) {
+          // Defer hits in an incompletely scanned tail or dup-capped sealed subtree to the next
+          // sync (`verifiedWatermark` is capped at `actualEndSub * 256` so zero notes are lost).
+          if (hitSubSeq >= actualEndSub) {
+            continue;
+          }
+        }
         addNeededSubtree(l, hitSubSeq);
-        if (hitSubSeq < finalizedCount && !uniformNewSubtreeKeys.has(`${l}:${hitSubSeq.toString()}`)) {
+        if (hitSubSeq < finalizedCount && !publicSealedSubtrees.has(`${l}:${hitSubSeq.toString()}`)) {
           hasHitCorrelatedSealedSubtree = true;
         }
       }
     }
+    // Unfrozen `store.notes` guard: in `'strict'` mode, ONLY schedule unfrozen sealed notes that
+    // EITHER (a) were ALREADY locally finalized & scanned in `store` prior to this sync AND ALL
+    // locally persisted lanes are non-lagging (`allLocalLanesNonLagging`, blocking O(log N)
+    // lagging-`nextLeaf` binary-search & decoy-domain shrink oracles), OR (b) lie strictly inside
+    // this sync's verified Pass 1C scanned window `[startSub .. actualEndSub)` with
+    // `scannedLeaf > startLeaf`.
+    const strictUnfrozenOk = scannedLeaf > startLeaf;
+    const localFinalizedLen = BigInt(laneState.finalizedSubroots.length);
+    const localNextMemoLeaf = laneState.nextMemoLeaf;
     for (const note of params.store.notes) {
       if (note.laneId === l && !note.frozenIntraSiblings) {
         const noteSubSeq = note.leafIndex / subSize;
-        if (noteSubSeq < finalizedCount) {
+        const locallyFinalizedUnfrozen =
+          allLocalLanesNonLagging &&
+          noteSubSeq < localFinalizedLen &&
+          noteSubSeq < localNextMemoLeaf / subSize;
+        const newlyScannedUnfrozen =
+          strictUnfrozenOk &&
+          noteSubSeq >= startSub &&
+          noteSubSeq < actualEndSub &&
+          (privacyMode === 'strict' || Boolean(lookupVerifiedSubroot(l, noteSubSeq)));
+        if (
+          noteSubSeq < finalizedCount &&
+          (locallyFinalizedUnfrozen ||
+            newlyScannedUnfrozen ||
+            (privacyMode === 'fast' && Boolean(lookupVerifiedSubroot(l, noteSubSeq))))
+        ) {
           addNeededSubtree(l, noteSubSeq);
-          if (!uniformNewSubtreeKeys.has(`${l}:${noteSubSeq.toString()}`)) {
+          if (!publicSealedSubtrees.has(`${l}:${noteSubSeq.toString()}`)) {
             hasHitCorrelatedSealedSubtree = true;
           }
         }
       }
     }
-    if (
-      finalizedCount > 0n &&
-      laneState.frontierLeaves.length > 0 &&
-      laneState.frontierSubSeq === finalizedCount - 1n
-    ) {
-      addNeededSubtree(l, finalizedCount - 1n);
-    }
   }
 
+  const persistedWatermarks: Array<{ laneId: number; startLeaf: bigint }> = Array.from(
+    { length: NUM_LANES },
+    (_, l) => ({ laneId: l, startLeaf: params.store.lanes[l]!.nextMemoLeaf }),
+  );
   const epochBucket = params.decoyEpochBucket ?? 0n;
 
   // Rendezvous (HRW) wallet-keyed decoy padding for `'strict'` mode:
+  // - Sizes the private anonymity bucket strictly ON TOP of `publicSealedSubtrees`
+  //   (`uniformNewSubtrees` sealed entries + `hasScannedSealedFrontier` old frontiers) so
+  //   publicly-known returning frontiers or uniform incremental pages NEVER cannibalize the
+  //   16-subtree decoy budget.
   // - Windowed strictly to the actual hit-independent Pass 1C scanned ceiling
-  //   `[startSub_l .. actualEndSub_l)` derived from `scannedWatermarkByLane` (bounded by
-  //   `MAX_SYNC_PAGES_PER_CALL = 4,096` MemoPages and tracking early-stop spillover accurately).
-  // - When `!hasOutsideWindowSealed && windowSealedSubtrees < targetSealed`, first include
-  //   EVERY sealed subtree in the scanned window uniformly, then draw remaining decoys from a
-  //   bounded downward tail `[startSub - tail .. startSub)` and (if still short) a bounded
-  //   upward tail `[actualEndSub .. min(fc, actualEndSub + tail))`.
-  // - Scoped deterministically to the sync's starting watermark state so retries keep identical
-  //   decoys while consecutive distinct syncs rotate cleanly (zero multi-sync hit oracle or cookie).
+  //   `[startSub_l .. actualEndSub_l)` derived from `scannedWatermarkByLane`.
+  // - Scoped strictly to ALL 16 persisted `store.lanes[0..NUM_LANES].nextMemoLeaf` watermarks.
   const shouldDecoyPad =
     privacyMode === 'strict' &&
     totalSealedSubtrees > 0n &&
     (hasHitCorrelatedSealedSubtree || (!fetchNewSubtreesUniformly && totalNewMemoPages > 0n));
 
   if (shouldDecoyPad) {
-    let currentSealedCount = 0;
+    const syncScope = makeSyncDecoyScope(persistedWatermarks);
+    const laneCount = BigInt(Math.max(1, lanes.length));
+    const perLaneMaxSpan = BigInt(MAX_HRW_SEALED_SUBTREES) / laneCount;
+    const batchUnit = STRICT_DECOY_SEALED_SUBTREE_TARGET;
+
+    const countAllSealedNeeded = (): bigint => {
+      let c = 0n;
+      for (const req of neededSubtrees.values()) {
+        if (req.subSeq < (finalizedByLane.get(req.laneId) ?? 0n)) c++;
+      }
+      return c;
+    };
+
     let hasOutsideWindowSealed = false;
-    for (const req of neededSubtrees.values()) {
+    for (const [key, req] of neededSubtrees.entries()) {
       const fc = finalizedByLane.get(req.laneId) ?? 0n;
-      if (req.subSeq < fc) {
-        currentSealedCount++;
+      if (req.subSeq < fc && !publicSealedSubtrees.has(key)) {
         const sStart = startSubByLane.get(req.laneId) ?? 0n;
         const sEnd = actualEndSubByLane.get(req.laneId) ?? sStart;
         if (req.subSeq < sStart || req.subSeq >= sEnd) {
           hasOutsideWindowSealed = true;
+          break;
         }
       }
     }
 
-    // Fixed uniform batch size independent of hit count: multiples of 16 (min 16 even on 0 hits)
-    const batchUnit = STRICT_DECOY_SEALED_SUBTREE_TARGET;
-    const batches = Math.max(1, Math.ceil(currentSealedCount / batchUnit));
-    const desiredBig = BigInt(batches * batchUnit);
-    const targetSealed = Number(
-      totalSealedSubtrees < desiredBig ? totalSealedSubtrees : desiredBig,
-    );
+    const padScannedWindow = (): void => {
+      let winPublicCount = 0;
+      for (const pub of publicSealedSubtrees.values()) {
+        const sStart = startSubByLane.get(pub.laneId) ?? 0n;
+        const sEnd = actualEndSubByLane.get(pub.laneId) ?? sStart;
+        if (pub.subSeq >= sStart && pub.subSeq < sEnd) winPublicCount++;
+      }
+      let winAlreadyCount = 0;
+      for (const req of neededSubtrees.values()) {
+        const sStart = startSubByLane.get(req.laneId) ?? 0n;
+        const sEnd = actualEndSubByLane.get(req.laneId) ?? sStart;
+        if (req.subSeq >= sStart && req.subSeq < sEnd) winAlreadyCount++;
+      }
+      const winPrivateCount = Math.max(0, winAlreadyCount - winPublicCount);
+      const winPrivateBuckets = Math.max(1, Math.ceil(winPrivateCount / batchUnit));
+      const winPrivateTarget = BigInt(winPrivateBuckets) * BigInt(batchUnit);
+      const winDesiredTotal = BigInt(winPublicCount) + winPrivateTarget;
+      const rawNeedBig = winDesiredTotal > BigInt(winAlreadyCount)
+        ? winDesiredTotal - BigInt(winAlreadyCount)
+        : 0n;
+      const globalAvailBig = totalSealedSubtrees > countAllSealedNeeded()
+        ? totalSealedSubtrees - countAllSealedNeeded()
+        : 0n;
+      const winNeedNew = Number(rawNeedBig < globalAvailBig ? rawNeedBig : globalAvailBig);
+      if (winNeedNew <= 0) return;
 
-    if (currentSealedCount < targetSealed) {
-      const syncScope = makeSyncDecoyScope(watermarkPairs);
-      const laneCount = BigInt(Math.max(1, lanes.length));
-      const perLaneMaxSpan = BigInt(MAX_HRW_SEALED_SUBTREES) / laneCount;
-
-      if (!hasOutsideWindowSealed && windowSealedSubtrees >= BigInt(targetSealed)) {
+      const winAvailable = windowSealedSubtrees > BigInt(winAlreadyCount)
+        ? windowSealedSubtrees - BigInt(winAlreadyCount)
+        : 0n;
+      if (winAvailable >= BigInt(winNeedNew)) {
         if (windowSealedSubtrees > BigInt(MAX_HRW_SEALED_SUBTREES)) {
           throw new RangeError(
             `Total sealed subtrees (${windowSealedSubtrees}) exceeds HRW operational bound (${MAX_HRW_SEALED_SUBTREES})`,
@@ -1156,122 +1635,241 @@ export async function syncCompactStoreWithRpc(params: {
           epochBucket,
           sealedByLane: windowedRangesByLane,
           alreadySelected: new Set(neededSubtrees.keys()),
-          targetSealed,
+          targetSealed: winAlreadyCount + winNeedNew,
         });
         for (const d of decoys) {
           addNeededSubtree(d.laneId, d.pageSeq);
         }
-      } else if (!hasOutsideWindowSealed) {
-        // Step 2a: include EVERY sealed subtree in the RPC-visible scanned window uniformly so
-        // hits inside 26..42 MemoPage or early-stopped scans are never distinguishable.
+      } else {
+        // Step 2a: include EVERY sealed subtree in the RPC-visible scanned window uniformly.
+        let addedTotal = 0;
         for (const r of windowedRangesByLane) {
           for (let seq = r.startSeq; seq < r.sealedCount; seq++) {
-            addNeededSubtree(r.laneId, seq);
+            if (addNeededSubtree(r.laneId, seq)) addedTotal++;
           }
         }
-        const scaledTail = BigInt(targetSealed) * 64n;
+        const scaledTail = winDesiredTotal * 64n;
         const minTail = scaledTail > 1024n ? scaledTail : 1024n;
         const tailPerLane = minTail < perLaneMaxSpan ? minTail : perLaneMaxSpan;
-        let sealedAfterWindow = 0;
-        for (const req of neededSubtrees.values()) {
-          const fc = finalizedByLane.get(req.laneId) ?? 0n;
-          if (req.subSeq < fc) sealedAfterWindow++;
-        }
-        if (sealedAfterWindow < targetSealed) {
+        if (addedTotal < winNeedNew) {
           // Step 2b: bounded downward tail `[startSub - tail .. startSub)`
-          const remainingDown = targetSealed - sealedAfterWindow;
+          const remainingDown = winNeedNew - addedTotal;
           const tailRanges = lanes.map((h) => {
             const startSub = startSubByLane.get(h.laneId) ?? 0n;
             const low = startSub > tailPerLane ? startSub - tailPerLane : 0n;
             return { laneId: h.laneId, startSeq: low, sealedCount: startSub };
           });
+          let inTailAlready = 0;
+          for (const req of neededSubtrees.values()) {
+            for (const r of tailRanges) {
+              if (req.laneId === r.laneId && req.subSeq >= r.startSeq && req.subSeq < r.sealedCount) {
+                inTailAlready++;
+                break;
+              }
+            }
+          }
           const decoys = selectHrwSealedDecoys({
             viewSk: params.fvk.viewSk,
             scope: syncScope,
             epochBucket,
             sealedByLane: tailRanges,
             alreadySelected: new Set(neededSubtrees.keys()),
-            targetSealed: remainingDown,
+            targetSealed: inTailAlready + remainingDown,
           });
           for (const d of decoys) {
-            addNeededSubtree(d.laneId, d.pageSeq);
+            if (addNeededSubtree(d.laneId, d.pageSeq)) addedTotal++;
           }
         }
-        let sealedAfterDown = 0;
-        for (const req of neededSubtrees.values()) {
-          const fc = finalizedByLane.get(req.laneId) ?? 0n;
-          if (req.subSeq < fc) sealedAfterDown++;
-        }
-        if (sealedAfterDown < targetSealed) {
+        if (addedTotal < winNeedNew) {
           // Step 2c: bounded upward tail `[actualEndSub .. min(fc, actualEndSub + tail))`
-          // (e.g. startSub == 0 after early-stopped Pass 1C; disjoint from Steps 2a/2b).
-          const remainingUp = targetSealed - sealedAfterDown;
+          const remainingUp = winNeedNew - addedTotal;
           const upRanges = lanes.map((h) => {
             const fc = finalizedByLane.get(h.laneId) ?? 0n;
             const sEnd = actualEndSubByLane.get(h.laneId) ?? 0n;
             const hiCand = sEnd + tailPerLane;
             return { laneId: h.laneId, startSeq: sEnd, sealedCount: hiCand < fc ? hiCand : fc };
           });
+          let inUpAlready = 0;
+          for (const req of neededSubtrees.values()) {
+            for (const r of upRanges) {
+              if (req.laneId === r.laneId && req.subSeq >= r.startSeq && req.subSeq < r.sealedCount) {
+                inUpAlready++;
+                break;
+              }
+            }
+          }
           const decoys = selectHrwSealedDecoys({
             viewSk: params.fvk.viewSk,
             scope: syncScope,
             epochBucket,
             sealedByLane: upRanges,
             alreadySelected: new Set(neededSubtrees.keys()),
-            targetSealed: remainingUp,
+            targetSealed: inUpAlready + remainingUp,
           });
           for (const d of decoys) {
             addNeededSubtree(d.laneId, d.pageSeq);
           }
         }
+      }
+    };
+
+    if (!hasOutsideWindowSealed) {
+      padScannedWindow();
+    } else {
+      // Branch 3 (`hasOutsideWindowSealed === true`): only reachable via locally persisted
+      // `locallyFinalizedUnfrozen` legacy notes (`noteSubSeq < localFc_l` and
+      // `note.leafIndex < localNextMemoLeaf <= startLeaf`).
+      // Partition strictly into TWO disjoint domains whenever Pass 1C also scanned a non-uniform
+      // sealed window (`willPadWindow`):
+      //   - `L' = ⋃_l [0 .. legacyFc_l)` where `legacyFc_l = min(localFc_l, startSub_l)` on lanes
+      //     with `actualEndSub_l > startSub_l` (and `localFc_l` otherwise). Disjoint from `W` by
+      //     construction AND covers every outside-window legacy note.
+      //   - `W  = ⋃_l [startSub_l .. actualEndSub_l)` padded independently via `padScannedWindow`.
+      // Neither `uniformNewSubtrees`, returning frontiers, nor in-window hits can ever cannibalize
+      // `L'`, and forged `laneHdr.nextLeaf = 2^19..2^26` with empty Pass 1C (`windowSealedSubtrees === 0n`)
+      // leaves `willPadWindow === false` and 0% decoy rotation.
+      const willPadWindow = !fetchNewSubtreesUniformly && windowSealedSubtrees > 0n;
+      const localFcByLane = new Map<number, bigint>();
+      const localFinalizedRanges: Array<{
+        laneId: number;
+        startSeq: bigint;
+        sealedCount: bigint;
+      }> = [];
+      let localFinalizedTotal = 0n;
+      for (const h of lanes) {
+        const fc = finalizedByLane.get(h.laneId) ?? 0n;
+        const sStart = startSubByLane.get(h.laneId) ?? 0n;
+        const sEnd = actualEndSubByLane.get(h.laneId) ?? sStart;
+        const laneState = params.store.lanes[h.laneId]!;
+        // Bound `L'` strictly by full-subtree floor `localScannedFc = nextMemoLeaf / subSize`
+        // (matching `locallyFinalizedUnfrozen` & `padScannedWindow` Step 2b `[0..startSub)`):
+        // guarantees `L' ⊆ [0..startSub)` is unconditionally disjoint from `W`, eliminates
+        // unscanned-lane dilution AND mid-subtree boundary singleton pinpoint / rotation.
+        const localScannedFc = laneState.nextMemoLeaf / subSize;
+        const storedLen = BigInt(laneState.finalizedSubroots.length);
+        const minStoredFc = storedLen < fc ? storedLen : fc;
+        const rawLocalFc = minStoredFc < localScannedFc ? minStoredFc : localScannedFc;
+        const legacyFc =
+          willPadWindow && sEnd > sStart && sStart < rawLocalFc ? sStart : rawLocalFc;
+        localFcByLane.set(h.laneId, legacyFc);
+        localFinalizedRanges.push({ laneId: h.laneId, startSeq: 0n, sealedCount: legacyFc });
+        localFinalizedTotal += legacyFc;
+      }
+      let publicInLocal = 0;
+      for (const pub of publicSealedSubtrees.values()) {
+        if (pub.subSeq < (localFcByLane.get(pub.laneId) ?? 0n)) publicInLocal++;
+      }
+      let alreadyInLocal = 0;
+      for (const req of neededSubtrees.values()) {
+        if (req.subSeq < (localFcByLane.get(req.laneId) ?? 0n)) alreadyInLocal++;
+      }
+      const privateInLocal = Math.max(0, alreadyInLocal - publicInLocal);
+      const localPrivateBuckets = Math.max(1, Math.ceil(privateInLocal / batchUnit));
+      const localPrivateTarget = BigInt(localPrivateBuckets) * BigInt(batchUnit);
+      const localTargetBig = BigInt(publicInLocal) + localPrivateTarget;
+
+      if (localFinalizedTotal >= localTargetBig) {
+        const localTarget = Number(localTargetBig);
+        if (alreadyInLocal < localTarget) {
+          const decoys =
+            localFinalizedTotal <= BigInt(MAX_HRW_SEALED_SUBTREES)
+              ? selectHrwSealedDecoys({
+                  viewSk: params.fvk.viewSk,
+                  scope: syncScope,
+                  epochBucket,
+                  sealedByLane: localFinalizedRanges,
+                  alreadySelected: new Set(neededSubtrees.keys()),
+                  targetSealed: localTarget,
+                })
+              : selectLargePoolHrwSealedDecoys({
+                  viewSk: params.fvk.viewSk,
+                  scope: syncScope,
+                  epochBucket,
+                  sealedByLane: lanes.map((h) => ({
+                    laneId: h.laneId,
+                    sealedCount: localFcByLane.get(h.laneId) ?? 0n,
+                  })),
+                  alreadySelected: new Set(neededSubtrees.keys()),
+                  targetSealed: localTarget,
+                });
+          for (const d of decoys) {
+            addNeededSubtree(d.laneId, d.pageSeq);
+          }
+        }
+        if (willPadWindow) {
+          padScannedWindow();
+        }
       } else {
-        const olderRanges =
-          totalSealedSubtrees <= BigInt(MAX_HRW_SEALED_SUBTREES)
-            ? fullRangesByLane
-            : lanes.map((h) => {
-                const lid = h.laneId;
-                const fc = finalizedByLane.get(lid) ?? 0n;
-                let minS: bigint | null = null;
-                let maxS: bigint | null = null;
-                for (const req of neededSubtrees.values()) {
-                  if (req.laneId === lid && req.subSeq < fc) {
-                    minS = minS === null || req.subSeq < minS ? req.subSeq : minS;
-                    maxS = maxS === null || req.subSeq > maxS ? req.subSeq : maxS;
-                  }
-                }
-                if (minS !== null && maxS !== null) {
-                  const anchor = maxS - minS < perLaneMaxSpan ? minS + (maxS - minS) / 2n : minS;
-                  const half = perLaneMaxSpan / 2n;
-                  const rawLow = anchor > half ? anchor - half : 0n;
-                  const maxLow = fc > perLaneMaxSpan ? fc - perLaneMaxSpan : 0n;
-                  const low = rawLow < maxLow ? rawLow : maxLow;
-                  const hiCand = low + perLaneMaxSpan;
-                  return { laneId: lid, startSeq: low, sealedCount: hiCand < fc ? hiCand : fc };
-                }
-                const low = fc > perLaneMaxSpan ? fc - perLaneMaxSpan : 0n;
-                return { laneId: lid, startSeq: low, sealedCount: fc };
-              });
-        let outsideOlderCount = 0;
-        for (const req of neededSubtrees.values()) {
-          const fc = finalizedByLane.get(req.laneId) ?? 0n;
-          if (req.subSeq < fc) {
-            const r = olderRanges.find((e) => e.laneId === req.laneId);
-            if (!r || req.subSeq < r.startSeq || req.subSeq >= r.sealedCount) {
-              outsideOlderCount++;
+        // Tiny legacy store (`localFinalizedTotal < localTarget`): include ALL of `L'` uniformly;
+        // if a non-uniform Pass 1C window was also scanned, pad `W` FIRST so Step 3A's upward
+        // fallback never overlaps `W` or splits `W`'s 16-subtree bucket.
+        for (const r of localFinalizedRanges) {
+          for (let seq = 0n; seq < r.sealedCount; seq++) {
+            addNeededSubtree(r.laneId, seq);
+          }
+        }
+        if (willPadWindow) {
+          padScannedWindow();
+        }
+        const allSealedNow = countAllSealedNeeded();
+        const nonPublicSealedNow =
+          allSealedNow > BigInt(publicSealedSubtrees.size)
+            ? allSealedNow - BigInt(publicSealedSubtrees.size)
+            : 0n;
+        const rawLegacyNeed =
+          localPrivateTarget > nonPublicSealedNow ? localPrivateTarget - nonPublicSealedNow : 0n;
+        const globalAvail =
+          totalSealedSubtrees > allSealedNow ? totalSealedSubtrees - allSealedNow : 0n;
+        let remainingLegacy = Number(rawLegacyNeed < globalAvail ? rawLegacyNeed : globalAvail);
+        if (remainingLegacy > 0) {
+          const scaledTail = localPrivateTarget * 64n;
+          const minTail = scaledTail > 1024n ? scaledTail : 1024n;
+          const tailPerLane = minTail < perLaneMaxSpan ? minTail : perLaneMaxSpan;
+          const upRanges = lanes.map((h) => {
+            const fc = finalizedByLane.get(h.laneId) ?? 0n;
+            const lfc = localFcByLane.get(h.laneId) ?? 0n;
+            const hiCand = lfc + tailPerLane;
+            return { laneId: h.laneId, startSeq: lfc, sealedCount: hiCand < fc ? hiCand : fc };
+          });
+          let inUpCount = 0;
+          for (const req of neededSubtrees.values()) {
+            for (const r of upRanges) {
+              if (req.laneId === r.laneId && req.subSeq >= r.startSeq && req.subSeq < r.sealedCount) {
+                inUpCount++;
+                break;
+              }
+            }
+          }
+          const decoys = selectHrwSealedDecoys({
+            viewSk: params.fvk.viewSk,
+            scope: syncScope,
+            epochBucket,
+            sealedByLane: upRanges,
+            alreadySelected: new Set(neededSubtrees.keys()),
+            targetSealed: inUpCount + remainingLegacy,
+          });
+          for (const d of decoys) {
+            if (addNeededSubtree(d.laneId, d.pageSeq) && remainingLegacy > 0) {
+              remainingLegacy--;
             }
           }
         }
-        const olderTarget = Math.max(0, targetSealed - outsideOlderCount);
-        const decoys = selectHrwSealedDecoys({
-          viewSk: params.fvk.viewSk,
-          scope: syncScope,
-          epochBucket,
-          sealedByLane: olderRanges,
-          alreadySelected: new Set(neededSubtrees.keys()),
-          targetSealed: olderTarget,
-        });
-        for (const d of decoys) {
-          addNeededSubtree(d.laneId, d.pageSeq);
+        if (remainingLegacy > 0) {
+          const sealedAfterUp = Number(countAllSealedNeeded());
+          const decoys = selectLargePoolHrwSealedDecoys({
+            viewSk: params.fvk.viewSk,
+            scope: syncScope,
+            epochBucket,
+            sealedByLane: lanes.map((h) => ({
+              laneId: h.laneId,
+              sealedCount: finalizedByLane.get(h.laneId) ?? 0n,
+            })),
+            alreadySelected: new Set(neededSubtrees.keys()),
+            targetSealed: sealedAfterUp + remainingLegacy,
+          });
+          for (const d of decoys) {
+            addNeededSubtree(d.laneId, d.pageSeq);
+          }
         }
       }
     }
@@ -1310,6 +1908,34 @@ export async function syncCompactStoreWithRpc(params: {
         );
       }
       const frLeaves = sub.leaves.map((b) => frFromBeBytesStrict(b));
+      // Enforce append-only prefix immutability against persisted `frontierLeaves` and
+      // `prevSealedLeaves` (note-independent; blocks single-leaf frontier rewrite oracles and
+      // permanent `finalizedSubroots` poisoning while remaining safe on honest lagging RPC
+      // replicas whose truncated prefix still matches).
+      const laneStore = params.store.lanes[item.req.laneId]!;
+      if (laneStore.frontierLeaves.length > 0 && item.req.subSeq === laneStore.frontierSubSeq) {
+        const prefixLen = Math.min(sub.leaves.length, laneStore.frontierLeaves.length);
+        for (let k = 0; k < prefixLen; k++) {
+          if (compareBytes32(sub.leaves[k]!, laneStore.frontierLeaves[k]!) !== 0) {
+            throw new Error(
+              'SubtreePage frontier prefix mismatch against persisted frontierLeaves',
+            );
+          }
+        }
+      }
+      if (
+        laneStore.prevSealedLeaves.length > 0 &&
+        laneStore.prevSealedSubSeq === item.req.subSeq
+      ) {
+        const prefixLen = Math.min(sub.leaves.length, laneStore.prevSealedLeaves.length);
+        for (let k = 0; k < prefixLen; k++) {
+          if (compareBytes32(sub.leaves[k]!, laneStore.prevSealedLeaves[k]!) !== 0) {
+            throw new Error(
+              'SubtreePage prefix mismatch against persisted prevSealedLeaves',
+            );
+          }
+        }
+      }
       const fc = finalizedByLane.get(item.req.laneId) ?? 0n;
       const expectedMinLeaves =
         item.req.subSeq < fc ? SUBTREE_LEAVES : (frontierRemByLane.get(item.req.laneId) ?? 0);
@@ -1325,6 +1951,18 @@ export async function syncCompactStoreWithRpc(params: {
         const expectedSubrootFr = frFromBeBytesStrict(expectedSubrootBe);
         if (computeSubtree256Root(frLeaves, SUBTREE_LEAVES) !== expectedSubrootFr) {
           throw new Error('SubtreePage root mismatch against SubtreeRootPage');
+        }
+      } else if (
+        sub.leaves.length === SUBTREE_LEAVES &&
+        item.req.subSeq < BigInt(laneStore.finalizedSubroots.length)
+      ) {
+        // Even if Phase 0 `laneHdr.nextLeaf` lagged below persisted `finalizedSubroots`, any
+        // fetched 256-leaf page covering an immutable local subroot MUST match it.
+        const expectedSubrootFr = frFromBeBytesStrict(
+          laneStore.finalizedSubroots[Number(item.req.subSeq)]!,
+        );
+        if (computeSubtree256Root(frLeaves, SUBTREE_LEAVES) !== expectedSubrootFr) {
+          throw new Error('SubtreePage root mismatch against persisted finalizedSubroots');
         }
       }
       if (item.req.subSeq >= fc) {
@@ -1404,20 +2042,56 @@ export async function syncCompactStoreWithRpc(params: {
     decrypted: DecryptedMemo;
     cmBe: Uint8Array;
   }> = [];
-  const pendingWatermarks: Array<{ laneId: number; verifiedWatermark: bigint }> = [];
+  const pendingWatermarks = new Map<number, bigint>();
+  const holdSealedFrontierLanes = new Set<number>();
 
   for (const laneHdr of lanes) {
     const l = laneHdr.laneId;
     const laneState = params.store.lanes[l]!;
     const oldFrontierSubSeq = laneState.frontierSubSeq;
     const oldFrontierLeaves = laneState.frontierLeaves;
+    const oldNextMemoLeaf = laneState.nextMemoLeaf;
+    const finalizedCount = laneHdr.nextLeaf / subSize;
+    const startLeaf = scanStartLeafByLane.get(l) ?? oldNextMemoLeaf;
+    const startSub = startSubByLane.get(l) ?? 0n;
+
+    // Returning-wallet privacy & liveness invariant: ONLY hold a sealed frontier page if this
+    // wallet had actually memo-scanned leaves inside `oldFrontierSubSeq` prior to this sync
+    // (`oldNextMemoLeaf > oldFrontierSubSeq * 256 && oldFrontierSubSeq >= startSub`) AND
+    // `(l, oldFrontierSubSeq)` was not fetched in Pass 1D. Never hold a never-memo-scanned
+    // frontier (eliminates permanent livelocks on `> 786k`-note fresh catch-ups and Pass 1B
+    // `birthdaySlot` skips while preserving 100% 0-note vs N-note uniformity).
+    const holdSealedFrontier =
+      oldFrontierLeaves.length > 0 &&
+      oldFrontierSubSeq < finalizedCount &&
+      oldNextMemoLeaf > oldFrontierSubSeq * subSize &&
+      oldFrontierSubSeq >= startSub &&
+      !fetchedSubtrees.has(`${l}:${oldFrontierSubSeq.toString()}`);
+    if (holdSealedFrontier) {
+      holdSealedFrontierLanes.add(l);
+    }
 
     // Verify all view-tag candidates for this lane in ascending leaf order into a temporary buffer;
     // `store` is ONLY mutated below when `!anyPass1dSubtreeMissing` so any dropped Pass 1D page
     // (hit OR decoy) leaves `store` and `discoveredNotes` 100% untouched.
-    let verifiedWatermark = scannedWatermarkByLane.get(l) ?? laneState.nextMemoLeaf;
+    let verifiedWatermark = scannedWatermarkByLane.get(l) ?? oldNextMemoLeaf;
+    if (strictSubtreeAtomic) {
+      const finalizedLeaves = finalizedCount * subSize;
+      if (dupEndSubCap.has(l) || verifiedWatermark < finalizedLeaves) {
+        const actualEndSub = actualEndSubByLane.get(l) ?? 0n;
+        const endLeaf = actualEndSub * subSize;
+        const atomicCap = endLeaf > startLeaf ? endLeaf : startLeaf;
+        if (verifiedWatermark > atomicCap) {
+          verifiedWatermark = atomicCap;
+        }
+      }
+    }
+    if (holdSealedFrontier && verifiedWatermark > oldNextMemoLeaf) {
+      verifiedWatermark = oldNextMemoLeaf;
+    }
     const hits = hitsByLane.get(l) ?? [];
     for (const hit of hits) {
+      if (hit.leafIdx >= verifiedWatermark) break;
       const memoPage = fetchedFullMemos.get(`${l}:${hit.memoSeq.toString()}`);
       const subSeq = hit.leafIdx / subSize;
       const subSlot = Number(hit.leafIdx % subSize);
@@ -1453,7 +2127,7 @@ export async function syncCompactStoreWithRpc(params: {
         });
       }
     }
-    pendingWatermarks.push({ laneId: l, verifiedWatermark });
+    pendingWatermarks.set(l, verifiedWatermark);
   }
 
   // Privacy & atomicity invariant: if ANY Pass 1A `SubtreeRootPage` stopped short of
@@ -1529,9 +2203,24 @@ export async function syncCompactStoreWithRpc(params: {
       }
     }
 
+    // Public, note-independent lagging-lane guard: never commit newly verified memos or advance
+    // `nextMemoLeaf` for a lane whose Phase 0 `finalizedCount` lags behind already-persisted
+    // immutable `finalizedSubroots` (blocks forged unsealed-frontier note injection inside an
+    // already-finalized subtree).
+    const laggingLanes = new Set<number>();
+    for (const laneHdr of lanes) {
+      if (
+        laneHdr.nextLeaf / subSize <
+        BigInt(params.store.lanes[laneHdr.laneId]!.finalizedSubroots.length)
+      ) {
+        laggingLanes.add(laneHdr.laneId);
+      }
+    }
+
     // All validations & precomputations succeeded: commit atomically to `store`.
     for (const laneHdr of lanes) {
       const l = laneHdr.laneId;
+      if (holdSealedFrontierLanes.has(l) || laggingLanes.has(l)) continue;
       const newRoots = pass1aNewSubroots.get(l);
       if (newRoots && newRoots.length > 0) {
         params.store.lanes[l]!.finalizedSubroots.push(...newRoots);
@@ -1545,6 +2234,7 @@ export async function syncCompactStoreWithRpc(params: {
     }
 
     for (const m of pendingVerifiedMemos) {
+      if (laggingLanes.has(m.laneId)) continue;
       if (
         params.store.recordVerifiedMemo({
           fvk: params.fvk,
@@ -1564,7 +2254,8 @@ export async function syncCompactStoreWithRpc(params: {
       }
     }
 
-    for (const { laneId, verifiedWatermark } of pendingWatermarks) {
+    for (const [laneId, verifiedWatermark] of pendingWatermarks) {
+      if (laggingLanes.has(laneId)) continue;
       const laneState = params.store.lanes[laneId]!;
       if (verifiedWatermark > laneState.nextMemoLeaf) {
         laneState.nextMemoLeaf = verifiedWatermark;
@@ -1573,6 +2264,7 @@ export async function syncCompactStoreWithRpc(params: {
 
     for (const laneHdr of lanes) {
       const l = laneHdr.laneId;
+      if (holdSealedFrontierLanes.has(l)) continue;
       const laneState = params.store.lanes[l]!;
       const oldFrontierSubSeq = laneState.frontierSubSeq;
       const oldFrontierLeaves = laneState.frontierLeaves;
@@ -1644,13 +2336,45 @@ export async function syncCompactStoreWithRpc(params: {
   // whether Pass 2 was skipped. If ANY Pass 1A/1D page was missing OR any lane had an
   // unverified miss, we guarantee unconditional rollback of `nextNfIndex` across ALL lanes on
   // BOTH normal return and error exits.
+  // Public, note-independent completeness & Phase 0 monotonicity gate across ALL `0..NUM_LANES`:
+  // never commit `nextNfIndex` if ANY lane still has persisted on-chain leaves ahead of
+  // `nextMemoLeaf` OR if Phase 0 lags behind ANY lane's previously observed monotonic high-water
+  // marks (`activeLanes`, `nextLeaf`, `nfCount`). Blocks permanent cross-lane spend-detection
+  // loss for BOTH interrupted catch-up wallets AND caught-up returning wallets.
+  let allPersistedLeavesScanned = true;
+  for (let l = 0; l < NUM_LANES; l++) {
+    const lane = params.store.lanes[l]!;
+    const persistedSealed = BigInt(lane.finalizedSubroots.length) * subSize;
+    const persistedFrontier =
+      lane.frontierLeaves.length === 0
+        ? 0n
+        : lane.frontierSubSeq * subSize + BigInt(lane.frontierLeaves.length);
+    const persistedCeil =
+      persistedSealed > persistedFrontier ? persistedSealed : persistedFrontier;
+    if (lane.nextMemoLeaf < persistedCeil) {
+      allPersistedLeavesScanned = false;
+      break;
+    }
+    const localLeafHwm =
+      persistedCeil > lane.nextMemoLeaf ? persistedCeil : lane.nextMemoLeaf;
+    if (localLeafHwm > 0n || lane.nextNfIndex > 0n) {
+      const hdr = lanes.find((h) => h.laneId === l);
+      if (!hdr || hdr.nextLeaf < localLeafHwm || hdr.nfCount < lane.nextNfIndex) {
+        allPersistedLeavesScanned = false;
+        break;
+      }
+    }
+  }
   const allLanesCaughtUp =
     !pass1Incomplete &&
+    allPersistedLeavesScanned &&
     lanes.every((h) => params.store.lanes[h.laneId]!.nextMemoLeaf >= h.nextLeaf);
   const savedNextNfIndex = new Map<number, bigint>();
   for (const laneHdr of lanes) {
     savedNextNfIndex.set(laneHdr.laneId, params.store.lanes[laneHdr.laneId]!.nextNfIndex);
   }
+  const savedSpent = params.store.notes.map((n) => n.spent);
+  let pass2Succeeded = false;
 
   try {
     const nfStartIdxByLane = new Map<number, bigint>();
@@ -1708,6 +2432,15 @@ export async function syncCompactStoreWithRpc(params: {
           const skipTo = st.lo * nfSize;
           nfStartIdxByLane.set(st.laneId, skipTo < st.nfCount ? skipTo : st.nfCount);
         }
+      }
+    }
+
+    // Advance `nextNfIndex` to each lane's verified birthday-skip watermark before streaming
+    // contiguous NullifierPages (rolled back unconditionally on Pass 2 error or `!allLanesCaughtUp`).
+    for (const [l, startIdx] of nfStartIdxByLane) {
+      const laneState = params.store.lanes[l]!;
+      if (startIdx > laneState.nextNfIndex) {
+        laneState.nextNfIndex = startIdx;
       }
     }
 
@@ -1799,18 +2532,18 @@ export async function syncCompactStoreWithRpc(params: {
       }
     }
 
-    if (allLanesCaughtUp) {
-      for (const [l, startIdx] of nfStartIdxByLane) {
-        const laneState = params.store.lanes[l]!;
-        if (startIdx > laneState.nextNfIndex) {
-          laneState.nextNfIndex = startIdx;
-        }
-      }
-    }
+    pass2Succeeded = true;
   } finally {
-    // If Pass 1 was incomplete on any lane, unconditionally restore `nextNfIndex` on BOTH
-    // normal return and error exits so notes discovered on retry are never skipped past their spends.
-    if (!allLanesCaughtUp) {
+    // On Pass 2 error, roll back BOTH `nextNfIndex` and `note.spent` atomically across all lanes.
+    // On Pass 1 incomplete (`!allLanesCaughtUp`), unconditionally restore `nextNfIndex`.
+    if (!pass2Succeeded) {
+      for (const [l, prevIdx] of savedNextNfIndex) {
+        params.store.lanes[l]!.nextNfIndex = prevIdx;
+      }
+      for (let i = 0; i < savedSpent.length && i < params.store.notes.length; i++) {
+        params.store.notes[i]!.spent = savedSpent[i]!;
+      }
+    } else if (!allLanesCaughtUp) {
       for (const [l, prevIdx] of savedNextNfIndex) {
         params.store.lanes[l]!.nextNfIndex = prevIdx;
       }

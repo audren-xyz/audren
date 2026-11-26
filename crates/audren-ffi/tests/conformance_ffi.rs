@@ -458,8 +458,22 @@ fn ffi_conformance_matches_spec_vectors() {
     let op_ix_0 = build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 2, 0, 0, 1, Some(0)).unwrap();
     assert_eq!(op_ix_0.data.len(), 23, "OpenPage wire length must be 23 B (incl. max_payer_deficit)");
     assert_eq!(&op_ix_0.data[15..23], &0u64.to_le_bytes());
-    let op_ix_max = build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 2, 0, 0, 1, None).unwrap();
+    let op_ix_default = build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 2, 0, 0, 1, None).unwrap();
+    assert_eq!(
+        &op_ix_default.data[15..23],
+        &0u64.to_le_bytes(),
+        "build_open_page_ix(None) must fail-closed with max_payer_deficit=0"
+    );
+    let op_ix_max = build_open_page_ix(pid.clone(), s0.pubkey_b58.clone(), 2, 0, 0, 1, Some(u64::MAX)).unwrap();
     assert_eq!(&op_ix_max.data[15..23], &u64::MAX.to_le_bytes());
+
+    // Redacted Debug on FFI secret records
+    let dbg_keys = format!("{alice:?}");
+    assert!(dbg_keys.contains("<redacted>"));
+    let dbg_fvk = format!("{fvk:?}");
+    assert!(dbg_fvk.contains("<redacted>"));
+    let dbg_sess = format!("{s0:?}");
+    assert!(dbg_sess.contains("<redacted>"));
     assert!(build_init_pool_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 0, 0, 0).is_err());
     assert!(build_init_root_history_ix(pid.clone(), s0.pubkey_b58.clone(), 0, 257, 4).is_err());
     assert!(derive_lane_pda(pid.clone(), 0, 16).is_err());

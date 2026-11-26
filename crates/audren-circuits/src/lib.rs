@@ -11,6 +11,7 @@ pub mod poseidon;
 pub mod solana_export;
 
 use ark_bn254::{Bn254, Fr};
+use ark_ec::AffineRepr;
 use ark_groth16::{Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -64,19 +65,63 @@ pub fn serialize_pk_compressed(pk: &ProvingKey<Bn254>) -> Vec<u8> {
     out
 }
 
-/// Deserialize a compressed `ProvingKey<Bn254>` (validated on curve).
-pub fn deserialize_pk_compressed(bytes: &[u8]) -> Result<ProvingKey<Bn254>, String> {
-    ProvingKey::<Bn254>::deserialize_compressed(bytes).map_err(|e| e.to_string())
+/// Exact frozen `JoinSplit4AryCircuit` (`17,861` R1CS, `N = 2^15`) Groth16 proving key dimensions.
+pub const JOINSPLIT_PK_GAMMA_ABC_LEN: usize = 2;
+pub const JOINSPLIT_PK_QUERY_LEN: usize = 17_990;
+pub const JOINSPLIT_PK_H_QUERY_LEN: usize = 32_767;
+pub const JOINSPLIT_PK_L_QUERY_LEN: usize = 17_988;
+
+/// Validate that a deserialized `ProvingKey<Bn254>` structurally matches the frozen
+/// `JoinSplit4AryCircuit` dimensions and has non-zero, non-degenerate Phase-2 curve elements,
+/// preventing out-of-bounds panics inside `ark-groth16` on crafted or wrong-circuit keys.
+pub fn validate_joinsplit_pk(pk: &ProvingKey<Bn254>) -> Result<(), String> {
+    if pk.vk.gamma_abc_g1.len() != JOINSPLIT_PK_GAMMA_ABC_LEN
+        || pk.a_query.len() != JOINSPLIT_PK_QUERY_LEN
+        || pk.b_g1_query.len() != JOINSPLIT_PK_QUERY_LEN
+        || pk.b_g2_query.len() != JOINSPLIT_PK_QUERY_LEN
+        || pk.h_query.len() != JOINSPLIT_PK_H_QUERY_LEN
+        || pk.l_query.len() != JOINSPLIT_PK_L_QUERY_LEN
+    {
+        return Err("proving key dimensions do not match frozen JoinSplit4AryCircuit".to_string());
+    }
+    if pk.vk.alpha_g1.is_zero()
+        || pk.beta_g1.is_zero()
+        || pk.vk.beta_g2.is_zero()
+        || pk.vk.gamma_g2.is_zero()
+        || pk.delta_g1.is_zero()
+        || pk.vk.delta_g2.is_zero()
+        || pk.vk.delta_g2 == pk.vk.gamma_g2
+    {
+        return Err("proving key has degenerate or zero group elements".to_string());
+    }
+    Ok(())
 }
 
-/// Zeroize a sensitive stack byte buffer with a volatile write + compiler fence so the
+/// Deserialize a compressed `ProvingKey<Bn254>` (curve-validated, exact length with zero trailing
+/// bytes, and structurally verified against the frozen `JoinSplit4AryCircuit` dimensions).
+pub fn deserialize_pk_compressed(bytes: &[u8]) -> Result<ProvingKey<Bn254>, String> {
+    let mut cursor = bytes;
+    let pk = ProvingKey::<Bn254>::deserialize_compressed(&mut cursor).map_err(|e| e.to_string())?;
+    if !cursor.is_empty() {
+        return Err("trailing bytes after compressed proving key".to_string());
+    }
+    validate_joinsplit_pk(&pk)?;
+    Ok(pk)
+}
+
+/// Zeroize a sensitive stack byte buffer with `zeroize` + compiler fence so the
 /// compiler cannot elide clearing prover RNG seeds on normal or early-error returns.
 #[inline(never)]
 fn zeroize_bytes(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        // SAFETY: `b` is a valid, aligned mutable reference to a single byte.
-        unsafe { core::ptr::write_volatile(b, 0) };
-    }
+    zeroize::Zeroize::zeroize(buf);
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Overwrite a `ChaCha20Rng`'s internal key/counter state after proving completes.
+#[inline(never)]
+fn scrub_rng(rng: &mut ChaCha20Rng) {
+    *rng = ChaCha20Rng::from_seed([0u8; 32]);
+    core::hint::black_box(&*rng);
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
@@ -93,8 +138,8 @@ pub fn check_joinsplit_satisfied(circuit: &JoinSplit4AryCircuit) -> Result<(), S
         }
     }
     let cs = ConstraintSystem::<Fr>::new_ref();
-    circuit
-        .clone()
+    let cloned = circuit.clone();
+    cloned
         .generate_constraints(cs.clone())
         .map_err(|e| format!("joinsplit constraint synthesis failed: {e}"))?;
     let satisfied = cs
@@ -110,16 +155,24 @@ pub fn check_joinsplit_satisfied(circuit: &JoinSplit4AryCircuit) -> Result<(), S
 /// constraint satisfaction BEFORE invoking `Groth16::prove` (zero debug-build panics).
 pub fn try_prove_joinsplit(
     pk: &ProvingKey<Bn254>,
-    circuit: JoinSplit4AryCircuit,
+    mut circuit: JoinSplit4AryCircuit,
     mut seed: [u8; 32],
 ) -> Result<Proof<Bn254>, String> {
+    if let Err(err) = validate_joinsplit_pk(pk) {
+        circuit.zeroize_secrets();
+        zeroize_bytes(&mut seed);
+        return Err(err);
+    }
     if let Err(err) = check_joinsplit_satisfied(&circuit) {
+        circuit.zeroize_secrets();
         zeroize_bytes(&mut seed);
         return Err(err);
     }
     let mut rng = ChaCha20Rng::from_seed(seed);
     zeroize_bytes(&mut seed);
-    Groth16::<Bn254>::prove(pk, circuit, &mut rng).map_err(|e| e.to_string())
+    let res = Groth16::<Bn254>::prove(pk, circuit, &mut rng).map_err(|e| e.to_string());
+    scrub_rng(&mut rng);
+    res
 }
 
 /// Generate a BN254 Groth16 proof for `JoinSplit4AryCircuit`.
@@ -218,7 +271,11 @@ pub fn decode_joinsplit_witness_bytes(buf: &[u8]) -> Result<JoinSplit4AryCircuit
     let public_amount_out = read_u64(&mut off)?;
     let relayer_fee_amount = read_u64(&mut off)?;
     let ctx_hash = read_fr(&mut off)?;
-    let omit_nf1 = buf[off] != 0;
+    let omit_nf1 = match buf[off] {
+        0 => false,
+        1 => true,
+        _ => return Err(-3),
+    };
     off += 1;
 
     let mut inputs_vec = Vec::with_capacity(2);
@@ -228,7 +285,11 @@ pub fn decode_joinsplit_witness_bytes(buf: &[u8]) -> Result<JoinSplit4AryCircuit
         let asset_id = read_fr(&mut off)?;
         let amount = read_u64(&mut off)?;
         let blinding = read_fr(&mut off)?;
-        let is_dummy = buf[off] != 0;
+        let is_dummy = match buf[off] {
+            0 => false,
+            1 => true,
+            _ => return Err(-3),
+        };
         off += 1;
         let mut positions = [0u8; TOTAL_DEPTH_4ARY];
         positions.copy_from_slice(&buf[off..off + TOTAL_DEPTH_4ARY]);
@@ -293,10 +354,16 @@ pub fn decode_joinsplit_witness_bytes(buf: &[u8]) -> Result<JoinSplit4AryCircuit
 fn prove_and_verify_abi_output(
     pk: &ProvingKey<Bn254>,
     pvk: &PreparedVerifyingKey<Bn254>,
-    circuit: JoinSplit4AryCircuit,
+    mut circuit: JoinSplit4AryCircuit,
     mut seed: [u8; 32],
 ) -> Result<[u8; PROVE_OUTPUT_BYTES], i32> {
+    if validate_joinsplit_pk(pk).is_err() {
+        circuit.zeroize_secrets();
+        zeroize_bytes(&mut seed);
+        return Err(-5);
+    }
     if check_joinsplit_satisfied(&circuit).is_err() {
+        circuit.zeroize_secrets();
         zeroize_bytes(&mut seed);
         return Err(-6);
     }
@@ -304,7 +371,9 @@ fn prove_and_verify_abi_output(
     let pub_hash = pub_in.compute_hash();
     let mut rng = ChaCha20Rng::from_seed(seed);
     zeroize_bytes(&mut seed);
-    let proof = Groth16::<Bn254>::prove(pk, circuit, &mut rng).map_err(|_| -4)?;
+    let proof_res = Groth16::<Bn254>::prove(pk, circuit, &mut rng).map_err(|_| -4);
+    scrub_rng(&mut rng);
+    let proof = proof_res?;
     let verified =
         Groth16::<Bn254>::verify_with_processed_vk(pvk, &[pub_hash], &proof).unwrap_or(false);
     if !verified {
@@ -328,6 +397,7 @@ fn prove_and_verify_abi_output(
 mod wasm_exports {
     use super::*;
     use ark_groth16::prepare_verifying_key;
+    use std::alloc::{alloc, dealloc, Layout};
     use std::cell::RefCell;
 
     fn custom_rng(_buf: &mut [u8]) -> Result<(), getrandom::Error> {
@@ -342,22 +412,44 @@ mod wasm_exports {
             const { RefCell::new(None) };
     }
 
+    #[inline]
+    fn valid_wasm_range(ptr: usize, len: usize) -> bool {
+        ptr != 0
+            && len > 0
+            && len <= isize::MAX as usize
+            && ptr.checked_add(len).is_some()
+    }
+
     #[no_mangle]
     pub extern "C" fn wasm_alloc(len: usize) -> *mut u8 {
-        let mut buf = Vec::<u8>::with_capacity(len);
-        let ptr = buf.as_mut_ptr();
-        std::mem::forget(buf);
-        ptr
+        if len == 0 || len > isize::MAX as usize {
+            return core::ptr::null_mut();
+        }
+        let Ok(layout) = Layout::from_size_align(len, 1) else {
+            return core::ptr::null_mut();
+        };
+        // SAFETY: `layout.size() > 0` and alignment is `1`. Returns null on OOM without panicking.
+        unsafe { alloc(layout) }
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn wasm_dealloc(ptr: *mut u8, len: usize) {
-        let _ = Vec::from_raw_parts(ptr, 0, len);
+        if ptr.is_null() || len == 0 || len > isize::MAX as usize {
+            return;
+        }
+        if let Ok(layout) = Layout::from_size_align(len, 1) {
+            // SAFETY: Caller must pass a live `(ptr, len)` allocation from `wasm_alloc(len)`.
+            unsafe { dealloc(ptr, layout) };
+        }
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn wasm_load_pk_compressed(ptr: *const u8, len: usize) -> i32 {
-        let slice = std::slice::from_raw_parts(ptr, len);
+        if !valid_wasm_range(ptr as usize, len) {
+            return -5;
+        }
+        // SAFETY: Non-null, non-empty, `<= isize::MAX`, non-wrapping byte range validated above.
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         match deserialize_pk_compressed(slice) {
             Ok(pk) => {
                 let pvk = prepare_verifying_key(&pk.vk);
@@ -378,8 +470,17 @@ mod wasm_exports {
         seed_ptr: *const u8,
         out_ptr: *mut u8,
     ) -> i32 {
-        let witness = std::slice::from_raw_parts(witness_ptr, witness_len);
-        let seed_slice = std::slice::from_raw_parts(seed_ptr, 32);
+        if witness_len != WITNESS_TOTAL_BYTES
+            || !valid_wasm_range(witness_ptr as usize, witness_len)
+            || !valid_wasm_range(seed_ptr as usize, 32)
+            || !valid_wasm_range(out_ptr as usize, PROVE_OUTPUT_BYTES)
+        {
+            return -2;
+        }
+        // SAFETY: All three pointer/length ranges are non-null, non-wrapping, and `<= isize::MAX`.
+        // `witness` and `seed_slice` are consumed before `out_ptr` is turned into `&mut [u8]`.
+        let witness = unsafe { std::slice::from_raw_parts(witness_ptr, witness_len) };
+        let seed_slice = unsafe { std::slice::from_raw_parts(seed_ptr, 32) };
         let mut seed = [0u8; 32];
         seed.copy_from_slice(seed_slice);
 
@@ -394,11 +495,15 @@ mod wasm_exports {
         let rc = CACHED_PK.with(|c| {
             let guard = c.borrow();
             let Some((pk, pvk)) = guard.as_ref() else {
+                let mut c_drop = circuit;
+                c_drop.zeroize_secrets();
                 return -1;
             };
             match prove_and_verify_abi_output(pk, pvk, circuit, seed) {
                 Ok(encoded) => {
-                    let out = std::slice::from_raw_parts_mut(out_ptr, PROVE_OUTPUT_BYTES);
+                    // SAFETY: `out_ptr` was validated for `PROVE_OUTPUT_BYTES` above and no input
+                    // slices remain live.
+                    let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, PROVE_OUTPUT_BYTES) };
                     out.copy_from_slice(&encoded);
                     0
                 }
@@ -421,7 +526,14 @@ mod wasm_exports {
         if n == 0 || n > 12 {
             return -2;
         }
-        let raw = std::slice::from_raw_parts(inputs_ptr, n * 32);
+        let in_bytes = n * 32;
+        if !valid_wasm_range(inputs_ptr as usize, in_bytes)
+            || !valid_wasm_range(out_ptr as usize, 32)
+        {
+            return -2;
+        }
+        // SAFETY: Validated non-null, non-wrapping input range; read completes before `out_ptr` write.
+        let raw = unsafe { std::slice::from_raw_parts(inputs_ptr, in_bytes) };
         let mut frs = Vec::with_capacity(n);
         for i in 0..n {
             let chunk: [u8; 32] = raw[i * 32..(i + 1) * 32].try_into().unwrap();
@@ -431,7 +543,8 @@ mod wasm_exports {
             frs.push(f);
         }
         let digest = poseidon::poseidon_hash(&frs);
-        let out = std::slice::from_raw_parts_mut(out_ptr, 32);
+        // SAFETY: `out_ptr` validated for 32 bytes above and `raw` is no longer live.
+        let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, 32) };
         out.copy_from_slice(&fr_to_be_bytes(&digest));
         0
     }
@@ -676,6 +789,53 @@ mod tests {
             prove_and_verify_abi_output(&pk, &pvk, bad_pos, seed),
             Err(-6),
             "invalid 4-ary position must be rejected with -6"
+        );
+    }
+
+    #[test]
+    fn pk_structural_validation_strict_booleans_and_redacted_debug() {
+        let (canonical_pk, _) = load_canonical_joinsplit_keys();
+        assert!(validate_joinsplit_pk(&canonical_pk).is_ok());
+
+        // 1. Trailing bytes after compressed PK must be rejected
+        let mut with_trailing = CANONICAL_PK_COMPRESSED.to_vec();
+        with_trailing.push(0x00);
+        assert!(deserialize_pk_compressed(&with_trailing).is_err());
+
+        // 2. Degenerate Phase-2 PK (`delta_g2 == gamma_g2`) must be rejected
+        let mut deg_pk = canonical_pk.clone();
+        deg_pk.vk.delta_g2 = deg_pk.vk.gamma_g2;
+        assert!(validate_joinsplit_pk(&deg_pk).is_err());
+        let deg_bytes = serialize_pk_compressed(&deg_pk);
+        assert!(deserialize_pk_compressed(&deg_bytes).is_err());
+
+        // 3. Empty/truncated query PK (wrong circuit) must be rejected before ark-groth16 panics
+        let mut empty_pk = canonical_pk;
+        empty_pk.a_query.clear();
+        assert!(validate_joinsplit_pk(&empty_pk).is_err());
+        let empty_bytes = serialize_pk_compressed(&empty_pk);
+        assert!(deserialize_pk_compressed(&empty_bytes).is_err());
+
+        // 4. Strict 0|1 boolean validation in `decode_joinsplit_witness_bytes`
+        let real = JoinSplit4AryCircuit::realistic_benchmark_instance();
+        let valid_bytes = encode_joinsplit_witness_bytes(&real);
+        for bad_off in [144usize, 281usize, 2358usize] {
+            let mut bad = valid_bytes;
+            bad[bad_off] = 2;
+            assert_eq!(
+                decode_joinsplit_witness_bytes(&bad).unwrap_err(),
+                -3,
+                "non-boolean byte at witness offset {bad_off} must return -3"
+            );
+        }
+
+        // 5. Redacted Debug on JoinSplit4AryCircuit / JoinSplitInputWitness never leaks spend_sk
+        let dbg = format!("{real:?}");
+        assert!(dbg.contains("<redacted>"));
+        let sk_dbg = format!("{:?}", real.inputs[0].spend_sk);
+        assert!(
+            !dbg.contains(&sk_dbg),
+            "JoinSplit4AryCircuit Debug output must not expose spend_sk"
         );
     }
 }

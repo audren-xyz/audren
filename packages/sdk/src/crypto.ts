@@ -264,6 +264,9 @@ function computeContributorySharedSecret(secret32: Uint8Array, public32: Uint8Ar
   ) {
     return null;
   }
+  if (isAllZero32(public32)) {
+    return null;
+  }
   let shared: Uint8Array;
   try {
     shared = x25519.getSharedSecret(secret32, public32);
@@ -416,38 +419,27 @@ export function prepareDynamicSwapMemo(
   return { tweak: dynTweak, blinding: dynBlinding, dynHead34, dynMask72 };
 }
 
-/**
- * Decrypt or unmask a `106 B` `MemoPage` entry (`viewTag[2]`, `epk[32]`, `ct72[72]`) AND
- * mandatorily verify `computeNoteCommitment(stealthOwner, deriveAssetId(mint), amount, blinding) == onchainCmBe`.
- * Rejects low-order X25519 ephemeral keys, tampered AEAD AAD, non-v1 static memo versions,
- * and non-zero trailing padding bytes on `AUD1DYN1` dynamic swap memos.
- */
-export function tryDecryptAndVerifyMemoEntry(
-  fvk: MemoVerificationFvk,
+const KDF_DOMAIN_HIT_DEDUP = 'audren/v1/hit_dedup';
+
+function decryptMemoPayloadInternal(
+  viewSk: Uint8Array,
   viewTag: Uint8Array,
   epk: Uint8Array,
   ct72: Uint8Array,
-  onchainCmBe: Uint8Array,
-): DecryptedMemo | null {
+): { memo: DecryptedMemo; dedupTag: Uint8Array } | null {
   if (
-    !fvk ||
-    typeof fvk !== 'object' ||
-    !(fvk.viewSk instanceof Uint8Array) ||
-    fvk.viewSk.byteLength !== 32 ||
-    !(fvk.spendPk instanceof Uint8Array) ||
-    fvk.spendPk.byteLength !== 32 ||
+    !(viewSk instanceof Uint8Array) ||
+    viewSk.byteLength !== 32 ||
     !(viewTag instanceof Uint8Array) ||
     viewTag.byteLength !== 2 ||
     !(epk instanceof Uint8Array) ||
     epk.byteLength !== 32 ||
     !(ct72 instanceof Uint8Array) ||
-    ct72.byteLength !== MEMO_CT_LEN ||
-    !(onchainCmBe instanceof Uint8Array) ||
-    onchainCmBe.byteLength !== 32
+    ct72.byteLength !== MEMO_CT_LEN
   ) {
     return null;
   }
-  const shared = computeContributorySharedSecret(fvk.viewSk, epk);
+  const shared = computeContributorySharedSecret(viewSk, epk);
   if (!shared) {
     return null;
   }
@@ -462,6 +454,7 @@ export function tryDecryptAndVerifyMemoEntry(
     dynMask72,
   } = deriveMemoSecrets(shared);
   if (expVt[0] !== viewTag[0] || expVt[1] !== viewTag[1]) {
+    shared.fill(0);
     return null;
   }
 
@@ -469,11 +462,11 @@ export function tryDecryptAndVerifyMemoEntry(
   aad.set(viewTag, 0);
   aad.set(epk, 2);
 
-  let candidate: DecryptedMemo | null = null;
+  let memo: DecryptedMemo | null = null;
   const plain = chacha20Poly1305Decrypt(aeadKey, nonce, ct72, aad);
   if (plain && plain.byteLength === MEMO_PLAINTEXT_LEN && plain[40] === MEMO_VERSION_V1) {
     const dv = new DataView(plain.buffer, plain.byteOffset, plain.byteLength);
-    candidate = {
+    memo = {
       tweak,
       blinding,
       amount: dv.getBigUint64(0, true),
@@ -505,7 +498,7 @@ export function tryDecryptAndVerifyMemoEntry(
     }
     if (paddingOk) {
       const dv = new DataView(unmasked.buffer);
-      candidate = {
+      memo = {
         tweak: dynTweak,
         blinding: dynBlinding,
         amount: dv.getBigUint64(8, true),
@@ -516,8 +509,90 @@ export function tryDecryptAndVerifyMemoEntry(
         isDynamic: true,
       };
     }
+    unmasked.fill(0);
   }
-  if (!candidate) return null;
+  if (!memo) {
+    shared.fill(0);
+    return null;
+  }
+  // Key cross-subtree Pass 1D hit deduplication on the X25519 shared secret (domain-separated)
+  // so all 16 Curve25519 torsion + bit-255 + non-canonical `epk` equivalents for `AUD1DYN1`
+  // dynamic swap memos collapse into a single deduplication entry.
+  const dedupTag = sha256Labeled(KDF_DOMAIN_HIT_DEDUP, shared);
+  shared.fill(0);
+  return { memo, dedupTag };
+}
+
+const PUBLIC_CANON_EPK_SCALAR = new Uint8Array(32);
+PUBLIC_CANON_EPK_SCALAR[0] = 0x08;
+PUBLIC_CANON_EPK_SCALAR[31] = 0x40;
+
+/**
+ * Public, key-independent canonicalization of a Curve25519 ephemeral public key modulo cofactor 8
+ * and bit-255 / `u + p` non-canonicality (matches Rust `canonicalize_public_epk` bit-for-bit).
+ * Returns `null` for all-zero and all 12 low-order points (curve + twist).
+ */
+export function canonicalizePublicEpk(epk: Uint8Array): Uint8Array | null {
+  return computeContributorySharedSecret(PUBLIC_CANON_EPK_SCALAR, epk);
+}
+
+/**
+ * AEAD / `AUD1DYN1` pre-filter for full `MemoPage` scans (`'strict'` mode): returns a domain-
+ * separated `32 B` deduplication tag `SHA256("audren/v1/hit_dedup" || shared)` (collapsing all 16
+ * Curve25519 torsion + bit-255 `epk` equivalents) iff the payload decrypts/unmasks cleanly, or
+ * `null` otherwise, without exposing any unverified note plaintext or raw shared secret.
+ */
+export function computeMemoScanDedupTag(
+  viewSk: Uint8Array,
+  viewTag: Uint8Array,
+  epk: Uint8Array,
+  ct72: Uint8Array,
+): Uint8Array | null {
+  return decryptMemoPayloadInternal(viewSk, viewTag, epk, ct72)?.dedupTag ?? null;
+}
+
+/**
+ * Boolean-only AEAD / `AUD1DYN1` pre-filter for full `MemoPage` scans (`Strict` mode):
+ * rejects random `1/65536` `viewTag` false positives and `(viewTag, epk, junkCt)` probes before
+ * Pass 1D scheduling without exposing any unverified note plaintext.
+ */
+export function checkMemoPayloadForScan(
+  viewSk: Uint8Array,
+  viewTag: Uint8Array,
+  epk: Uint8Array,
+  ct72: Uint8Array,
+): boolean {
+  return computeMemoScanDedupTag(viewSk, viewTag, epk, ct72) !== null;
+}
+
+/**
+ * Decrypt or unmask a `106 B` `MemoPage` entry (`viewTag[2]`, `epk[32]`, `ct72[72]`) AND
+ * mandatorily verify `computeNoteCommitment(stealthOwner, deriveAssetId(mint), amount, blinding) == onchainCmBe`.
+ * Rejects low-order X25519 ephemeral keys, tampered AEAD AAD, non-v1 static memo versions,
+ * and non-zero trailing padding bytes on `AUD1DYN1` dynamic swap memos.
+ */
+export function tryDecryptAndVerifyMemoEntry(
+  fvk: MemoVerificationFvk,
+  viewTag: Uint8Array,
+  epk: Uint8Array,
+  ct72: Uint8Array,
+  onchainCmBe: Uint8Array,
+): DecryptedMemo | null {
+  if (
+    !fvk ||
+    typeof fvk !== 'object' ||
+    !(fvk.viewSk instanceof Uint8Array) ||
+    fvk.viewSk.byteLength !== 32 ||
+    !(fvk.spendPk instanceof Uint8Array) ||
+    fvk.spendPk.byteLength !== 32 ||
+    !(onchainCmBe instanceof Uint8Array) ||
+    onchainCmBe.byteLength !== 32
+  ) {
+    return null;
+  }
+  const decoded = decryptMemoPayloadInternal(fvk.viewSk, viewTag, epk, ct72);
+  if (!decoded) return null;
+  const candidate = decoded.memo;
 
   let spendPkFr: bigint;
   try {

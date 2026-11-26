@@ -49,7 +49,7 @@ use audren_client::{
     prover::AudrenProver,
     router::{DEFAULT_RELAY_URL, JUPITER_CPI_EXCLUDED_DEXES},
     scanner::{
-        decode_global_root_history, decode_lane_header, decode_pool_state,
+        decode_global_root_history_boxed, decode_lane_header, decode_pool_state,
         validate_global_root_history,
     },
     store::CompactWalletStore,
@@ -64,6 +64,7 @@ use audren_core::{
     AUDREN_PROGRAM_ID, NUM_ESCROW_SHARDS, NUM_LANES, PROTOCOL_VERSION,
 };
 use solana_address::Address;
+use zeroize::{Zeroize, Zeroizing};
 
 uniffi::setup_scaffolding!();
 
@@ -137,7 +138,7 @@ fn validate_shard_id(shard_id: u8) -> Result<(), AudrenFfiError> {
     Ok(())
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct FfiAudrenKeys {
     pub spend_sk: Vec<u8>,
     pub spend_pk: Vec<u8>,
@@ -147,7 +148,20 @@ pub struct FfiAudrenKeys {
     pub address: String,
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+impl std::fmt::Debug for FfiAudrenKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiAudrenKeys")
+            .field("spend_sk", &"<redacted>")
+            .field("spend_pk", &self.spend_pk)
+            .field("nk", &"<redacted>")
+            .field("view_sk", &"<redacted>")
+            .field("view_pk", &self.view_pk)
+            .field("address", &self.address)
+            .finish()
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
 pub struct FfiFullViewingKey {
     pub spend_pk: Vec<u8>,
     pub nk: Vec<u8>,
@@ -155,11 +169,32 @@ pub struct FfiFullViewingKey {
     pub view_pk: Vec<u8>,
 }
 
-#[derive(Clone, Debug, uniffi::Record)]
+impl std::fmt::Debug for FfiFullViewingKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiFullViewingKey")
+            .field("spend_pk", &self.spend_pk)
+            .field("nk", &"<redacted>")
+            .field("view_sk", &"<redacted>")
+            .field("view_pk", &self.view_pk)
+            .finish()
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
 pub struct FfiDefiSessionKeypair {
     pub session_index: u32,
     pub secret_seed: Vec<u8>,
     pub pubkey_b58: String,
+}
+
+impl std::fmt::Debug for FfiDefiSessionKeypair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiDefiSessionKeypair")
+            .field("session_index", &self.session_index)
+            .field("secret_seed", &"<redacted>")
+            .field("pubkey_b58", &self.pubkey_b58)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -374,13 +409,31 @@ fn keys_to_ffi(k: &AudrenKeys) -> Result<FfiAudrenKeys, AudrenFfiError> {
     })
 }
 
-fn fvk_from_ffi(fvk: &FfiFullViewingKey) -> Result<FullViewingKey, AudrenFfiError> {
-    Ok(FullViewingKey {
+struct FvkGuard(FullViewingKey);
+
+impl Drop for FvkGuard {
+    fn drop(&mut self) {
+        self.0.nk.zeroize();
+        self.0.view_sk.zeroize();
+    }
+}
+
+struct FfiFvkInputGuard(FfiFullViewingKey);
+
+impl Drop for FfiFvkInputGuard {
+    fn drop(&mut self) {
+        self.0.nk.zeroize();
+        self.0.view_sk.zeroize();
+    }
+}
+
+fn fvk_from_ffi(fvk: &FfiFullViewingKey) -> Result<FvkGuard, AudrenFfiError> {
+    Ok(FvkGuard(FullViewingKey {
         spend_pk: to_arr::<32>(&fvk.spend_pk, "fvk.spend_pk")?,
         nk: to_arr::<32>(&fvk.nk, "fvk.nk")?,
         view_sk: to_arr::<32>(&fvk.view_sk, "fvk.view_sk")?,
         view_pk: to_arr::<32>(&fvk.view_pk, "fvk.view_pk")?,
-    })
+    }))
 }
 
 #[uniffi::export]
@@ -408,7 +461,8 @@ pub fn jupiter_cpi_excluded_dexes() -> Vec<String> {
 
 #[uniffi::export]
 pub fn derive_keys_from_seed(seed: Vec<u8>) -> Result<FfiAudrenKeys, AudrenFfiError> {
-    let s = to_arr::<32>(&seed, "seed")?;
+    let seed = Zeroizing::new(seed);
+    let s = Zeroizing::new(to_arr::<32>(&seed, "seed")?);
     keys_to_ffi(&AudrenKeys::from_seed(&s))
 }
 
@@ -417,19 +471,21 @@ pub fn derive_subaccount_keys(
     seed: Vec<u8>,
     account_index: u32,
 ) -> Result<FfiAudrenKeys, AudrenFfiError> {
-    let s = to_arr::<32>(&seed, "seed")?;
+    let seed = Zeroizing::new(seed);
+    let s = Zeroizing::new(to_arr::<32>(&seed, "seed")?);
     keys_to_ffi(&AudrenKeys::from_seed_subaccount(&s, account_index))
 }
 
 #[uniffi::export]
 pub fn export_full_viewing_key(seed: Vec<u8>) -> Result<FfiFullViewingKey, AudrenFfiError> {
-    let s = to_arr::<32>(&seed, "seed")?;
-    let fvk = AudrenKeys::from_seed(&s).full_viewing_key();
+    let seed = Zeroizing::new(seed);
+    let s = Zeroizing::new(to_arr::<32>(&seed, "seed")?);
+    let fvk = FvkGuard(AudrenKeys::from_seed(&s).full_viewing_key());
     Ok(FfiFullViewingKey {
-        spend_pk: fvk.spend_pk.to_vec(),
-        nk: fvk.nk.to_vec(),
-        view_sk: fvk.view_sk.to_vec(),
-        view_pk: fvk.view_pk.to_vec(),
+        spend_pk: fvk.0.spend_pk.to_vec(),
+        nk: fvk.0.nk.to_vec(),
+        view_sk: fvk.0.view_sk.to_vec(),
+        view_pk: fvk.0.view_pk.to_vec(),
     })
 }
 
@@ -438,7 +494,8 @@ pub fn derive_defi_session_keypair(
     seed: Vec<u8>,
     session_index: u32,
 ) -> Result<FfiDefiSessionKeypair, AudrenFfiError> {
-    let s = to_arr::<32>(&seed, "seed")?;
+    let seed = Zeroizing::new(seed);
+    let s = Zeroizing::new(to_arr::<32>(&seed, "seed")?);
     let kp = AudrenKeys::derive_defi_session_keypair(&s, session_index);
     Ok(FfiDefiSessionKeypair {
         session_index: kp.session_index,
@@ -692,7 +749,7 @@ pub fn decode_lane_header_account(data: Vec<u8>) -> Result<FfiLaneHeader, Audren
 pub fn decode_global_root_history_account(
     data: Vec<u8>,
 ) -> Result<FfiGlobalRootHistory, AudrenFfiError> {
-    let r = decode_global_root_history(&data)?;
+    let r = decode_global_root_history_boxed(&data)?;
     validate_global_root_history(&r, r.pool_id)?;
     Ok(FfiGlobalRootHistory {
         version: r.version,
@@ -725,16 +782,17 @@ pub fn encrypt_note_memo(
     mint: Vec<u8>,
     payment_id: Option<Vec<u8>>,
 ) -> Result<FfiEncryptedMemo, AudrenFfiError> {
+    let eph_secret = Zeroizing::new(eph_secret);
     let spk_b = to_arr::<32>(&recipient_spend_pk, "recipient_spend_pk")?;
     let spk = fr_from_be_bytes_strict(&spk_b).ok_or(ClientError::InvalidFieldElement)?;
     let vpk = to_arr::<32>(&recipient_view_pk, "recipient_view_pk")?;
-    let eph = to_arr::<32>(&eph_secret, "eph_secret")?;
+    let eph = Zeroizing::new(to_arr::<32>(&eph_secret, "eph_secret")?);
     let m = to_arr::<32>(&mint, "mint")?;
     let pid = match payment_id {
         Some(b) => to_arr::<MEMO_PAYMENT_ID_LEN>(&b, "payment_id")?,
         None => [0u8; MEMO_PAYMENT_ID_LEN],
     };
-    let (tw, bl, memo) = rust_encrypt_memo_with_pid(&vpk, eph, amount, &m, pid)?;
+    let (tw, bl, memo) = rust_encrypt_memo_with_pid(&vpk, *eph, amount, &m, pid)?;
     let stealth = derive_stealth_owner(spk, tw);
     let cm = compute_note_commitment(stealth, derive_asset_id(&m), amount, bl);
     Ok(FfiEncryptedMemo {
@@ -751,9 +809,10 @@ pub fn prepare_dynamic_swap_memo(
     recipient_view_pk: Vec<u8>,
     eph_secret: Vec<u8>,
 ) -> Result<FfiDynamicMemoPrep, AudrenFfiError> {
+    let eph_secret = Zeroizing::new(eph_secret);
     let vpk = to_arr::<32>(&recipient_view_pk, "recipient_view_pk")?;
-    let eph = to_arr::<32>(&eph_secret, "eph_secret")?;
-    let (tw, bl, head, mask) = rust_prepare_dyn_memo(&vpk, eph)?;
+    let eph = Zeroizing::new(to_arr::<32>(&eph_secret, "eph_secret")?);
+    let (tw, bl, head, mask) = rust_prepare_dyn_memo(&vpk, *eph)?;
     Ok(FfiDynamicMemoPrep {
         tweak: fr_to_be_bytes(&tw).to_vec(),
         blinding: fr_to_be_bytes(&bl).to_vec(),
@@ -768,10 +827,11 @@ pub fn check_memo_view_tag(
     view_tag: Vec<u8>,
     epk: Vec<u8>,
 ) -> Result<bool, AudrenFfiError> {
-    let f = fvk_from_ffi(&fvk)?;
+    let fvk = FfiFvkInputGuard(fvk);
+    let f = fvk_from_ffi(&fvk.0)?;
     let vt = to_arr::<2>(&view_tag, "view_tag")?;
     let e = to_arr::<32>(&epk, "epk")?;
-    Ok(rust_check_view_tag(&f, vt, &e))
+    Ok(rust_check_view_tag(&f.0, vt, &e))
 }
 
 #[uniffi::export]
@@ -780,15 +840,16 @@ pub fn decrypt_and_verify_memo_entry(
     memo_106: Vec<u8>,
     onchain_commitment: Vec<u8>,
 ) -> Result<Option<FfiDecryptedMemo>, AudrenFfiError> {
+    let fvk = FfiFvkInputGuard(fvk);
     let m = to_arr::<MEMO_ENTRY_WIRE_LEN>(&memo_106, "memo_106")?;
     let cm = to_arr::<32>(&onchain_commitment, "onchain_commitment")?;
-    let f = fvk_from_ffi(&fvk)?;
+    let f = fvk_from_ffi(&fvk.0)?;
     let vt = [m[0], m[1]];
     let mut epk = [0u8; 32];
     epk.copy_from_slice(&m[2..34]);
     let mut ct = [0u8; MEMO_CT_LEN];
     ct.copy_from_slice(&m[34..MEMO_ENTRY_WIRE_LEN]);
-    Ok(rust_decrypt_memo(&f, vt, &epk, &ct, &cm).map(|d| FfiDecryptedMemo {
+    Ok(rust_decrypt_memo(&f.0, vt, &epk, &ct, &cm).map(|d| FfiDecryptedMemo {
         tweak: fr_to_be_bytes(&d.tweak).to_vec(),
         blinding: fr_to_be_bytes(&d.blinding).to_vec(),
         amount: d.amount,
@@ -832,7 +893,9 @@ pub fn prove_joinsplit_witness_bytes(
     witness_4611: Vec<u8>,
     seed_32: Vec<u8>,
 ) -> Result<FfiGroth16ProofBundle, AudrenFfiError> {
-    let seed = to_arr::<32>(&seed_32, "seed_32")?;
+    let witness_4611 = Zeroizing::new(witness_4611);
+    let seed_32 = Zeroizing::new(seed_32);
+    let seed = Zeroizing::new(to_arr::<32>(&seed_32, "seed_32")?);
     // Strictly reject non-boolean (2..=255) values for `omit_nf1` (offset 144) and
     // `inputs[0..2].is_dummy` (offsets 281 and 2358) before decoding into the circuit.
     if witness_4611.len() == audren_circuits::WITNESS_TOTAL_BYTES {
@@ -853,7 +916,7 @@ pub fn prove_joinsplit_witness_bytes(
             reason: format!("invalid binary witness (code {c})"),
         }
     })?;
-    let b = canonical_prover().try_prove_with_seed(circuit, seed)?;
+    let b = canonical_prover().try_prove_with_seed(circuit, *seed)?;
     Ok(FfiGroth16ProofBundle {
         proof_192: b.proof_192.to_vec(),
         nf0: b.nf0.to_vec(),
@@ -1103,6 +1166,8 @@ pub fn build_open_page_ix(
     page_seq: u64,
     max_payer_deficit: Option<u64>,
 ) -> Result<FfiInstruction, AudrenFfiError> {
+    // Fail-closed default: `None` -> `0` so callers cannot accidentally authorize unbounded payer
+    // SOL drain if `LaneRentVault` is underfunded; pass explicit `Some(limit)` for mandatory top-ups.
     Ok(from_audren_ix(try_build_open_page(
         parse_addr(&program_id, "program_id")?,
         parse_addr(&payer, "payer")?,
@@ -1110,7 +1175,7 @@ pub fn build_open_page_ix(
         pool_id,
         lane_id,
         page_seq,
-        max_payer_deficit.unwrap_or(u64::MAX),
+        max_payer_deficit.unwrap_or(0),
     )?))
 }
 
@@ -1437,7 +1502,7 @@ pub fn select_root_snapshot_for_notes(
     expected_pool_id: u32,
     notes: Vec<FfiNoteCoord>,
 ) -> Result<FfiRootSnapshotChoice, AudrenFfiError> {
-    let roots = decode_global_root_history(&root_history_data)?;
+    let roots = decode_global_root_history_boxed(&root_history_data)?;
     validate_global_root_history(&roots, expected_pool_id)?;
     let mut coords = Vec::with_capacity(notes.len());
     for n in notes {
@@ -1460,6 +1525,7 @@ pub fn select_root_snapshot_for_notes(
 }
 
 #[uniffi::export]
+#[allow(clippy::too_many_arguments)]
 pub fn plan_auto_open_pages(
     program_id: String,
     pool_id: u32,

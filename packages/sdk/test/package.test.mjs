@@ -15,6 +15,7 @@ import {
   AUTO_OPEN_SUBTREE_REM_THRESHOLD,
   AudrenRelayClient,
   BN254_FR_MODULUS,
+  CANONICAL_WASM_BYTES,
   CLASSIC_TOKEN_PROGRAM_ID,
   CU_LIMIT_DEPOSIT,
   CU_LIMIT_DEPOSIT_HOOK,
@@ -85,6 +86,8 @@ import {
   OPEN_PAGE_KIND_SUBTREE,
   PL_OFF_ACTIVE_LANES,
   PL_OFF_MAGIC,
+  PL_OFF_PAUSED,
+  PL_OFF_ROOT_EPOCH_INTERVAL,
   PL_OFF_VERSION,
   POOL_MAGIC,
   POOL_STATE_LEN,
@@ -171,12 +174,14 @@ import {
   buildUpdatePoolInstruction,
   buildUpdatePoolParamsInstruction,
   bytesToBigIntBe,
+  canonicalizePublicEpk,
   chacha20Poly1305Decrypt,
   chacha20Poly1305Encrypt,
   checkMemoViewTag,
   compileV1Message,
   computeBumpCuMargin,
   computeExecCtxHash,
+  computeMemoScanDedupTag,
   computeMerkleRoot4Ary,
   computeNoteCommitment,
   computePageRollovers,
@@ -245,6 +250,7 @@ import {
   recommendedTransactCuLimit,
   reconstructWitness,
   selectHrwSealedDecoys,
+  selectLargePoolHrwSealedDecoys,
   selectRootSnapshotForNotes,
   serializeV1Transaction,
   syncCompactStoreWithRpc,
@@ -700,8 +706,11 @@ test('Package exports, IDLs, Transaction v1 compiler, and CompactWalletStore sea
   );
   assert.equal(rtRaw.byteLength, ROOT_HISTORY_LEN);
 
-  // Out-of-order NullifierPage ingestion still marks spent notes cleanly (page 1 before page 0)
-  const nfRaw0 = makeNfPage(1, 0n, [note.nullifier.subarray(0, NF_PREFIX_LEN)]);
+  // Out-of-order contiguous NullifierPage ingestion still marks spent notes cleanly (page 1 before full page 0)
+  const nf0Prefixes = Array.from({ length: NF_PER_PAGE }, (_, i) =>
+    i === 0 ? note.nullifier.subarray(0, NF_PREFIX_LEN) : new Uint8Array(NF_PREFIX_LEN).fill(0xaa),
+  );
+  const nfRaw0 = makeNfPage(1, 0n, nf0Prefixes);
   const nfRaw1 = makeNfPage(1, 1n, [new Uint8Array(NF_PREFIX_LEN).fill(0xee)]);
 
   restored.ingestLanePages({
@@ -1326,6 +1335,7 @@ function makePoolState(activeLanes) {
   buf.set(enc.encode(POOL_MAGIC), PL_OFF_MAGIC);
   buf[PL_OFF_VERSION] = PROTOCOL_VERSION;
   buf[PL_OFF_ACTIVE_LANES] = activeLanes;
+  new DataView(buf.buffer).setBigUint64(PL_OFF_ROOT_EPOCH_INTERVAL, 1n, true);
   return buf;
 }
 
@@ -4475,19 +4485,30 @@ test('R4-C2/C3/C4 & relayer.ts: deriveSubaccountKeys 32B check, freeze commitmen
   );
   assert.equal(store.notes[0].frozenIntraPositions, null);
 
-  // 2. ingestLanePages with forged sealed SubtreePage #0 MUST also skip freezing!
+  // 2. ingestLanePages with forged sealed SubtreePage #0 MUST reject mutated frontier prefix
+  //    outright (zero subroot poisoning, zero freezing)!
   const forgedSealedSub = makeSubtreePage(0, 0n, forgedFrLeaves);
-  store.ingestLanePages({
-    fvk,
-    laneId: 0,
-    subtreePages: [{ pageSeq: 0n, raw: forgedSealedSub }],
-    memoPages: [],
-    nfPages: [],
-  });
+  assert.throws(
+    () =>
+      store.ingestLanePages({
+        fvk,
+        laneId: 0,
+        subtreePages: [{ pageSeq: 0n, raw: forgedSealedSub }],
+        memoPages: [],
+        nfPages: [],
+      }),
+    /frontier prefix mismatch/,
+    'R4-C3 + R6-1: forged sealed SubtreePage via ingestLanePages must reject mutated frontier prefix',
+  );
+  assert.equal(
+    store.lanes[0].finalizedSubroots.length,
+    0,
+    'R6-1: rejected forged SubtreePage must not poison finalizedSubroots',
+  );
   assert.equal(
     store.notes[0].frozenIntraSiblings,
     null,
-    'R4-C3: forged sealed SubtreePage via ingestLanePages must skip mismatched commitment',
+    'R4-C3: forged sealed SubtreePage via ingestLanePages must not freeze mismatched note',
   );
 
   // 3. Matching commitment at offset 7 freezes cleanly!
@@ -8772,4 +8793,2345 @@ test('Audit remediation regressions: OpenPage maxPayerDeficit, windowed HRW, bat
     RangeError,
   );
   assert.throws(() => recommendedDepositCuLimit({ openPageCount: Number.NaN }), RangeError);
+});
+
+test('security audit hardening: store contiguity/JSON, strict privacy oracle, pass2 rollback, and WASM ABI safety', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const alice = deriveKeysFromSeed(new Uint8Array(32).fill(0x77));
+  const fvk = exportFullViewingKey(alice);
+
+  // 1. SubtreeRootPage sparse gap MUST fail atomically with zero mutation
+  const srStore = new CompactWalletStore(0, 0n);
+  const sr0Partial = makeSubrootPage(0, 0n, Array.from({ length: 10 }, () => 1n));
+  const sr2 = makeSubrootPage(0, 2n, [2n]);
+  assert.throws(
+    () =>
+      srStore.ingestSubrootPages({
+        laneId: 0,
+        subrootPages: [
+          { rootPageSeq: 0n, raw: sr0Partial },
+          { rootPageSeq: 2n, raw: sr2 },
+        ],
+      }),
+    /sequence gap/i,
+  );
+  assert.equal(srStore.lanes[0].finalizedSubroots.length, 0);
+
+  // 2. NullifierPage gapped batch MUST fail atomically with zero mutation
+  const nfStore = new CompactWalletStore(0, 0n);
+  const encRes = encryptNoteMemo(
+    alice.viewPk,
+    new Uint8Array(32).fill(0x44),
+    10_000n,
+    WSOL_MINT_BYTES,
+  );
+  const stealth = deriveStealthOwner(alice.spendPk, encRes.tweak);
+  const cm = computeNoteCommitment(stealth, deriveAssetId(WSOL_MINT_BYTES), 10_000n, encRes.blinding);
+  const cmBe = frToBeBytes(cm);
+  nfStore.recordVerifiedMemo({
+    fvk,
+    laneId: 0,
+    leafIdx: 0n,
+    decrypted: {
+      tweak: encRes.tweak,
+      blinding: encRes.blinding,
+      amount: 10_000n,
+      mint: WSOL_MINT_BYTES,
+      memoVersion: MEMO_VERSION_V1,
+      memoFlags: 0,
+      paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+      isDynamic: false,
+    },
+    cmBe,
+  });
+  const ownPref = nfStore.notes[0].nullifier.subarray(0, NF_PREFIX_LEN);
+  const nf0Partial = makeNfPage(0, 0n, [ownPref]);
+  const nf1 = makeNfPage(0, 1n, [new Uint8Array(NF_PREFIX_LEN).fill(0xbb)]);
+  assert.throws(
+    () =>
+      nfStore.ingestNullifierPages({
+        laneId: 0,
+        nfPages: [
+          { pageSeq: 0n, raw: nf0Partial },
+          { pageSeq: 1n, raw: nf1 },
+        ],
+      }),
+    /sequence gap/i,
+  );
+  assert.equal(nfStore.lanes[0].nextNfIndex, 0n);
+  assert.equal(nfStore.notes[0].spent, false);
+
+  // 3. CompactWalletStore.fromJSON rejects duplicate notes and non-canonical Fr
+  const parsed = JSON.parse(nfStore.toJSON());
+  const dupJson = JSON.stringify({ ...parsed, notes: [parsed.notes[0], parsed.notes[0]] });
+  assert.throws(() => CompactWalletStore.fromJSON(dupJson), /duplicate note/i);
+
+  const nonCanonHex = 'ff'.repeat(32);
+  const badCmJson = JSON.stringify({
+    ...parsed,
+    notes: [{ ...parsed.notes[0], commitment: nonCanonHex }],
+  });
+  assert.throws(() => CompactWalletStore.fromJSON(badCmJson));
+
+  // 4. Adversarial RPC inflated nextLeaf + dropped Pass 1A/1C (and served SR0 + dropped Pass 1C)
+  //    MUST emit BYTE-FOR-BYTE IDENTICAL RPC batches for 0-note vs 1-unfrozen-note wallets!
+  const poolPda = derivePoolPdaSync(0).address;
+  const lane0Pda = deriveLanePdaSync(0, 0).address;
+  const lane1Pda = deriveLanePdaSync(0, 1).address;
+  const sr0Pda = deriveSubrootPdaSync(0, 0, 0n).address;
+  const spoofNextLeaf = 200_000n * BigInt(SUBTREE_LEAVES);
+  const poolRaw = makePoolState(2);
+  const lane0Raw = makeLaneState(0, spoofNextLeaf, 0n, 11n);
+  const lane1Raw = makeLaneState(1, spoofNextLeaf, 0n, 22n);
+  const sr0Raw = makeSubrootPage(0, 0n, Array.from({ length: SUBROOTS_PER_PAGE }, () => 33n));
+
+  for (const serveSr0 of [false, true]) {
+    const runProbe = async (st) => {
+      const batches = [];
+      await syncCompactStoreWithRpc({
+        store: st,
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => {
+          batches.push([...addrs]);
+          return addrs.map((a) => {
+            if (a === poolPda) return poolRaw;
+            if (a === lane0Pda) return lane0Raw;
+            if (a === lane1Pda) return lane1Raw;
+            if (serveSr0 && a === sr0Pda) return sr0Raw;
+            return null;
+          });
+        },
+      });
+      return batches;
+    };
+    const emptyBatches = await runProbe(new CompactWalletStore(0, 0n));
+    const unfrozenStore = CompactWalletStore.fromJSON(nfStore.toJSON());
+    assert.equal(unfrozenStore.notes[0].frozenIntraSiblings, null);
+    const unfrozenBatches = await runProbe(unfrozenStore);
+    assert.deepEqual(
+      unfrozenBatches,
+      emptyBatches,
+      `serveSr0=${serveSr0}: 0-note and 1-unfrozen-note wallets MUST emit identical RPC batches`,
+    );
+  }
+
+  // 5. Large-pool (> MAX_HRW_SEALED_SUBTREES) hit-independent decoy sampler
+  const scope = new Uint8Array([0x73, 0x79, 0x6e, 0x63, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const sealedLarge = [
+    { laneId: 0, sealedCount: 200_000n },
+    { laneId: 1, sealedCount: 200_000n },
+  ];
+  const dA = selectLargePoolHrwSealedDecoys({
+    viewSk: fvk.viewSk,
+    scope,
+    epochBucket: 0n,
+    sealedByLane: sealedLarge,
+    alreadySelected: new Set(['0:5']),
+    targetSealed: 16,
+  });
+  const dB = selectLargePoolHrwSealedDecoys({
+    viewSk: fvk.viewSk,
+    scope,
+    epochBucket: 0n,
+    sealedByLane: sealedLarge,
+    alreadySelected: new Set(['0:199995']),
+    targetSealed: 16,
+  });
+  assert.equal(dA.length, 15);
+  assert.deepEqual(dA, dB, 'large-pool HRW decoys MUST be invariant to hit coordinates');
+  assert.ok(dA.some((d) => d.laneId === 0) && dA.some((d) => d.laneId === 1));
+  assert.ok(dA.some((d) => d.pageSeq < 100_000n) && dA.some((d) => d.pageSeq >= 100_000n));
+
+  // 6. Pass 2 mid-stream error with allLanesCaughtUp=true rolls back BOTH nextNfIndex AND note.spent
+  const rbStore = CompactWalletStore.fromJSON(nfStore.toJSON());
+  rbStore.lanes[0].nextMemoLeaf = 1n;
+  rbStore.lanes[0].frontierLeaves = [cmBe];
+  const sub0 = makeSubtreePage(0, 0n, [cm]);
+  let curNode = computeSubtree256Root([cm], 1);
+  for (let h = 4; h < 18; h++) {
+    curNode = poseidon4(curNode, ZERO_HASHES_4ARY[h], ZERO_HASHES_4ARY[h], ZERO_HASHES_4ARY[h]);
+  }
+  const pool1Raw = makePoolState(1);
+  const lane0RbRaw = makeLaneState(0, 1n, BigInt(NF_PER_PAGE + 5), curNode);
+  const nf0Full = makeNfPage(
+    0,
+    0n,
+    Array.from({ length: NF_PER_PAGE }, (_, i) => (i === 0 ? ownPref : new Uint8Array(NF_PREFIX_LEN))),
+  );
+  const badNf1 = new Uint8Array(NF_PAGE_LEN).fill(0xff);
+  const sub0Pda = deriveSubtreePdaSync(0, 0, 0n).address;
+  const nf0Pda = deriveNfPagePdaSync(0, 0, 0n).address;
+  const nf1Pda = deriveNfPagePdaSync(0, 0, 1n).address;
+
+  await assert.rejects(() =>
+    syncCompactStoreWithRpc({
+      store: rbStore,
+      fvk,
+      privacyMode: 'strict',
+      fetchBatch: async (addrs) =>
+        addrs.map((a) => {
+          if (a === poolPda) return pool1Raw;
+          if (a === lane0Pda) return lane0RbRaw;
+          if (a === sub0Pda) return sub0;
+          if (a === nf0Pda) return nf0Full;
+          if (a === nf1Pda) return badNf1;
+          return null;
+        }),
+    }),
+  );
+  assert.equal(rbStore.lanes[0].nextNfIndex, 0n, 'Pass 2 error must roll back nextNfIndex');
+  assert.equal(rbStore.notes[0].spent, false, 'Pass 2 error must roll back note.spent');
+
+  // 7. Rebuilt audren_circuits.wasm pointer/length ABI safety & CANONICAL_WASM_BYTES parity
+  const wasmBytes = await readFile(new URL('../wasm/audren_circuits.wasm', import.meta.url));
+  assert.equal(wasmBytes.byteLength, CANONICAL_WASM_BYTES, 'CANONICAL_WASM_BYTES must match wasm file');
+  const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+  const ex = instance.exports;
+  assert.equal(ex.wasm_alloc(0), 0, 'wasm_alloc(0) must return 0 without allocating');
+  ex.wasm_dealloc(0, 0); // must not trap
+  ex.wasm_dealloc(0, 16); // null pointer dealloc must be a safe no-op
+  assert.equal(ex.wasm_load_pk_compressed(0, 16), -5, 'null pk ptr must return -5');
+  assert.equal(ex.wasm_load_pk_compressed(16, 0), -5, 'zero pk len must return -5');
+  assert.equal(ex.wasm_prove_joinsplit(0, 4611, 0, 32, 0), -2, 'null prove ptrs must return -2');
+  assert.equal(ex.wasm_poseidon_hash(0, 2, 0), -2, 'null poseidon ptrs must return -2');
+
+  // 8. Round-1 Audit regressions: atomic ingestLanePages, unsealed Fr rejection, duplicate SR dedup,
+  //    selectLargePoolHrwSealedDecoys u64 overflow parity, Vectors 1A/1B/1C, and Finding #2 activeLanes
+  const unsealedBad = new Uint8Array(SUBTREE_PAGE_LEN);
+  unsealedBad.set(enc.encode(SUBTREE_MAGIC), 0);
+  new DataView(unsealedBad.buffer).setUint16(SB_OFF_COUNT, 1, true);
+  unsealedBad.set(new Uint8Array(32).fill(0xff), SB_OFF_LEAVES);
+  const atomicStore = new CompactWalletStore(0, 0n);
+  assert.throws(() =>
+    atomicStore.ingestLanePages({
+      fvk,
+      laneId: 0,
+      subtreePages: [{ pageSeq: 0n, raw: unsealedBad }],
+      memoPages: [],
+      nfPages: [],
+    }),
+  );
+  assert.equal(atomicStore.lanes[0].frontierLeaves.length, 0);
+
+  const sealed0 = makeSubtreePage(0, 0n, Array.from({ length: SUBTREE_LEAVES }, (_, i) => (i === 0 ? cm : 0n)));
+  const sealed2 = makeSubtreePage(0, 2n, Array.from({ length: SUBTREE_LEAVES }, () => 0n));
+  const memoWithHit = makeMemoPage(0, 0n, [encRes.memo]);
+  assert.throws(() =>
+    atomicStore.ingestLanePages({
+      fvk,
+      laneId: 0,
+      subtreePages: [
+        { pageSeq: 0n, raw: sealed0 },
+        { pageSeq: 2n, raw: sealed2 },
+      ],
+      memoPages: [{ pageSeq: 0n, raw: memoWithHit }],
+      nfPages: [],
+    }),
+  );
+  assert.equal(atomicStore.lanes[0].nextMemoLeaf, 0n);
+  assert.equal(atomicStore.notes.length, 0);
+  assert.equal(atomicStore.lanes[0].finalizedSubroots.length, 0);
+
+  assert.throws(() =>
+    atomicStore.ingestLanePages({
+      fvk,
+      laneId: 0,
+      subtreePages: [{ pageSeq: 0n, raw: sealed0 }],
+      memoPages: [{ pageSeq: 0n, raw: memoWithHit }],
+      nfPages: [{ pageSeq: 1n, raw: nf1 }],
+    }),
+  );
+  assert.equal(atomicStore.lanes[0].nextMemoLeaf, 0n);
+  assert.equal(atomicStore.notes.length, 0);
+  assert.equal(atomicStore.lanes[0].finalizedSubroots.length, 0);
+
+  const dupSrStore = new CompactWalletStore(0, 0n);
+  const srFull = makeSubrootPage(0, 0n, Array.from({ length: SUBROOTS_PER_PAGE }, () => 1n));
+  const srShortConsistent = makeSubrootPage(0, 0n, [1n]);
+  const srShortConflict = makeSubrootPage(0, 0n, [99n]);
+  assert.throws(
+    () =>
+      dupSrStore.ingestSubrootPages({
+        laneId: 0,
+        subrootPages: [
+          { rootPageSeq: 0n, raw: srFull },
+          { rootPageSeq: 0n, raw: srShortConflict },
+        ],
+      }),
+    /Conflicting duplicate SubtreeRootPage/,
+  );
+  assert.equal(dupSrStore.lanes[0].finalizedSubroots.length, 0);
+  dupSrStore.ingestSubrootPages({
+    laneId: 0,
+    subrootPages: [
+      { rootPageSeq: 0n, raw: srFull },
+      { rootPageSeq: 0n, raw: srShortConsistent },
+    ],
+  });
+  assert.equal(dupSrStore.lanes[0].finalizedSubroots.length, SUBROOTS_PER_PAGE);
+  assert.deepEqual(dupSrStore.lanes[0].finalizedSubroots[0], frToBeBytes(1n));
+
+  assert.throws(
+    () =>
+      selectLargePoolHrwSealedDecoys({
+        viewSk: fvk.viewSk,
+        scope,
+        epochBucket: 0n,
+        sealedByLane: [
+          { laneId: 0, sealedCount: (1n << 64n) - 1n },
+          { laneId: 1, sealedCount: 1n },
+        ],
+        alreadySelected: new Set(),
+        targetSealed: 16,
+      }),
+    RangeError,
+  );
+
+  // Vector 1C & Finding #2 in TS scanner (with exact rolled-up lane root for 20 subroots = 33n)
+  const jumpLeaves = 20n * BigInt(SUBTREE_LEAVES);
+  let levelNodes = Array.from({ length: 20 }, () => 33n);
+  for (let h = 4; h < 18; h++) {
+    const z = ZERO_HASHES_4ARY[h];
+    const next = [];
+    for (let g = 0; g < Math.ceil(levelNodes.length / 4); g++) {
+      const b = g * 4;
+      next.push(poseidon4(levelNodes[b] ?? z, levelNodes[b + 1] ?? z, levelNodes[b + 2] ?? z, levelNodes[b + 3] ?? z));
+    }
+    levelNodes = next;
+  }
+  const lane0Jump = makeLaneState(0, jumpLeaves, 0n, levelNodes[0]);
+  const memoMap = new Map();
+  for (let m = 0n; m < 54n; m++) {
+    memoMap.set(deriveMemoPdaSync(0, 0, m).address, makeMemoPage(0, m, Array.from({ length: MEMO_NOTES_PER_PAGE }, () => new Uint8Array(MEMO_ENTRY_WIRE_LEN))));
+  }
+  const emptyLaneMap = new Map();
+  for (let lid = 1; lid < 8; lid++) {
+    emptyLaneMap.set(deriveLanePdaSync(0, lid).address, makeLaneState(lid, 0n, 0n));
+  }
+  const subPdaSet = new Set(Array.from({ length: 20 }, (_, i) => deriveSubtreePdaSync(0, 0, BigInt(i)).address));
+
+  // Vector 1C: honest Wallet A (0 notes) vs Wallet B (1 unfrozen frontier note)
+  const wA = new CompactWalletStore(0, 0n);
+  wA.lanes[0].nextMemoLeaf = 10n;
+  wA.lanes[0].frontierSubSeq = 0n;
+  wA.lanes[0].frontierLeaves = Array.from({ length: 10 }, () => frToBeBytes(1n));
+  const wB = CompactWalletStore.fromJSON(nfStore.toJSON());
+  wB.lanes[0].nextMemoLeaf = 10n;
+  wB.lanes[0].frontierSubSeq = 0n;
+  wB.lanes[0].frontierLeaves = Array.from({ length: 10 }, () => frToBeBytes(1n));
+  const run1c = async (st) => {
+    const batches = [];
+    await syncCompactStoreWithRpc({
+      store: st,
+      fvk,
+      privacyMode: 'strict',
+      fetchBatch: async (addrs) => {
+        batches.push([...addrs]);
+        return addrs.map((a) => {
+          if (a === poolPda) return pool1Raw;
+          if (a === lane0Pda) return lane0Jump;
+          if (a === sr0Pda) return sr0Raw;
+          return memoMap.get(a) ?? null;
+        });
+      },
+    });
+    return batches;
+  };
+  assert.deepEqual(await run1c(wA), await run1c(wB), 'Vector 1C TS: 0-note and 1-unfrozen-frontier-note must match');
+
+  // Finding #2: spoofing activeLanes=1 vs 8 across retries must keep identical HRW decoys
+  const runRetryActive = async (activeLanes) => {
+    const st = new CompactWalletStore(0, 0n);
+    const poolK = makePoolState(activeLanes);
+    const pass1dSubs = [];
+    await syncCompactStoreWithRpc({
+      store: st,
+      fvk,
+      privacyMode: 'strict',
+      fetchBatch: async (addrs) => {
+        for (const a of addrs) if (subPdaSet.has(a)) pass1dSubs.push(a);
+        return addrs.map((a) => {
+          if (a === poolPda) return poolK;
+          if (a === lane0Pda) return lane0Jump;
+          if (emptyLaneMap.has(a)) return emptyLaneMap.get(a);
+          if (a === sr0Pda) return sr0Raw;
+          return memoMap.get(a) ?? null;
+        });
+      },
+    });
+    return pass1dSubs;
+  };
+  const r1 = await runRetryActive(1);
+  const r8 = await runRetryActive(8);
+  assert.equal(r1.length, 16);
+  assert.deepEqual(r1, r8, 'Finding #2 TS: spoofing activeLanes across retries must not rotate HRW decoys');
+});
+
+test('Round-2 audit regressions: strict returning-wallet hold, subtree-atomic Pass 1C/1D, dyadic HRW, & subroot Fr validation', async () => {
+  const keys = deriveKeysFromSeed(new Uint8Array(32).fill(0x61));
+  const fvk = exportFullViewingKey(keys);
+  const wsolAsset = deriveAssetId(WSOL_MINT_BYTES);
+  const poolPda = derivePoolPdaSync(0).address;
+  const lane0Pda = deriveLanePdaSync(0, 0).address;
+  const lane1Pda = deriveLanePdaSync(0, 1).address;
+
+  const rollUpSubroots = (subroots) => {
+    let nodes = [...subroots];
+    for (let h = 4; h < 18; h++) {
+      const z = ZERO_HASHES_4ARY[h];
+      const next = [];
+      for (let g = 0; g < Math.ceil(nodes.length / 4); g++) {
+        const b = g * 4;
+        next.push(poseidon4(nodes[b] ?? z, nodes[b + 1] ?? z, nodes[b + 2] ?? z, nodes[b + 3] ?? z));
+      }
+      nodes = next;
+    }
+    return nodes[0];
+  };
+
+  const dummyLeaves = Array.from({ length: SUBTREE_LEAVES }, () => 1n);
+  const dummySubroot = computeSubtree256Root(dummyLeaves, SUBTREE_LEAVES);
+
+  // =========================================================================
+  // 1. Finding #4: ingestSubrootPages validates canonical Fr on ALL 0..cnt
+  //    entries of EVERY input page (discarded shorter duplicates + trailing)
+  // =========================================================================
+  {
+    const modBe = new Uint8Array(32);
+    let mVal = BN254_FR_MODULUS;
+    for (let i = 31; i >= 0; i--) {
+      modBe[i] = Number(mVal & 0xffn);
+      mVal >>= 8n;
+    }
+    const srFull = makeSubrootPage(0, 0n, Array.from({ length: SUBROOTS_PER_PAGE }, () => 1n));
+    const srBadShort = makeSubrootPage(0, 0n, [1n]);
+    srBadShort.set(modBe, SR_OFF_ROOTS);
+    const srTrailingBad = makeSubrootPage(0, 0n, [7n, 8n]);
+    srTrailingBad.set(modBe, SR_OFF_ROOTS + 32);
+
+    const st = new CompactWalletStore(0, 0n);
+    assert.throws(() =>
+      st.ingestSubrootPages({
+        laneId: 0,
+        subrootPages: [
+          { rootPageSeq: 0n, raw: srBadShort },
+          { rootPageSeq: 0n, raw: srFull },
+        ],
+      }),
+    );
+    assert.equal(st.lanes[0].finalizedSubroots.length, 0);
+    assert.throws(() =>
+      st.ingestSubrootPages({
+        laneId: 0,
+        subrootPages: [
+          { rootPageSeq: 0n, raw: srFull },
+          { rootPageSeq: 0n, raw: srBadShort },
+        ],
+      }),
+    );
+    assert.equal(st.lanes[0].finalizedSubroots.length, 0);
+    assert.throws(() =>
+      st.ingestSubrootPages({
+        laneId: 0,
+        subrootPages: [{ rootPageSeq: 0n, raw: srTrailingBad }],
+        finalizedCount: 1n,
+      }),
+    );
+    assert.equal(st.lanes[0].finalizedSubroots.length, 0);
+  }
+
+  // =========================================================================
+  // 2. Finding #1 Trigger 1B (single-lane adversarial MemoPage(0, 0)=null,
+  //    fc=3000): Sync #2 and Sync #3 MUST be 100% identical for 0-note vs 1-note
+  // =========================================================================
+  {
+    const fc = 3000;
+    const encNote = encryptNoteMemo(keys.viewPk, new Uint8Array(32).fill(0x92), 55_000n, WSOL_MINT_BYTES);
+    const cm = computeNoteCommitment(deriveStealthOwner(keys.spendPk, encNote.tweak), wsolAsset, 55_000n, encNote.blinding);
+    const sub0Leaves = [...dummyLeaves];
+    sub0Leaves[5] = cm;
+    const sub0Root = computeSubtree256Root(sub0Leaves, SUBTREE_LEAVES);
+    const roots = Array.from({ length: fc }, (_, i) => (i === 0 ? sub0Root : dummySubroot));
+    const lane0Root = rollUpSubroots(roots);
+
+    const acc = new Map();
+    acc.set(poolPda, makePoolState(1));
+    acc.set(lane0Pda, makeLaneState(0, BigInt(fc * SUBTREE_LEAVES), 0n, lane0Root));
+    for (let sr = 0; sr < Math.ceil(fc / SUBROOTS_PER_PAGE); sr++) {
+      const start = sr * SUBROOTS_PER_PAGE;
+      acc.set(
+        deriveSubrootPdaSync(0, 0, BigInt(sr)).address,
+        makeSubrootPage(0, BigInt(sr), roots.slice(start, Math.min(fc, start + SUBROOTS_PER_PAGE))),
+      );
+    }
+    acc.set(deriveSubtreePdaSync(0, 0, 0n).address, makeSubtreePage(0, 0n, sub0Leaves));
+    const subSeqByPda = new Map();
+    for (let s = 1; s < fc; s++) {
+      subSeqByPda.set(deriveSubtreePdaSync(0, 0, BigInt(s)).address, BigInt(s));
+    }
+    const makeSt = (withNote) => {
+      const st = new CompactWalletStore(0, 0n);
+      st.lanes[0].nextMemoLeaf = 10n;
+      st.lanes[0].frontierSubSeq = 0n;
+      st.lanes[0].frontierLeaves = sub0Leaves.slice(0, 10).map((x) => frToBeBytes(x));
+      if (withNote) {
+        st.recordVerifiedMemo({
+          fvk,
+          laneId: 0,
+          leafIdx: 5n,
+          decrypted: {
+            tweak: encNote.tweak,
+            blinding: encNote.blinding,
+            amount: 55_000n,
+            mint: WSOL_MINT_BYTES,
+            memoVersion: MEMO_VERSION_V1,
+            memoFlags: 0,
+            paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+            isDynamic: false,
+          },
+          cmBe: frToBeBytes(cm),
+        });
+      }
+      return st;
+    };
+    const wA = makeSt(false);
+    const wB = makeSt(true);
+    const run1b = async (st) => {
+      const log = [];
+      await syncCompactStoreWithRpc({
+        store: st,
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => {
+          log.push([...addrs]);
+          return addrs.map((a) => {
+            if (acc.has(a)) return acc.get(a);
+            if (subSeqByPda.has(a)) return makeSubtreePage(0, subSeqByPda.get(a), dummyLeaves);
+            return null; // MemoPage(0, 0) dropped
+          });
+        },
+      });
+      return log;
+    };
+    assert.deepEqual(await run1b(wA), await run1b(wB), 'TS Trigger 1B Sync #2 must match');
+    assert.deepEqual(await run1b(wA), await run1b(wB), 'TS Trigger 1B Sync #3 must match');
+  }
+
+  // =========================================================================
+  // 2b. Finding #1 Trigger 1A (100% honest 2-lane sync exhausting 4,096
+  //     MemoPages on Lane 0 -> Lane 1 holds frontier & subroots until scanned)
+  // =========================================================================
+  {
+    const fc0 = 1540; // 394,240 leaves = 4,107 MemoPages (> 4,096 budget on Sync #2!)
+    const fc1 = 20;
+    const encN = encryptNoteMemo(keys.viewPk, new Uint8Array(32).fill(0x91), 77_000n, WSOL_MINT_BYTES);
+    const cmN = computeNoteCommitment(deriveStealthOwner(keys.spendPk, encN.tweak), wsolAsset, 77_000n, encN.blinding);
+    const l1Sub0Leaves = [...dummyLeaves];
+    l1Sub0Leaves[5] = cmN;
+    const l1Sub0Root = computeSubtree256Root(l1Sub0Leaves, SUBTREE_LEAVES);
+    const l0Roots = Array.from({ length: fc0 }, () => dummySubroot);
+    const l1Roots = Array.from({ length: fc1 }, (_, i) => (i === 0 ? l1Sub0Root : dummySubroot));
+
+    const staticAcc = new Map();
+    staticAcc.set(poolPda, makePoolState(2));
+    staticAcc.set(lane0Pda, makeLaneState(0, BigInt(fc0 * SUBTREE_LEAVES), 0n, rollUpSubroots(l0Roots)));
+    staticAcc.set(lane1Pda, makeLaneState(1, BigInt(fc1 * SUBTREE_LEAVES), 0n, rollUpSubroots(l1Roots)));
+    for (let sr = 0; sr < Math.ceil(fc0 / SUBROOTS_PER_PAGE); sr++) {
+      const start = sr * SUBROOTS_PER_PAGE;
+      staticAcc.set(
+        deriveSubrootPdaSync(0, 0, BigInt(sr)).address,
+        makeSubrootPage(0, BigInt(sr), l0Roots.slice(start, Math.min(fc0, start + SUBROOTS_PER_PAGE))),
+      );
+    }
+    staticAcc.set(deriveSubrootPdaSync(0, 1, 0n).address, makeSubrootPage(1, 0n, l1Roots));
+    staticAcc.set(deriveSubtreePdaSync(0, 1, 0n).address, makeSubtreePage(1, 0n, l1Sub0Leaves));
+
+    const meta = new Map();
+    for (let s = 0; s < fc0; s++) meta.set(deriveSubtreePdaSync(0, 0, BigInt(s)).address, [0, 0, BigInt(s)]);
+    for (let s = 1; s < fc1; s++) meta.set(deriveSubtreePdaSync(0, 1, BigInt(s)).address, [0, 1, BigInt(s)]);
+    const l0Memos = Math.ceil((fc0 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+    const l1Memos = Math.ceil((fc1 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+    for (let m = 0; m < l0Memos; m++) meta.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, [1, 0, BigInt(m)]);
+    for (let m = 0; m < l1Memos; m++) meta.set(deriveMemoPdaSync(0, 1, BigInt(m)).address, [1, 1, BigInt(m)]);
+
+    const makeSynced10 = (withNote) => {
+      const st = new CompactWalletStore(0, 0n);
+      st.lanes[0].nextMemoLeaf = 10n;
+      st.lanes[0].frontierSubSeq = 0n;
+      st.lanes[0].frontierLeaves = dummyLeaves.slice(0, 10).map((x) => frToBeBytes(x));
+      st.lanes[1].nextMemoLeaf = 10n;
+      st.lanes[1].frontierSubSeq = 0n;
+      st.lanes[1].frontierLeaves = l1Sub0Leaves.slice(0, 10).map((x) => frToBeBytes(x));
+      if (withNote) {
+        st.recordVerifiedMemo({
+          fvk,
+          laneId: 1,
+          leafIdx: 5n,
+          decrypted: {
+            tweak: encN.tweak,
+            blinding: encN.blinding,
+            amount: 77_000n,
+            mint: WSOL_MINT_BYTES,
+            memoVersion: MEMO_VERSION_V1,
+            memoFlags: 0,
+            paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+            isDynamic: false,
+          },
+          cmBe: frToBeBytes(cmN),
+        });
+      }
+      return st;
+    };
+    const wA = makeSynced10(false);
+    const wB = makeSynced10(true);
+    const run1aStep = async (st) => {
+      const log = [];
+      await syncCompactStoreWithRpc({
+        store: st,
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => {
+          log.push([...addrs]);
+          return addrs.map((a) => {
+            if (staticAcc.has(a)) return staticAcc.get(a);
+            const m = meta.get(a);
+            if (!m) return null;
+            return m[0] === 0
+              ? makeSubtreePage(m[1], m[2], dummyLeaves)
+              : makeMemoPageWithMeta(m[1], m[2], MEMO_NOTES_PER_PAGE, 0n);
+          });
+        },
+      });
+      return log;
+    };
+    assert.deepEqual(await run1aStep(wA), await run1aStep(wB), 'TS Trigger 1A Sync #2 must match');
+    assert.equal(wA.lanes[1].finalizedSubroots.length, 0);
+    assert.equal(wB.lanes[1].finalizedSubroots.length, 0);
+    assert.equal(wA.lanes[1].frontierLeaves.length, 10);
+    assert.equal(wB.lanes[1].frontierLeaves.length, 10);
+    assert.deepEqual(await run1aStep(wA), await run1aStep(wB), 'TS Trigger 1A Sync #3 must match');
+    assert.equal(wA.lanes[1].finalizedSubroots.length, fc1);
+    assert.equal(wB.lanes[1].finalizedSubroots.length, fc1);
+    assert.ok(wB.notes[0].frozenIntraSiblings, 'TS Trigger 1A Wallet B note (1, 5) must freeze on Sync #3');
+  }
+
+  // =========================================================================
+  // 3. Finding #2: Sub-subtree MemoPage-drop (4896 vs 4992), MM_OFF_COUNT sweep,
+  //    birthdaySlot mid-scan closedSlot toggle, Pass 1B alignment (133 vs 134),
+  //    1-shot (vt, epk, ct) replay amplification + cross-lane memo griefing
+  // =========================================================================
+  {
+    const fc = 20;
+    const encH = encryptNoteMemo(keys.viewPk, new Uint8Array(32).fill(0x93), 42_000n, WSOL_MINT_BYTES);
+    const cmH = computeNoteCommitment(deriveStealthOwner(keys.spendPk, encH.tweak), wsolAsset, 42_000n, encH.blinding);
+    const sub19Leaves = [...dummyLeaves];
+    sub19Leaves[4900 % SUBTREE_LEAVES] = cmH;
+    const sub19Root = computeSubtree256Root(sub19Leaves, SUBTREE_LEAVES);
+    const roots20 = Array.from({ length: fc }, (_, i) => (i === 19 ? sub19Root : dummySubroot));
+    const lane0Root20 = rollUpSubroots(roots20);
+    const sr0Raw = makeSubrootPage(0, 0n, roots20);
+    const sr0Pda = deriveSubrootPdaSync(0, 0, 0n).address;
+    const lane0Raw = makeLaneState(0, BigInt(fc * SUBTREE_LEAVES), 0n, lane0Root20);
+    const pool1 = makePoolState(1);
+    const subPdas = new Set(Array.from({ length: fc }, (_, s) => deriveSubtreePdaSync(0, 0, BigInt(s)).address));
+
+    const probePass1d = async ({ birthday = 0n, maxMemo = 53, customCount = null, customClosed = null, withHit = true }) => {
+      const st = new CompactWalletStore(0, birthday);
+      const memoMap = new Map();
+      for (let m = 0; m <= maxMemo; m++) {
+        const cnt = customCount && customCount[0] === m ? customCount[1] : MEMO_NOTES_PER_PAGE;
+        const closed = customClosed && customClosed[0] === m ? customClosed[1] : 9999n;
+        const raw = makeMemoPageWithMeta(0, BigInt(m), cnt, closed);
+        if (withHit && m === 51 && cnt > 4) {
+          writeMemoSlot(raw, 4, encH.memo);
+        }
+        memoMap.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, raw);
+      }
+      const p1d = [];
+      await syncCompactStoreWithRpc({
+        store: st,
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => {
+          for (const a of addrs) if (subPdas.has(a)) p1d.push(a);
+          return addrs.map((a) => {
+            if (a === poolPda) return pool1;
+            if (a === lane0Pda) return lane0Raw;
+            if (a === sr0Pda) return sr0Raw;
+            return memoMap.get(a) ?? null;
+          });
+        },
+      });
+      return p1d;
+    };
+
+    const probeAHit = await probePass1d({ maxMemo: 50, withHit: true });
+    const probeBHit = await probePass1d({ maxMemo: 51, withHit: true });
+    const probeBZero = await probePass1d({ maxMemo: 51, withHit: false });
+    assert.equal(probeAHit.length, 16);
+    assert.deepEqual(probeAHit, probeBHit, 'TS 2A: Probe A (4896) vs Probe B (4992) must match');
+    assert.deepEqual(probeBHit, probeBZero, 'TS 2A: partial-tail hit must match 0-note wallet');
+
+    assert.deepEqual(
+      await probePass1d({ maxMemo: 51, customCount: [51, 1], withHit: true }),
+      await probePass1d({ maxMemo: 51, customCount: [51, 96], withHit: true }),
+      'TS 2B: MM_OFF_COUNT sweep on MemoPage 51 must leak 0 bits',
+    );
+    assert.deepEqual(
+      await probePass1d({ maxMemo: 53, customCount: [53, 1], withHit: true }),
+      await probePass1d({ maxMemo: 53, customCount: [53, 31], withHit: true }),
+      'TS 2B: MemoPage 53 count 1..31 must exclude subtree 19 uniformly',
+    );
+    assert.deepEqual(
+      await probePass1d({ maxMemo: 53, customCount: [53, 32], withHit: true }),
+      await probePass1d({ maxMemo: 53, customCount: [53, 96], withHit: true }),
+      'TS 2B: MemoPage 53 count 32..96 must emit identical Pass 1D',
+    );
+
+    assert.deepEqual(
+      await probePass1d({ birthday: 500n, maxMemo: 53, customClosed: [51, 9999n], withHit: true }),
+      await probePass1d({ birthday: 500n, maxMemo: 53, customClosed: [51, 1n], withHit: true }),
+      'TS 2C: mid-scan closedSlot < birthdaySlot must not toggle MemoPage 51 visibility',
+    );
+
+    // Pass 1B alignment: skipping 0..=133 vs 0..=134 on 80-subtree pool (>25 remaining MemoPages)
+    const fc60 = 80;
+    const roots60 = Array.from({ length: fc60 }, () => dummySubroot);
+    const sr0_60 = makeSubrootPage(0, 0n, roots60);
+    const lane0_60 = makeLaneState(0, BigInt(fc60 * SUBTREE_LEAVES), 0n, rollUpSubroots(roots60));
+    const sub60Pdas = new Set(Array.from({ length: fc60 }, (_, s) => deriveSubtreePdaSync(0, 0, BigInt(s)).address));
+    const runPass1bAlign = async (lastPreBday) => {
+      const st = new CompactWalletStore(0, 500n);
+      const mMap = new Map();
+      const totalM = Math.ceil((fc60 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+      for (let m = 0; m < totalM; m++) {
+        const raw = makeMemoPageWithMeta(0, BigInt(m), MEMO_NOTES_PER_PAGE, m <= lastPreBday ? 100n : 900n);
+        if (m === 134) writeMemoSlot(raw, 36, encH.memo);
+        mMap.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, raw);
+      }
+      const p1d = [];
+      await syncCompactStoreWithRpc({
+        store: st,
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => {
+          for (const a of addrs) if (sub60Pdas.has(a)) p1d.push(a);
+          return addrs.map((a) => {
+            if (a === poolPda) return pool1;
+            if (a === lane0Pda) return lane0_60;
+            if (a === sr0Pda) return sr0_60;
+            return mMap.get(a) ?? null;
+          });
+        },
+      });
+      return p1d;
+    };
+    assert.deepEqual(
+      await runPass1bAlign(133),
+      await runPass1bAlign(134),
+      'TS 2C: Pass 1B skips 0..=133 and 0..=134 must align to 50*256 with identical Pass 1D',
+    );
+
+    // 1-shot replay amplification: single junk_ct filtered in Pass 1C; 17 valid/junk clones
+    // resolved identically for Alice (owner) and Bob (non-owner) via public `canonEpk` tracking.
+    const junkMemo = new Uint8Array(encH.memo);
+    junkMemo[40] ^= 0xff;
+    const bobReplayFvk = exportFullViewingKey(deriveKeysFromSeed(new Uint8Array(32).fill(0x63)));
+    const runReplay = async (cloneMemo, copies, who) => {
+      const st = new CompactWalletStore(0, 0n);
+      const mMap = new Map();
+      for (let m = 0; m < 54; m++) {
+        mMap.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, makeMemoPageWithMeta(0, BigInt(m), MEMO_NOTES_PER_PAGE, 0n));
+      }
+      if (cloneMemo) {
+        for (let s = 0; s < copies; s++) {
+          const leaf = s * SUBTREE_LEAVES;
+          const mSeq = Math.floor(leaf / MEMO_NOTES_PER_PAGE);
+          const slot = leaf % MEMO_NOTES_PER_PAGE;
+          writeMemoSlot(mMap.get(deriveMemoPdaSync(0, 0, BigInt(mSeq)).address), slot, cloneMemo);
+        }
+      }
+      const p1d = [];
+      await syncCompactStoreWithRpc({
+        store: st,
+        fvk: who,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => {
+          for (const a of addrs) if (subPdas.has(a)) p1d.push(a);
+          return addrs.map((a) => {
+            if (a === poolPda) return pool1;
+            if (a === lane0Pda) return lane0Raw;
+            if (a === sr0Pda) return sr0Raw;
+            return mMap.get(a) ?? null;
+          });
+        },
+      });
+      return p1d;
+    };
+    const zeroSubs = await runReplay(null, 0, fvk);
+    const junkSingleSubs = await runReplay(junkMemo, 1, fvk);
+    const valid17Alice = await runReplay(encH.memo, 17, fvk);
+    const valid17Bob = await runReplay(encH.memo, 17, bobReplayFvk);
+    const junk17Alice = await runReplay(junkMemo, 17, fvk);
+    assert.equal(zeroSubs.length, 16);
+    assert.deepEqual(junkSingleSubs, zeroSubs, 'TS 2D: single junk_ct probe must be filtered in Pass 1C');
+    assert.deepEqual(valid17Alice, valid17Bob, 'TS 2D + R7-1: 17 valid clones must yield byte-identical Pass 1D for Alice & Bob');
+    assert.deepEqual(junk17Alice, valid17Alice, 'TS 2D + R7-1: 17 junk clones must match 17 valid clones');
+
+    // Round-3 Issue #2: 2-sync duplicate-memo / batch binary-search oracle MUST NOT cap
+    // `nextMemoLeaf` or roll back `nextNfIndex` on Sync #1 or diverge on Sync #2!
+    {
+      const bobKeys = deriveKeysFromSeed(new Uint8Array(32).fill(0x62));
+      const bobFvk = exportFullViewingKey(bobKeys);
+      const fcD = 20;
+      const dRoots = Array.from({ length: fcD }, () => dummySubroot);
+      const dLaneRoot = rollUpSubroots(dRoots);
+      const nf0 = makeNfPage(
+        0,
+        0n,
+        Array.from({ length: 50 }, (_, i) => new Uint8Array(16).fill((i + 1) & 0xff)),
+      );
+      const dAcc = new Map();
+      dAcc.set(poolPda, makePoolState(1));
+      dAcc.set(lane0Pda, makeLaneState(0, BigInt(fcD * SUBTREE_LEAVES), 50n, dLaneRoot));
+      dAcc.set(sr0Pda, makeSubrootPage(0, 0n, dRoots));
+      dAcc.set(deriveNfPagePdaSync(0, 0, 0n).address, nf0);
+      for (let s = 0; s < fcD; s++) {
+        dAcc.set(deriveSubtreePdaSync(0, 0, BigInt(s)).address, makeSubtreePage(0, BigInt(s), dummyLeaves));
+      }
+      for (let m = 0; m < 54; m++) {
+        const raw = makeMemoPageWithMeta(0, BigInt(m), MEMO_NOTES_PER_PAGE, 0n);
+        if (m === 0) writeMemoSlot(raw, 0, encH.memo);
+        else if (m === Math.floor(256 / MEMO_NOTES_PER_PAGE)) writeMemoSlot(raw, 256 % MEMO_NOTES_PER_PAGE, encH.memo);
+        dAcc.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, raw);
+      }
+      const aliceSt = new CompactWalletStore(0, 0n);
+      const bobSt = new CompactWalletStore(0, 0n);
+      const runD = async (st, who) => {
+        const log = [];
+        await syncCompactStoreWithRpc({
+          store: st,
+          fvk: who,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            log.push([...addrs]);
+            return addrs.map((a) => dAcc.get(a) ?? null);
+          },
+        });
+        return log;
+      };
+      await runD(aliceSt, fvk);
+      await runD(bobSt, bobFvk);
+      assert.equal(aliceSt.lanes[0].nextMemoLeaf, BigInt(fcD * SUBTREE_LEAVES));
+      assert.equal(bobSt.lanes[0].nextMemoLeaf, BigInt(fcD * SUBTREE_LEAVES));
+      assert.equal(aliceSt.lanes[0].nextNfIndex, 50n);
+      assert.equal(bobSt.lanes[0].nextNfIndex, 50n);
+      assert.deepEqual(
+        await runD(aliceSt, fvk),
+        await runD(bobSt, bobFvk),
+        'TS Round-3 Issue #2: Sync #2 after duplicated memo probe must be byte-identical',
+      );
+    }
+
+    // Round-3 Issue #3: All 16 Curve25519 torsion + bit-255 `epk` variants of a single `AUD1DYN1`
+    // dynamic swap memo MUST collapse to 1 shared-secret dedupTag in Pass 1D!
+    {
+      const dyn = prepareDynamicSwapMemo(keys.viewPk, new Uint8Array(32).fill(0x95));
+      const plain72 = new Uint8Array(72);
+      plain72.set(enc.encode('AUD1DYN1'), 0);
+      new DataView(plain72.buffer).setBigUint64(8, 123_456n, true);
+      plain72.set(WSOL_MINT_BYTES, 16);
+      const ct72 = new Uint8Array(72);
+      for (let i = 0; i < 72; i++) ct72[i] = plain72[i] ^ dyn.dynMask72[i];
+      const vt = dyn.dynHead34.slice(0, 2);
+      const torsionHex = [
+        '066a931ab81e21612b08dfe188b228739987edf34ae116246d1519bff1bfa864',
+        '066a931ab81e21612b08dfe188b228739987edf34ae116246d1519bff1bfa8e4',
+        '61afece328d0bbf272266a924af5f171c0bacbaa43db0a25d7f5ad414f23e624',
+        '61afece328d0bbf272266a924af5f171c0bacbaa43db0a25d7f5ad414f23e6a4',
+        '71236b3d0eebd0bda154cf3d71bf191f3fc5a7373f36167158087bc2d60b0d7e',
+        '71236b3d0eebd0bda154cf3d71bf191f3fc5a7373f36167158087bc2d60b0dfe',
+        '957ba0f0a7650a904c08930e8c08b4f15dc532fc39e81afc5ec0819d0a311d2f',
+        '957ba0f0a7650a904c08930e8c08b4f15dc532fc39e81afc5ec0819d0a311daf',
+        '553ad91bcdcbdf0705575fa25b8b61b4a043f86be7ca3b44bcd06bee4c2b017e',
+        '553ad91bcdcbdf0705575fa25b8b61b4a043f86be7ca3b44bcd06bee4c2b01fe',
+        '85602b9d9ec94c219a638fb19e9b50bfa358642a53a50d2472a84d9f07515c1f',
+        '85602b9d9ec94c219a638fb19e9b50bfa358642a53a50d2472a84d9f07515c9f',
+        '1020194047a5e4de808c8054615d7f312f7b6475450d56b48c76cdd9b672906a',
+        '1020194047a5e4de808c8054615d7f312f7b6475450d56b48c76cdd9b67290ea',
+        'eb10757c22c0897939f8a3221d1caf188819f1b6d90cdf140e8ec09ebbd5be05',
+        'eb10757c22c0897939f8a3221d1caf188819f1b6d90cdf140e8ec09ebbd5be85',
+      ];
+      const tags = new Set();
+      const canonEpks = new Set();
+      const variantMemos = [];
+      for (const h of torsionHex) {
+        const epk = Uint8Array.from(Buffer.from(h, 'hex'));
+        assert.equal(checkMemoViewTag(fvk.viewSk, vt, epk), true);
+        const tag = computeMemoScanDedupTag(fvk.viewSk, vt, epk, ct72);
+        assert.ok(tag);
+        tags.add(Buffer.from(tag).toString('hex'));
+        const canon = canonicalizePublicEpk(epk);
+        assert.ok(canon);
+        canonEpks.add(Buffer.from(canon).toString('hex'));
+        const m106 = new Uint8Array(MEMO_ENTRY_WIRE_LEN);
+        m106.set(vt, 0);
+        m106.set(epk, 2);
+        m106.set(ct72, 34);
+        variantMemos.push(m106);
+      }
+      assert.equal(tags.size, 1, 'TS Round-3 Issue #3: all 16 torsion + bit-255 variants must collapse to 1 dedupTag');
+      assert.equal(canonEpks.size, 1, 'TS Round-7 Finding #1: all 16 torsion + bit-255 variants must collapse to 1 public canonEpk');
+
+      const fc32 = 32;
+      const roots32 = Array.from({ length: fc32 }, () => dummySubroot);
+      const sr0_32 = makeSubrootPage(0, 0n, roots32);
+      const lane0_32 = makeLaneState(0, BigInt(fc32 * SUBTREE_LEAVES), 0n, rollUpSubroots(roots32));
+      const m32 = new Map();
+      const nM32 = Math.ceil((fc32 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+      for (let m = 0; m < nM32; m++) {
+        m32.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, makeMemoPageWithMeta(0, BigInt(m), MEMO_NOTES_PER_PAGE, 0n));
+      }
+      for (let s = 0; s < 16; s++) {
+        const leaf = s * SUBTREE_LEAVES;
+        writeMemoSlot(
+          m32.get(deriveMemoPdaSync(0, 0, BigInt(Math.floor(leaf / MEMO_NOTES_PER_PAGE))).address),
+          leaf % MEMO_NOTES_PER_PAGE,
+          variantMemos[s],
+        );
+      }
+      const sub32Set = new Set(Array.from({ length: fc32 }, (_, s) => deriveSubtreePdaSync(0, 0, BigInt(s)).address));
+      const runDynTorsion = async (who) => {
+        const p1dDyn = [];
+        await syncCompactStoreWithRpc({
+          store: new CompactWalletStore(0, 0n),
+          fvk: who,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            for (const a of addrs) if (sub32Set.has(a)) p1dDyn.push(a);
+            return addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) return lane0_32;
+              if (a === sr0Pda) return sr0_32;
+              return m32.get(a) ?? null;
+            });
+          },
+        });
+        return p1dDyn;
+      };
+      const bobDynFvk = exportFullViewingKey(deriveKeysFromSeed(new Uint8Array(32).fill(0x64)));
+      const dynAlice = await runDynTorsion(fvk);
+      const dynBob = await runDynTorsion(bobDynFvk);
+      assert.equal(dynAlice.length, 32, 'TS 16 public torsion subtrees + 16 non-public = 32');
+      assert.deepEqual(
+        dynAlice,
+        dynBob,
+        'TS Round-3 Issue #3 + Round-7 Finding #1: 16 torsion AUD1DYN1 variants must yield byte-identical Pass 1D for Alice & Bob',
+      );
+    }
+
+    // Round-3 Issue #1: Zero livelock on honest >786,433-note fresh catch-up (Trigger 1A)
+    // AND birthdaySlot > 0 after transient Sync #1 MemoPage drop (Trigger 1B)!
+    {
+      // Trigger 1B: birthdaySlot = 1000, Sync 1 drops MemoPage(0,0) at 10 leaves -> Sync 2 at 500 leaves catches up!
+      const rollUpWithFrontier = (subroots, fLeaves) => {
+        const nodes = [...subroots];
+        if (fLeaves.length > 0) nodes.push(computeSubtree256Root(fLeaves, fLeaves.length));
+        return rollUpSubroots(nodes);
+      };
+      const stBday = new CompactWalletStore(0, 1000n);
+      await syncCompactStoreWithRpc({
+        store: stBday,
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) =>
+          addrs.map((a) => {
+            if (a === poolPda) return pool1;
+            if (a === lane0Pda) return makeLaneState(0, 10n, 0n, rollUpWithFrontier([], dummyLeaves.slice(0, 10)));
+            if (a === deriveSubtreePdaSync(0, 0, 0n).address) return makeSubtreePage(0, 0n, dummyLeaves.slice(0, 10));
+            return null; // MemoPage(0, 0) dropped
+          }),
+      });
+      assert.equal(stBday.lanes[0].nextMemoLeaf, 0n);
+      assert.equal(stBday.lanes[0].frontierLeaves.length, 10);
+
+      const acc500 = new Map();
+      acc500.set(poolPda, pool1);
+      acc500.set(lane0Pda, makeLaneState(0, 500n, 0n, rollUpWithFrontier([dummySubroot], dummyLeaves.slice(0, 244))));
+      acc500.set(sr0Pda, makeSubrootPage(0, 0n, [dummySubroot]));
+      acc500.set(deriveSubtreePdaSync(0, 0, 0n).address, makeSubtreePage(0, 0n, dummyLeaves));
+      acc500.set(deriveSubtreePdaSync(0, 0, 1n).address, makeSubtreePage(0, 1n, dummyLeaves.slice(0, 244)));
+      for (let m = 0; m < 6; m++) {
+        acc500.set(
+          deriveMemoPdaSync(0, 0, BigInt(m)).address,
+          makeMemoPageWithMeta(0, BigInt(m), m < 5 ? MEMO_NOTES_PER_PAGE : 20, m <= 2 ? 500n : 1500n),
+        );
+      }
+      await syncCompactStoreWithRpc({
+        store: stBday,
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => addrs.map((a) => acc500.get(a) ?? null),
+      });
+      assert.equal(stBday.lanes[0].nextMemoLeaf, 500n, 'TS Round-3 Issue #1 Trigger 1B must catch up to 500 without livelock');
+      assert.equal(stBday.lanes[0].finalizedSubroots.length, 1);
+      assert.equal(stBday.lanes[0].frontierSubSeq, 1n);
+
+      // Trigger 1A: fresh wallet synced 1 chunk (nextMemoLeaf=393216, frontierSubSeq=3125, frontierLeaves=10)
+      // when frontier 3125 seals to 3126 -> Sync 2 MUST advance to 786432 (NOT livelock at 393216!)
+      const fcA2 = 3126;
+      const remA2 = 4;
+      const rootsA2 = Array.from({ length: fcA2 }, () => dummySubroot);
+      const lrootA2 = rollUpWithFrontier(rootsA2, dummyLeaves.slice(0, remA2));
+      const srA2 = new Map();
+      for (let sr = 0; sr < Math.ceil(fcA2 / SUBROOTS_PER_PAGE); sr++) {
+        const s0 = sr * SUBROOTS_PER_PAGE;
+        srA2.set(
+          deriveSubrootPdaSync(0, 0, BigInt(sr)).address,
+          makeSubrootPage(0, BigInt(sr), rootsA2.slice(s0, Math.min(fcA2, s0 + SUBROOTS_PER_PAGE))),
+        );
+      }
+      const subA2Meta = new Map();
+      for (let s = 1536; s <= fcA2; s++) subA2Meta.set(deriveSubtreePdaSync(0, 0, BigInt(s)).address, BigInt(s));
+      const memoA2Meta = new Map();
+      for (let m = 4096; m < 8337; m++) memoA2Meta.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, BigInt(m));
+      const stLive = new CompactWalletStore(0, 0n);
+      stLive.lanes[0].nextMemoLeaf = 393_216n;
+      stLive.lanes[0].finalizedSubroots = Array.from({ length: 3125 }, () => frToBeBytes(dummySubroot));
+      stLive.lanes[0].frontierSubSeq = 3125n;
+      stLive.lanes[0].frontierLeaves = dummyLeaves.slice(0, 10).map((x) => frToBeBytes(x));
+      const laneA2 = makeLaneState(0, BigInt(fcA2 * SUBTREE_LEAVES + remA2), 0n, lrootA2);
+      const runA2 = async () =>
+        syncCompactStoreWithRpc({
+          store: stLive,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) return laneA2;
+              if (srA2.has(a)) return srA2.get(a);
+              if (subA2Meta.has(a)) {
+                const s = subA2Meta.get(a);
+                return makeSubtreePage(0, s, s === BigInt(fcA2) ? dummyLeaves.slice(0, remA2) : dummyLeaves);
+              }
+              if (memoA2Meta.has(a)) return makeMemoPageWithMeta(0, memoA2Meta.get(a), MEMO_NOTES_PER_PAGE, 0n);
+              return null;
+            }),
+        });
+      await runA2();
+      assert.equal(stLive.lanes[0].nextMemoLeaf, 786_432n, 'TS Round-3 Issue #1 Trigger 1A Sync 2 must advance to 786432');
+      assert.equal(stLive.lanes[0].finalizedSubroots.length, fcA2);
+      await runA2();
+      assert.equal(stLive.lanes[0].nextMemoLeaf, BigInt(fcA2 * SUBTREE_LEAVES + remA2), 'TS Trigger 1A Sync 3 must catch up');
+    }
+
+    // Round-3 Issue #4: O(log N) lagging `laneHdr.nextLeaf` binary-search & multi-lane shrink
+    // oracle on legacy `locallyFinalizedUnfrozen` notes MUST leak 0 bits!
+    {
+      const leg = new CompactWalletStore(0, 0n);
+      leg.lanes[0].nextMemoLeaf = 100n * BigInt(SUBTREE_LEAVES);
+      leg.lanes[0].finalizedSubroots = Array.from({ length: 100 }, () => frToBeBytes(dummySubroot));
+      leg.recordVerifiedMemo({
+        fvk,
+        laneId: 0,
+        leafIdx: 42n * BigInt(SUBTREE_LEAVES) + 7n,
+        decrypted: {
+          tweak: encH.tweak,
+          blinding: encH.blinding,
+          amount: 42_000n,
+          mint: WSOL_MINT_BYTES,
+          memoVersion: MEMO_VERSION_V1,
+          memoFlags: 0,
+          paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+          isDynamic: false,
+        },
+        cmBe: frToBeBytes(cmH),
+      });
+      const sub100Set = new Set(Array.from({ length: 100 }, (_, s) => deriveSubtreePdaSync(0, 0, BigInt(s)).address));
+      const probeLag = async (midFc) => {
+        const st = CompactWalletStore.fromJSON(leg.toJSON());
+        const p1d = [];
+        await syncCompactStoreWithRpc({
+          store: st,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            for (const a of addrs) if (sub100Set.has(a)) p1d.push(a);
+            return addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) {
+                const root =
+                  midFc === 0
+                    ? ZERO_HASHES_4ARY[18]
+                    : midFc <= 100
+                      ? rollUpSubroots(Array.from({ length: midFc }, () => dummySubroot))
+                      : 77n;
+                return makeLaneState(0, BigInt(midFc) * BigInt(SUBTREE_LEAVES), 0n, root);
+              }
+              return null;
+            });
+          },
+        });
+        return p1d;
+      };
+      for (const mid of [0, 10, 41, 42, 43, 50, 99]) {
+        assert.equal((await probeLag(mid)).length, 0, `TS Round-3 Issue #4: lagging mid=${mid} < 100 must emit 0 Pass 1D subtrees`);
+      }
+      const nonLag100 = await probeLag(100);
+      assert.equal(nonLag100.length, 16);
+      assert.deepEqual(await probeLag(150), nonLag100);
+      assert.deepEqual(await probeLag(1000), nonLag100);
+
+      leg.lanes[1].nextMemoLeaf = 50n * BigInt(SUBTREE_LEAVES);
+      leg.lanes[1].finalizedSubroots = Array.from({ length: 50 }, () => frToBeBytes(dummySubroot));
+      assert.equal(
+        (await probeLag(100)).length,
+        0,
+        'TS Round-3 Issue #4: omitting persisted Lane 1 via activeLanes=1 must emit 0 Pass 1D subtrees',
+      );
+    }
+  }
+
+  // =========================================================================
+  // 4. Finding #3: Exact monotone dyadic Poisson-split large-pool HRW
+  //    (+1 multi-lane survival, 2^18->2^18+1 zero cliff, 2^19..2^26 immunity)
+  // =========================================================================
+  {
+    const scope = new Uint8Array([
+      0x73, 0x79, 0x6e, 0x63, 2,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,
+      1, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    const dBase = selectLargePoolHrwSealedDecoys({
+      viewSk: fvk.viewSk,
+      scope,
+      epochBucket: 0n,
+      sealedByLane: [
+        { laneId: 0, sealedCount: 200_000n },
+        { laneId: 1, sealedCount: 200_000n },
+      ],
+      alreadySelected: new Set(),
+      targetSealed: 16,
+    });
+    const dPlus1 = selectLargePoolHrwSealedDecoys({
+      viewSk: fvk.viewSk,
+      scope,
+      epochBucket: 0n,
+      sealedByLane: [
+        { laneId: 0, sealedCount: 200_001n },
+        { laneId: 1, sealedCount: 200_000n },
+      ],
+      alreadySelected: new Set(),
+      targetSealed: 16,
+    });
+    assert.equal(dBase.length, 16);
+    assert.equal(dPlus1.length, 16);
+    assert.deepEqual(
+      dBase.map((x) => [x.laneId, Number(x.pageSeq)]),
+      [
+        [1, 198615],
+        [0, 109445],
+        [1, 184529],
+        [1, 41970],
+        [1, 123773],
+        [1, 119560],
+        [0, 93805],
+        [0, 148551],
+        [1, 13461],
+        [1, 22508],
+        [0, 89835],
+        [0, 191803],
+        [0, 26692],
+        [1, 181517],
+        [1, 66812],
+        [1, 169712],
+      ],
+      'TS<->Rust exact bit-for-bit dyadic large-pool HRW parity vector',
+    );
+    const sBase = new Set(dBase.map((x) => `${x.laneId}:${x.pageSeq}`));
+    const sPlus1 = new Set(dPlus1.map((x) => `${x.laneId}:${x.pageSeq}`));
+    const overlap1 = [...sBase].filter((k) => sPlus1.has(k)).length;
+    assert.ok(overlap1 >= 15, `TS Finding #3: +1 growth must preserve >=15/16 decoys, got ${overlap1}`);
+
+    const dPow2 = selectLargePoolHrwSealedDecoys({
+      viewSk: fvk.viewSk,
+      scope,
+      epochBucket: 0n,
+      sealedByLane: [{ laneId: 0, sealedCount: 262_144n }],
+      alreadySelected: new Set(),
+      targetSealed: 16,
+    });
+    const dPow2Plus1 = selectLargePoolHrwSealedDecoys({
+      viewSk: fvk.viewSk,
+      scope,
+      epochBucket: 0n,
+      sealedByLane: [{ laneId: 0, sealedCount: 262_145n }],
+      alreadySelected: new Set(),
+      targetSealed: 16,
+    });
+    const sp2 = new Set(dPow2.map((x) => `${x.laneId}:${x.pageSeq}`));
+    const sp2p1 = new Set(dPow2Plus1.map((x) => `${x.laneId}:${x.pageSeq}`));
+    const overlapP2 = [...sp2].filter((k) => sp2p1.has(k)).length;
+    assert.ok(overlapP2 >= 15, `TS Finding #3: 2^18->2^18+1 must preserve >=15/16 decoys, got ${overlapP2}`);
+
+    // Adversarial RPC forging lane0.nextLeaf = 2^19..2^26 against legacy locallyFinalizedUnfrozen store
+    const encL = encryptNoteMemo(keys.viewPk, new Uint8Array(32).fill(0x94), 33_000n, WSOL_MINT_BYTES);
+    const cmL = computeNoteCommitment(deriveStealthOwner(keys.spendPk, encL.tweak), wsolAsset, 33_000n, encL.blinding);
+    for (const localFc of [20, 4]) {
+      const baseSt = new CompactWalletStore(0, 0n);
+      baseSt.lanes[0].nextMemoLeaf = BigInt(localFc * SUBTREE_LEAVES);
+      baseSt.lanes[0].finalizedSubroots = Array.from({ length: localFc }, () => frToBeBytes(dummySubroot));
+      baseSt.recordVerifiedMemo({
+        fvk,
+        laneId: 0,
+        leafIdx: 5n,
+        decrypted: {
+          tweak: encL.tweak,
+          blinding: encL.blinding,
+          amount: 33_000n,
+          mint: WSOL_MINT_BYTES,
+          memoVersion: MEMO_VERSION_V1,
+          memoFlags: 0,
+          paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+          isDynamic: false,
+        },
+        cmBe: frToBeBytes(cmL),
+      });
+      let prevBatch = null;
+      for (let exp = 19n; exp <= 26n; exp++) {
+        const st = CompactWalletStore.fromJSON(baseSt.toJSON());
+        const forgedLane0 = makeLaneState(0, (1n << exp) * BigInt(SUBTREE_LEAVES), 0n, 99n);
+        let p1d = [];
+        await syncCompactStoreWithRpc({
+          store: st,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            if (addrs.length === 16) p1d = [...addrs];
+            return addrs.map((a) => {
+              if (a === poolPda) return makePoolState(1);
+              if (a === lane0Pda) return forgedLane0;
+              return null;
+            });
+          },
+        });
+        assert.equal(p1d.length, 16);
+        if (prevBatch !== null) {
+          assert.deepEqual(
+            p1d,
+            prevBatch,
+            `TS Finding #3: forged nextLeaf=2^${exp}*256 must yield 0% decoy rotation (localFc=${localFc})`,
+          );
+        }
+        prevBatch = p1d;
+      }
+    }
+  }
+
+  // =========================================================================
+  // 5. Round-4 Issues #1 & #2: `publicSealedSubtrees` NEVER cannibalizes the
+  //    private 16-subtree decoy budget (returning frontiers M=15/16, dropped
+  //    frontier MemoPage, uniformNewSubtrees U=15/9, and legacy + catch-up
+  //    disjoint domain padding for both normal & tiny legacy stores)!
+  // =========================================================================
+  {
+    const pool1 = makePoolState(1);
+    const pool16 = makePoolState(16);
+    const encR4 = encryptNoteMemo(keys.viewPk, new Uint8Array(32).fill(0xa1), 77_000n, WSOL_MINT_BYTES);
+    const cmR4 = computeNoteCommitment(deriveStealthOwner(keys.spendPk, encR4.tweak), wsolAsset, 77_000n, encR4.blinding);
+
+    // --- 5a. Issue #1 POCs 1A (M=16), 1B (M=15), and 1C (M=16 + dropped MemoPage(15, 2)) ---
+    {
+      const fc10 = 10;
+      const roots10 = Array.from({ length: fc10 }, () => dummySubroot);
+      const lroot10 = rollUpSubroots(roots10);
+      const hitLeaves = [...dummyLeaves];
+      hitLeaves[3] = cmR4;
+      const hitSubroot = computeSubtree256Root(hitLeaves, SUBTREE_LEAVES);
+      const roots10Hit = [...roots10];
+      roots10Hit[5] = hitSubroot;
+      const lroot10Hit = rollUpSubroots(roots10Hit);
+
+      const allSub16 = new Map();
+      for (let l = 0; l < 16; l++) {
+        for (let s = 0; s < fc10; s++) {
+          allSub16.set(deriveSubtreePdaSync(0, l, BigInt(s)).address, [l, s]);
+        }
+      }
+      const nMemos10 = Math.ceil((fc10 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+
+      const runReturning = async (mFrontiers, dropLane15M2, withHit) => {
+        const st = new CompactWalletStore(0, 0n);
+        for (let l = 0; l < mFrontiers; l++) {
+          st.lanes[l].nextMemoLeaf = 10n;
+          st.lanes[l].frontierSubSeq = 0n;
+          st.lanes[l].frontierLeaves = dummyLeaves.slice(0, 10).map((x) => frToBeBytes(x));
+        }
+        const acc = new Map();
+        acc.set(poolPda, pool16);
+        const hitLeaf = 5 * SUBTREE_LEAVES + 3;
+        const hitM = Math.floor(hitLeaf / MEMO_NOTES_PER_PAGE);
+        const hitSlot = hitLeaf % MEMO_NOTES_PER_PAGE;
+        for (let l = 0; l < 16; l++) {
+          const useHit = withHit && l === 0;
+          acc.set(
+            deriveLanePdaSync(0, l).address,
+            makeLaneState(l, BigInt(fc10 * SUBTREE_LEAVES), 0n, useHit ? lroot10Hit : lroot10),
+          );
+          acc.set(
+            deriveSubrootPdaSync(0, l, 0n).address,
+            makeSubrootPage(l, 0n, useHit ? roots10Hit : roots10),
+          );
+          for (let m = 0; m < nMemos10; m++) {
+            if (dropLane15M2 && l === 15 && m === 2) continue;
+            const cnt = Math.min(MEMO_NOTES_PER_PAGE, fc10 * SUBTREE_LEAVES - m * MEMO_NOTES_PER_PAGE);
+            const raw = makeMemoPageWithMeta(l, BigInt(m), cnt, 0n);
+            if (useHit && m === hitM) writeMemoSlot(raw, hitSlot, encR4.memo);
+            acc.set(deriveMemoPdaSync(0, l, BigInt(m)).address, raw);
+          }
+        }
+        const p1d = [];
+        await syncCompactStoreWithRpc({
+          store: st,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            for (const a of addrs) {
+              const ls = allSub16.get(a);
+              if (ls) p1d.push(ls);
+            }
+            return addrs.map((a) => acc.get(a) ?? null);
+          },
+        });
+        return p1d;
+      };
+
+      const p1aZero = await runReturning(16, false, false);
+      const p1aHit = await runReturning(16, false, true);
+      assert.equal(p1aZero.length, 32, 'TS Round-4 POC 1A (0 hits): must fetch 32');
+      assert.equal(p1aHit.length, 32, 'TS Round-4 POC 1A (1 hit): must fetch 32');
+      assert.ok(p1aHit.some(([l, s]) => l === 0 && s === 5));
+      assert.equal(p1aHit.filter(([, s]) => s !== 0).length, 16);
+
+      const p1bZero = await runReturning(15, false, false);
+      const p1bHit = await runReturning(15, false, true);
+      assert.equal(p1bZero.length, 31, 'TS Round-4 POC 1B (M=15, 0 hits): must fetch 31');
+      assert.equal(p1bHit.length, 31, 'TS Round-4 POC 1B (M=15, 1 hit): must fetch 31 (NOT 16!)');
+      assert.ok(p1bHit.some(([l, s]) => l === 0 && s === 5));
+      assert.equal(p1bHit.filter(([l, s]) => !(l < 15 && s === 0)).length, 16);
+
+      const p1cZero = await runReturning(16, true, false);
+      const p1cHit = await runReturning(16, true, true);
+      assert.equal(p1cZero.length, 31, 'TS Round-4 POC 1C (dropped MemoPage, 0 hits): must fetch 31');
+      assert.equal(p1cHit.length, 31, 'TS Round-4 POC 1C (dropped MemoPage, 1 hit): must fetch 31');
+      assert.ok(p1cHit.some(([l, s]) => l === 0 && s === 5));
+    }
+
+    // --- 5b. Issue #2 POC 2A (U=15 spoofed activeLanes=16) & POC 2B (U=9 on Lane 0) ---
+    {
+      const decLeg = {
+        tweak: encR4.tweak,
+        blinding: encR4.blinding,
+        amount: 77_000n,
+        mint: WSOL_MINT_BYTES,
+        memoVersion: MEMO_VERSION_V1,
+        memoFlags: 0,
+        paymentId: new Uint8Array(MEMO_PAYMENT_ID_LEN),
+        isDynamic: false,
+      };
+      const makeLegacy100 = (bday) => {
+        const st = new CompactWalletStore(0, bday);
+        st.lanes[0].nextMemoLeaf = 100n * BigInt(SUBTREE_LEAVES);
+        st.lanes[0].finalizedSubroots = Array.from({ length: 100 }, () => frToBeBytes(dummySubroot));
+        st.recordVerifiedMemo({
+          fvk,
+          laneId: 0,
+          leafIdx: 3n * BigInt(SUBTREE_LEAVES) + 7n,
+          decrypted: decLeg,
+          cmBe: frToBeBytes(cmR4),
+        });
+        return st;
+      };
+
+      const lroot100 = rollUpSubroots(Array.from({ length: 100 }, () => dummySubroot));
+      const lroot2 = rollUpSubroots([dummySubroot, dummySubroot]);
+      const acc2a = new Map();
+      acc2a.set(poolPda, pool16);
+      acc2a.set(lane0Pda, makeLaneState(0, 100n * BigInt(SUBTREE_LEAVES), 0n, lroot100));
+      const subLookup2a = new Map();
+      for (let s = 0; s < 100; s++) subLookup2a.set(deriveSubtreePdaSync(0, 0, BigInt(s)).address, [0, s]);
+      for (let l = 1; l < 16; l++) {
+        acc2a.set(deriveLanePdaSync(0, l).address, makeLaneState(l, 2n * BigInt(SUBTREE_LEAVES), 0n, lroot2));
+        acc2a.set(deriveSubrootPdaSync(0, l, 0n).address, makeSubrootPage(l, 0n, [dummySubroot, dummySubroot]));
+        for (let m = 0; m < 5; m++) {
+          acc2a.set(deriveMemoPdaSync(0, l, BigInt(m)).address, makeMemoPageWithMeta(l, BigInt(m), 96, 50n));
+        }
+        acc2a.set(deriveMemoPdaSync(0, l, 5n).address, makeMemoPageWithMeta(l, 5n, 32, 200n));
+        subLookup2a.set(deriveSubtreePdaSync(0, l, 0n).address, [l, 0]);
+        subLookup2a.set(deriveSubtreePdaSync(0, l, 1n).address, [l, 1]);
+      }
+      const p1d2a = [];
+      await syncCompactStoreWithRpc({
+        store: makeLegacy100(100n),
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs, opts) => {
+          for (const a of addrs) {
+            const ls = subLookup2a.get(a);
+            if (ls) p1d2a.push(ls);
+          }
+          return addrs.map((a) => {
+            const full = acc2a.get(a) ?? null;
+            if (!full || !opts?.dataSlice) return full;
+            return full.slice(opts.dataSlice.offset, opts.dataSlice.offset + opts.dataSlice.length);
+          });
+        },
+      });
+      const lane02a = p1d2a.filter(([l]) => l === 0);
+      assert.equal(lane02a.length, 16, 'TS Round-4 POC 2A: Lane 0 [0..100) must get full 16 subtrees');
+      assert.ok(lane02a.some(([, s]) => s === 3));
+      assert.equal(p1d2a.length, 31, 'TS Round-4 POC 2A: 16 on Lane 0 + 15 uniform on Lanes 1..15 = 31');
+
+      // POC 2B: U=9 uniform new sealed subtrees 100..109 on Lane 0
+      const roots109 = Array.from({ length: 109 }, () => dummySubroot);
+      const acc2b = new Map();
+      acc2b.set(poolPda, pool1);
+      acc2b.set(lane0Pda, makeLaneState(0, 109n * BigInt(SUBTREE_LEAVES), 0n, rollUpSubroots(roots109)));
+      acc2b.set(deriveSubrootPdaSync(0, 0, 0n).address, makeSubrootPage(0, 0n, roots109));
+      const mStart = Math.floor((100 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+      const mEnd = Math.ceil((109 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+      for (let m = mStart; m < mEnd; m++) {
+        const cnt = Math.min(MEMO_NOTES_PER_PAGE, 109 * SUBTREE_LEAVES - m * MEMO_NOTES_PER_PAGE);
+        acc2b.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, makeMemoPageWithMeta(0, BigInt(m), cnt, 0n));
+      }
+      const subLookup2b = new Map(Array.from({ length: 109 }, (_, s) => [deriveSubtreePdaSync(0, 0, BigInt(s)).address, s]));
+      const p1d2b = [];
+      await syncCompactStoreWithRpc({
+        store: makeLegacy100(0n),
+        fvk,
+        privacyMode: 'strict',
+        fetchBatch: async (addrs) => {
+          for (const a of addrs) {
+            const s = subLookup2b.get(a);
+            if (s !== undefined) p1d2b.push(s);
+          }
+          return addrs.map((a) => acc2b.get(a) ?? null);
+        },
+      });
+      assert.equal(p1d2b.filter((s) => s < 100).length, 16, 'TS Round-4 POC 2B: Lane 0 [0..100) must get 16');
+      assert.equal(p1d2b.filter((s) => s >= 100).length, 9, 'TS Round-4 POC 2B: 9 uniform subtrees 100..109');
+      assert.equal(p1d2b.length, 25);
+
+      // --- 5c. Step 3B + Disjoint Partition: normal (localFc=100) & tiny (localFc=4) legacy ---
+      const runLegacyCatchup = async (localFc, extraFc, hitSubs) => {
+        const totalFc = localFc + extraFc;
+        const st = new CompactWalletStore(0, 0n);
+        st.lanes[0].nextMemoLeaf = BigInt(localFc * SUBTREE_LEAVES);
+        st.lanes[0].finalizedSubroots = Array.from({ length: localFc }, () => frToBeBytes(dummySubroot));
+        st.recordVerifiedMemo({
+          fvk,
+          laneId: 0,
+          leafIdx: 2n * BigInt(SUBTREE_LEAVES) + 5n,
+          decrypted: decLeg,
+          cmBe: frToBeBytes(cmR4),
+        });
+        const roots = Array.from({ length: totalFc }, () => dummySubroot);
+        const acc = new Map();
+        acc.set(poolPda, pool1);
+        acc.set(lane0Pda, makeLaneState(0, BigInt(totalFc * SUBTREE_LEAVES), 0n, rollUpSubroots(roots)));
+        acc.set(deriveSubrootPdaSync(0, 0, 0n).address, makeSubrootPage(0, 0n, roots));
+        const m0 = Math.floor((localFc * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+        const m1 = Math.ceil((totalFc * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+        for (let m = m0; m < m1; m++) {
+          const cnt = Math.min(MEMO_NOTES_PER_PAGE, totalFc * SUBTREE_LEAVES - m * MEMO_NOTES_PER_PAGE);
+          acc.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, makeMemoPageWithMeta(0, BigInt(m), cnt, 0n));
+        }
+        for (let i = 0; i < hitSubs.length; i++) {
+          const encX = encryptNoteMemo(keys.viewPk, new Uint8Array(32).fill((0xb0 + i) & 0xff), 10_000n + BigInt(i), WSOL_MINT_BYTES);
+          const leaf = hitSubs[i] * SUBTREE_LEAVES + 1;
+          const mSeq = Math.floor(leaf / MEMO_NOTES_PER_PAGE);
+          const slot = leaf % MEMO_NOTES_PER_PAGE;
+          writeMemoSlot(acc.get(deriveMemoPdaSync(0, 0, BigInt(mSeq)).address), slot, encX.memo);
+        }
+        const subLu = new Map(Array.from({ length: totalFc }, (_, s) => [deriveSubtreePdaSync(0, 0, BigInt(s)).address, s]));
+        const p1d = [];
+        await syncCompactStoreWithRpc({
+          store: st,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            for (const a of addrs) {
+              const s = subLu.get(a);
+              if (s !== undefined) p1d.push(s);
+            }
+            return addrs.map((a) => acc.get(a) ?? null);
+          },
+        });
+        return p1d;
+      };
+
+      const normZero = await runLegacyCatchup(100, 50, []);
+      const normOne = await runLegacyCatchup(100, 50, [120]);
+      assert.equal(normZero.filter((s) => s < 100).length, 16);
+      assert.equal(normZero.filter((s) => s >= 100).length, 16);
+      assert.equal(normOne.filter((s) => s < 100).length, 16);
+      assert.equal(normOne.filter((s) => s >= 100).length, 16);
+      assert.ok(normOne.includes(120));
+
+      const tinyZero = await runLegacyCatchup(4, 50, []);
+      const tinyOne = await runLegacyCatchup(4, 50, [30]);
+      const tinyFive = await runLegacyCatchup(4, 50, [10, 20, 30, 40, 50]);
+      for (const [lbl, v] of [
+        ['0 hits', tinyZero],
+        ['1 hit', tinyOne],
+        ['5 hits', tinyFive],
+      ]) {
+        assert.equal(v.filter((s) => s < 4).length, 4, `TS Round-4 tiny legacy (${lbl}): [0..4)`);
+        assert.equal(v.filter((s) => s >= 4).length, 16, `TS Round-4 tiny legacy (${lbl}): [4..54)`);
+        assert.equal(v.length, 20, `TS Round-4 tiny legacy (${lbl}): total must stay 20`);
+      }
+
+      // --- 5d. Round-5 Finding #1: Pass 1A `SubtreeRootPage`-drop frontier oracle ---
+      {
+        const fc50 = 50;
+        const roots50 = Array.from({ length: fc50 }, () => dummySubroot);
+        const lroot50 = rollUpSubroots(roots50);
+        const fHitLeaves = [...dummyLeaves];
+        fHitLeaves[20] = cmR4;
+        const fHitSubroot = computeSubtree256Root(fHitLeaves, SUBTREE_LEAVES);
+        const roots50Hit = [...roots50];
+        roots50Hit[0] = fHitSubroot;
+        const lroot50Hit = rollUpSubroots(roots50Hit);
+        const nM50 = Math.ceil((fc50 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+        const sub50Lu = new Map(Array.from({ length: fc50 }, (_, s) => [deriveSubtreePdaSync(0, 0, BigInt(s)).address, s]));
+
+        const runP1aDrop = async (withFrontierNote, dropPass1aSr) => {
+          const st = new CompactWalletStore(0, 0n);
+          st.lanes[0].nextMemoLeaf = 10n;
+          st.lanes[0].frontierSubSeq = 0n;
+          st.lanes[0].frontierLeaves = dummyLeaves.slice(0, 10).map((x) => frToBeBytes(x));
+          const acc = new Map();
+          acc.set(poolPda, pool1);
+          acc.set(lane0Pda, makeLaneState(0, BigInt(fc50 * SUBTREE_LEAVES), 0n, withFrontierNote ? lroot50Hit : lroot50));
+          if (!dropPass1aSr) {
+            acc.set(deriveSubrootPdaSync(0, 0, 0n).address, makeSubrootPage(0, 0n, withFrontierNote ? roots50Hit : roots50));
+          }
+          for (let m = 0; m < nM50; m++) {
+            const cnt = Math.min(MEMO_NOTES_PER_PAGE, fc50 * SUBTREE_LEAVES - m * MEMO_NOTES_PER_PAGE);
+            const raw = makeMemoPageWithMeta(0, BigInt(m), cnt, 0n);
+            if (withFrontierNote && m === 0) writeMemoSlot(raw, 20, encR4.memo);
+            acc.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, raw);
+          }
+          const p1d = [];
+          await syncCompactStoreWithRpc({
+            store: st,
+            fvk,
+            privacyMode: 'strict',
+            fetchBatch: async (addrs) => {
+              for (const a of addrs) {
+                const s = sub50Lu.get(a);
+                if (s !== undefined) p1d.push(s);
+              }
+              return addrs.map((a) => acc.get(a) ?? null);
+            },
+          });
+          return { p1d, unmutated: st.lanes[0].nextMemoLeaf === 10n };
+        };
+
+        for (const withNote of [false, true]) {
+          const r1 = await runP1aDrop(withNote, false);
+          const r2 = await runP1aDrop(withNote, true);
+          assert.equal(r1.p1d.length, 17, 'TS Round-5 Finding #1: 1 returning frontier + 16 non-frontier = 17');
+          assert.deepEqual(
+            r1.p1d,
+            r2.p1d,
+            `TS Round-5 Finding #1: dropping Pass 1A SubtreeRootPage must yield byte-identical Pass 1D (withNote=${withNote})`,
+          );
+          assert.ok(r2.p1d.includes(0));
+          assert.ok(r1.unmutated && r2.unmutated);
+        }
+      }
+
+      // --- 5e. Round-5 Finding #2: Branch 3 `legacyFc` bounded by `localScannedFc` ---
+      {
+        const fc200 = 200;
+        const roots200 = Array.from({ length: fc200 }, () => dummySubroot);
+        const lroot200 = rollUpSubroots(roots200);
+        const stMulti = new CompactWalletStore(0, 0n);
+        for (let l = 0; l < 16; l++) {
+          stMulti.lanes[l].finalizedSubroots = Array.from({ length: fc200 }, () => frToBeBytes(dummySubroot));
+        }
+        stMulti.lanes[0].nextMemoLeaf = 20n * BigInt(SUBTREE_LEAVES);
+        stMulti.recordVerifiedMemo({
+          fvk,
+          laneId: 0,
+          leafIdx: 3n * BigInt(SUBTREE_LEAVES) + 7n,
+          decrypted: decLeg,
+          cmBe: frToBeBytes(cmR4),
+        });
+        const subLu16 = new Map();
+        const accMulti = new Map();
+        accMulti.set(poolPda, pool16);
+        for (let l = 0; l < 16; l++) {
+          accMulti.set(deriveLanePdaSync(0, l).address, makeLaneState(l, BigInt(fc200 * SUBTREE_LEAVES), 0n, lroot200));
+          for (let s = 0; s < fc200; s++) subLu16.set(deriveSubtreePdaSync(0, l, BigInt(s)).address, [l, s]);
+        }
+        const p1dMulti = [];
+        await syncCompactStoreWithRpc({
+          store: stMulti,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            for (const a of addrs) {
+              const ls = subLu16.get(a);
+              if (ls) p1dMulti.push(ls);
+            }
+            return addrs.map((a) => accMulti.get(a) ?? null);
+          },
+        });
+        assert.equal(p1dMulti.length, 16);
+        assert.ok(
+          p1dMulti.every(([l, s]) => l === 0 && s < 20),
+          'TS Round-5 Finding #2 POC 2A: ALL 16 legacy decoys must stay in scanned Lane 0 [0..20)',
+        );
+        assert.ok(p1dMulti.some(([l, s]) => l === 0 && s === 3));
+
+        // POC 2B: single-lane MemoPage drop vs served yields identical 16 legacy subtrees in [0..18)
+        const base1l = new CompactWalletStore(0, 0n);
+        base1l.lanes[0].finalizedSubroots = Array.from({ length: fc200 }, () => frToBeBytes(dummySubroot));
+        base1l.lanes[0].nextMemoLeaf = 18n * BigInt(SUBTREE_LEAVES);
+        base1l.recordVerifiedMemo({
+          fvk,
+          laneId: 0,
+          leafIdx: 3n * BigInt(SUBTREE_LEAVES) + 7n,
+          decrypted: decLeg,
+          cmBe: frToBeBytes(cmR4),
+        });
+        const run1l = async (serveMemos) => {
+          const st = CompactWalletStore.fromJSON(base1l.toJSON());
+          const acc = new Map();
+          acc.set(poolPda, pool1);
+          acc.set(lane0Pda, makeLaneState(0, BigInt(fc200 * SUBTREE_LEAVES), 0n, lroot200));
+          if (serveMemos) {
+            const m0 = Math.floor((18 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+            const m1 = Math.ceil((68 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+            for (let m = m0; m < m1; m++) {
+              acc.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, makeMemoPageWithMeta(0, BigInt(m), MEMO_NOTES_PER_PAGE, 0n));
+            }
+          }
+          const p1d = [];
+          await syncCompactStoreWithRpc({
+            store: st,
+            fvk,
+            privacyMode: 'strict',
+            fetchBatch: async (addrs) => {
+              for (const a of addrs) {
+                const ls = subLu16.get(a);
+                if (ls && ls[0] === 0) p1d.push(ls[1]);
+              }
+              return addrs.map((a) => acc.get(a) ?? null);
+            },
+          });
+          return p1d;
+        };
+        const dropped1l = await run1l(false);
+        const served1l = await run1l(true);
+        assert.equal(dropped1l.length, 16);
+        assert.ok(dropped1l.every((s) => s < 18));
+        assert.deepEqual(
+          dropped1l,
+          served1l.filter((s) => s < 18),
+          'TS Round-5 Finding #2 POC 2B: toggling MemoPage(0, 48) must yield 0% decoy rotation on [0..18)',
+        );
+      }
+
+      // --- 5f. Round-5 Finding #3: Rust<->TS layout decoder strict version/paused/rootEpochInterval parity ---
+      {
+        const badVerPool = makePoolState(1);
+        badVerPool[PL_OFF_VERSION] = 2;
+        assert.throws(() => decodePoolState(badVerPool), /version/);
+
+        const badPausedPool = makePoolState(1);
+        badPausedPool[PL_OFF_PAUSED] = 2;
+        assert.throws(() => decodePoolState(badPausedPool), /paused/);
+
+        const zeroEpochPool = makePoolState(1);
+        new DataView(zeroEpochPool.buffer).setBigUint64(PL_OFF_ROOT_EPOCH_INTERVAL, 0n, true);
+        assert.throws(() => decodePoolState(zeroEpochPool), /rootEpochInterval/);
+
+        const highEpochPool = makePoolState(1);
+        new DataView(highEpochPool.buffer).setBigUint64(PL_OFF_ROOT_EPOCH_INTERVAL, 257n, true);
+        assert.throws(() => decodePoolState(highEpochPool), /rootEpochInterval/);
+
+        const badVerLane = makeLaneState(0, 0n, 0n);
+        badVerLane[LN_OFF_VERSION] = 0;
+        assert.throws(() => decodeLaneHeader(badVerLane), /version/);
+
+        const badVerRoots = makeSyntheticRootHistory({
+          laneRoots: Array.from({ length: NUM_LANES }, () => ZERO_HASHES_4ARY[18]),
+          laneCounts: new Array(NUM_LANES).fill(0n),
+        }).raw.slice();
+        badVerRoots[RT_OFF_VERSION] = 9;
+        assert.throws(() => decodeGlobalRootHistory(badVerRoots), /version/);
+      }
+
+      // --- 5g. Round-6 Finding #1: Unverified frontier prefix rewrite rejected uniformly ---
+      {
+        const rollUpWithFrontier = (subroots, fLeaves) => {
+          const nodes = [...subroots];
+          if (fLeaves.length > 0) nodes.push(computeSubtree256Root(fLeaves, fLeaves.length));
+          return rollUpSubroots(nodes);
+        };
+        const honestLeaves = [...dummyLeaves];
+        honestLeaves[3] = cmR4;
+        const honestF10Root = rollUpWithFrontier([], honestLeaves.slice(0, 10));
+        const m0Honest = makeMemoPageWithMeta(0, 0n, 10, 0n);
+        writeMemoSlot(m0Honest, 3, encR4.memo);
+
+        const bobKeys = deriveKeysFromSeed(new Uint8Array(32).fill(0xa9));
+        const bobFvk = exportFullViewingKey(bobKeys);
+        const stAlice = new CompactWalletStore(0, 0n);
+        const stBob = new CompactWalletStore(0, 0n);
+        const syncHonest10 = async (st, who) =>
+          syncCompactStoreWithRpc({
+            store: st,
+            fvk: who,
+            privacyMode: 'strict',
+            fetchBatch: async (addrs) =>
+              addrs.map((a) => {
+                if (a === poolPda) return pool1;
+                if (a === lane0Pda) return makeLaneState(0, 10n, 0n, honestF10Root);
+                if (a === deriveSubtreePdaSync(0, 0, 0n).address) return makeSubtreePage(0, 0n, honestLeaves.slice(0, 10));
+                if (a === deriveMemoPdaSync(0, 0, 0n).address) return m0Honest;
+                return null;
+              }),
+          });
+        await syncHonest10(stAlice, fvk);
+        await syncHonest10(stBob, bobFvk);
+        assert.equal(stAlice.notes.length, 1);
+        assert.equal(stAlice.notes[0].frozenIntraSiblings, null);
+        assert.equal(stBob.notes.length, 0);
+
+        const forgedLeaves = [...honestLeaves];
+        forgedLeaves[3] = 999_999n;
+        const forgedSubroot = computeSubtree256Root(forgedLeaves, SUBTREE_LEAVES);
+        const forgedSealedRoot = rollUpSubroots([forgedSubroot]);
+        const forgedGrowRoot = rollUpWithFrontier([], forgedLeaves.slice(0, 20));
+
+        for (const [label, isSealed] of [
+          ['sealing rewrite', true],
+          ['unsealed grow rewrite', false],
+        ]) {
+          for (const [whoLbl, baseSt, whoFvk] of [
+            ['Alice (note owner)', stAlice, fvk],
+            ['Bob (0 notes)', stBob, bobFvk],
+          ]) {
+            const st = CompactWalletStore.fromJSON(baseSt.toJSON());
+            await assert.rejects(
+              () =>
+                syncCompactStoreWithRpc({
+                  store: st,
+                  fvk: whoFvk,
+                  privacyMode: 'strict',
+                  fetchBatch: async (addrs) =>
+                    addrs.map((a) => {
+                      if (a === poolPda) return pool1;
+                      if (a === lane0Pda) {
+                        return isSealed
+                          ? makeLaneState(0, BigInt(SUBTREE_LEAVES), 0n, forgedSealedRoot)
+                          : makeLaneState(0, 20n, 0n, forgedGrowRoot);
+                      }
+                      if (a === deriveSubrootPdaSync(0, 0, 0n).address && isSealed) {
+                        return makeSubrootPage(0, 0n, [forgedSubroot]);
+                      }
+                      if (a === deriveSubtreePdaSync(0, 0, 0n).address) {
+                        return isSealed
+                          ? makeSubtreePage(0, 0n, forgedLeaves)
+                          : makeSubtreePage(0, 0n, forgedLeaves.slice(0, 20));
+                      }
+                      if (a === deriveMemoPdaSync(0, 0, 0n).address) {
+                        return makeMemoPageWithMeta(0, 0n, isSealed ? 96 : 20, 0n);
+                      }
+                      if (a === deriveMemoPdaSync(0, 0, 1n).address && isSealed) return makeMemoPageWithMeta(0, 1n, 96, 0n);
+                      if (a === deriveMemoPdaSync(0, 0, 2n).address && isSealed) return makeMemoPageWithMeta(0, 2n, 64, 0n);
+                      return null;
+                    }),
+                }),
+              /frontier prefix mismatch/,
+              `TS Round-6 Finding #1 (${label}, ${whoLbl}) must reject`,
+            );
+            assert.equal(st.lanes[0].finalizedSubroots.length, 0);
+            assert.equal(st.lanes[0].nextMemoLeaf, 10n);
+          }
+        }
+
+        // Direct offline ingestLanePages must also reject mutated frontier prefix
+        const stOff = CompactWalletStore.fromJSON(stAlice.toJSON());
+        assert.throws(
+          () =>
+            stOff.ingestLanePages({
+              fvk,
+              laneId: 0,
+              subtreePages: [{ pageSeq: 0n, raw: makeSubtreePage(0, 0n, forgedLeaves.slice(0, 20)) }],
+              memoPages: [],
+              nfPages: [],
+            }),
+          /frontier prefix mismatch/,
+        );
+
+        // Honest lagging replica returning truncated matching prefix (5 < 10) must NOT throw
+        const stLag = CompactWalletStore.fromJSON(stAlice.toJSON());
+        const lagF5Root = rollUpWithFrontier([], honestLeaves.slice(0, 5));
+        await syncCompactStoreWithRpc({
+          store: stLag,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) return makeLaneState(0, 5n, 0n, lagF5Root);
+              if (a === deriveSubtreePdaSync(0, 0, 0n).address) return makeSubtreePage(0, 0n, honestLeaves.slice(0, 5));
+              return null;
+            }),
+        });
+        assert.equal(stLag.lanes[0].frontierLeaves.length, 10);
+      }
+
+      // --- 5h. Round-6 Finding #2: Mid-subtree boundary (`18*256 + 10`) zero pinpoint & liveness ---
+      {
+        const fc50 = 50;
+        const sub18Leaves = [...dummyLeaves];
+        sub18Leaves[5] = cmR4;
+        const sub18Root = computeSubtree256Root(sub18Leaves, SUBTREE_LEAVES);
+        const roots50 = Array.from({ length: fc50 }, (_, s) => (s === 18 ? sub18Root : dummySubroot));
+        const lroot50 = rollUpSubroots(roots50);
+        const sub50Lu = new Map(Array.from({ length: fc50 }, (_, s) => [deriveSubtreePdaSync(0, 0, BigInt(s)).address, s]));
+
+        const makeMidStore = (noteLeaf) => {
+          const st = new CompactWalletStore(0, 0n);
+          st.lanes[0].nextMemoLeaf = 18n * BigInt(SUBTREE_LEAVES) + 10n;
+          st.lanes[0].finalizedSubroots = roots50.map((r) => frToBeBytes(r));
+          if (noteLeaf !== null) {
+            st.recordVerifiedMemo({
+              fvk,
+              laneId: 0,
+              leafIdx: noteLeaf,
+              decrypted: decLeg,
+              cmBe: frToBeBytes(cmR4),
+            });
+          }
+          return st;
+        };
+
+        const runMid = async (base, serveMemos, serveSubs) => {
+          const st = CompactWalletStore.fromJSON(base.toJSON());
+          const acc = new Map();
+          acc.set(poolPda, pool1);
+          acc.set(lane0Pda, makeLaneState(0, BigInt(fc50 * SUBTREE_LEAVES), 0n, lroot50));
+          if (serveMemos) {
+            const m0 = Math.floor((18 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+            const m1 = Math.ceil((fc50 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+            for (let m = m0; m < m1; m++) {
+              const cnt = Math.min(MEMO_NOTES_PER_PAGE, fc50 * SUBTREE_LEAVES - m * MEMO_NOTES_PER_PAGE);
+              acc.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, makeMemoPageWithMeta(0, BigInt(m), cnt, 0n));
+            }
+          }
+          if (serveSubs) {
+            for (let s = 0; s < fc50; s++) {
+              acc.set(
+                deriveSubtreePdaSync(0, 0, BigInt(s)).address,
+                makeSubtreePage(0, BigInt(s), s === 18 ? sub18Leaves : dummyLeaves),
+              );
+            }
+          }
+          const p1d = [];
+          await syncCompactStoreWithRpc({
+            store: st,
+            fvk,
+            privacyMode: 'strict',
+            fetchBatch: async (addrs) => {
+              for (const a of addrs) {
+                const s = sub50Lu.get(a);
+                if (s !== undefined) p1d.push(s);
+              }
+              return addrs.map((a) => acc.get(a) ?? null);
+            },
+          });
+          return { p1d, st };
+        };
+
+        const stNote18 = makeMidStore(18n * BigInt(SUBTREE_LEAVES) + 5n);
+        const stZero = makeMidStore(null);
+        const { p1d: b1Note18 } = await runMid(stNote18, true, false);
+        const { p1d: b2Note18 } = await runMid(stNote18, false, false);
+        const { p1d: b2Zero } = await runMid(stZero, false, false);
+        assert.equal(b1Note18.length, 16);
+        assert.ok(b1Note18.includes(18));
+        assert.ok(b1Note18.every((s) => s >= 18));
+        assert.equal(b2Note18.length, 16);
+        assert.ok(b2Note18.every((s) => s < 18), 'TS Round-6 Finding #2: dropped MemoPage 48 must not fetch subtree 18');
+        assert.deepEqual(b2Note18, b2Zero, 'TS Round-6 Finding #2: note at (0, 18*256+5) must match 0-note wallet');
+        const { st: stFrozen } = await runMid(stNote18, true, true);
+        assert.ok(stFrozen.notes[0].frozenIntraSiblings, 'TS Round-6 Finding #2 liveness: honest sync must freeze note');
+
+        const stNote3 = makeMidStore(3n * BigInt(SUBTREE_LEAVES) + 5n);
+        const { p1d: b1Note3 } = await runMid(stNote3, true, false);
+        const { p1d: b2Note3 } = await runMid(stNote3, false, false);
+        assert.equal(b2Note3.length, 16);
+        assert.ok(b2Note3.every((s) => s < 18));
+        assert.deepEqual(
+          b2Note3,
+          b1Note3.filter((s) => s < 18),
+          'TS Round-6 Finding #2: legacy note at (0, 3) with mid-subtree watermark must have 0% L\' rotation',
+        );
+      }
+
+      // --- 5i. Round-7 Finding #1: Permissionless cross-lane griefing (1-copy & 70-copy > 64) ---
+      {
+        const bobGFvk = exportFullViewingKey(deriveKeysFromSeed(new Uint8Array(32).fill(0xb7)));
+        const fc4 = 4;
+        const nM4 = Math.ceil((fc4 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+        const realL15S2 = [...dummyLeaves];
+        realL15S2[9] = cmR4;
+        const realL15S2Root = computeSubtree256Root(realL15S2, SUBTREE_LEAVES);
+        const roots4 = Array.from({ length: fc4 }, () => dummySubroot);
+        const lroot4 = rollUpSubroots(roots4);
+        const roots4L15 = [...roots4];
+        roots4L15[2] = realL15S2Root;
+        const lroot4L15 = rollUpSubroots(roots4L15);
+
+        const accG1 = new Map();
+        const subG1 = new Set();
+        accG1.set(poolPda, pool16);
+        for (let l = 0; l < 16; l++) {
+          accG1.set(
+            deriveLanePdaSync(0, l).address,
+            makeLaneState(l, BigInt(fc4 * SUBTREE_LEAVES), 0n, l === 15 ? lroot4L15 : lroot4),
+          );
+          accG1.set(
+            deriveSubrootPdaSync(0, l, 0n).address,
+            makeSubrootPage(l, 0n, l === 15 ? roots4L15 : roots4),
+          );
+          for (let s = 0; s < fc4; s++) {
+            const a = deriveSubtreePdaSync(0, l, BigInt(s)).address;
+            subG1.add(a);
+            accG1.set(a, makeSubtreePage(l, BigInt(s), l === 15 && s === 2 ? realL15S2 : dummyLeaves));
+          }
+          for (let m = 0; m < nM4; m++) {
+            const cnt = Math.min(MEMO_NOTES_PER_PAGE, fc4 * SUBTREE_LEAVES - m * MEMO_NOTES_PER_PAGE);
+            const raw = makeMemoPageWithMeta(l, BigInt(m), cnt, 0n);
+            if (l === 0 && m === 0) writeMemoSlot(raw, 0, encR4.memo);
+            else if (l === 15) {
+              const realLeaf = 2 * SUBTREE_LEAVES + 9;
+              if (m === Math.floor(realLeaf / MEMO_NOTES_PER_PAGE)) {
+                writeMemoSlot(raw, realLeaf % MEMO_NOTES_PER_PAGE, encR4.memo);
+              }
+            }
+            accG1.set(deriveMemoPdaSync(0, l, BigInt(m)).address, raw);
+          }
+        }
+        const stG1A = new CompactWalletStore(0, 0n);
+        const stG1B = new CompactWalletStore(0, 0n);
+        const p1dA = [];
+        const p1dB = [];
+        const resA = await syncCompactStoreWithRpc({
+          store: stG1A,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            for (const a of addrs) if (subG1.has(a)) p1dA.push(a);
+            return addrs.map((a) => accG1.get(a) ?? null);
+          },
+        });
+        const resB = await syncCompactStoreWithRpc({
+          store: stG1B,
+          fvk: bobGFvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) => {
+            for (const a of addrs) if (subG1.has(a)) p1dB.push(a);
+            return addrs.map((a) => accG1.get(a) ?? null);
+          },
+        });
+        assert.equal(resA.discoveredNotes, 1, 'TS Round-7 Finding #1 POC 1A: Alice must recover Lane 15 note');
+        assert.equal(stG1A.notes[0].laneId, 15);
+        assert.ok(stG1A.notes[0].frozenIntraSiblings);
+        assert.equal(resB.discoveredNotes, 0);
+        assert.equal(p1dA.length, 18);
+        assert.equal(p1dB.length, 18);
+
+        // POC 1B: 70 fake copies on Lane 0 (> 64) + Alice's real note on Lane 15 Subtree 0
+        const fc70 = 70;
+        const nM70 = Math.ceil((fc70 * SUBTREE_LEAVES) / MEMO_NOTES_PER_PAGE);
+        const roots70 = Array.from({ length: fc70 }, () => dummySubroot);
+        const lroot70 = rollUpSubroots(roots70);
+        const realL15S0 = [...dummyLeaves];
+        realL15S0[4] = cmR4;
+        const realL15S0Root = computeSubtree256Root(realL15S0, SUBTREE_LEAVES);
+        const accG70 = new Map();
+        accG70.set(poolPda, pool16);
+        accG70.set(lane0Pda, makeLaneState(0, BigInt(fc70 * SUBTREE_LEAVES), 0n, lroot70));
+        accG70.set(deriveSubrootPdaSync(0, 0, 0n).address, makeSubrootPage(0, 0n, roots70));
+        for (let s = 0; s < fc70; s++) accG70.set(deriveSubtreePdaSync(0, 0, BigInt(s)).address, makeSubtreePage(0, BigInt(s), dummyLeaves));
+        for (let m = 0; m < nM70; m++) {
+          const cnt = Math.min(MEMO_NOTES_PER_PAGE, fc70 * SUBTREE_LEAVES - m * MEMO_NOTES_PER_PAGE);
+          accG70.set(deriveMemoPdaSync(0, 0, BigInt(m)).address, makeMemoPageWithMeta(0, BigInt(m), cnt, 0n));
+        }
+        for (let s = 0; s < fc70; s++) {
+          const leaf = s * SUBTREE_LEAVES;
+          writeMemoSlot(
+            accG70.get(deriveMemoPdaSync(0, 0, BigInt(Math.floor(leaf / MEMO_NOTES_PER_PAGE))).address),
+            leaf % MEMO_NOTES_PER_PAGE,
+            encR4.memo,
+          );
+        }
+        for (let l = 1; l < 15; l++) accG70.set(deriveLanePdaSync(0, l).address, makeLaneState(l, 0n, 0n));
+        accG70.set(deriveLanePdaSync(0, 15).address, makeLaneState(15, BigInt(SUBTREE_LEAVES), 0n, rollUpSubroots([realL15S0Root])));
+        accG70.set(deriveSubrootPdaSync(0, 15, 0n).address, makeSubrootPage(15, 0n, [realL15S0Root]));
+        accG70.set(deriveSubtreePdaSync(0, 15, 0n).address, makeSubtreePage(15, 0n, realL15S0));
+        for (let m = 0; m < 3; m++) {
+          const raw = makeMemoPageWithMeta(15, BigInt(m), m < 2 ? 96 : 64, 0n);
+          if (m === 0) writeMemoSlot(raw, 4, encR4.memo);
+          accG70.set(deriveMemoPdaSync(0, 15, BigInt(m)).address, raw);
+        }
+        const st70A = new CompactWalletStore(0, 0n);
+        const st70B = new CompactWalletStore(0, 0n);
+        const fetch70 = async (addrs) => addrs.map((a) => accG70.get(a) ?? null);
+        await syncCompactStoreWithRpc({ store: st70A, fvk, privacyMode: 'strict', fetchBatch: fetch70 });
+        await syncCompactStoreWithRpc({ store: st70B, fvk: bobGFvk, privacyMode: 'strict', fetchBatch: fetch70 });
+        assert.equal(st70A.lanes[0].nextMemoLeaf, 64n * BigInt(SUBTREE_LEAVES));
+        assert.equal(st70B.lanes[0].nextMemoLeaf, 64n * BigInt(SUBTREE_LEAVES));
+        assert.equal(st70A.lanes[15].nextMemoLeaf, 0n);
+        assert.equal(st70B.lanes[15].nextMemoLeaf, 0n);
+        const res70_2 = await syncCompactStoreWithRpc({ store: st70A, fvk, privacyMode: 'strict', fetchBatch: fetch70 });
+        await syncCompactStoreWithRpc({ store: st70B, fvk: bobGFvk, privacyMode: 'strict', fetchBatch: fetch70 });
+        assert.equal(res70_2.discoveredNotes, 1, 'TS Round-7 Finding #1 POC 1B: Alice must recover Lane 15 note on Sync #2');
+        assert.equal(st70A.notes[0].laneId, 15);
+        assert.ok(st70A.notes[0].frozenIntraSiblings);
+        assert.equal(st70A.lanes[0].nextMemoLeaf, BigInt(fc70 * SUBTREE_LEAVES));
+        assert.equal(st70A.lanes[15].nextMemoLeaf, BigInt(SUBTREE_LEAVES));
+        assert.equal(st70B.lanes[0].nextMemoLeaf, BigInt(fc70 * SUBTREE_LEAVES));
+        assert.equal(st70B.lanes[15].nextMemoLeaf, BigInt(SUBTREE_LEAVES));
+      }
+
+      // --- 5j. Round-7 Finding #2: Lagging `nextLeaf` inside already-finalized `finalizedSubroots` ---
+      {
+        const rollUpWithFrontier = (subroots, fLeaves) => {
+          const nodes = [...subroots];
+          if (fLeaves.length > 0) nodes.push(computeSubtree256Root(fLeaves, fLeaves.length));
+          return rollUpSubroots(nodes);
+        };
+        const stLagInj = new CompactWalletStore(0, 0n);
+        stLagInj.lanes[0].finalizedSubroots = Array.from({ length: 50 }, () => frToBeBytes(dummySubroot));
+        stLagInj.lanes[0].frontierSubSeq = 50n;
+        stLagInj.lanes[0].nextMemoLeaf = 20n * BigInt(SUBTREE_LEAVES);
+
+        const fakeRoot = rollUpWithFrontier(Array.from({ length: 20 }, () => dummySubroot), [cmR4]);
+        const fakeLeaf = 20 * SUBTREE_LEAVES;
+        const fakeM = Math.floor(fakeLeaf / MEMO_NOTES_PER_PAGE);
+        const fakeSlot = fakeLeaf % MEMO_NOTES_PER_PAGE;
+        const fakeMemoPage = makeMemoPageWithMeta(0, BigInt(fakeM), fakeSlot + 1, 0n);
+        writeMemoSlot(fakeMemoPage, fakeSlot, encR4.memo);
+
+        const resInj = await syncCompactStoreWithRpc({
+          store: stLagInj,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) return makeLaneState(0, BigInt(fakeLeaf + 1), 0n, fakeRoot);
+              if (a === deriveSubtreePdaSync(0, 0, 20n).address) return makeSubtreePage(0, 20n, [cmR4]);
+              if (a === deriveMemoPdaSync(0, 0, BigInt(fakeM)).address) return fakeMemoPage;
+              return null;
+            }),
+        });
+        assert.equal(resInj.discoveredNotes, 0, 'TS Round-7 Finding #2: lagging nextLeaf must not inject forged note');
+        assert.equal(stLagInj.notes.length, 0);
+        assert.equal(stLagInj.lanes[0].nextMemoLeaf, 20n * BigInt(SUBTREE_LEAVES));
+
+        const forged256 = [...dummyLeaves];
+        forged256[0] = cmR4;
+        await assert.rejects(
+          () =>
+            syncCompactStoreWithRpc({
+              store: stLagInj,
+              fvk,
+              privacyMode: 'strict',
+              fetchBatch: async (addrs) =>
+                addrs.map((a) => {
+                  if (a === poolPda) return pool1;
+                  if (a === lane0Pda) return makeLaneState(0, BigInt(fakeLeaf + 1), 0n, fakeRoot);
+                  if (a === deriveSubtreePdaSync(0, 0, 20n).address) return makeSubtreePage(0, 20n, forged256);
+                  if (a === deriveMemoPdaSync(0, 0, BigInt(fakeM)).address) return fakeMemoPage;
+                  return null;
+                }),
+            }),
+          /finalizedSubroots/,
+        );
+      }
+
+      // --- 5k. Round-7 Finding #3: Immutable `finalizedSubroots` across store & Pass 1A ---
+      {
+        const stImm = new CompactWalletStore(0, 0n);
+        stImm.lanes[0].finalizedSubroots = Array.from({ length: 5 }, () => frToBeBytes(dummySubroot));
+        stImm.lanes[0].frontierSubSeq = 5n;
+        const origRoot1 = new Uint8Array(stImm.lanes[0].finalizedSubroots[1]);
+
+        const badLeaves = [...dummyLeaves];
+        badLeaves[0] = 123_456_789n;
+        assert.throws(
+          () =>
+            stImm.ingestLanePages({
+              fvk,
+              laneId: 0,
+              subtreePages: [{ pageSeq: 1n, raw: makeSubtreePage(0, 1n, badLeaves) }],
+              memoPages: [],
+              nfPages: [],
+            }),
+          /finalizedSubroots/,
+        );
+        assert.deepEqual(stImm.lanes[0].finalizedSubroots[1], origRoot1);
+
+        const badRoots = Array.from({ length: 6 }, () => dummySubroot);
+        badRoots[1] = 987_654_321n;
+        const badSr0 = makeSubrootPage(0, 0n, badRoots);
+        assert.throws(
+          () => stImm.ingestSubrootPages({ laneId: 0, subrootPages: [{ rootPageSeq: 0n, raw: badSr0 }] }),
+          /finalizedSubroots/,
+        );
+        assert.equal(stImm.lanes[0].finalizedSubroots.length, 5);
+        assert.deepEqual(stImm.lanes[0].finalizedSubroots[1], origRoot1);
+
+        await assert.rejects(
+          () =>
+            syncCompactStoreWithRpc({
+              store: stImm,
+              fvk,
+              privacyMode: 'strict',
+              fetchBatch: async (addrs) =>
+                addrs.map((a) => {
+                  if (a === poolPda) return pool1;
+                  if (a === lane0Pda) return makeLaneState(0, 6n * BigInt(SUBTREE_LEAVES), 0n, rollUpSubroots(badRoots));
+                  if (a === deriveSubrootPdaSync(0, 0, 0n).address) return badSr0;
+                  return null;
+                }),
+            }),
+          /finalizedSubroots/,
+        );
+      }
+
+      // --- 5l. Round-8 Finding #1: `allLanesCaughtUp` rolls back `nextNfIndex` under lagging
+      //     `nextLeaf` (1A), lagging unsealed frontier (1B), AND lagging `activeLanes` (1C) ---
+      {
+        const nf0_500 = makeNfPage(
+          0,
+          0n,
+          Array.from({ length: 500 }, (_, i) => new Uint8Array(NF_PREFIX_LEN).fill((i % 250) + 1)),
+        );
+        const nf0Addr = deriveNfPagePdaSync(0, 0, 0n).address;
+
+        // Trigger 1A: Lane 15 persisted finalized subroot (nextMemoLeaf=0), Sync gets lagging Lane 15 nextLeaf=0
+        const st1a = new CompactWalletStore(0, 0n);
+        st1a.lanes[15].finalizedSubroots = [frToBeBytes(dummySubroot)];
+        await syncCompactStoreWithRpc({
+          store: st1a,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool16;
+              if (a === lane0Pda) return makeLaneState(0, 0n, 500n);
+              if (a === nf0Addr) return nf0_500;
+              for (let l = 1; l < 16; l++) {
+                if (a === deriveLanePdaSync(0, l).address) return makeLaneState(l, 0n, 0n);
+              }
+              return null;
+            }),
+        });
+        assert.equal(st1a.lanes[0].nextNfIndex, 0n, 'TS Round-8 Finding #1 (1A): must roll back Lane 0 nextNfIndex');
+
+        // Trigger 1B: Lane 0 persisted frontierLeaves.length=50, nextMemoLeaf=10; Sync gets lagging nextLeaf=10
+        const rollUpWithFrontier = (subroots, fLeaves) => {
+          const nodes = [...subroots];
+          if (fLeaves.length > 0) nodes.push(computeSubtree256Root(fLeaves, fLeaves.length));
+          return rollUpSubroots(nodes);
+        };
+        const st1b = new CompactWalletStore(0, 0n);
+        st1b.lanes[0].frontierSubSeq = 0n;
+        st1b.lanes[0].frontierLeaves = dummyLeaves.slice(0, 50).map((x) => frToBeBytes(x));
+        st1b.lanes[0].nextMemoLeaf = 10n;
+        const root10 = rollUpWithFrontier([], dummyLeaves.slice(0, 10));
+        await syncCompactStoreWithRpc({
+          store: st1b,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) return makeLaneState(0, 10n, 500n, root10);
+              if (a === deriveSubtreePdaSync(0, 0, 0n).address) return makeSubtreePage(0, 0n, dummyLeaves.slice(0, 10));
+              if (a === nf0Addr) return nf0_500;
+              return null;
+            }),
+        });
+        assert.equal(st1b.lanes[0].nextNfIndex, 0n, 'TS Round-8 Finding #1 (1B): lagging frontier must roll back nextNfIndex');
+
+        // Trigger 1C: Lane 15 persisted finalized subroot (nextMemoLeaf=0), Sync gets lagging activeLanes=1
+        const st1c = new CompactWalletStore(0, 0n);
+        st1c.lanes[15].finalizedSubroots = [frToBeBytes(dummySubroot)];
+        await syncCompactStoreWithRpc({
+          store: st1c,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) return makeLaneState(0, 0n, 500n);
+              if (a === nf0Addr) return nf0_500;
+              return null;
+            }),
+        });
+        assert.equal(st1c.lanes[0].nextNfIndex, 0n, 'TS Round-8 Finding #1 (1C): lagging activeLanes=1 must roll back nextNfIndex');
+      }
+
+      // --- 5m. Round-8 Finding #2: `ingestLanePages` rejects truncated `< 256`-leaf `SubtreePage`
+      //     covering already-finalized `seq < finalizedSubroots.length` ---
+      {
+        const forged10 = [...dummyLeaves.slice(0, 10)];
+        forged10[0] = cmR4;
+        const forgedSub0_10 = makeSubtreePage(0, 0n, forged10);
+        const forgedMemo0 = makeMemoPageWithMeta(0, 0n, 10, 0n);
+        writeMemoSlot(forgedMemo0, 0, encR4.memo);
+
+        const st2a = new CompactWalletStore(0, 0n);
+        st2a.ingestSubrootPages({
+          laneId: 0,
+          subrootPages: [{ rootPageSeq: 0n, raw: makeSubrootPage(0, 0n, Array.from({ length: 5 }, () => dummySubroot)) }],
+        });
+        assert.throws(
+          () =>
+            st2a.ingestLanePages({
+              fvk,
+              laneId: 0,
+              subtreePages: [{ pageSeq: 0n, raw: forgedSub0_10 }],
+              memoPages: [{ pageSeq: 0n, raw: forgedMemo0 }],
+              nfPages: [],
+            }),
+          /Truncated SubtreePage/,
+        );
+        assert.equal(st2a.notes.length, 0);
+        assert.equal(st2a.lanes[0].nextMemoLeaf, 0n);
+        assert.equal(st2a.lanes[0].frontierLeaves.length, 0);
+
+        const st2c = new CompactWalletStore(0, 0n);
+        st2c.lanes[0].finalizedSubroots = [frToBeBytes(dummySubroot)];
+        st2c.lanes[0].frontierSubSeq = 0n;
+        st2c.lanes[0].frontierLeaves = dummyLeaves.slice(0, 10).map((x) => frToBeBytes(x));
+        st2c.lanes[0].nextMemoLeaf = 10n;
+        const forged20 = [...dummyLeaves.slice(0, 20)];
+        forged20[15] = cmR4;
+        assert.throws(
+          () =>
+            st2c.ingestLanePages({
+              fvk,
+              laneId: 0,
+              subtreePages: [{ pageSeq: 0n, raw: makeSubtreePage(0, 0n, forged20) }],
+              memoPages: [],
+              nfPages: [],
+            }),
+          /Truncated SubtreePage/,
+        );
+        assert.equal(st2c.lanes[0].frontierLeaves.length, 10);
+      }
+
+      // --- 5n. Round-9 Finding #1: Caught-up returning wallet MUST roll back `nextNfIndex`
+      //     whenever Phase 0 lags below persisted monotonic high-water marks (1A, 1B, 1C) ---
+      {
+        const rollUpWithFrontier = (subroots, fLeaves) => {
+          const nodes = [...subroots];
+          if (fLeaves.length > 0) nodes.push(computeSubtree256Root(fLeaves, fLeaves.length));
+          return rollUpSubroots(nodes);
+        };
+        const nf0_1 = makeNfPage(0, 0n, [new Uint8Array(NF_PREFIX_LEN).fill(0x42)]);
+        const nf0Addr = deriveNfPagePdaSync(0, 0, 0n).address;
+        const root100 = rollUpWithFrontier([], dummyLeaves.slice(0, 100));
+        const root260 = rollUpWithFrontier([dummySubroot], dummyLeaves.slice(0, 4));
+
+        const makeCaughtUp = () => {
+          const st = new CompactWalletStore(0, 0n);
+          st.lanes[0].frontierSubSeq = 0n;
+          st.lanes[0].frontierLeaves = dummyLeaves.slice(0, 100).map((x) => frToBeBytes(x));
+          st.lanes[0].nextMemoLeaf = 100n;
+          st.lanes[15].finalizedSubroots = [frToBeBytes(dummySubroot)];
+          st.lanes[15].frontierSubSeq = 1n;
+          st.lanes[15].frontierLeaves = dummyLeaves.slice(0, 44).map((x) => frToBeBytes(x));
+          st.lanes[15].nextMemoLeaf = 300n;
+          return st;
+        };
+
+        // Trigger 1A: Lane 15 nextLeaf=100 < 300
+        const stR9_1a = makeCaughtUp();
+        await syncCompactStoreWithRpc({
+          store: stR9_1a,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool16;
+              if (a === lane0Pda) return makeLaneState(0, 100n, 1n, root100);
+              if (a === deriveLanePdaSync(0, 15).address) return makeLaneState(15, 100n, 0n, root100);
+              if (a === deriveSubtreePdaSync(0, 0, 0n).address) return makeSubtreePage(0, 0n, dummyLeaves.slice(0, 100));
+              if (a === deriveSubtreePdaSync(0, 15, 0n).address) return makeSubtreePage(15, 0n, dummyLeaves.slice(0, 100));
+              if (a === nf0Addr) return nf0_1;
+              for (let l = 1; l < 15; l++) {
+                if (a === deriveLanePdaSync(0, l).address) return makeLaneState(l, 0n, 0n);
+              }
+              return null;
+            }),
+        });
+        assert.equal(stR9_1a.lanes[0].nextNfIndex, 0n, 'TS Round-9 Finding #1 (1A): must roll back nextNfIndex');
+
+        // Trigger 1B: Lane 15 nextLeaf=260 < 300
+        const stR9_1b = makeCaughtUp();
+        await syncCompactStoreWithRpc({
+          store: stR9_1b,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool16;
+              if (a === lane0Pda) return makeLaneState(0, 100n, 1n, root100);
+              if (a === deriveLanePdaSync(0, 15).address) return makeLaneState(15, 260n, 0n, root260);
+              if (a === deriveSubtreePdaSync(0, 0, 0n).address) return makeSubtreePage(0, 0n, dummyLeaves.slice(0, 100));
+              if (a === deriveSubtreePdaSync(0, 15, 1n).address) return makeSubtreePage(15, 1n, dummyLeaves.slice(0, 4));
+              if (a === nf0Addr) return nf0_1;
+              for (let l = 1; l < 15; l++) {
+                if (a === deriveLanePdaSync(0, l).address) return makeLaneState(l, 0n, 0n);
+              }
+              return null;
+            }),
+        });
+        assert.equal(stR9_1b.lanes[0].nextNfIndex, 0n, 'TS Round-9 Finding #1 (1B): must roll back nextNfIndex');
+
+        // Trigger 1C: lagging PoolState.activeLanes=1 hiding caught-up Lane 15
+        const stR9_1c = makeCaughtUp();
+        await syncCompactStoreWithRpc({
+          store: stR9_1c,
+          fvk,
+          privacyMode: 'strict',
+          fetchBatch: async (addrs) =>
+            addrs.map((a) => {
+              if (a === poolPda) return pool1;
+              if (a === lane0Pda) return makeLaneState(0, 100n, 1n, root100);
+              if (a === deriveSubtreePdaSync(0, 0, 0n).address) return makeSubtreePage(0, 0n, dummyLeaves.slice(0, 100));
+              if (a === nf0Addr) return nf0_1;
+              return null;
+            }),
+        });
+        assert.equal(stR9_1c.lanes[0].nextNfIndex, 0n, 'TS Round-9 Finding #1 (1C): must roll back nextNfIndex');
+      }
+    }
+  }
 });

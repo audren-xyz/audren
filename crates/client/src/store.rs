@@ -34,9 +34,6 @@ use audren_core::{
 };
 
 const MAX_SUBROOTS_PER_LANE: u64 = MAX_LEAVES_PER_LANE / SUBTREE_LEAVES as u64;
-/// Maximum zero-fill gap allowed when ingesting sparse/out-of-order subroot indices
-/// (prevents malicious RPC `page_seq` jumps from triggering unbounded vector OOM).
-const MAX_SUBROOT_GAP: usize = 65_536;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -138,6 +135,13 @@ struct CompactWalletStoreWire {
     seen_nf_prefixes: Vec<[u8; NF_PREFIX_LEN]>,
 }
 
+struct ValidatedNullifierPage<'a> {
+    page_base: u64,
+    start_slot: usize,
+    limit_slot: usize,
+    raw: &'a [u8],
+}
+
 impl CompactWalletStore {
     pub fn new(pool_id: u32, birthday_slot: u64) -> Self {
         Self {
@@ -193,7 +197,23 @@ impl CompactWalletStore {
                     "store lane next_memo_leaf exceeds MAX_LEAVES_PER_LANE",
                 ));
             }
+            for sr in &lane.finalized_subroots {
+                if !audren_core::is_canonical_fr(sr) {
+                    return Err(ClientError::InvalidFieldElement);
+                }
+            }
+            for leaf in &lane.frontier_leaves {
+                if !audren_core::is_canonical_fr(leaf) {
+                    return Err(ClientError::InvalidFieldElement);
+                }
+            }
+            for leaf in &lane.prev_sealed_leaves {
+                if !audren_core::is_canonical_fr(leaf) {
+                    return Err(ClientError::InvalidFieldElement);
+                }
+            }
         }
+        let mut seen_notes: HashSet<(u8, u64)> = HashSet::with_capacity(wire.notes.len());
         for note in &wire.notes {
             if note.pool_id != wire.pool_id {
                 return Err(ClientError::InvalidEncoding("store note pool_id mismatch"));
@@ -206,16 +226,38 @@ impl CompactWalletStore {
                     "store note leaf_index exceeds MAX_LEAVES_PER_LANE",
                 ));
             }
+            if !seen_notes.insert((note.lane_id, note.leaf_index)) {
+                return Err(ClientError::InvalidEncoding(
+                    "store contains duplicate (lane_id, leaf_index) note",
+                ));
+            }
             let expected_global = ((note.lane_id as u64) << 36) | note.leaf_index;
             if note.global_leaf_index != expected_global {
                 return Err(ClientError::InvalidEncoding(
                     "store note global_leaf_index mismatch",
                 ));
             }
+            if !audren_core::is_canonical_fr(&note.tweak)
+                || !audren_core::is_canonical_fr(&note.blinding)
+                || !audren_core::is_canonical_fr(&note.stealth_owner)
+                || !audren_core::is_canonical_fr(&note.commitment)
+                || !audren_core::is_canonical_fr(&note.nullifier)
+            {
+                return Err(ClientError::InvalidFieldElement);
+            }
             if note.frozen_intra_siblings.is_some() != note.frozen_intra_positions.is_some() {
                 return Err(ClientError::InvalidEncoding(
                     "store note frozen_intra_siblings/positions mismatch",
                 ));
+            }
+            if let Some(ref sibs) = note.frozen_intra_siblings {
+                for lvl in sibs {
+                    for entry in lvl {
+                        if !audren_core::is_canonical_fr(entry) {
+                            return Err(ClientError::InvalidFieldElement);
+                        }
+                    }
+                }
             }
             if let Some(positions) = note.frozen_intra_positions {
                 if positions.iter().any(|&p| p > 3) {
@@ -374,6 +416,10 @@ impl CompactWalletStore {
 
     /// Ingest `SubtreeRootPage` accounts (`9,664 B`, 300 finalized subroots each) without
     /// downloading sealed `SubtreePage`s for subtrees with no owned notes.
+    ///
+    /// Validates every page in sorted sequence order and enforces strict contiguity (zero
+    /// zero-filled gaps, zero sparse amplification DoS, zero partial mutation on error) BEFORE
+    /// writing any subroots into `finalized_subroots`.
     pub fn ingest_subroot_pages(
         &mut self,
         lane_id: u8,
@@ -387,6 +433,8 @@ impl CompactWalletStore {
         let max_roots_u64 = finalized_count
             .unwrap_or(MAX_SUBROOTS_PER_LANE)
             .min(MAX_SUBROOTS_PER_LANE);
+
+        let mut dedup_pages: BTreeMap<u64, (&[u8], usize)> = BTreeMap::new();
         for &(root_page_seq, raw) in subroot_pages {
             if raw.len() != SUBROOT_PAGE_LEN || raw[0..8] != SUBROOT_MAGIC {
                 return Err(ClientError::InvalidEncoding("invalid SubtreeRootPage"));
@@ -423,9 +471,61 @@ impl CompactWalletStore {
             let base_idx = usize::try_from(base_idx_u64).map_err(|_| {
                 ClientError::InvalidEncoding("SubtreeRootPage root_page_seq overflow")
             })?;
-            if base_idx > self.lanes[l].finalized_subroots.len().saturating_add(MAX_SUBROOT_GAP) {
+            let existing_subroots = &self.lanes[l].finalized_subroots;
+            for i in 0..cnt {
+                let root = read_32(raw, SR_OFF_ROOTS + i * 32);
+                fr_from_be_bytes_strict(&root).ok_or(ClientError::InvalidFieldElement)?;
+                let sub_idx = base_idx.checked_add(i).ok_or(ClientError::InvalidEncoding(
+                    "SubtreeRootPage index overflow",
+                ))?;
+                if sub_idx < existing_subroots.len() && existing_subroots[sub_idx] != root {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreeRootPage subroot mismatch against persisted finalized_subroots",
+                    ));
+                }
+            }
+            match dedup_pages.get(&root_page_seq) {
+                Some(&(existing_raw, existing_cnt)) => {
+                    let overlap = existing_cnt.min(cnt);
+                    for i in 0..overlap {
+                        if read_32(existing_raw, SR_OFF_ROOTS + i * 32)
+                            != read_32(raw, SR_OFF_ROOTS + i * 32)
+                        {
+                            return Err(ClientError::InvalidEncoding(
+                                "conflicting duplicate SubtreeRootPage entries",
+                            ));
+                        }
+                    }
+                    if cnt > existing_cnt {
+                        dedup_pages.insert(root_page_seq, (raw, cnt));
+                    }
+                }
+                None => {
+                    dedup_pages.insert(root_page_seq, (raw, cnt));
+                }
+            }
+        }
+
+        let mut running_len = self.lanes[l].finalized_subroots.len();
+        let mut validated: Vec<(usize, Vec<[u8; 32]>)> = Vec::with_capacity(dedup_pages.len());
+
+        for (root_page_seq, (raw, cnt)) in dedup_pages {
+            let base_idx_u64 = root_page_seq
+                .checked_mul(SUBROOTS_PER_PAGE as u64)
+                .ok_or(ClientError::InvalidEncoding(
+                    "SubtreeRootPage root_page_seq overflow",
+                ))?;
+            if base_idx_u64 > MAX_SUBROOTS_PER_LANE {
                 return Err(ClientError::InvalidEncoding(
-                    "SubtreeRootPage page_seq jump exceeds limit",
+                    "SubtreeRootPage root_page_seq out of range",
+                ));
+            }
+            let base_idx = usize::try_from(base_idx_u64).map_err(|_| {
+                ClientError::InvalidEncoding("SubtreeRootPage root_page_seq overflow")
+            })?;
+            if base_idx > running_len {
+                return Err(ClientError::InvalidEncoding(
+                    "SubtreeRootPage sequence gap exceeds contiguous frontier",
                 ));
             }
             let end_idx_u64 = base_idx_u64
@@ -435,26 +535,23 @@ impl CompactWalletStore {
             if end_idx_u64 <= base_idx_u64 {
                 continue;
             }
-            let last_sub_idx = usize::try_from(end_idx_u64 - 1).map_err(|_| {
+            let end_idx = usize::try_from(end_idx_u64).map_err(|_| {
                 ClientError::InvalidEncoding("SubtreeRootPage index overflow")
             })?;
-            if last_sub_idx > self.lanes[l].finalized_subroots.len().saturating_add(MAX_SUBROOT_GAP)
-            {
-                return Err(ClientError::InvalidEncoding(
-                    "SubtreeRootPage page_seq jump exceeds limit",
-                ));
-            }
             let write_cnt = (end_idx_u64 - base_idx_u64) as usize;
+            let mut roots = Vec::with_capacity(write_cnt);
             for i in 0..write_cnt {
                 let root = read_32(raw, SR_OFF_ROOTS + i * 32);
                 fr_from_be_bytes_strict(&root).ok_or(ClientError::InvalidFieldElement)?;
+                roots.push(root);
             }
-            for i in 0..write_cnt {
+            running_len = running_len.max(end_idx);
+            validated.push((base_idx, roots));
+        }
+
+        for (base_idx, roots) in validated {
+            for (i, root) in roots.into_iter().enumerate() {
                 let sub_idx = base_idx + i;
-                let root = read_32(raw, SR_OFF_ROOTS + i * 32);
-                while self.lanes[l].finalized_subroots.len() < sub_idx {
-                    self.lanes[l].finalized_subroots.push([0u8; 32]);
-                }
                 if self.lanes[l].finalized_subroots.len() == sub_idx {
                     self.lanes[l].finalized_subroots.push(root);
                 } else {
@@ -477,33 +574,26 @@ impl CompactWalletStore {
         self.ingest_nullifier_pages(lane_id, &[(page_seq, raw)], max_nf_index)
     }
 
-    /// Stream `NullifierPage`s in ascending sequence order against an `O(owned_unspent_notes)`
-    /// prefix map across all lanes, discarding every stranger prefix immediately.
-    pub fn ingest_nullifier_pages(
-        &mut self,
+    fn validate_nullifier_pages<'a>(
+        &self,
         lane_id: u8,
-        nf_pages: &[(u64, &[u8])],
+        nf_pages: &[(u64, &'a [u8])],
         max_nf_index: Option<u64>,
-    ) -> Result<usize, ClientError> {
+    ) -> Result<Vec<ValidatedNullifierPage<'a>>, ClientError> {
         let l = lane_id as usize;
         if l >= NUM_LANES {
             return Err(ClientError::InvalidEncoding("invalid lane_id"));
         }
         if nf_pages.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
-        let mut unspent_by_prefix: HashMap<[u8; NF_PREFIX_LEN], Vec<usize>> = HashMap::new();
-        for (idx, note) in self.notes.iter().enumerate() {
-            if !note.spent {
-                let pref: [u8; NF_PREFIX_LEN] = note.nullifier[0..NF_PREFIX_LEN].try_into().unwrap();
-                unspent_by_prefix.entry(pref).or_default().push(idx);
-            }
-        }
-
-        let mut sorted_nf_pages: Vec<(u64, &[u8])> = nf_pages.to_vec();
+        let mut sorted_nf_pages: Vec<(u64, &'a [u8])> = nf_pages.to_vec();
         sorted_nf_pages.sort_by_key(|&(seq, _)| seq);
-        let mut newly_spent = 0usize;
+
+        let mut running_nf_index = self.lanes[l].next_nf_index;
+        let mut validated: Vec<ValidatedNullifierPage<'a>> =
+            Vec::with_capacity(sorted_nf_pages.len());
 
         for (seq, raw) in sorted_nf_pages {
             if raw.len() != NF_PAGE_LEN || raw[0..8] != NF_PAGE_MAGIC {
@@ -534,18 +624,64 @@ impl CompactWalletStore {
             page_base
                 .checked_add(count as u64)
                 .ok_or(ClientError::InvalidEncoding("NullifierPage index overflow"))?;
-            let start_slot = self.lanes[l]
-                .next_nf_index
+            if page_base > running_nf_index {
+                return Err(ClientError::InvalidEncoding("NullifierPage sequence gap"));
+            }
+            let start_slot = running_nf_index
                 .saturating_sub(page_base)
                 .min(NF_PER_PAGE as u64) as usize;
             let limit_slot = match max_nf_index {
-                Some(cap) => count.min(cap.saturating_sub(page_base).min(NF_PER_PAGE as u64) as usize),
+                Some(cap) => {
+                    count.min(cap.saturating_sub(page_base).min(NF_PER_PAGE as u64) as usize)
+                }
                 None => count,
             };
+            if limit_slot > start_slot {
+                let end_idx = page_base
+                    .checked_add(limit_slot as u64)
+                    .ok_or(ClientError::InvalidEncoding("NullifierPage index overflow"))?;
+                running_nf_index = running_nf_index.max(end_idx);
+            }
+            validated.push(ValidatedNullifierPage {
+                page_base,
+                start_slot,
+                limit_slot,
+                raw,
+            });
+        }
+        Ok(validated)
+    }
+
+    fn apply_validated_nullifier_pages(
+        &mut self,
+        lane_id: u8,
+        validated: Vec<ValidatedNullifierPage<'_>>,
+    ) -> usize {
+        if validated.is_empty() {
+            return 0;
+        }
+        let l = lane_id as usize;
+        let mut unspent_by_prefix: HashMap<[u8; NF_PREFIX_LEN], Vec<usize>> = HashMap::new();
+        for (idx, note) in self.notes.iter().enumerate() {
+            if !note.spent {
+                let pref: [u8; NF_PREFIX_LEN] = note.nullifier[0..NF_PREFIX_LEN].try_into().unwrap();
+                unspent_by_prefix.entry(pref).or_default().push(idx);
+            }
+        }
+
+        let mut newly_spent = 0usize;
+        for ValidatedNullifierPage {
+            page_base,
+            start_slot,
+            limit_slot,
+            raw,
+        } in validated
+        {
             for slot in start_slot..limit_slot {
                 if !unspent_by_prefix.is_empty() {
                     let off = NF_OFF_PREFIXES + slot * NF_PREFIX_LEN;
-                    let pref: [u8; NF_PREFIX_LEN] = raw[off..off + NF_PREFIX_LEN].try_into().unwrap();
+                    let pref: [u8; NF_PREFIX_LEN] =
+                        raw[off..off + NF_PREFIX_LEN].try_into().unwrap();
                     if let Some(indices) = unspent_by_prefix.remove(&pref) {
                         for ni in indices {
                             if !self.notes[ni].spent {
@@ -555,13 +691,27 @@ impl CompactWalletStore {
                         }
                     }
                 }
-                let next_idx = page_base
-                    .checked_add(slot as u64 + 1)
-                    .ok_or(ClientError::InvalidEncoding("NullifierPage index overflow"))?;
+                let next_idx = page_base + slot as u64 + 1;
                 self.lanes[l].next_nf_index = self.lanes[l].next_nf_index.max(next_idx);
             }
         }
-        Ok(newly_spent)
+        newly_spent
+    }
+
+    /// Stream `NullifierPage`s in ascending sequence order against an `O(owned_unspent_notes)`
+    /// prefix map across all lanes, discarding every stranger prefix immediately.
+    ///
+    /// Pre-validates every page header, bounds, and strict contiguity (`page_base <= running_nf_index`)
+    /// BEFORE mutating any note or advancing `next_nf_index` so a gapped or lagging batch can never
+    /// silently skip uninspected nullifier slots or leave partially mutated state on error.
+    pub fn ingest_nullifier_pages(
+        &mut self,
+        lane_id: u8,
+        nf_pages: &[(u64, &[u8])],
+        max_nf_index: Option<u64>,
+    ) -> Result<usize, ClientError> {
+        let validated = self.validate_nullifier_pages(lane_id, nf_pages, max_nf_index)?;
+        Ok(self.apply_validated_nullifier_pages(lane_id, validated))
     }
 
     /// Prune retained `prev_sealed_leaves` on any lane whose `ROOT_RING_EPOCH` (`stable`)
@@ -622,8 +772,10 @@ impl CompactWalletStore {
             return Err(ClientError::InvalidEncoding("invalid lane_id"));
         }
 
-        // 1. Collect newly provided SubtreePage leaves into a temporary page map for memo verification & freezing
-        let mut page_leaves_map: BTreeMap<u64, Vec<[u8; 32]>> = BTreeMap::new();
+        // 1. Pre-validate ALL SubtreePages (headers, counts, canonical BN254 Fr on BOTH sealed
+        //    AND unsealed leaves, and contiguous sealed page_seq), ALL MemoPages, and ALL
+        //    NullifierPages BEFORE mutating ANY store state (100% atomic on validation error).
+        let mut page_leaves_map: BTreeMap<u64, (Vec<[u8; 32]>, Vec<Fr>)> = BTreeMap::new();
         for &(seq, raw) in subtree_pages {
             if raw.len() != SUBTREE_PAGE_LEN || raw[0..8] != SUBTREE_MAGIC {
                 return Err(ClientError::InvalidEncoding("invalid SubtreePage"));
@@ -641,19 +793,65 @@ impl CompactWalletStore {
                 ));
             }
             let mut leaves = Vec::with_capacity(count);
+            let mut fr_leaves = Vec::with_capacity(count);
             for i in 0..count {
-                leaves.push(read_32(raw, SB_OFF_LEAVES + i * 32));
+                let leaf_be = read_32(raw, SB_OFF_LEAVES + i * 32);
+                let leaf_fr =
+                    fr_from_be_bytes_strict(&leaf_be).ok_or(ClientError::InvalidFieldElement)?;
+                leaves.push(leaf_be);
+                fr_leaves.push(leaf_fr);
+            }
+            // Enforce append-only prefix immutability against persisted frontier & prev_sealed leaves
+            let old_frontier = &self.lanes[l].frontier_leaves;
+            if !old_frontier.is_empty() && seq == self.lanes[l].frontier_sub_seq {
+                let prefix_len = leaves.len().min(old_frontier.len());
+                if leaves[..prefix_len] != old_frontier[..prefix_len] {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreePage frontier prefix mismatch against persisted frontier_leaves",
+                    ));
+                }
+            }
+            let old_prev = &self.lanes[l].prev_sealed_leaves;
+            if !old_prev.is_empty() && self.lanes[l].prev_sealed_sub_seq == Some(seq) {
+                let prefix_len = leaves.len().min(old_prev.len());
+                if leaves[..prefix_len] != old_prev[..prefix_len] {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreePage prefix mismatch against persisted prev_sealed_leaves",
+                    ));
+                }
+            }
+            // Enforce immutability against already-persisted `finalized_subroots[seq]`
+            if leaves.len() == SUBTREE_LEAVES {
+                if let Ok(seq_idx) = usize::try_from(seq) {
+                    if seq_idx < self.lanes[l].finalized_subroots.len() {
+                        let subroot =
+                            fr_to_be_bytes(&compute_subtree_256_root(&fr_leaves, SUBTREE_LEAVES));
+                        if subroot != self.lanes[l].finalized_subroots[seq_idx] {
+                            return Err(ClientError::InvalidEncoding(
+                                "SubtreePage subroot mismatch against persisted finalized_subroots",
+                            ));
+                        }
+                    }
+                }
             }
             match page_leaves_map.get(&seq) {
-                Some(existing) if existing.len() >= leaves.len() => {}
-                _ => {
-                    page_leaves_map.insert(seq, leaves);
+                Some((existing, _)) => {
+                    let overlap = existing.len().min(leaves.len());
+                    if existing[..overlap] != leaves[..overlap] {
+                        return Err(ClientError::InvalidEncoding(
+                            "conflicting duplicate SubtreePage entries",
+                        ));
+                    }
+                    if leaves.len() > existing.len() {
+                        page_leaves_map.insert(seq, (leaves, fr_leaves));
+                    }
+                }
+                None => {
+                    page_leaves_map.insert(seq, (leaves, fr_leaves));
                 }
             }
         }
 
-        // 2. Scan MemoPages sequentially from `next_memo_leaf`, verifying every hit vs SubtreePage leaf
-        let mut discovered = 0usize;
         let mut memo_map: BTreeMap<u64, &[u8]> = BTreeMap::new();
         for &(seq, raw) in memo_pages {
             if raw.len() != MEMO_PAGE_LEN || raw[0..8] != MEMO_MAGIC {
@@ -679,6 +877,82 @@ impl CompactWalletStore {
             }
         }
 
+        // Pre-validate all sealed SubtreePages for contiguity & compute subroots up front, AND
+        // reject any truncated (`< 256`-leaf) SubtreePage covering an already-finalized
+        // `seq < finalized_subroots.len()` unless the store already holds a full verified 256-leaf
+        // copy of `seq` (which was prefix-checked above).
+        let mut running_subroot_len = self.lanes[l].finalized_subroots.len();
+        let mut validated_sealed_subroots: BTreeMap<u64, [u8; 32]> = BTreeMap::new();
+        for (&seq, (leaves, fr_leaves)) in &page_leaves_map {
+            if leaves.len() < SUBTREE_LEAVES {
+                if let Ok(seq_idx) = usize::try_from(seq) {
+                    if seq_idx < self.lanes[l].finalized_subroots.len() {
+                        let has_full_held_copy = (seq == self.lanes[l].frontier_sub_seq
+                            && self.lanes[l].frontier_leaves.len() == SUBTREE_LEAVES)
+                            || (self.lanes[l].prev_sealed_sub_seq == Some(seq)
+                                && self.lanes[l].prev_sealed_leaves.len() == SUBTREE_LEAVES);
+                        if !has_full_held_copy {
+                            return Err(ClientError::InvalidEncoding(
+                                "truncated SubtreePage cannot be verified against persisted finalized_subroots",
+                            ));
+                        }
+                    }
+                }
+            }
+            if leaves.len() == SUBTREE_LEAVES {
+                if seq >= MAX_SUBROOTS_PER_LANE {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreePage page_seq out of range",
+                    ));
+                }
+                let seq_idx = usize::try_from(seq)
+                    .map_err(|_| ClientError::InvalidEncoding("SubtreePage page_seq overflow"))?;
+                if seq_idx > running_subroot_len {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreePage sequence gap exceeds contiguous frontier",
+                    ));
+                }
+                let next_seq = seq
+                    .checked_add(1)
+                    .ok_or(ClientError::InvalidEncoding("SubtreePage page_seq overflow"))?;
+                next_seq
+                    .checked_mul(SUBTREE_LEAVES as u64)
+                    .ok_or(ClientError::InvalidEncoding("SubtreePage page_seq overflow"))?;
+                let subroot = fr_to_be_bytes(&compute_subtree_256_root(fr_leaves, SUBTREE_LEAVES));
+                running_subroot_len = running_subroot_len.max(seq_idx + 1);
+                validated_sealed_subroots.insert(seq, subroot);
+            }
+        }
+
+        // Pre-validate held sealed frontier leaves & bounds before mutating anything
+        let held_sealed = self.lanes[l].frontier_leaves.len() == SUBTREE_LEAVES
+            && page_leaves_map
+                .get(&self.lanes[l].frontier_sub_seq)
+                .is_none_or(|(leaves, _)| leaves.len() < SUBTREE_LEAVES);
+        if held_sealed {
+            let held_seq = self.lanes[l].frontier_sub_seq;
+            let next_frontier_seq = held_seq
+                .checked_add(1)
+                .ok_or(ClientError::InvalidEncoding("frontier_sub_seq overflow"))?;
+            next_frontier_seq
+                .checked_mul(SUBTREE_LEAVES as u64)
+                .ok_or(ClientError::InvalidEncoding("frontier_sub_seq overflow"))?;
+            for b in &self.lanes[l].frontier_leaves {
+                fr_from_be_bytes_strict(b).ok_or(ClientError::InvalidFieldElement)?;
+            }
+        }
+
+        // Pre-validate ALL NullifierPages (headers, counts, contiguity) BEFORE any mutation
+        let validated_nf_pages = self.validate_nullifier_pages(lane_id, nf_pages, None)?;
+
+        // Pre-validate FVK field elements when memos will be scanned
+        if !memo_map.is_empty() {
+            fvk.spend_pk_fr()?;
+            fvk.nk_fr()?;
+        }
+
+        // 2. Scan MemoPages sequentially from `next_memo_leaf`, verifying every hit vs SubtreePage leaf
+        let mut discovered = 0usize;
         loop {
             let leaf_idx = self.lanes[l].next_memo_leaf;
             if leaf_idx >= MAX_LEAVES_PER_LANE {
@@ -696,7 +970,7 @@ impl CompactWalletStore {
 
             let s_seq = leaf_idx / SUBTREE_LEAVES as u64;
             let s_slot = (leaf_idx % SUBTREE_LEAVES as u64) as usize;
-            let supplied = page_leaves_map.get(&s_seq).map(Vec::as_slice);
+            let supplied = page_leaves_map.get(&s_seq).map(|(v, _)| v.as_slice());
             let best_leaves = if s_seq == self.lanes[l].frontier_sub_seq {
                 let held = self.lanes[l].frontier_leaves.as_slice();
                 match supplied {
@@ -732,20 +1006,12 @@ impl CompactWalletStore {
         // 3. Advance finalized subroots & freeze intra-subtree siblings for owned notes in sealed pages.
         //    Hold a full 256-leaf page in `frontier_leaves` until `next_memo_leaf` finishes scanning all
         //    256 leaves (spanning 3 MemoPages) so lagged MemoPage batches never stall sync.
-        if self.lanes[l].frontier_leaves.len() == SUBTREE_LEAVES
-            && page_leaves_map
-                .get(&self.lanes[l].frontier_sub_seq)
-                .is_none_or(|leaves| leaves.len() < SUBTREE_LEAVES)
-        {
+        if held_sealed {
             let held_seq = self.lanes[l].frontier_sub_seq;
             let held_leaves = self.lanes[l].frontier_leaves.clone();
             self.freeze_owned_notes_in_subtree_page(lane_id, held_seq, &held_leaves)?;
-            let next_frontier_seq = held_seq
-                .checked_add(1)
-                .ok_or(ClientError::InvalidEncoding("frontier_sub_seq overflow"))?;
-            let page_end_leaf = next_frontier_seq
-                .checked_mul(SUBTREE_LEAVES as u64)
-                .ok_or(ClientError::InvalidEncoding("frontier_sub_seq overflow"))?;
+            let next_frontier_seq = held_seq + 1;
+            let page_end_leaf = next_frontier_seq * SUBTREE_LEAVES as u64;
             if self.lanes[l].next_memo_leaf >= page_end_leaf {
                 self.lanes[l].prev_sealed_sub_seq = Some(held_seq);
                 self.lanes[l].prev_sealed_leaves = held_leaves;
@@ -754,34 +1020,12 @@ impl CompactWalletStore {
             }
         }
 
-        for (&seq, leaves) in &page_leaves_map {
+        for (&seq, (leaves, _)) in &page_leaves_map {
             let memo_sub_seq = self.lanes[l].next_memo_leaf / SUBTREE_LEAVES as u64;
             if leaves.len() == SUBTREE_LEAVES {
-                if seq >= MAX_SUBROOTS_PER_LANE {
-                    return Err(ClientError::InvalidEncoding(
-                        "SubtreePage page_seq out of range",
-                    ));
-                }
                 let seq_idx = usize::try_from(seq)
                     .map_err(|_| ClientError::InvalidEncoding("SubtreePage page_seq overflow"))?;
-                if seq_idx
-                    > self.lanes[l]
-                        .finalized_subroots
-                        .len()
-                        .saturating_add(MAX_SUBROOT_GAP)
-                {
-                    return Err(ClientError::InvalidEncoding(
-                        "SubtreePage page_seq jump exceeds limit",
-                    ));
-                }
-                let fr_leaves: Vec<Fr> = leaves
-                    .iter()
-                    .map(|b| fr_from_be_bytes_strict(b).ok_or(ClientError::InvalidFieldElement))
-                    .collect::<Result<_, _>>()?;
-                let subroot = fr_to_be_bytes(&compute_subtree_256_root(&fr_leaves, SUBTREE_LEAVES));
-                while self.lanes[l].finalized_subroots.len() < seq_idx {
-                    self.lanes[l].finalized_subroots.push([0u8; 32]);
-                }
+                let subroot = validated_sealed_subroots[&seq];
                 if self.lanes[l].finalized_subroots.len() == seq_idx {
                     self.lanes[l].finalized_subroots.push(subroot);
                 } else {
@@ -790,12 +1034,8 @@ impl CompactWalletStore {
 
                 self.freeze_owned_notes_in_subtree_page(lane_id, seq, leaves)?;
 
-                let next_seq = seq
-                    .checked_add(1)
-                    .ok_or(ClientError::InvalidEncoding("SubtreePage page_seq overflow"))?;
-                let page_end_leaf = next_seq
-                    .checked_mul(SUBTREE_LEAVES as u64)
-                    .ok_or(ClientError::InvalidEncoding("SubtreePage page_seq overflow"))?;
+                let next_seq = seq + 1;
+                let page_end_leaf = next_seq * SUBTREE_LEAVES as u64;
                 if self.lanes[l].next_memo_leaf >= page_end_leaf {
                     if seq >= self.lanes[l].frontier_sub_seq {
                         self.lanes[l].prev_sealed_sub_seq = Some(seq);
@@ -811,7 +1051,8 @@ impl CompactWalletStore {
                     self.lanes[l].frontier_sub_seq = seq;
                     self.lanes[l].frontier_leaves = leaves.clone();
                 }
-            } else if seq >= self.lanes[l].frontier_sub_seq
+            } else if seq >= self.lanes[l].finalized_subroots.len() as u64
+                && seq >= self.lanes[l].frontier_sub_seq
                 && seq <= memo_sub_seq
                 && (seq > self.lanes[l].frontier_sub_seq
                     || leaves.len() > self.lanes[l].frontier_leaves.len())
@@ -821,9 +1062,9 @@ impl CompactWalletStore {
             }
         }
 
-        // 4. Stream NullifierPages in ascending sequence order against owned unspent notes
+        // 4. Commit already-validated NullifierPages against owned unspent notes
         //    (discarding all stranger prefixes immediately).
-        self.ingest_nullifier_pages(lane_id, nf_pages, None)?;
+        self.apply_validated_nullifier_pages(lane_id, validated_nf_pages);
 
         Ok(discovered)
     }
@@ -1131,10 +1372,10 @@ mod tests {
         assert_eq!(store.lanes[0].frontier_sub_seq, 1);
         assert!(store.lanes[0].frontier_leaves.is_empty());
 
-        // Out-of-order NullifierPages (page 1 before page 0) must not skip page 0
+        // Out-of-order contiguous NullifierPages (page 1 before full page 0) must not skip page 0
         let mut nf0 = vec![0u8; NF_PAGE_LEN];
         nf0[0..8].copy_from_slice(&NF_PAGE_MAGIC);
-        nf0[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+        nf0[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&(NF_PER_PAGE as u16).to_le_bytes());
         nf0[NF_OFF_PREFIXES..NF_OFF_PREFIXES + NF_PREFIX_LEN]
             .copy_from_slice(&store.notes[0].nullifier[0..NF_PREFIX_LEN]);
 
@@ -1665,7 +1906,8 @@ mod tests {
             "R4-C3: forged direct freeze must NOT populate frozen_intra_positions"
         );
 
-        // 2. ingest_lane_pages with a forged sealed SubtreePage #0 MUST also skip freezing!
+        // 2. ingest_lane_pages with a forged sealed SubtreePage #0 MUST reject the mutated
+        //    frontier prefix outright (zero subroot poisoning, zero freezing)!
         let mut forged_sub_raw = vec![0u8; SUBTREE_PAGE_LEN];
         forged_sub_raw[0..8].copy_from_slice(&SUBTREE_MAGIC);
         forged_sub_raw[SB_OFF_COUNT..SB_OFF_COUNT + 2]
@@ -1674,9 +1916,16 @@ mod tests {
             forged_sub_raw[SB_OFF_LEAVES + i * 32..SB_OFF_LEAVES + (i + 1) * 32]
                 .copy_from_slice(leaf);
         }
-        store
-            .ingest_lane_pages(&fvk, 0, &[(0, &forged_sub_raw)], &[], &[])
-            .unwrap();
+        assert!(
+            store
+                .ingest_lane_pages(&fvk, 0, &[(0, &forged_sub_raw)], &[], &[])
+                .is_err(),
+            "R4-C3 + R6-1: forged sealed SubtreePage via ingest_lane_pages must reject mutated frontier prefix"
+        );
+        assert!(
+            store.lanes[0].finalized_subroots.is_empty(),
+            "R6-1: rejected forged SubtreePage must NOT poison finalized_subroots"
+        );
         assert!(
             store.notes[0].frozen_intra_siblings.is_none(),
             "R4-C3: forged sealed SubtreePage via ingest_lane_pages must NOT freeze mismatched note"
@@ -2474,5 +2723,201 @@ mod tests {
         assert_eq!(dup_memo_store.lanes[0].next_memo_leaf, 200);
         assert_eq!(dup_memo_store.notes.len(), 2);
         assert_eq!(dup_memo_store.notes[1].leaf_index, 180);
+    }
+
+    #[test]
+    fn store_rejects_sparse_subroot_gaps_nullifier_gaps_duplicate_notes_and_noncanonical_json() {
+        let keys = AudrenKeys::from_seed(&[0x55u8; 32]);
+        let fvk = keys.full_viewing_key();
+
+        let make_sr_page = |lane_id: u8, seq: u64, roots: &[[u8; 32]]| -> Vec<u8> {
+            let mut raw = vec![0u8; SUBROOT_PAGE_LEN];
+            raw[0..8].copy_from_slice(&SUBROOT_MAGIC);
+            raw[SR_OFF_LANE_ID] = lane_id;
+            raw[SR_OFF_COUNT..SR_OFF_COUNT + 2].copy_from_slice(&(roots.len() as u16).to_le_bytes());
+            raw[SR_OFF_ROOT_PAGE_SEQ..SR_OFF_ROOT_PAGE_SEQ + 8].copy_from_slice(&seq.to_le_bytes());
+            for (i, r) in roots.iter().enumerate() {
+                raw[SR_OFF_ROOTS + i * 32..SR_OFF_ROOTS + (i + 1) * 32].copy_from_slice(r);
+            }
+            raw
+        };
+        let make_nf = |lane_id: u8, seq: u64, count: u16, first_pref: Option<[u8; NF_PREFIX_LEN]>| {
+            let mut raw = vec![0u8; NF_PAGE_LEN];
+            raw[0..8].copy_from_slice(&NF_PAGE_MAGIC);
+            raw[NF_OFF_LANE_ID] = lane_id;
+            raw[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&count.to_le_bytes());
+            raw[NF_OFF_PAGE_SEQ..NF_OFF_PAGE_SEQ + 8].copy_from_slice(&seq.to_le_bytes());
+            if let Some(p) = first_pref {
+                raw[NF_OFF_PREFIXES..NF_OFF_PREFIXES + NF_PREFIX_LEN].copy_from_slice(&p);
+            }
+            raw
+        };
+
+        // 1. SubtreeRootPage sparse gap / amplification attack MUST fail atomically with zero mutation
+        let mut sr_store = CompactWalletStore::new(0, 0);
+        let sr0 = make_sr_page(0, 0, &[fr_to_be_bytes(&Fr::from(1u64)); 10]);
+        let sr2 = make_sr_page(0, 2, &[fr_to_be_bytes(&Fr::from(2u64)); 1]);
+        assert!(sr_store
+            .ingest_subroot_pages(0, &[(0, &sr0), (2, &sr2)], None)
+            .is_err());
+        assert!(
+            sr_store.lanes[0].finalized_subroots.is_empty(),
+            "failed ingest_subroot_pages batch must not partially mutate finalized_subroots"
+        );
+        // Contiguous full page 0 (300) + page 1 (2) in reverse order succeeds cleanly
+        let sr0_full = make_sr_page(0, 0, &[fr_to_be_bytes(&Fr::from(1u64)); SUBROOTS_PER_PAGE]);
+        let sr1 = make_sr_page(0, 1, &[fr_to_be_bytes(&Fr::from(2u64)); 2]);
+        sr_store
+            .ingest_subroot_pages(0, &[(1, &sr1), (0, &sr0_full)], None)
+            .unwrap();
+        assert_eq!(sr_store.lanes[0].finalized_subroots.len(), SUBROOTS_PER_PAGE + 2);
+
+        // 2. NullifierPage gapped batch (partial page 0 + page 1) MUST fail atomically without
+        //    marking notes spent or advancing next_nf_index
+        let mut nf_store = CompactWalletStore::new(0, 0);
+        let (tw, bl, _memo) =
+            encrypt_note_memo(&keys.view_pk, [0x44u8; 32], 10_000, &audren_core::WSOL_MINT)
+                .unwrap();
+        let stealth = fvk.stealth_owner(tw).unwrap();
+        let cm = compute_note_commitment(stealth, derive_asset_id(&audren_core::WSOL_MINT), 10_000, bl);
+        let cm_be = fr_to_be_bytes(&cm);
+        let dec = DecryptedMemo {
+            tweak: tw,
+            blinding: bl,
+            amount: 10_000,
+            mint: audren_core::WSOL_MINT,
+            memo_version: 1,
+            memo_flags: 0,
+            payment_id: [0u8; MEMO_PAYMENT_ID_LEN],
+            is_dynamic: false,
+        };
+        nf_store.record_verified_memo(&fvk, 0, 0, &dec, cm_be).unwrap();
+        let own_pref: [u8; NF_PREFIX_LEN] = nf_store.notes[0].nullifier[0..NF_PREFIX_LEN]
+            .try_into()
+            .unwrap();
+        let nf0_partial = make_nf(0, 0, 1, Some(own_pref));
+        let nf1 = make_nf(0, 1, 1, None);
+        assert!(nf_store
+            .ingest_nullifier_pages(0, &[(0, &nf0_partial), (1, &nf1)], None)
+            .is_err());
+        assert_eq!(nf_store.lanes[0].next_nf_index, 0);
+        assert!(!nf_store.notes[0].spent);
+
+        // 3. from_json_bytes rejects duplicate (lane_id, leaf_index) notes and non-canonical Fr
+        let mut dup_store = nf_store.clone();
+        dup_store.notes.push(dup_store.notes[0].clone());
+        let dup_json = dup_store.to_json_bytes().unwrap();
+        assert!(CompactWalletStore::from_json_bytes(&dup_json).is_err());
+
+        let mut bad_fr_store = nf_store.clone();
+        bad_fr_store.notes[0].commitment = audren_core::BN254_FR_MODULUS_BE;
+        let bad_fr_json = bad_fr_store.to_json_bytes().unwrap();
+        assert!(matches!(
+            CompactWalletStore::from_json_bytes(&bad_fr_json),
+            Err(ClientError::InvalidFieldElement)
+        ));
+
+        let mut bad_sr_store = nf_store.clone();
+        bad_sr_store.lanes[0]
+            .finalized_subroots
+            .push(audren_core::BN254_FR_MODULUS_BE);
+        let bad_sr_json = bad_sr_store.to_json_bytes().unwrap();
+        assert!(matches!(
+            CompactWalletStore::from_json_bytes(&bad_sr_json),
+            Err(ClientError::InvalidFieldElement)
+        ));
+
+        // 4. ingest_lane_pages rejects unsealed non-canonical Fr leaf & is 100% atomic on
+        //    gapped sealed SubtreePage or gapped NullifierPage (zero partial state mutation)
+        let mut unsealed_bad = vec![0u8; SUBTREE_PAGE_LEN];
+        unsealed_bad[0..8].copy_from_slice(&SUBTREE_MAGIC);
+        unsealed_bad[SB_OFF_COUNT..SB_OFF_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+        unsealed_bad[SB_OFF_LEAVES..SB_OFF_LEAVES + 32]
+            .copy_from_slice(&audren_core::BN254_FR_MODULUS_BE);
+        let mut atomic_store = CompactWalletStore::new(0, 0);
+        assert!(matches!(
+            atomic_store.ingest_lane_pages(&fvk, 0, &[(0, &unsealed_bad)], &[], &[]),
+            Err(ClientError::InvalidFieldElement)
+        ));
+        assert!(atomic_store.lanes[0].frontier_leaves.is_empty());
+
+        let mut sealed0 = vec![0u8; SUBTREE_PAGE_LEN];
+        sealed0[0..8].copy_from_slice(&SUBTREE_MAGIC);
+        sealed0[SB_OFF_COUNT..SB_OFF_COUNT + 2]
+            .copy_from_slice(&(SUBTREE_LEAVES as u16).to_le_bytes());
+        sealed0[SB_OFF_LEAVES..SB_OFF_LEAVES + 32].copy_from_slice(&cm_be);
+        let mut sealed2 = sealed0.clone();
+        sealed2[SB_OFF_PAGE_SEQ..SB_OFF_PAGE_SEQ + 8].copy_from_slice(&2u64.to_le_bytes());
+        let mut memo0 = vec![0u8; MEMO_PAGE_LEN];
+        memo0[0..8].copy_from_slice(&MEMO_MAGIC);
+        memo0[MM_OFF_COUNT..MM_OFF_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+        memo0[MM_OFF_VIEW_TAGS..MM_OFF_VIEW_TAGS + 2].copy_from_slice(&_memo[0..2]);
+        memo0[MM_OFF_EPHEMERAL_PKS..MM_OFF_EPHEMERAL_PKS + 32].copy_from_slice(&_memo[2..34]);
+        memo0[MM_OFF_CIPHERTEXTS..MM_OFF_CIPHERTEXTS + MEMO_CT_LEN]
+            .copy_from_slice(&_memo[34..MEMO_ENTRY_WIRE_LEN]);
+        assert!(atomic_store
+            .ingest_lane_pages(&fvk, 0, &[(0, &sealed0), (2, &sealed2)], &[(0, &memo0)], &[])
+            .is_err());
+        assert_eq!(atomic_store.lanes[0].next_memo_leaf, 0);
+        assert!(atomic_store.notes.is_empty());
+        assert!(atomic_store.lanes[0].finalized_subroots.is_empty());
+
+        assert!(atomic_store
+            .ingest_lane_pages(&fvk, 0, &[(0, &sealed0)], &[(0, &memo0)], &[(1, &nf1)])
+            .is_err());
+        assert_eq!(atomic_store.lanes[0].next_memo_leaf, 0);
+        assert!(atomic_store.notes.is_empty());
+        assert!(atomic_store.lanes[0].finalized_subroots.is_empty());
+        assert_eq!(atomic_store.lanes[0].next_nf_index, 0);
+
+        // 5. Duplicate root_page_seq in ingest_subroot_pages: consistent shorter prefix keeps
+        //    fuller copy, while conflicting duplicate entry MUST be rejected atomically!
+        let mut dup_sr_store = CompactWalletStore::new(0, 0);
+        let sr0_short_consistent = make_sr_page(0, 0, &[fr_to_be_bytes(&Fr::from(1u64)); 1]);
+        let sr0_short_conflict = make_sr_page(0, 0, &[fr_to_be_bytes(&Fr::from(99u64)); 1]);
+        assert!(
+            dup_sr_store
+                .ingest_subroot_pages(0, &[(0, &sr0_full), (0, &sr0_short_conflict)], None)
+                .is_err(),
+            "conflicting duplicate SubtreeRootPage entries must be rejected"
+        );
+        assert!(dup_sr_store.lanes[0].finalized_subroots.is_empty());
+        dup_sr_store
+            .ingest_subroot_pages(0, &[(0, &sr0_full), (0, &sr0_short_consistent)], None)
+            .unwrap();
+        assert_eq!(dup_sr_store.lanes[0].finalized_subroots.len(), SUBROOTS_PER_PAGE);
+        assert_eq!(
+            dup_sr_store.lanes[0].finalized_subroots[0],
+            fr_to_be_bytes(&Fr::from(1u64))
+        );
+
+        // 6. Round-2 Audit Finding #4: ingest_subroot_pages validates canonical Fr on ALL 0..cnt
+        //    entries of EVERY input page (including discarded shorter duplicates and trailing
+        //    entries past `finalized_count`) with zero store mutation on error.
+        let sr0_bad_short = make_sr_page(0, 0, &[audren_core::BN254_FR_MODULUS_BE]);
+        let sr0_trailing_bad = make_sr_page(
+            0,
+            0,
+            &[
+                fr_to_be_bytes(&Fr::from(7u64)),
+                audren_core::BN254_FR_MODULUS_BE,
+            ],
+        );
+        let mut strict_sr_store = CompactWalletStore::new(0, 0);
+        assert!(matches!(
+            strict_sr_store.ingest_subroot_pages(0, &[(0, &sr0_bad_short), (0, &sr0_full)], None),
+            Err(ClientError::InvalidFieldElement)
+        ));
+        assert!(strict_sr_store.lanes[0].finalized_subroots.is_empty());
+        assert!(matches!(
+            strict_sr_store.ingest_subroot_pages(0, &[(0, &sr0_full), (0, &sr0_bad_short)], None),
+            Err(ClientError::InvalidFieldElement)
+        ));
+        assert!(strict_sr_store.lanes[0].finalized_subroots.is_empty());
+        assert!(matches!(
+            strict_sr_store.ingest_subroot_pages(0, &[(0, &sr0_trailing_bad)], Some(1)),
+            Err(ClientError::InvalidFieldElement)
+        ));
+        assert!(strict_sr_store.lanes[0].finalized_subroots.is_empty());
     }
 }

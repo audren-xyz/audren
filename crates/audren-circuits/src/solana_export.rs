@@ -81,6 +81,10 @@ pub fn render_vk_generated_rs(
 
 /// Render an Arkworks `VerifyingKey<Bn254>` into a Rust constant for `groth16-solana`.
 pub fn render_solana_vk_const(const_name: &str, vk: &VerifyingKey<Bn254>) -> String {
+    assert!(
+        !vk.gamma_abc_g1.is_empty(),
+        "VerifyingKey.gamma_abc_g1 must contain at least the constant term"
+    );
     let nr_pubinputs = vk.gamma_abc_g1.len() - 1;
     let alpha = g1_to_be_uncompressed(&vk.alpha_g1);
     let beta = g2_to_be_uncompressed(&vk.beta_g2);

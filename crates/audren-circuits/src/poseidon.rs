@@ -4,16 +4,33 @@
 //! hash computed natively and constrained in R1CS matches Solana's on-chain `sol_poseidon`
 //! syscall (`Parameters::Bn254X5`, `Endianness::BigEndian`) 100% bit-for-bit.
 
+use std::sync::OnceLock;
+
 use ark_bn254::Fr;
-use ark_ff::{BigInteger, PrimeField};
+use ark_ff::{BigInteger, Field, PrimeField};
 use ark_r1cs_std::{
     alloc::AllocVar,
     fields::{fp::FpVar, FieldVar},
 };
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use light_poseidon::{
-    parameters::bn254_x5::get_poseidon_parameters, Poseidon, PoseidonHasher, PoseidonParameters,
+    parameters::bn254_x5::get_poseidon_parameters, PoseidonParameters,
 };
+
+static POSEIDON_PARAMS_CACHE: [OnceLock<PoseidonParameters<Fr>>; 12] =
+    [const { OnceLock::new() }; 12];
+
+/// Return cached Circom BN254 `x^5` Poseidon parameters for `width` (`2..=13`, i.e., `1..=12` inputs).
+#[inline]
+fn cached_poseidon_parameters(width: usize) -> &'static PoseidonParameters<Fr> {
+    assert!(
+        (2..=13).contains(&width),
+        "sol_poseidon supports width 2..=13 (1..=12 inputs), got {width}"
+    );
+    POSEIDON_PARAMS_CACHE[width - 2].get_or_init(|| {
+        get_poseidon_parameters::<Fr>(width as u8).expect("supported poseidon width")
+    })
+}
 
 /// Convert an `Fr` element to its 32-byte canonical big-endian representation
 /// (exact wire format expected by `sol_poseidon` and `groth16-solana`).
@@ -35,14 +52,53 @@ pub fn fr_from_be_bytes_strict(bytes: &[u8; 32]) -> Option<Fr> {
 }
 
 /// Native Poseidon hash over `inputs` (1..=12 inputs), matching `sol_poseidon` bit-for-bit.
+/// Uses cached `OnceLock` parameters with zero per-call heap allocations or parameter rebuilds.
 pub fn poseidon_hash(inputs: &[Fr]) -> Fr {
     assert!(
         !inputs.is_empty() && inputs.len() <= 12,
         "sol_poseidon supports 1..=12 inputs, got {}",
         inputs.len()
     );
-    let mut hasher = Poseidon::<Fr>::new_circom(inputs.len()).expect("valid circom width");
-    hasher.hash(inputs).expect("poseidon hash")
+    let width = inputs.len() + 1;
+    let params = cached_poseidon_parameters(width);
+
+    let mut state = [Fr::from(0u64); 13];
+    let mut next = [Fr::from(0u64); 13];
+    state[1..width].copy_from_slice(inputs);
+
+    let half_rounds = params.full_rounds / 2;
+    let all_rounds = params.full_rounds + params.partial_rounds;
+
+    #[inline(always)]
+    fn sbox_x5(a: Fr) -> Fr {
+        let x2 = a.square();
+        let x4 = x2.square();
+        x4 * a
+    }
+
+    for round in 0..all_rounds {
+        let ark_base = round * width;
+        for (i, slot) in state[..width].iter_mut().enumerate() {
+            *slot += params.ark[ark_base + i];
+        }
+        if round < half_rounds || round >= half_rounds + params.partial_rounds {
+            for slot in &mut state[..width] {
+                *slot = sbox_x5(*slot);
+            }
+        } else {
+            state[0] = sbox_x5(state[0]);
+        }
+        for (r, mds_row) in params.mds.iter().enumerate().take(width) {
+            let mut acc = Fr::from(0u64);
+            for (c, &coeff) in mds_row.iter().enumerate().take(width) {
+                acc += state[c] * coeff;
+            }
+            next[r] = acc;
+        }
+        state[..width].copy_from_slice(&next[..width]);
+    }
+
+    state[0]
 }
 
 #[inline]
@@ -80,8 +136,7 @@ pub fn poseidon_hash_var(
     inputs: &[FpVar<Fr>],
 ) -> Result<FpVar<Fr>, SynthesisError> {
     let width = inputs.len() + 1;
-    let params: PoseidonParameters<Fr> =
-        get_poseidon_parameters::<Fr>(width as u8).expect("supported poseidon width");
+    let params: &PoseidonParameters<Fr> = cached_poseidon_parameters(width);
 
     let mut state: Vec<FpVar<Fr>> = Vec::with_capacity(width);
     state.push(FpVar::new_constant(cs, Fr::from(0u64))?);

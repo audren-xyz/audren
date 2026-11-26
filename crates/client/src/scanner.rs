@@ -11,7 +11,8 @@
 //! - Streams all new `NullifierPage`s to `lane_hdr.nf_count` in Pass 2 unconditionally
 //!   (even if Pass 1D hits a transient `SubtreePage` miss) with zero early-exit.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
 use ark_bn254::Fr;
 use audren_circuits::{
@@ -38,11 +39,13 @@ use audren_core::{
 };
 use sha2::{Digest, Sha256};
 use solana_address::Address;
+use zeroize::Zeroizing;
 
 use crate::{
     instructions::validate_root_ring,
     keys::{
-        check_memo_view_tag, try_decrypt_and_verify_memo_entry, DecryptedMemo, FullViewingKey,
+        canonicalize_public_epk, check_memo_view_tag, compute_memo_scan_dedup_tag,
+        try_decrypt_and_verify_memo_entry, DecryptedMemo, FullViewingKey,
     },
     pda::{
         derive_lane_pda, derive_memo_pda, derive_nf_page_pda, derive_pool_pda, derive_roots_pda,
@@ -60,6 +63,10 @@ pub const INCREMENTAL_FULL_MEMO_PAGE_THRESHOLD: u64 = 25;
 pub const INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD: u64 = 25;
 /// Minimum sealed `SubtreePage` anonymity set size when decoy-padding in `Strict` mode.
 pub const STRICT_DECOY_SEALED_SUBTREE_TARGET: usize = 16;
+/// Maximum publicly-duplicated `canon_epk` sealed `SubtreePage`s resolved per sync call in `Strict` mode.
+/// Overflowing lanes cap `actual_end_sub` & `verified_watermark` identically for 0-note and N-note wallets,
+/// guaranteeing bounded RPC cost, 0-bit privacy leakage, and 100% fund recovery against cross-lane griefing.
+pub const MAX_PUBLIC_DUP_SUBTREES: usize = 64;
 /// Sealed-subtree count divisor for deterministic decoy epoch buckets (synced with TypeScript SDK).
 pub const DECOY_EPOCH_BUCKET_SIZE: u64 = 64;
 /// Maximum pages fetched per pass in a single `sync_compact_store_with_batch` call (prevents untrusted-RPC OOM/hang).
@@ -105,6 +112,12 @@ fn compute_lane_root_from_subroots_and_frontier(
 }
 /// Domain tag for Rendezvous (HRW) wallet-keyed decoy selection in `Strict` mode.
 const DECOY_DOMAIN: &[u8] = b"audren/v1/decoy";
+/// Domain tag for hit-independent O(`target_sealed * log(N)`) exact monotone large-pool
+/// (`> MAX_HRW_SEALED_SUBTREES`) dyadic Poisson-split HRW decoy sampling in `Strict` mode
+/// (matched bit-for-bit in `packages/sdk/src/scanner.ts`).
+const DECOY_LARGE_DOMAIN: &[u8] = b"audren/v1/hrw_large_dyadic";
+const LARGE_HRW_HEIGHT: u8 = 62;
+const LN2_Q32: u128 = 2_977_044_472; // round(ln(2) * 2^32)
 const DECOY_SCOPE_SYNC: &[u8] = b"sync";
 const DECOY_SCOPE_WITNESS_PREFIX: &[u8] = b"witness";
 /// Byte length of the `MemoPage` header prefix (`closed_slot` binary search).
@@ -146,7 +159,7 @@ pub struct SyncOptions {
 }
 
 /// Options controlling stateless witness reconstruction (`reconstruct_witness_with_batch`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct WitnessOptions {
     pub privacy_mode: SyncPrivacyMode,
     /// Required 32-byte `view_sk` in `SyncPrivacyMode::Strict` for deterministic Rendezvous (HRW)
@@ -156,6 +169,16 @@ pub struct WitnessOptions {
     /// Optional explicit epoch bucket override (defaults to `0`, letting Rendezvous HRW naturally
     /// preserve overlapping decoys across monotonic pool growth with zero cliff rotation).
     pub decoy_epoch_bucket: Option<u64>,
+}
+
+impl std::fmt::Debug for WitnessOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WitnessOptions")
+            .field("privacy_mode", &self.privacy_mode)
+            .field("view_sk", &self.view_sk.as_ref().map(|_| "<redacted>"))
+            .field("decoy_epoch_bucket", &self.decoy_epoch_bucket)
+            .finish()
+    }
 }
 
 /// Derive deterministic watermark-bound HRW decoy scope for Pass 1D catch-up syncs:
@@ -267,7 +290,9 @@ pub fn try_select_hrw_sealed_decoys_in_ranges(
         return Ok(out);
     }
 
-    let mut preimage = Vec::with_capacity(32 + DECOY_DOMAIN.len() + scope.len() + 8 + 1 + 8);
+    let mut preimage = Zeroizing::new(Vec::with_capacity(
+        32 + DECOY_DOMAIN.len() + scope.len() + 8 + 1 + 8,
+    ));
     preimage.extend_from_slice(view_sk);
     preimage.extend_from_slice(DECOY_DOMAIN);
     preimage.extend_from_slice(scope);
@@ -297,7 +322,7 @@ pub fn try_select_hrw_sealed_decoys_in_ranges(
                 continue;
             }
             preimage[seq_off..seq_off + 8].copy_from_slice(&s.to_le_bytes());
-            let score: [u8; 32] = Sha256::digest(&preimage).into();
+            let score: [u8; 32] = Sha256::digest(preimage.as_slice()).into();
             if top.len() == need && !beats(&score, lane_id, s, &top[need - 1]) {
                 continue;
             }
@@ -313,6 +338,146 @@ pub fn try_select_hrw_sealed_decoys_in_ranges(
     }
 
     Ok(top.into_iter().map(|(_, l, s)| (l, s)).collect())
+}
+
+/// Pure-integer fixed-point `Q0.32` approximation of `Exp(1) = -ln(U)` for `U = max(raw, 1) / 2^64`
+/// using a 24-term Taylor series for `-ln(1 - g)` with `g in [0, 1/2]`. Zero floating-point so
+/// Rust (`u128`) and TypeScript (`BigInt`) match 100% bit-for-bit across all platforms.
+fn exp1_q32(raw: u64) -> u128 {
+    let r_nz = if raw == 0 { 1u64 } else { raw };
+    let k = r_nz.leading_zeros() as u128; // 0..=63
+    let m = (r_nz << k) as u128; // [2^63, 2^64 - 1]
+    let g_q32 = ((1u128 << 64) - m) >> 32; // [0, 2^31]
+    let mut term: u128 = 1u128 << 32;
+    let mut sum: u128 = 0;
+    for j in 1u128..=24 {
+        term = (term * g_q32) >> 32;
+        sum += term / j;
+    }
+    k * LN2_Q32 + sum
+}
+
+/// Hit-independent O(`(L + target_sealed) * 62`) exact monotone Rendezvous (HRW) decoy sampler
+/// across ALL sealed subtrees `[0 .. fc_l)` on ALL active lanes when `total_sealed > MAX_HRW_SEALED_SUBTREES`.
+///
+/// Uses a pure-integer fixed-height (`H = 62`) dyadic Poisson-process splitting tree over
+/// `SHA256("audren/v1/hrw_large_dyadic" || view_sk[32] || (scope.len() as u32)_le4 || scope || epoch_bucket_le8 || lane_id[1] || level[1] || node_idx_le8)`
+/// matching `packages/sdk/src/scanner.ts::selectLargePoolHrwSealedDecoys` bit-for-bit:
+/// - Every leaf `(lane_id, sub_seq)` across all 16 lanes receives a fixed, range-independent i.i.d.
+///   `Exp(1)` HRW priority (zero dependency on `fc_l` or `total_sealed`).
+/// - Preserves 100% exact HRW monotonicity across `+1` subtree growth on ANY lane `0..15` (zero
+///   multi-lane index shift, zero power-of-2 mask cliff).
+/// - Deterministic bounded work with zero rejection loop and zero hit-coordinate inspection.
+pub fn select_large_pool_hrw_sealed_decoys(
+    view_sk: &[u8; 32],
+    scope: &[u8],
+    epoch_bucket: u64,
+    sealed_by_lane: &[(u8, u64)],
+    already_selected: &BTreeSet<(u8, u64)>,
+    target_sealed: usize,
+) -> Result<Vec<(u8, u64)>, ClientError> {
+    let mut fc_by_lane = [0u64; NUM_LANES];
+    let mut active_lanes: Vec<(u8, u64)> = Vec::with_capacity(sealed_by_lane.len());
+    let mut seen_lanes: BTreeSet<u8> = BTreeSet::new();
+    let mut total_sealed = 0u64;
+    let mut already_sealed_count = 0usize;
+    for &(lane_id, fc) in sealed_by_lane {
+        if (lane_id as usize) >= NUM_LANES {
+            return Err(ClientError::InvalidEncoding("lane_id out of range"));
+        }
+        if !seen_lanes.insert(lane_id) {
+            return Err(ClientError::InvalidEncoding(
+                "duplicate lane_id in HRW decoy ranges",
+            ));
+        }
+        total_sealed = total_sealed
+            .checked_add(fc)
+            .ok_or(ClientError::InvalidEncoding("sealed subtree count overflow"))?;
+        fc_by_lane[lane_id as usize] = fc;
+        if fc > 0 {
+            active_lanes.push((lane_id, fc));
+        }
+        for &(sel_lane, sel_seq) in already_selected {
+            if sel_lane == lane_id && sel_seq < fc {
+                already_sealed_count += 1;
+            }
+        }
+    }
+    if total_sealed == 0 || total_sealed > (1u64 << LARGE_HRW_HEIGHT) {
+        return Ok(Vec::new());
+    }
+    active_lanes.sort_by_key(|&(lid, _)| lid);
+
+    let capped_target = (target_sealed as u64).min(total_sealed) as usize;
+    let need = capped_target.saturating_sub(already_sealed_count);
+    if need == 0 {
+        return Ok(Vec::new());
+    }
+
+    let scope_len_u32 = u32::try_from(scope.len())
+        .map_err(|_| ClientError::InvalidEncoding("HRW scope length overflow"))?;
+    let mut preimage = Zeroizing::new(Vec::with_capacity(
+        DECOY_LARGE_DOMAIN.len() + 32 + 4 + scope.len() + 8 + 1 + 1 + 8,
+    ));
+    preimage.extend_from_slice(DECOY_LARGE_DOMAIN);
+    preimage.extend_from_slice(view_sk);
+    preimage.extend_from_slice(&scope_len_u32.to_le_bytes());
+    preimage.extend_from_slice(scope);
+    preimage.extend_from_slice(&epoch_bucket.to_le_bytes());
+    let lane_off = preimage.len();
+    preimage.push(0u8); // lane_id
+    preimage.push(0u8); // level
+    preimage.extend_from_slice(&0u64.to_le_bytes()); // node_idx
+
+    let hash_node = |buf: &mut [u8], lane_id: u8, level: u8, node_idx: u64| -> [u8; 32] {
+        buf[lane_off] = lane_id;
+        buf[lane_off + 1] = level;
+        buf[lane_off + 2..lane_off + 10].copy_from_slice(&node_idx.to_le_bytes());
+        Sha256::digest(&*buf).into()
+    };
+
+    // Min-heap of `(scaled_time_s, lane_id, level, node_idx)` ordered ascending.
+    let mut heap: BinaryHeap<Reverse<(u128, u8, u8, u64)>> =
+        BinaryHeap::with_capacity(active_lanes.len() * 4);
+    for &(lid, _) in &active_lanes {
+        let digest = hash_node(&mut preimage, lid, LARGE_HRW_HEIGHT + 1, 0);
+        let raw = u64::from_le_bytes(digest[0..8].try_into().unwrap());
+        let s_root = exp1_q32(raw);
+        heap.push(Reverse((s_root, lid, LARGE_HRW_HEIGHT, 0u64)));
+    }
+
+    let mut out = Vec::with_capacity(need);
+    while out.len() < need {
+        let Some(Reverse((s, lid, level, node_idx))) = heap.pop() else {
+            break;
+        };
+        if level == 0 {
+            let cand = (lid, node_idx);
+            if !already_selected.contains(&cand) {
+                out.push(cand);
+            }
+            continue;
+        }
+        let digest = hash_node(&mut preimage, lid, level, node_idx);
+        let raw = u64::from_le_bytes(digest[0..8].try_into().unwrap());
+        let winner_right = (digest[8] & 1) != 0;
+        let shift = (LARGE_HRW_HEIGHT + 1 - level) as u32; // 1..=62
+        let s_loser = s + (exp1_q32(raw) << shift);
+        let child_level = level - 1;
+        let left_idx = node_idx << 1;
+        let right_idx = left_idx | 1;
+        let fc = fc_by_lane[lid as usize];
+
+        let left_s = if winner_right { s_loser } else { s };
+        heap.push(Reverse((left_s, lid, child_level, left_idx)));
+
+        let right_lo = right_idx << child_level;
+        if right_lo < fc {
+            let right_s = if winner_right { s } else { s_loser };
+            heap.push(Reverse((right_s, lid, child_level, right_idx)));
+        }
+    }
+    Ok(out)
 }
 
 /// Fallible deterministic Rendezvous (Highest Random Weight) sealed `SubtreePage` decoy selection
@@ -379,6 +544,13 @@ pub fn decode_global_root_history(data: &[u8]) -> Result<GlobalRootHistory, Clie
         .ok_or(ClientError::InvalidEncoding("invalid GlobalRootHistory account"))
 }
 
+pub fn decode_global_root_history_boxed(
+    data: &[u8],
+) -> Result<Box<GlobalRootHistory>, ClientError> {
+    GlobalRootHistory::decode_boxed(data)
+        .ok_or(ClientError::InvalidEncoding("invalid GlobalRootHistory account"))
+}
+
 /// Strictly validate `GlobalRootHistory` pool binding, ring cursor/count bounds, epoch/slot
 /// header consistency, lane count monotonicity and zero-root/equal-root invariants, non-zero
 /// roots, ring cursor parity (super_root + slot), and full canonical BN254 `Fr` + 4-ary super-root
@@ -397,11 +569,9 @@ pub fn validate_global_root_history(
     let slot_cursor = roots.slot_cursor as usize;
     let epoch_count = roots.epoch_count as usize;
     let epoch_cursor = roots.epoch_cursor as usize;
-    if slot_count < 1
-        || slot_count > SLOT_RING_LEN
+    if !(1..=SLOT_RING_LEN).contains(&slot_count)
         || slot_cursor >= slot_count
-        || epoch_count < 1
-        || epoch_count > EPOCH_RING_LEN
+        || !(1..=EPOCH_RING_LEN).contains(&epoch_count)
         || epoch_cursor >= epoch_count
     {
         return Err(ClientError::InvalidEncoding(
@@ -573,21 +743,21 @@ where
         }
     }
     let (roots_pda, _) = derive_roots_pda(program_id, pool_id);
-    let mut finalized_roots: Option<GlobalRootHistory> = None;
+    let mut finalized_roots: Option<Box<GlobalRootHistory>> = None;
     let mut finalized_slot_choice: Option<RootSnapshotChoice> = None;
     if let Some(raw_finalized) = fetch_finalized(&roots_pda) {
-        let roots = decode_global_root_history(&raw_finalized)?;
+        let roots = decode_global_root_history_boxed(&raw_finalized)?;
         validate_global_root_history(&roots, pool_id)?;
         if let Some(choice) = roots.select_snapshot_for_notes(required_notes) {
             if choice.ring_kind == ROOT_RING_EPOCH {
-                return Ok((roots, choice));
+                return Ok((*roots, choice));
             }
             finalized_slot_choice = Some(choice);
         }
         finalized_roots = Some(roots);
     }
     if let Some(raw_confirmed) = fetch_confirmed(&roots_pda) {
-        let confirmed_roots = decode_global_root_history(&raw_confirmed)?;
+        let confirmed_roots = decode_global_root_history_boxed(&raw_confirmed)?;
         validate_global_root_history(&confirmed_roots, pool_id)?;
         if let Some(confirmed_choice) = confirmed_roots.select_snapshot_for_notes(required_notes) {
             if let Some(fin_roots) = finalized_roots {
@@ -627,9 +797,9 @@ where
                                         .super_root
                                         != fin_choice.super_root)));
                     return if upgrade_to_confirmed {
-                        Ok((confirmed_roots, confirmed_choice))
+                        Ok((*confirmed_roots, confirmed_choice))
                     } else {
-                        Ok((fin_roots, fin_choice))
+                        Ok((*fin_roots, fin_choice))
                     };
                 }
                 if !confirmed_not_behind {
@@ -638,17 +808,17 @@ where
                     ));
                 }
             }
-            return Ok((confirmed_roots, confirmed_choice));
+            return Ok((*confirmed_roots, confirmed_choice));
         }
         if let (Some(fin_roots), Some(fin_choice)) = (finalized_roots, finalized_slot_choice) {
-            return Ok((fin_roots, fin_choice));
+            return Ok((*fin_roots, fin_choice));
         }
         return Err(ClientError::WitnessNotFound(
             "note not yet included in GlobalRootHistory",
         ));
     }
     if let (Some(fin_roots), Some(fin_choice)) = (finalized_roots, finalized_slot_choice) {
-        return Ok((fin_roots, fin_choice));
+        return Ok((*fin_roots, fin_choice));
     }
     Err(ClientError::WitnessNotFound(
         "GlobalRootHistory account missing",
@@ -1589,9 +1759,19 @@ where
                     "SubtreeRootPage count exceeds capacity",
                 ));
             }
+            let existing_subroots = &store.lanes[l].finalized_subroots;
             for k in 0..cnt {
                 let r = read_32(sr_raw, SR_OFF_ROOTS + k * 32);
                 fr_from_be_bytes_strict(&r).ok_or(ClientError::InvalidFieldElement)?;
+                if let Some(sub_idx_u64) = base.checked_add(k as u64) {
+                    if let Ok(sub_idx) = usize::try_from(sub_idx_u64) {
+                        if sub_idx < existing_subroots.len() && existing_subroots[sub_idx] != r {
+                            return Err(ClientError::InvalidEncoding(
+                                "SubtreeRootPage subroot mismatch against persisted finalized_subroots",
+                            ));
+                        }
+                    }
+                }
             }
             let start_in_page = cur_len.saturating_sub(base).min(sr_size) as usize;
             let avail = cnt.min(expected_on_page);
@@ -1740,6 +1920,24 @@ where
     let fetch_new_subtrees_uniformly = privacy_mode == SyncPrivacyMode::Strict
         && is_incremental_memo_sync
         && total_new_subtrees <= INCREMENTAL_UNIFORM_SUBTREE_THRESHOLD;
+    let strict_subtree_atomic =
+        privacy_mode == SyncPrivacyMode::Strict && !fetch_new_subtrees_uniformly;
+
+    // Pass 1B subtree-boundary alignment (`Strict` non-uniform mode): when Pass 1B skips into the
+    // middle of a sealed `256`-leaf subtree (`skip_to < finalized_count * 256`), align `start_leaf`
+    // down to the exact `256`-leaf boundary so distinct `MemoPage` skip points inside the same
+    // subtree can NEVER share `start_sub` while scanning different subsets of leaves.
+    if strict_subtree_atomic {
+        for lane_hdr in &lanes {
+            let lane_id = lane_hdr.lane_id;
+            let finalized_leaves = (lane_hdr.next_leaf / sub_size) * sub_size;
+            if let Some(skip_to) = scan_start_leaf_by_lane.get_mut(&lane_id) {
+                if *skip_to < finalized_leaves {
+                    *skip_to = (*skip_to / sub_size) * sub_size;
+                }
+            }
+        }
+    }
 
     // =========================================================================
     // PASS 1C: Lazily stream `MemoPage`s across ALL active lanes in 100-account windows
@@ -1785,6 +1983,12 @@ where
     } else {
         None
     };
+
+    enum PublicEpkSubtrees {
+        One(u8, u64),
+        Multi(BTreeSet<(u8, u64)>),
+    }
+    let mut public_epk_subtrees: HashMap<[u8; 32], PublicEpkSubtrees> = HashMap::new();
 
     let mut memo_pages_fetched = 0usize;
     while memo_pages_fetched < MAX_SYNC_PAGES_PER_CALL {
@@ -1845,27 +2049,18 @@ where
                     "MemoPage count exceeds capacity",
                 ));
             }
-            let closed_slot = read_u64(mraw, MM_OFF_CLOSED_SLOT);
             let page_base = memo_seq * memo_size;
             let cursor_wm = *scanned_watermark_by_lane.get(&lane_id).unwrap_or(&0);
             let start_slot = cursor_wm.saturating_sub(page_base).min(memo_size) as usize;
             let max_for_snapshot = next_leaf.saturating_sub(page_base).min(memo_size) as usize;
             let limit_slot = count.min(max_for_snapshot);
 
-            if start_slot == 0
-                && birthday_slot > 0
-                && count == MEMO_NOTES_PER_PAGE
-                && closed_slot > 0
-                && closed_slot < birthday_slot
-            {
-                scanned_watermark_by_lane.insert(lane_id, page_base + limit_slot as u64);
-                if count < max_for_snapshot {
-                    memo_cursors[c_idx].stopped = true;
-                }
-                continue;
-            }
-
+            // Never skip a mid-scan `MemoPage` via `MM_OFF_CLOSED_SLOT < birthday_slot`: Pass 1B
+            // already skips pre-birthday prefixes via binary search, and honoring unauthenticated
+            // `closed_slot` mid-stream would let an adversarial RPC toggle single-page visibility
+            // while holding `actual_end_sub` constant.
             let lane_hits = hits_by_lane.entry(lane_id).or_default();
+            let lane_fc = next_leaf / sub_size;
             let mut page_matched = false;
             for slot in start_slot..limit_slot {
                 let vt = [
@@ -1873,12 +2068,49 @@ where
                     mraw[MM_OFF_VIEW_TAGS + slot * 2 + 1],
                 ];
                 let epk = read_32(mraw, MM_OFF_EPHEMERAL_PKS + slot * 32);
+                let leaf_idx = page_base + slot as u64;
+                if strict_subtree_atomic {
+                    let sub_seq = leaf_idx / sub_size;
+                    if sub_seq < lane_fc {
+                        if let Some(canon_epk) = canonicalize_public_epk(&epk) {
+                            match public_epk_subtrees.get_mut(&canon_epk) {
+                                None => {
+                                    public_epk_subtrees
+                                        .insert(canon_epk, PublicEpkSubtrees::One(lane_id, sub_seq));
+                                }
+                                Some(PublicEpkSubtrees::One(prev_l, prev_s)) => {
+                                    if *prev_l != lane_id || *prev_s != sub_seq {
+                                        let mut set = BTreeSet::new();
+                                        set.insert((*prev_l, *prev_s));
+                                        set.insert((lane_id, sub_seq));
+                                        public_epk_subtrees
+                                            .insert(canon_epk, PublicEpkSubtrees::Multi(set));
+                                    }
+                                }
+                                Some(PublicEpkSubtrees::Multi(set)) => {
+                                    set.insert((lane_id, sub_seq));
+                                }
+                            }
+                        }
+                    }
+                }
                 if check_memo_view_tag(fvk, vt, &epk) {
+                    // When the full `10,240 B` `MemoPage` is already fetched (`Strict` mode and
+                    // incremental `Fast` mode), verify AEAD / `AUD1DYN1` immediately to reject
+                    // `1/65536` false positives and single-copy `(vt, epk, junk_ct)` probes.
+                    if mraw.len() == MEMO_PAGE_LEN {
+                        let ct_off = MM_OFF_CIPHERTEXTS + slot * MEMO_CT_LEN;
+                        let ct72: [u8; MEMO_CT_LEN] =
+                            mraw[ct_off..ct_off + MEMO_CT_LEN].try_into().unwrap();
+                        if compute_memo_scan_dedup_tag(fvk, vt, &epk, &ct72).is_none() {
+                            continue;
+                        }
+                    }
                     page_matched = true;
                     lane_hits.push(MemoHitCandidate {
                         memo_seq,
                         slot,
-                        leaf_idx: page_base + slot as u64,
+                        leaf_idx,
                     });
                 }
             }
@@ -1927,7 +2159,11 @@ where
     }
 
     let mut needed_subtrees: BTreeMap<(u8, u64), Address> = BTreeMap::new();
-    let mut uniform_new_subtrees: BTreeSet<(u8, u64)> = BTreeSet::new();
+    // Publicly-known, hit-independent sealed `SubtreePage`s (`uniform_new_subtrees` sealed pages
+    // + `has_scanned_sealed_frontier` old frontiers): NEVER counted against the private 16-subtree
+    // decoy budget so neither `M = 1..16` returning frontiers nor `U = 1..25` uniform new subtrees
+    // can cannibalize decoys or create a 0-vs-1-note / 1-of-1 pinpoint oracle.
+    let mut public_sealed_subtrees: BTreeSet<(u8, u64)> = BTreeSet::new();
     let add_needed_subtree =
         |map: &mut BTreeMap<(u8, u64), Address>, lane_id: u8, sub_seq: u64| -> bool {
             let key = (lane_id, sub_seq);
@@ -1943,6 +2179,7 @@ where
 
     if fetch_new_subtrees_uniformly {
         for lane_hdr in &lanes {
+            let finalized_count = lane_hdr.next_leaf / sub_size;
             let start_leaf = *scan_start_leaf_by_lane
                 .get(&lane_hdr.lane_id)
                 .unwrap_or(&store.lanes[lane_hdr.lane_id as usize].next_memo_leaf);
@@ -1951,97 +2188,229 @@ where
                 let end_sub = (lane_hdr.next_leaf - 1) / sub_size;
                 for s in start_sub..=end_sub {
                     add_needed_subtree(&mut needed_subtrees, lane_hdr.lane_id, s);
-                    uniform_new_subtrees.insert((lane_hdr.lane_id, s));
+                    if s < finalized_count {
+                        public_sealed_subtrees.insert((lane_hdr.lane_id, s));
+                    }
                 }
             }
         }
     }
 
+    // Compute per-lane scanned window `[start_sub .. actual_end_sub)` up front so unfrozen
+    // `store.notes`, public duplicate `canon_epk` resolution, and sealed-frontier checks strictly
+    // stay inside the RPC-visible scanned window in `Strict` mode (zero out-of-window oracle,
+    // zero 0-MemoPage oracle, zero Vector 1C lift, zero sub-subtree `MemoPage`-drop / `MM_OFF_COUNT`
+    // oracle, zero cross-lane griefing note suppression, and zero 1-shot/2-sync replay oracles).
     let mut has_hit_correlated_sealed_subtree = false;
+    let mut finalized_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut frontier_rem_by_lane: BTreeMap<u8, usize> = BTreeMap::new();
+    let mut start_sub_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut actual_end_sub_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut windowed_ranges_by_lane: Vec<(u8, u64, u64)> = Vec::with_capacity(lanes.len());
+    let mut total_sealed_subtrees = 0u64;
+    let mut window_sealed_subtrees = 0u64;
+
+    // Public, note-independent non-lagging predicate across ALL locally persisted lanes:
+    // blocks O(log N) lagging-`next_leaf` binary-search & decoy-domain shrink oracles on legacy
+    // `locally_finalized_unfrozen` notes.
+    let all_local_lanes_non_lagging = (0..NUM_LANES).all(|l| {
+        let local_len = store.lanes[l].finalized_subroots.len() as u64;
+        local_len == 0
+            || lanes
+                .iter()
+                .find(|h| h.lane_id as usize == l)
+                .is_some_and(|h| (h.next_leaf / sub_size) >= local_len)
+    });
+
     for lane_hdr in &lanes {
         let lane_id = lane_hdr.lane_id;
         let l = lane_id as usize;
         let finalized_count = lane_hdr.next_leaf / sub_size;
         let frontier_rem = (lane_hdr.next_leaf % sub_size) as usize;
+        let start_leaf = *scan_start_leaf_by_lane
+            .get(&lane_id)
+            .unwrap_or(&store.lanes[l].next_memo_leaf);
+        let start_sub = (start_leaf / sub_size).min(finalized_count);
+        let scanned_leaf = *scanned_watermark_by_lane.get(&lane_id).unwrap_or(&start_leaf);
+        let actual_end_sub = if scanned_leaf <= start_leaf {
+            start_sub
+        } else if strict_subtree_atomic {
+            // Subtree-boundary atomicity (`Strict` non-uniform mode): only sealed subtrees whose
+            // full 256-leaf range was scanned (`(s + 1) * 256 <= scanned_leaf`) enter Pass 1D.
+            // Eliminates sub-subtree `MemoPage`-drop and `MM_OFF_COUNT` binary-search oracles.
+            (scanned_leaf / sub_size)
+                .min(finalized_count)
+                .max(start_sub)
+        } else {
+            scanned_leaf
+                .div_ceil(sub_size)
+                .min(finalized_count)
+                .max(start_sub)
+        };
+        finalized_by_lane.insert(lane_id, finalized_count);
+        frontier_rem_by_lane.insert(lane_id, frontier_rem);
+        start_sub_by_lane.insert(lane_id, start_sub);
+        actual_end_sub_by_lane.insert(lane_id, actual_end_sub);
+        total_sealed_subtrees = total_sealed_subtrees.saturating_add(finalized_count);
+    }
+
+    // Public, key-independent cross-subtree duplicate `canon_epk` resolution (`Strict` non-uniform
+    // mode): if any Curve25519 `canon_epk` (collapsing all 16 torsion + bit-255 + `u + p` variants)
+    // appears in >= 2 distinct sealed subtrees inside `[start_sub .. actual_end_sub)`, BOTH 0-note
+    // and N-note wallets identically schedule up to `MAX_PUBLIC_DUP_SUBTREES` (64) such subtrees
+    // in `public_sealed_subtrees` (ascending `(lane_id, sub_seq)` order) and cap overflowing lanes'
+    // `actual_end_sub` & `verified_watermark` at the minimum deferred duplicate `sub_seq`.
+    // Eliminates BOTH 1-shot/2-sync replay amplification oracles AND permissionless cross-lane
+    // griefing note suppression on honest RPCs, with guaranteed monotonic forward progress.
+    let mut dup_end_sub_cap: BTreeMap<u8, u64> = BTreeMap::new();
+    if strict_subtree_atomic {
+        let mut public_dup_subtrees: BTreeSet<(u8, u64)> = BTreeSet::new();
+        for tracker in public_epk_subtrees.values() {
+            if let PublicEpkSubtrees::Multi(set) = tracker {
+                let in_window: Vec<(u8, u64)> = set
+                    .iter()
+                    .copied()
+                    .filter(|&(lid, s)| {
+                        let s_start = *start_sub_by_lane.get(&lid).unwrap_or(&0);
+                        let s_end = *actual_end_sub_by_lane.get(&lid).unwrap_or(&s_start);
+                        s >= s_start && s < s_end
+                    })
+                    .collect();
+                if in_window.len() >= 2 {
+                    for ls in in_window {
+                        public_dup_subtrees.insert(ls);
+                    }
+                }
+            }
+        }
+        for (idx, (lid, s)) in public_dup_subtrees.into_iter().enumerate() {
+            if idx < MAX_PUBLIC_DUP_SUBTREES {
+                add_needed_subtree(&mut needed_subtrees, lid, s);
+                public_sealed_subtrees.insert((lid, s));
+            } else {
+                dup_end_sub_cap
+                    .entry(lid)
+                    .and_modify(|cur| {
+                        if s < *cur {
+                            *cur = s;
+                        }
+                    })
+                    .or_insert(s);
+            }
+        }
+        for (&lid, &cap_sub) in &dup_end_sub_cap {
+            let s_start = *start_sub_by_lane.get(&lid).unwrap_or(&0);
+            if let Some(end_ref) = actual_end_sub_by_lane.get_mut(&lid) {
+                *end_ref = (*end_ref).min(cap_sub).max(s_start);
+            }
+        }
+    }
+    public_epk_subtrees.clear();
+
+    for lane_hdr in &lanes {
+        let lane_id = lane_hdr.lane_id;
+        let l = lane_id as usize;
+        let finalized_count = *finalized_by_lane.get(&lane_id).unwrap_or(&0);
+        let frontier_rem = *frontier_rem_by_lane.get(&lane_id).unwrap_or(&0);
+        let start_leaf = *scan_start_leaf_by_lane
+            .get(&lane_id)
+            .unwrap_or(&store.lanes[l].next_memo_leaf);
+        let start_sub = *start_sub_by_lane.get(&lane_id).unwrap_or(&0);
+        let scanned_leaf = *scanned_watermark_by_lane.get(&lane_id).unwrap_or(&start_leaf);
+        let actual_end_sub = *actual_end_sub_by_lane.get(&lane_id).unwrap_or(&start_sub);
+        windowed_ranges_by_lane.push((lane_id, start_sub, actual_end_sub));
+        window_sealed_subtrees = window_sealed_subtrees.saturating_add(actual_end_sub - start_sub);
 
         if frontier_rem > 0 {
             add_needed_subtree(&mut needed_subtrees, lane_id, finalized_count);
         }
+        // Uniform sealed-frontier freeze (scheduled BEFORE hits/notes so it is registered in
+        // `public_sealed_subtrees`): ONLY when this wallet had previously memo-scanned leaves
+        // inside `frontier_sub_seq` (`next_memo_leaf > frontier_sub_seq * 256 && frontier_sub_seq >= start_sub`)
+        // AND that frontier page has sealed on-chain (`frontier_sub_seq < finalized_count`), fetch
+        // it uniformly across BOTH 0-note and N-note wallets and mark it public so it never
+        // cannibalizes the private 16-subtree decoy budget.
+        let frontier_seq = store.lanes[l].frontier_sub_seq;
+        let has_scanned_sealed_frontier = !store.lanes[l].frontier_leaves.is_empty()
+            && frontier_seq < finalized_count
+            && store.lanes[l].next_memo_leaf > frontier_seq.saturating_mul(sub_size)
+            && frontier_seq >= start_sub;
+        if has_scanned_sealed_frontier
+            && ((privacy_mode == SyncPrivacyMode::Fast
+                && lookup_verified_subroot(lane_id, frontier_seq).is_some())
+                || (privacy_mode == SyncPrivacyMode::Strict
+                    && scanned_leaf > start_leaf
+                    && frontier_seq < actual_end_sub))
+        {
+            add_needed_subtree(&mut needed_subtrees, lane_id, frontier_seq);
+            public_sealed_subtrees.insert((lane_id, frontier_seq));
+        }
         if let Some(hits) = hits_by_lane.get(&lane_id) {
             for hit in hits {
                 let hit_sub_seq = hit.leaf_idx / sub_size;
+                if strict_subtree_atomic && hit_sub_seq < finalized_count {
+                    // Defer hits in an incompletely scanned tail or dup-capped sealed subtree to
+                    // the next sync (`verified_watermark` is capped at `actual_end_sub * 256` so
+                    // zero notes are ever suppressed or lost).
+                    if hit_sub_seq >= actual_end_sub {
+                        continue;
+                    }
+                }
                 add_needed_subtree(&mut needed_subtrees, lane_id, hit_sub_seq);
                 if hit_sub_seq < finalized_count
-                    && !uniform_new_subtrees.contains(&(lane_id, hit_sub_seq))
+                    && !public_sealed_subtrees.contains(&(lane_id, hit_sub_seq))
                 {
                     has_hit_correlated_sealed_subtree = true;
                 }
             }
         }
+        // Unfrozen `store.notes` guard: in `Strict` mode, ONLY schedule unfrozen sealed notes that
+        // EITHER (a) were ALREADY locally finalized & scanned in `store` prior to this sync AND
+        // ALL locally persisted lanes are non-lagging (`all_local_lanes_non_lagging`, blocking
+        // O(log N) lagging-`next_leaf` binary-search & decoy-domain shrink oracles), OR (b) lie
+        // strictly inside this sync's verified Pass 1C scanned window `[start_sub .. actual_end_sub)`
+        // with `scanned_leaf > start_leaf`.
+        let strict_unfrozen_ok = scanned_leaf > start_leaf;
+        let local_finalized_len = store.lanes[l].finalized_subroots.len() as u64;
+        let local_next_memo_leaf = store.lanes[l].next_memo_leaf;
         for note in &store.notes {
             if note.lane_id == lane_id && note.frozen_intra_siblings.is_none() {
                 let note_sub_seq = note.leaf_index / sub_size;
-                if note_sub_seq < finalized_count {
+                let locally_finalized_unfrozen = all_local_lanes_non_lagging
+                    && note_sub_seq < local_finalized_len
+                    && note_sub_seq < local_next_memo_leaf / sub_size;
+                let newly_scanned_unfrozen = strict_unfrozen_ok
+                    && note_sub_seq >= start_sub
+                    && note_sub_seq < actual_end_sub
+                    && (privacy_mode == SyncPrivacyMode::Strict
+                        || lookup_verified_subroot(lane_id, note_sub_seq).is_some());
+                if note_sub_seq < finalized_count
+                    && (locally_finalized_unfrozen
+                        || newly_scanned_unfrozen
+                        || (privacy_mode == SyncPrivacyMode::Fast
+                            && lookup_verified_subroot(lane_id, note_sub_seq).is_some()))
+                {
                     add_needed_subtree(&mut needed_subtrees, lane_id, note_sub_seq);
-                    if !uniform_new_subtrees.contains(&(lane_id, note_sub_seq)) {
+                    if !public_sealed_subtrees.contains(&(lane_id, note_sub_seq)) {
                         has_hit_correlated_sealed_subtree = true;
                     }
                 }
             }
         }
-        if finalized_count > 0
-            && !store.lanes[l].frontier_leaves.is_empty()
-            && store.lanes[l].frontier_sub_seq == finalized_count - 1
-        {
-            add_needed_subtree(&mut needed_subtrees, lane_id, finalized_count - 1);
-        }
     }
 
     // Rendezvous (HRW) wallet-keyed decoy padding for historical sealed `SubtreePage` fetches in
     // `Strict` mode:
+    // - Sizes the private anonymity bucket strictly ON TOP of `public_sealed_subtrees`
+    //   (`uniform_new_subtrees` sealed entries + `has_scanned_sealed_frontier` old frontiers) so
+    //   publicly-known returning frontiers or uniform incremental pages NEVER cannibalize the
+    //   16-subtree decoy budget.
     // - Windowed strictly to the actual hit-independent Pass 1C scanned ceiling
-    //   `[start_sub_l .. actual_end_sub_l)` derived from `scanned_watermark_by_lane` (bounded by
-    //   `MAX_SYNC_PAGES_PER_CALL = 4,096` MemoPages and tracking early-stop spillover accurately).
-    // - When `!has_outside_window_sealed && window_sealed_subtrees < target_sealed`, first include
-    //   EVERY sealed subtree in the scanned window uniformly, then draw remaining decoys from a
-    //   bounded downward tail `[start_sub - tail .. start_sub)` and (if still short) a bounded
-    //   upward tail `[actual_end_sub .. min(fc, actual_end_sub + tail))`.
-    // - Scoped deterministically to the sync's starting watermark state (`"sync" || start_leaves`),
-    //   preserving HRW retry-intersection immunity across failed retries while eliminating both the
-    //   deterministic multi-sync hit oracle and persistent cross-IP decoy fingerprinting.
-    let mut finalized_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
-    let mut frontier_rem_by_lane: BTreeMap<u8, usize> = BTreeMap::new();
-    let mut start_sub_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
-    let mut actual_end_sub_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
-    let mut watermark_pairs: Vec<(u8, u64)> = Vec::with_capacity(lanes.len());
-    let mut full_ranges_by_lane: Vec<(u8, u64, u64)> = Vec::with_capacity(lanes.len());
-    let mut windowed_ranges_by_lane: Vec<(u8, u64, u64)> = Vec::with_capacity(lanes.len());
-    let mut total_sealed_subtrees = 0u64;
-    let mut window_sealed_subtrees = 0u64;
-    for lane_hdr in &lanes {
-        let lid = lane_hdr.lane_id;
-        let fc = lane_hdr.next_leaf / sub_size;
-        let frem = (lane_hdr.next_leaf % sub_size) as usize;
-        let start_leaf = *scan_start_leaf_by_lane
-            .get(&lid)
-            .unwrap_or(&store.lanes[lid as usize].next_memo_leaf);
-        let start_sub = (start_leaf / sub_size).min(fc);
-        let scanned_leaf = *scanned_watermark_by_lane.get(&lid).unwrap_or(&start_leaf);
-        let actual_end_sub = if scanned_leaf <= start_leaf {
-            start_sub
-        } else {
-            scanned_leaf.div_ceil(sub_size).min(fc).max(start_sub)
-        };
-        finalized_by_lane.insert(lid, fc);
-        frontier_rem_by_lane.insert(lid, frem);
-        start_sub_by_lane.insert(lid, start_sub);
-        actual_end_sub_by_lane.insert(lid, actual_end_sub);
-        watermark_pairs.push((lid, start_leaf));
-        full_ranges_by_lane.push((lid, 0, fc));
-        windowed_ranges_by_lane.push((lid, start_sub, actual_end_sub));
-        total_sealed_subtrees = total_sealed_subtrees.saturating_add(fc);
-        window_sealed_subtrees = window_sealed_subtrees.saturating_add(actual_end_sub - start_sub);
-    }
+    //   `[start_sub_l .. actual_end_sub_l)` derived from `scanned_watermark_by_lane`.
+    // - Scoped strictly to ALL 16 persisted `store.lanes[0..NUM_LANES].next_memo_leaf` watermarks.
+    let persisted_watermarks: Vec<(u8, u64)> = (0..NUM_LANES)
+        .map(|l| (l as u8, store.lanes[l].next_memo_leaf))
+        .collect();
     let epoch_bucket: u64 = options.decoy_epoch_bucket.unwrap_or(0);
 
     let should_decoy_pad = privacy_mode == SyncPrivacyMode::Strict
@@ -2049,66 +2418,88 @@ where
         && (has_hit_correlated_sealed_subtree
             || (!fetch_new_subtrees_uniformly && total_new_memo_pages > 0));
     if should_decoy_pad {
-        let current_sealed_count = needed_subtrees
-            .keys()
-            .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
-            .count();
+        let sync_scope = make_sync_decoy_scope(&persisted_watermarks);
+        let lane_count = (lanes.len().max(1)) as u64;
+        let per_lane_max_span = MAX_HRW_SEALED_SUBTREES / lane_count;
         let has_outside_window_sealed = needed_subtrees.keys().any(|&(lid, s)| {
             let fc = *finalized_by_lane.get(&lid).unwrap_or(&0);
             let s_start = *start_sub_by_lane.get(&lid).unwrap_or(&0);
             let s_end = *actual_end_sub_by_lane.get(&lid).unwrap_or(&s_start);
-            s < fc && (s < s_start || s >= s_end)
+            s < fc && !public_sealed_subtrees.contains(&(lid, s)) && (s < s_start || s >= s_end)
         });
-        let buckets = current_sealed_count
-            .max(1)
-            .div_ceil(STRICT_DECOY_SEALED_SUBTREE_TARGET);
-        let target_sealed = ((buckets as u64)
-            .saturating_mul(STRICT_DECOY_SEALED_SUBTREE_TARGET as u64))
-            .min(total_sealed_subtrees) as usize;
 
-        if current_sealed_count < target_sealed {
-            let sync_scope = make_sync_decoy_scope(&watermark_pairs);
-            let lane_count = (lanes.len().max(1)) as u64;
-            let per_lane_max_span = MAX_HRW_SEALED_SUBTREES / lane_count;
+        let pad_scanned_window = |needed: &mut BTreeMap<(u8, u64), Address>| -> Result<(), ClientError> {
+            let win_public_count = public_sealed_subtrees
+                .iter()
+                .filter(|&&(lid, s)| {
+                    let s_start = *start_sub_by_lane.get(&lid).unwrap_or(&0);
+                    let s_end = *actual_end_sub_by_lane.get(&lid).unwrap_or(&s_start);
+                    s >= s_start && s < s_end
+                })
+                .count();
+            let win_already_count = needed
+                .keys()
+                .filter(|&&(lid, s)| {
+                    let s_start = *start_sub_by_lane.get(&lid).unwrap_or(&0);
+                    let s_end = *actual_end_sub_by_lane.get(&lid).unwrap_or(&s_start);
+                    s >= s_start && s < s_end
+                })
+                .count();
+            let win_private_count = win_already_count.saturating_sub(win_public_count);
+            let win_private_buckets = win_private_count
+                .max(1)
+                .div_ceil(STRICT_DECOY_SEALED_SUBTREE_TARGET);
+            let win_private_target = (win_private_buckets as u64)
+                .saturating_mul(STRICT_DECOY_SEALED_SUBTREE_TARGET as u64);
+            let win_desired_total = (win_public_count as u64).saturating_add(win_private_target);
+            let win_need_new = win_desired_total
+                .saturating_sub(win_already_count as u64)
+                .min(total_sealed_subtrees.saturating_sub(
+                    needed
+                        .keys()
+                        .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
+                        .count() as u64,
+                )) as usize;
+            if win_need_new == 0 {
+                return Ok(());
+            }
 
-            if !has_outside_window_sealed && window_sealed_subtrees >= target_sealed as u64 {
+            let win_available = window_sealed_subtrees.saturating_sub(win_already_count as u64);
+            if win_available >= win_need_new as u64 {
                 if window_sealed_subtrees > MAX_HRW_SEALED_SUBTREES {
                     return Err(ClientError::InvalidEncoding(
                         "sealed subtree count exceeds HRW operational bound",
                     ));
                 }
-                let already_selected: BTreeSet<(u8, u64)> =
-                    needed_subtrees.keys().copied().collect();
+                let already_selected: BTreeSet<(u8, u64)> = needed.keys().copied().collect();
                 let decoys = try_select_hrw_sealed_decoys_in_ranges(
                     &fvk.view_sk,
                     &sync_scope,
                     epoch_bucket,
                     &windowed_ranges_by_lane,
                     &already_selected,
-                    target_sealed,
+                    win_already_count.saturating_add(win_need_new),
                 )?;
                 for (d_lane, d_seq) in decoys {
-                    add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+                    add_needed_subtree(needed, d_lane, d_seq);
                 }
-            } else if !has_outside_window_sealed {
-                // Step 2a: include EVERY sealed subtree in the RPC-visible scanned window uniformly
-                // so hits inside 26..42 MemoPage or early-stopped scans are never distinguishable.
+            } else {
+                // Step 2a: include EVERY sealed subtree in the RPC-visible scanned window uniformly.
+                let mut added_total = 0usize;
                 for &(lid, s, e) in &windowed_ranges_by_lane {
                     for seq in s..e {
-                        add_needed_subtree(&mut needed_subtrees, lid, seq);
+                        if add_needed_subtree(needed, lid, seq) {
+                            added_total += 1;
+                        }
                     }
                 }
-                let tail_per_lane = (target_sealed as u64)
+                let tail_per_lane = (win_desired_total)
                     .saturating_mul(64)
                     .max(1024)
                     .min(per_lane_max_span);
-                let sealed_after_window = needed_subtrees
-                    .keys()
-                    .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
-                    .count();
-                if sealed_after_window < target_sealed {
+                if added_total < win_need_new {
                     // Step 2b: bounded downward tail `[start_sub - tail .. start_sub)`
-                    let remaining_down = target_sealed - sealed_after_window;
+                    let remaining_down = win_need_new - added_total;
                     let tail_ranges: Vec<(u8, u64, u64)> = lanes
                         .iter()
                         .map(|h| {
@@ -2116,28 +2507,32 @@ where
                             (h.lane_id, start_sub.saturating_sub(tail_per_lane), start_sub)
                         })
                         .collect();
-                    let already_selected: BTreeSet<(u8, u64)> =
-                        needed_subtrees.keys().copied().collect();
+                    let in_tail_already = needed
+                        .keys()
+                        .filter(|&&(lid, s)| {
+                            tail_ranges
+                                .iter()
+                                .any(|&(rl, lo, hi)| rl == lid && s >= lo && s < hi)
+                        })
+                        .count();
+                    let already_selected: BTreeSet<(u8, u64)> = needed.keys().copied().collect();
                     let decoys = try_select_hrw_sealed_decoys_in_ranges(
                         &fvk.view_sk,
                         &sync_scope,
                         epoch_bucket,
                         &tail_ranges,
                         &already_selected,
-                        remaining_down,
+                        in_tail_already.saturating_add(remaining_down),
                     )?;
                     for (d_lane, d_seq) in decoys {
-                        add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+                        if add_needed_subtree(needed, d_lane, d_seq) {
+                            added_total += 1;
+                        }
                     }
                 }
-                let sealed_after_down = needed_subtrees
-                    .keys()
-                    .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
-                    .count();
-                if sealed_after_down < target_sealed {
+                if added_total < win_need_new {
                     // Step 2c: bounded upward tail `[actual_end_sub .. min(fc, actual_end_sub + tail))`
-                    // (e.g. start_sub == 0 after early-stopped Pass 1C; disjoint from Steps 2a/2b).
-                    let remaining_up = target_sealed - sealed_after_down;
+                    let remaining_up = win_need_new - added_total;
                     let up_ranges: Vec<(u8, u64, u64)> = lanes
                         .iter()
                         .map(|h| {
@@ -2146,6 +2541,166 @@ where
                             (h.lane_id, s_end, s_end.saturating_add(tail_per_lane).min(fc))
                         })
                         .collect();
+                    let in_up_already = needed
+                        .keys()
+                        .filter(|&&(lid, s)| {
+                            up_ranges
+                                .iter()
+                                .any(|&(rl, lo, hi)| rl == lid && s >= lo && s < hi)
+                        })
+                        .count();
+                    let already_selected: BTreeSet<(u8, u64)> = needed.keys().copied().collect();
+                    let decoys = try_select_hrw_sealed_decoys_in_ranges(
+                        &fvk.view_sk,
+                        &sync_scope,
+                        epoch_bucket,
+                        &up_ranges,
+                        &already_selected,
+                        in_up_already.saturating_add(remaining_up),
+                    )?;
+                    for (d_lane, d_seq) in decoys {
+                        add_needed_subtree(needed, d_lane, d_seq);
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        if !has_outside_window_sealed {
+            pad_scanned_window(&mut needed_subtrees)?;
+        } else {
+            // Branch 3 (`has_outside_window_sealed == true`): only reachable via locally persisted
+            // `locally_finalized_unfrozen` legacy notes (`note_sub_seq < local_fc_l` and
+            // `note.leaf_index < local_next_memo_leaf <= start_leaf`).
+            // Partition strictly into TWO disjoint domains whenever Pass 1C also scanned a non-uniform
+            // sealed window (`will_pad_window`):
+            //   - `L' = ⋃_l [0 .. legacy_fc_l)` where `legacy_fc_l = local_fc_l.min(start_sub_l)` on
+            //     lanes with `actual_end_sub_l > start_sub_l` (and `local_fc_l` otherwise).
+            //     Disjoint from `W` by construction AND covers every outside-window legacy note.
+            //   - `W  = ⋃_l [start_sub_l .. actual_end_sub_l)` padded independently via `pad_scanned_window`.
+            // Neither `uniform_new_subtrees`, returning frontiers, nor in-window hits can ever
+            // cannibalize `L'`, and forged `lane_hdr.next_leaf = 2^19..2^26` with empty Pass 1C
+            // (`window_sealed_subtrees == 0`) leaves `will_pad_window == false` and 0% decoy rotation.
+            let will_pad_window = !fetch_new_subtrees_uniformly && window_sealed_subtrees > 0;
+            let mut local_fc_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
+            let mut local_finalized_ranges: Vec<(u8, u64, u64)> =
+                Vec::with_capacity(lanes.len());
+            let mut local_finalized_total = 0u64;
+            for h in &lanes {
+                let fc = *finalized_by_lane.get(&h.lane_id).unwrap_or(&0);
+                let s_start = *start_sub_by_lane.get(&h.lane_id).unwrap_or(&0);
+                let s_end = *actual_end_sub_by_lane.get(&h.lane_id).unwrap_or(&s_start);
+                // Bound `L'` strictly by full-subtree floor `local_scanned_fc = next_memo_leaf / sub_size`
+                // (matching `locally_finalized_unfrozen` & `pad_scanned_window` Step 2b `[0..start_sub)`):
+                // guarantees `L' ⊆ [0..start_sub)` is unconditionally disjoint from `W`, eliminates
+                // unscanned-lane dilution AND mid-subtree boundary singleton pinpoint / rotation.
+                let local_scanned_fc = store.lanes[h.lane_id as usize].next_memo_leaf / sub_size;
+                let raw_local_fc = (store.lanes[h.lane_id as usize].finalized_subroots.len()
+                    as u64)
+                    .min(fc)
+                    .min(local_scanned_fc);
+                let legacy_fc = if will_pad_window && s_end > s_start {
+                    raw_local_fc.min(s_start)
+                } else {
+                    raw_local_fc
+                };
+                local_fc_by_lane.insert(h.lane_id, legacy_fc);
+                local_finalized_ranges.push((h.lane_id, 0, legacy_fc));
+                local_finalized_total = local_finalized_total.saturating_add(legacy_fc);
+            }
+            let public_in_local = public_sealed_subtrees
+                .iter()
+                .filter(|&&(lid, s)| s < *local_fc_by_lane.get(&lid).unwrap_or(&0))
+                .count();
+            let already_in_local = needed_subtrees
+                .keys()
+                .filter(|&&(lid, s)| s < *local_fc_by_lane.get(&lid).unwrap_or(&0))
+                .count();
+            let private_in_local = already_in_local.saturating_sub(public_in_local);
+            let local_private_buckets = private_in_local
+                .max(1)
+                .div_ceil(STRICT_DECOY_SEALED_SUBTREE_TARGET);
+            let local_private_target = (local_private_buckets as u64)
+                .saturating_mul(STRICT_DECOY_SEALED_SUBTREE_TARGET as u64);
+            let local_target_u64 = (public_in_local as u64).saturating_add(local_private_target);
+
+            if local_finalized_total >= local_target_u64 {
+                let local_target = local_target_u64 as usize;
+                if already_in_local < local_target {
+                    let already_selected: BTreeSet<(u8, u64)> =
+                        needed_subtrees.keys().copied().collect();
+                    let decoys = if local_finalized_total <= MAX_HRW_SEALED_SUBTREES {
+                        try_select_hrw_sealed_decoys_in_ranges(
+                            &fvk.view_sk,
+                            &sync_scope,
+                            epoch_bucket,
+                            &local_finalized_ranges,
+                            &already_selected,
+                            local_target,
+                        )?
+                    } else {
+                        let local_sealed_by_lane: Vec<(u8, u64)> = lanes
+                            .iter()
+                            .map(|h| (h.lane_id, *local_fc_by_lane.get(&h.lane_id).unwrap_or(&0)))
+                            .collect();
+                        select_large_pool_hrw_sealed_decoys(
+                            &fvk.view_sk,
+                            &sync_scope,
+                            epoch_bucket,
+                            &local_sealed_by_lane,
+                            &already_selected,
+                            local_target,
+                        )?
+                    };
+                    for (d_lane, d_seq) in decoys {
+                        add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
+                    }
+                }
+                if will_pad_window {
+                    pad_scanned_window(&mut needed_subtrees)?;
+                }
+            } else {
+                // Tiny legacy store (`local_finalized_total < local_target`): include ALL of `L'`
+                // uniformly; if a non-uniform Pass 1C window was also scanned, pad `W` FIRST so
+                // Step 3A's upward fallback never overlaps `W` or splits `W`'s 16-subtree bucket.
+                for &(lid, _, local_fc) in &local_finalized_ranges {
+                    for seq in 0..local_fc {
+                        add_needed_subtree(&mut needed_subtrees, lid, seq);
+                    }
+                }
+                if will_pad_window {
+                    pad_scanned_window(&mut needed_subtrees)?;
+                }
+                let all_sealed_now = needed_subtrees
+                    .keys()
+                    .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
+                    .count() as u64;
+                let non_public_sealed_now =
+                    all_sealed_now.saturating_sub(public_sealed_subtrees.len() as u64);
+                let mut remaining_legacy = local_private_target
+                    .saturating_sub(non_public_sealed_now)
+                    .min(total_sealed_subtrees.saturating_sub(all_sealed_now)) as usize;
+                if remaining_legacy > 0 {
+                    let tail_per_lane = local_private_target
+                        .saturating_mul(64)
+                        .max(1024)
+                        .min(per_lane_max_span);
+                    let up_ranges: Vec<(u8, u64, u64)> = lanes
+                        .iter()
+                        .map(|h| {
+                            let fc = *finalized_by_lane.get(&h.lane_id).unwrap_or(&0);
+                            let lfc = *local_fc_by_lane.get(&h.lane_id).unwrap_or(&0);
+                            (h.lane_id, lfc, lfc.saturating_add(tail_per_lane).min(fc))
+                        })
+                        .collect();
+                    let in_up_count = needed_subtrees
+                        .keys()
+                        .filter(|&&(lid, s)| {
+                            up_ranges
+                                .iter()
+                                .any(|&(rl, lo, hi)| rl == lid && s >= lo && s < hi)
+                        })
+                        .count();
                     let already_selected: BTreeSet<(u8, u64)> =
                         needed_subtrees.keys().copied().collect();
                     let decoys = try_select_hrw_sealed_decoys_in_ranges(
@@ -2154,70 +2709,36 @@ where
                         epoch_bucket,
                         &up_ranges,
                         &already_selected,
-                        remaining_up,
+                        in_up_count.saturating_add(remaining_legacy),
+                    )?;
+                    for (d_lane, d_seq) in decoys {
+                        if add_needed_subtree(&mut needed_subtrees, d_lane, d_seq) {
+                            remaining_legacy = remaining_legacy.saturating_sub(1);
+                        }
+                    }
+                }
+                if remaining_legacy > 0 {
+                    let sealed_after_up = needed_subtrees
+                        .keys()
+                        .filter(|&&(lid, s)| s < *finalized_by_lane.get(&lid).unwrap_or(&0))
+                        .count();
+                    let sealed_by_lane_vec: Vec<(u8, u64)> = lanes
+                        .iter()
+                        .map(|h| (h.lane_id, *finalized_by_lane.get(&h.lane_id).unwrap_or(&0)))
+                        .collect();
+                    let already_selected: BTreeSet<(u8, u64)> =
+                        needed_subtrees.keys().copied().collect();
+                    let decoys = select_large_pool_hrw_sealed_decoys(
+                        &fvk.view_sk,
+                        &sync_scope,
+                        epoch_bucket,
+                        &sealed_by_lane_vec,
+                        &already_selected,
+                        sealed_after_up.saturating_add(remaining_legacy),
                     )?;
                     for (d_lane, d_seq) in decoys {
                         add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
                     }
-                }
-            } else {
-                let older_ranges: Vec<(u8, u64, u64)> =
-                    if total_sealed_subtrees <= MAX_HRW_SEALED_SUBTREES {
-                        full_ranges_by_lane.clone()
-                    } else {
-                        lanes
-                            .iter()
-                            .map(|h| {
-                                let lid = h.lane_id;
-                                let fc = *finalized_by_lane.get(&lid).unwrap_or(&0);
-                                let mut min_s: Option<u64> = None;
-                                let mut max_s: Option<u64> = None;
-                                for &(nl, ns) in needed_subtrees.keys() {
-                                    if nl == lid && ns < fc {
-                                        min_s = Some(min_s.map_or(ns, |cur| cur.min(ns)));
-                                        max_s = Some(max_s.map_or(ns, |cur| cur.max(ns)));
-                                    }
-                                }
-                                let (low, high) = match (min_s, max_s) {
-                                    (Some(lo_n), Some(hi_n)) => {
-                                        let anchor = if hi_n.saturating_sub(lo_n) < per_lane_max_span {
-                                            lo_n + (hi_n - lo_n) / 2
-                                        } else {
-                                            lo_n
-                                        };
-                                        let low = anchor
-                                            .saturating_sub(per_lane_max_span / 2)
-                                            .min(fc.saturating_sub(per_lane_max_span));
-                                        (low, low.saturating_add(per_lane_max_span).min(fc))
-                                    }
-                                    _ => (fc.saturating_sub(per_lane_max_span), fc),
-                                };
-                                (lid, low, high)
-                            })
-                            .collect()
-                    };
-                let outside_older_count = needed_subtrees
-                    .keys()
-                    .filter(|&&(lid, s)| {
-                        s < *finalized_by_lane.get(&lid).unwrap_or(&0)
-                            && !older_ranges
-                                .iter()
-                                .any(|&(rl, rs, re)| rl == lid && s >= rs && s < re)
-                    })
-                    .count();
-                let older_target = target_sealed.saturating_sub(outside_older_count);
-                let already_selected: BTreeSet<(u8, u64)> =
-                    needed_subtrees.keys().copied().collect();
-                let decoys = try_select_hrw_sealed_decoys_in_ranges(
-                    &fvk.view_sk,
-                    &sync_scope,
-                    epoch_bucket,
-                    &older_ranges,
-                    &already_selected,
-                    older_target,
-                )?;
-                for (d_lane, d_seq) in decoys {
-                    add_needed_subtree(&mut needed_subtrees, d_lane, d_seq);
                 }
             }
         }
@@ -2245,6 +2766,29 @@ where
                 continue;
             };
             let (leaves_be, leaves_fr) = decode_subtree_page_strict(raw, pool_id, key.0, key.1)?;
+            // Enforce append-only prefix immutability against persisted `frontier_leaves` and
+            // `prev_sealed_leaves` (note-independent; blocks single-leaf frontier rewrite oracles
+            // and permanent `finalized_subroots` poisoning while remaining safe on honest lagging
+            // RPC replicas whose truncated prefix still matches).
+            let lane_store = &store.lanes[key.0 as usize];
+            if !lane_store.frontier_leaves.is_empty() && key.1 == lane_store.frontier_sub_seq {
+                let prefix_len = leaves_be.len().min(lane_store.frontier_leaves.len());
+                if leaves_be[..prefix_len] != lane_store.frontier_leaves[..prefix_len] {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreePage frontier prefix mismatch against persisted frontier_leaves",
+                    ));
+                }
+            }
+            if !lane_store.prev_sealed_leaves.is_empty()
+                && lane_store.prev_sealed_sub_seq == Some(key.1)
+            {
+                let prefix_len = leaves_be.len().min(lane_store.prev_sealed_leaves.len());
+                if leaves_be[..prefix_len] != lane_store.prev_sealed_leaves[..prefix_len] {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreePage prefix mismatch against persisted prev_sealed_leaves",
+                    ));
+                }
+            }
             let fc = *finalized_by_lane.get(&key.0).unwrap_or(&0);
             let expected_min_leaves = if key.1 < fc {
                 SUBTREE_LEAVES
@@ -2264,6 +2808,19 @@ where
                 if compute_subtree_256_root(&leaves_fr, SUBTREE_LEAVES) != expected_subroot_fr {
                     return Err(ClientError::InvalidEncoding(
                         "SubtreePage root mismatch against SubtreeRootPage",
+                    ));
+                }
+            } else if leaves_be.len() == SUBTREE_LEAVES
+                && key.1 < lane_store.finalized_subroots.len() as u64
+            {
+                // Even if Phase 0 `lane_hdr.next_leaf` lagged below persisted `finalized_subroots`,
+                // any fetched 256-leaf page covering an immutable local subroot MUST match it.
+                let expected_subroot_fr =
+                    fr_from_be_bytes_strict(&lane_store.finalized_subroots[key.1 as usize])
+                        .ok_or(ClientError::InvalidFieldElement)?;
+                if compute_subtree_256_root(&leaves_fr, SUBTREE_LEAVES) != expected_subroot_fr {
+                    return Err(ClientError::InvalidEncoding(
+                        "SubtreePage root mismatch against persisted finalized_subroots",
                     ));
                 }
             }
@@ -2357,22 +2914,60 @@ where
 
     let mut discovered_notes = 0usize;
     let mut pending_verified_memos: Vec<(u8, u64, DecryptedMemo, [u8; 32])> = Vec::new();
-    let mut pending_watermarks: Vec<(usize, u64)> = Vec::new();
+    let mut pending_watermarks: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut hold_sealed_frontier_lanes: BTreeSet<u8> = BTreeSet::new();
 
     for lane_hdr in &lanes {
         let lane_id = lane_hdr.lane_id;
         let l = lane_id as usize;
         let old_frontier_sub_seq = store.lanes[l].frontier_sub_seq;
         let old_frontier_leaves = &store.lanes[l].frontier_leaves;
+        let old_next_memo_leaf = store.lanes[l].next_memo_leaf;
+        let finalized_count = lane_hdr.next_leaf / sub_size;
+        let start_leaf = *scan_start_leaf_by_lane
+            .get(&lane_id)
+            .unwrap_or(&old_next_memo_leaf);
+        let start_sub = *start_sub_by_lane.get(&lane_id).unwrap_or(&0);
+
+        // Returning-wallet privacy & liveness invariant: ONLY hold a sealed frontier page if this
+        // wallet had actually memo-scanned leaves inside `old_frontier_sub_seq` prior to this sync
+        // (`old_next_memo_leaf > old_frontier_sub_seq * 256 && old_frontier_sub_seq >= start_sub`)
+        // AND `(lane_id, old_frontier_sub_seq)` was not fetched in Pass 1D. Never hold a never-
+        // memo-scanned frontier (eliminates permanent livelocks on `> 786k`-note fresh catch-ups
+        // and Pass 1B `birthday_slot` skips while preserving 100% 0-note vs N-note uniformity).
+        let hold_sealed_frontier = !old_frontier_leaves.is_empty()
+            && old_frontier_sub_seq < finalized_count
+            && old_next_memo_leaf > old_frontier_sub_seq.saturating_mul(sub_size)
+            && old_frontier_sub_seq >= start_sub
+            && !fetched_subtrees.contains_key(&(lane_id, old_frontier_sub_seq));
+        if hold_sealed_frontier {
+            hold_sealed_frontier_lanes.insert(lane_id);
+        }
 
         // Verify all view-tag candidates for this lane in ascending leaf order into a temporary
         // buffer; `store` is ONLY mutated below when `!any_pass1d_subtree_missing` so any dropped
         // Pass 1D page (hit OR decoy) leaves `store` and `discovered_notes` 100% untouched.
         let mut verified_watermark = *scanned_watermark_by_lane
             .get(&lane_id)
-            .unwrap_or(&store.lanes[l].next_memo_leaf);
+            .unwrap_or(&old_next_memo_leaf);
+        if strict_subtree_atomic {
+            let finalized_leaves = finalized_count.saturating_mul(sub_size);
+            if dup_end_sub_cap.contains_key(&lane_id) || verified_watermark < finalized_leaves {
+                let actual_end_sub = *actual_end_sub_by_lane.get(&lane_id).unwrap_or(&0);
+                let atomic_cap = actual_end_sub.saturating_mul(sub_size).max(start_leaf);
+                if verified_watermark > atomic_cap {
+                    verified_watermark = atomic_cap;
+                }
+            }
+        }
+        if hold_sealed_frontier && verified_watermark > old_next_memo_leaf {
+            verified_watermark = old_next_memo_leaf;
+        }
         if let Some(hits) = hits_by_lane.get(&lane_id) {
             for hit in hits {
+                if hit.leaf_idx >= verified_watermark {
+                    break;
+                }
                 let memo_raw = fetched_full_memos.get(&(lane_id, hit.memo_seq));
                 let sub_seq = hit.leaf_idx / sub_size;
                 let sub_slot = (hit.leaf_idx % sub_size) as usize;
@@ -2418,7 +3013,7 @@ where
                 }
             }
         }
-        pending_watermarks.push((l, verified_watermark));
+        pending_watermarks.insert(l, verified_watermark);
     }
 
     // Privacy & atomicity invariant: if ANY Pass 1A `SubtreeRootPage` stopped short of
@@ -2486,8 +3081,25 @@ where
             }
         }
 
+        // Public, note-independent lagging-lane guard: never commit newly verified memos or advance
+        // `next_memo_leaf` for a lane whose Phase 0 `finalized_count` lags behind already-persisted
+        // immutable `finalized_subroots` (blocks forged unsealed-frontier note injection inside an
+        // already-finalized subtree).
+        let lagging_lanes: BTreeSet<u8> = lanes
+            .iter()
+            .filter(|h| {
+                (h.next_leaf / sub_size) < (store.lanes[h.lane_id as usize].finalized_subroots.len() as u64)
+            })
+            .map(|h| h.lane_id)
+            .collect();
+
         // All validations & precomputations succeeded: commit atomically to `store`.
         for lane_hdr in &lanes {
+            if hold_sealed_frontier_lanes.contains(&lane_hdr.lane_id)
+                || lagging_lanes.contains(&lane_hdr.lane_id)
+            {
+                continue;
+            }
             if let Some(new_roots) = pass1a_new_subroots.get(&lane_hdr.lane_id) {
                 if !new_roots.is_empty() {
                     store.lanes[lane_hdr.lane_id as usize]
@@ -2503,6 +3115,9 @@ where
         }
 
         for (lane_id, leaf_idx, dec, cm_be) in pending_verified_memos {
+            if lagging_lanes.contains(&lane_id) {
+                continue;
+            }
             if store.record_verified_memo(fvk, lane_id, leaf_idx, &dec, cm_be)? {
                 discovered_notes += 1;
                 if let Some(&(sibs_be, pos)) = precomputed_new_freezes.get(&(lane_id, leaf_idx)) {
@@ -2515,6 +3130,9 @@ where
         }
 
         for (l, verified_watermark) in pending_watermarks {
+            if lagging_lanes.contains(&(l as u8)) {
+                continue;
+            }
             if verified_watermark > store.lanes[l].next_memo_leaf {
                 store.lanes[l].next_memo_leaf = verified_watermark;
             }
@@ -2522,6 +3140,9 @@ where
 
         for lane_hdr in &lanes {
             let lane_id = lane_hdr.lane_id;
+            if hold_sealed_frontier_lanes.contains(&lane_id) {
+                continue;
+            }
             let l = lane_id as usize;
             let old_frontier_sub_seq = store.lanes[l].frontier_sub_seq;
             let old_frontier_leaves = store.lanes[l].frontier_leaves.clone();
@@ -2582,7 +3203,38 @@ where
     //         RPC identically while guaranteeing unconditional rollback of
     //         `next_nf_index` on BOTH `Ok` AND `Err` exits.
     // =========================================================================
+    // Public, note-independent completeness & Phase 0 monotonicity gate across ALL `0..NUM_LANES`:
+    // never commit `next_nf_index` if ANY lane still has persisted on-chain leaves ahead of
+    // `next_memo_leaf` OR if Phase 0 lags behind ANY lane's previously observed monotonic high-
+    // water marks (`active_lanes`, `next_leaf`, `nf_count`). Blocks permanent cross-lane spend-
+    // detection loss for BOTH interrupted catch-up wallets AND caught-up returning wallets.
+    let all_persisted_leaves_scanned = (0..NUM_LANES).all(|l| {
+        let lane = &store.lanes[l];
+        let persisted_sealed = (lane.finalized_subroots.len() as u64).saturating_mul(sub_size);
+        let persisted_frontier = if lane.frontier_leaves.is_empty() {
+            0
+        } else {
+            lane.frontier_sub_seq
+                .saturating_mul(sub_size)
+                .saturating_add(lane.frontier_leaves.len() as u64)
+        };
+        let persisted_ceil = persisted_sealed.max(persisted_frontier);
+        if lane.next_memo_leaf < persisted_ceil {
+            return false;
+        }
+        let local_leaf_hwm = persisted_ceil.max(lane.next_memo_leaf);
+        if local_leaf_hwm > 0 || lane.next_nf_index > 0 {
+            let Some(hdr) = lanes.iter().find(|h| h.lane_id as usize == l) else {
+                return false;
+            };
+            if hdr.next_leaf < local_leaf_hwm || hdr.nf_count < lane.next_nf_index {
+                return false;
+            }
+        }
+        true
+    });
     let all_caught_up = !pass1_incomplete
+        && all_persisted_leaves_scanned
         && lanes
             .iter()
             .all(|h| store.lanes[h.lane_id as usize].next_memo_leaf >= h.next_leaf);
@@ -2590,6 +3242,7 @@ where
         .iter()
         .map(|h| (h.lane_id, store.lanes[h.lane_id as usize].next_nf_index))
         .collect();
+    let saved_spent: Vec<bool> = store.notes.iter().map(|n| n.spent).collect();
 
     let pass2_res: Result<(), ClientError> = (|| {
         let mut nf_start_idx_by_lane: BTreeMap<u8, u64> = BTreeMap::new();
@@ -2697,6 +3350,15 @@ where
             }
         }
 
+        // Advance `next_nf_index` to each lane's verified birthday-skip watermark before streaming
+        // contiguous NullifierPages (rolled back unconditionally on Pass 2 error or `!all_caught_up`).
+        for (&lane_id, &start_idx) in &nf_start_idx_by_lane {
+            let l = lane_id as usize;
+            if start_idx > store.lanes[l].next_nf_index {
+                store.lanes[l].next_nf_index = start_idx;
+            }
+        }
+
         // Lazily stream ALL new NullifierPages up to `lane_hdr.nf_count` in uniform 100-account windows.
         // NEVER skip when 0 unspent notes exist or when Pass 1D had a transient miss, and NEVER break
         // early when the last unspent note is marked spent — stranger prefixes are discarded immediately.
@@ -2791,23 +3453,22 @@ where
             }
         }
 
-        if all_caught_up {
-            for (&lane_id, &start_idx) in &nf_start_idx_by_lane {
-                let l = lane_id as usize;
-                if start_idx > store.lanes[l].next_nf_index {
-                    store.lanes[l].next_nf_index = start_idx;
-                }
-            }
-        }
         Ok(())
     })();
 
-    if !all_caught_up {
+    if pass2_res.is_err() {
+        for &(lane_id, prev_idx) in &saved_nf_indices {
+            store.lanes[lane_id as usize].next_nf_index = prev_idx;
+        }
+        for (note, was_spent) in store.notes.iter_mut().zip(saved_spent) {
+            note.spent = was_spent;
+        }
+        pass2_res?;
+    } else if !all_caught_up {
         for &(lane_id, prev_idx) in &saved_nf_indices {
             store.lanes[lane_id as usize].next_nf_index = prev_idx;
         }
     }
-    pass2_res?;
 
     Ok((pool, lanes, discovered_notes))
 }
@@ -2825,11 +3486,11 @@ mod tests {
         layout::{
             LANE_MAGIC, LANE_STATE_LEN, LN_OFF_CURRENT_ROOT, LN_OFF_LANE_ID, LN_OFF_NEXT_LEAF,
             LN_OFF_NF_COUNT, LN_OFF_VERSION, MAX_LEAVES_PER_LANE, MEMO_ENTRY_WIRE_LEN,
-            NF_OFF_PREFIXES, NF_PREFIX_LEN, PL_OFF_ACTIVE_LANES, PL_OFF_VERSION, POOL_MAGIC,
-            POOL_STATE_LEN, SB_OFF_LANE_ID, SB_OFF_PAGE_SEQ, SR_OFF_LANE_ID,
-            SR_OFF_ROOT_PAGE_SEQ,
+            NF_OFF_PREFIXES, NF_PREFIX_LEN, PL_OFF_ACTIVE_LANES, PL_OFF_ROOT_EPOCH_INTERVAL,
+            PL_OFF_VERSION, POOL_MAGIC, POOL_STATE_LEN, SB_OFF_LANE_ID, SB_OFF_PAGE_SEQ,
+            SR_OFF_LANE_ID, SR_OFF_ROOT_PAGE_SEQ,
         },
-        AUDREN_PROGRAM_ID, PROTOCOL_VERSION, WSOL_MINT,
+        AUDREN_PROGRAM_ID, DEFAULT_ROOT_EPOCH_INTERVAL, PROTOCOL_VERSION, WSOL_MINT,
     };
 
     use crate::keys::{encrypt_note_memo, AudrenKeys};
@@ -2839,6 +3500,8 @@ mod tests {
         buf[0..8].copy_from_slice(&POOL_MAGIC);
         buf[PL_OFF_VERSION] = PROTOCOL_VERSION;
         buf[PL_OFF_ACTIVE_LANES] = active_lanes;
+        buf[PL_OFF_ROOT_EPOCH_INTERVAL..PL_OFF_ROOT_EPOCH_INTERVAL + 8]
+            .copy_from_slice(&DEFAULT_ROOT_EPOCH_INTERVAL.to_le_bytes());
         buf
     }
 
@@ -7364,7 +8027,7 @@ mod tests {
                 0,
                 &[(0, 1)],
             )
-            .expect(&format!("{label}: must fall back to finalizedSlotFallback"));
+            .unwrap_or_else(|e| panic!("{label}: must fall back to finalizedSlotFallback: {e:?}"));
             assert_eq!(chosen_snap.ring_kind, ROOT_RING_SLOT, "{label}");
             assert_eq!(chosen_snap.slot, 150, "{label}");
             assert_eq!(
@@ -7373,14 +8036,16 @@ mod tests {
             );
 
             // Branch 2: note `(0, 2)` missing from `finalized` -> fail closed!
-            let err = fetch_root_history(
+            let err = match fetch_root_history(
                 |a| (*a == roots_pda).then(|| fin_raw.clone()),
                 |a| (*a == roots_pda).then(|| conf_raw.clone()),
                 &program_id,
                 0,
                 &[(0, 2)],
-            )
-            .expect_err(&format!("{label}: must fail closed without finalized fallback"));
+            ) {
+                Err(e) => e,
+                Ok(_) => panic!("{label}: must fail closed without finalized fallback"),
+            };
             assert!(
                 matches!(
                     err,
@@ -7416,7 +8081,7 @@ mod tests {
         assert_eq!(decoys.len(), 15);
         for &(l, s) in &decoys {
             assert!(
-                s >= 10_000 && s < 10_010,
+                (10_000..10_010).contains(&s),
                 "H-3: decoy ({l}, {s}) leaked outside scanned window [10000..10010)"
             );
         }
@@ -7795,6 +8460,3199 @@ mod tests {
                 lane1_count >= 12,
                 "Spilled Lane 1 hit must be surrounded by Lane 1 decoys (got {lane1_count})"
             );
+        }
+    }
+
+    #[test]
+    fn strict_privacy_oracle_fix_and_pass2_error_rollback_and_debug_redaction() {
+        let program_id = Address::from(AUDREN_PROGRAM_ID);
+        let keys = AudrenKeys::from_seed(&[0x77u8; 32]);
+        let fvk = keys.full_viewing_key();
+
+        // 1. WitnessOptions & AudrenKeys Debug must redact secrets
+        let opts = WitnessOptions {
+            privacy_mode: SyncPrivacyMode::Strict,
+            view_sk: Some([0xABu8; 32]),
+            decoy_epoch_bucket: Some(7),
+        };
+        let opts_dbg = format!("{opts:?}");
+        assert!(opts_dbg.contains("<redacted>"));
+        assert!(!opts_dbg.contains("171")); // 0xAB == 171
+        let keys_dbg = format!("{keys:?}");
+        assert!(keys_dbg.contains("<redacted>"));
+
+        // 2. Adversarial RPC spoofing inflated next_leaf (200,000 subtrees per lane, > MAX_HRW_SEALED_SUBTREES)
+        //    while dropping Pass 1A+1C OR serving SubtreeRootPage(0) + dropping Pass 1C MUST produce
+        //    BYTE-FOR-BYTE IDENTICAL Pass 1D requests for a 0-note wallet vs a 1-unfrozen-note wallet!
+        let pool_pda = derive_pool_pda(&program_id, 0).0;
+        let lane0_pda = derive_lane_pda(&program_id, 0, 0).0;
+        let lane1_pda = derive_lane_pda(&program_id, 0, 1).0;
+        let sr0_pda = derive_subroot_pda(&program_id, 0, 0, 0).0;
+        let spoof_fc: u64 = 200_000;
+        let spoof_next_leaf: u64 = spoof_fc * SUBTREE_LEAVES as u64;
+        let pool_raw = make_pool(2);
+        let lane0_raw = make_lane_with_root(0, spoof_next_leaf, 0, Fr::from(11u64));
+        let lane1_raw = make_lane_with_root(1, spoof_next_leaf, 0, Fr::from(22u64));
+        let sr0_raw = make_subroot(0, 0, &[Fr::from(33u64); SUBROOTS_PER_PAGE]);
+
+        let make_unfrozen_store = || -> CompactWalletStore {
+            let mut st = CompactWalletStore::new(0, 0);
+            let (tw, bl, _) =
+                encrypt_note_memo(&keys.view_pk, [0x44u8; 32], 50_000, &WSOL_MINT).unwrap();
+            let stealth = fvk.stealth_owner(tw).unwrap();
+            let cm = compute_note_commitment(stealth, derive_asset_id(&WSOL_MINT), 50_000, bl);
+            let dec = crate::keys::DecryptedMemo {
+                tweak: tw,
+                blinding: bl,
+                amount: 50_000,
+                mint: WSOL_MINT,
+                memo_version: 1,
+                memo_flags: 0,
+                payment_id: [0u8; 14],
+                is_dynamic: false,
+            };
+            st.record_verified_memo(&fvk, 0, 5, &dec, fr_to_be_bytes(&cm))
+                .unwrap();
+            assert!(st.notes[0].frozen_intra_siblings.is_none());
+            st
+        };
+
+        for serve_sr0 in [false, true] {
+            let run_probe = |mut st: CompactWalletStore| -> Vec<Vec<Address>> {
+                let batches = RefCell::new(Vec::<Vec<Address>>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _slice| {
+                        batches.borrow_mut().push(addrs.to_vec());
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool_raw.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_raw.clone())
+                                } else if *a == lane1_pda {
+                                    Some(lane1_raw.clone())
+                                } else if serve_sr0 && *a == sr0_pda {
+                                    Some(sr0_raw.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                batches.into_inner()
+            };
+
+            let empty_batches = run_probe(CompactWalletStore::new(0, 0));
+            let unfrozen_batches = run_probe(make_unfrozen_store());
+            assert_eq!(
+                empty_batches, unfrozen_batches,
+                "serve_sr0={serve_sr0}: 0-note and 1-unfrozen-note wallets MUST emit identical RPC batches"
+            );
+        }
+
+        // 3. Large-pool (> MAX_HRW_SEALED_SUBTREES) decoy sampling is 100% hit-independent and
+        //    spread uniformly across [0..fc) on ALL active lanes (zero hit-centering).
+        let scope = make_sync_decoy_scope(&[(0, 0), (1, 0)]);
+        let sealed_large = [(0u8, 200_000u64), (1u8, 200_000u64)];
+        let d_a = select_large_pool_hrw_sealed_decoys(
+            &fvk.view_sk,
+            &scope,
+            0,
+            &sealed_large,
+            &BTreeSet::from([(0u8, 5u64)]),
+            16,
+        )
+        .unwrap();
+        let d_b = select_large_pool_hrw_sealed_decoys(
+            &fvk.view_sk,
+            &scope,
+            0,
+            &sealed_large,
+            &BTreeSet::from([(0u8, 199_995u64)]),
+            16,
+        )
+        .unwrap();
+        assert_eq!(d_a.len(), 15);
+        assert_eq!(
+            d_a, d_b,
+            "large-pool HRW decoys MUST be invariant to hit coordinates (0 bits of hit-centering)"
+        );
+        assert!(
+            d_a.iter().any(|&(l, _)| l == 0) && d_a.iter().any(|&(l, _)| l == 1),
+            "large-pool decoys must cover all active lanes"
+        );
+        assert!(
+            d_a.iter().any(|&(_, s)| s < 100_000) && d_a.iter().any(|&(_, s)| s >= 100_000),
+            "large-pool decoys must span full [0..fc) range"
+        );
+
+        // 4. Pass 2 mid-stream error with `all_caught_up == true` rolls back BOTH `next_nf_index`
+        //    AND `note.spent` cleanly (atomic Pass 2 error rollback).
+        let mut store = CompactWalletStore::new(0, 0);
+        let (tw, bl, memo_bytes) =
+            encrypt_note_memo(&keys.view_pk, [0x66u8; 32], 123_456, &WSOL_MINT).unwrap();
+        let stealth = fvk.stealth_owner(tw).unwrap();
+        let cm = compute_note_commitment(stealth, derive_asset_id(&WSOL_MINT), 123_456, bl);
+        let cm_be = fr_to_be_bytes(&cm);
+        let lane0_root = compute_lane_root_from_subroots_and_frontier(&[], Some(&[cm]), 1).unwrap();
+        let pool1 = make_pool(1);
+        let lane0_hdr = make_lane_with_root(0, 1, (NF_PER_PAGE + 5) as u64, lane0_root);
+        let sub0 = make_subtree(0, 0, &[cm]);
+        let mut memo0 = make_memo(0, 0, 1, 0);
+        write_memo(&mut memo0, 0, &memo_bytes);
+
+        let dec = crate::keys::DecryptedMemo {
+            tweak: tw,
+            blinding: bl,
+            amount: 123_456,
+            mint: WSOL_MINT,
+            memo_version: 1,
+            memo_flags: 0,
+            payment_id: [0u8; 14],
+            is_dynamic: false,
+        };
+        store.record_verified_memo(&fvk, 0, 0, &dec, cm_be).unwrap();
+        let own_pref: [u8; NF_PREFIX_LEN] = store.notes[0].nullifier[0..NF_PREFIX_LEN]
+            .try_into()
+            .unwrap();
+        store.notes.clear(); // let Pass 1 discover it cleanly, or pre-populate:
+        store.record_verified_memo(&fvk, 0, 0, &dec, cm_be).unwrap();
+        store.lanes[0].next_memo_leaf = 1;
+        store.lanes[0].frontier_leaves = vec![cm_be];
+
+        let mut nf0 = vec![0u8; NF_PAGE_LEN];
+        nf0[0..8].copy_from_slice(&NF_PAGE_MAGIC);
+        nf0[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&(NF_PER_PAGE as u16).to_le_bytes());
+        nf0[NF_OFF_PREFIXES..NF_OFF_PREFIXES + NF_PREFIX_LEN].copy_from_slice(&own_pref);
+        let bad_nf1 = vec![0xFFu8; NF_PAGE_LEN]; // corrupt magic triggers mid-Pass-2 error!
+
+        let sub0_pda = derive_subtree_pda(&program_id, 0, 0, 0).0;
+        let memo0_pda = derive_memo_pda(&program_id, 0, 0, 0).0;
+        let nf0_pda = derive_nf_page_pda(&program_id, 0, 0, 0).0;
+        let nf1_pda = derive_nf_page_pda(&program_id, 0, 0, 1).0;
+
+        let err = sync_compact_store_with_batch(
+            &mut store,
+            &fvk,
+            |addrs, _slice| {
+                addrs
+                    .iter()
+                    .map(|a| {
+                        if *a == pool_pda {
+                            Some(pool1.clone())
+                        } else if *a == lane0_pda {
+                            Some(lane0_hdr.clone())
+                        } else if *a == sub0_pda {
+                            Some(sub0.clone())
+                        } else if *a == memo0_pda {
+                            Some(memo0.clone())
+                        } else if *a == nf0_pda {
+                            Some(nf0.clone())
+                        } else if *a == nf1_pda {
+                            Some(bad_nf1.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            },
+            &program_id,
+            SyncOptions::default(),
+        )
+        .expect_err("corrupt nf1 must return error");
+        assert!(matches!(err, ClientError::InvalidEncoding(_)));
+        assert_eq!(
+            store.lanes[0].next_nf_index, 0,
+            "Pass 2 mid-stream error with all_caught_up=true MUST roll back next_nf_index"
+        );
+        assert!(
+            !store.notes[0].spent,
+            "Pass 2 mid-stream error with all_caught_up=true MUST roll back note.spent"
+        );
+
+        // 5. Round-1 Audit Vector 1A: unfrozen note at sub_seq=1 + forged SR0 + 1 forged MemoPage(0, count=1)
+        //    MUST NOT flip has_outside_window_sealed or diverge from a 0-note wallet!
+        {
+            let mut st_1a = CompactWalletStore::new(0, 0);
+            let (tw1a, bl1a, _) =
+                encrypt_note_memo(&keys.view_pk, [0x81u8; 32], 50_000, &WSOL_MINT).unwrap();
+            let cm1a = compute_note_commitment(
+                fvk.stealth_owner(tw1a).unwrap(),
+                derive_asset_id(&WSOL_MINT),
+                50_000,
+                bl1a,
+            );
+            let dec1a = crate::keys::DecryptedMemo {
+                tweak: tw1a,
+                blinding: bl1a,
+                amount: 50_000,
+                mint: WSOL_MINT,
+                memo_version: 1,
+                memo_flags: 0,
+                payment_id: [0u8; 14],
+                is_dynamic: false,
+            };
+            st_1a
+                .record_verified_memo(&fvk, 0, 260, &dec1a, fr_to_be_bytes(&cm1a))
+                .unwrap();
+            let forged_memo0 = make_memo(0, 0, 1, 0); // epk=[0;32] -> 0 hits
+            let run_1a = |mut st: CompactWalletStore| -> Vec<Vec<Address>> {
+                let batches = RefCell::new(Vec::<Vec<Address>>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _slice| {
+                        batches.borrow_mut().push(addrs.to_vec());
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool_raw.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_raw.clone())
+                                } else if *a == lane1_pda {
+                                    Some(lane1_raw.clone())
+                                } else if *a == sr0_pda {
+                                    Some(sr0_raw.clone())
+                                } else if *a == memo0_pda {
+                                    Some(forged_memo0.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                batches.into_inner()
+            };
+            assert_eq!(
+                run_1a(CompactWalletStore::new(0, 0)),
+                run_1a(st_1a),
+                "Vector 1A: 1 forged MemoPage must produce byte-identical batches for 0-note vs unfrozen sub_seq=1 note"
+            );
+        }
+
+        // 6. Round-1 Audit Vector 1B: Pass 1B birthday-skip forged closed_slot headers -> 0 Pass 1D requests
+        //    for BOTH 0-note and 1-unfrozen-note wallets (`finalized_subroots` is empty locally)
+        {
+            let st_empty = CompactWalletStore::new(0, 500);
+            let mut st_unfrozen = make_unfrozen_store();
+            st_unfrozen.birthday_slot = 500;
+            let lane0_512 = make_lane_with_root(0, 512, 0, Fr::from(44u64));
+            let memo_hdr_map: BTreeMap<Address, Vec<u8>> = (0..6u64)
+                .map(|m| {
+                    (
+                        derive_memo_pda(&program_id, 0, 0, m).0,
+                        make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 100), // closed_slot=100 < birthday_slot=500
+                    )
+                })
+                .collect();
+            let run_1b = |mut st: CompactWalletStore| -> Vec<Vec<Address>> {
+                let batches = RefCell::new(Vec::<Vec<Address>>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _slice| {
+                        batches.borrow_mut().push(addrs.to_vec());
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_512.clone())
+                                } else if *a == sr0_pda {
+                                    Some(sr0_raw.clone())
+                                } else {
+                                    memo_hdr_map.get(a).cloned()
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                );
+                batches.into_inner()
+            };
+            assert_eq!(
+                run_1b(st_empty),
+                run_1b(st_unfrozen),
+                "Vector 1B: forged Pass 1B birthday-skip must emit identical batches for 0-note vs unfrozen note"
+            );
+        }
+
+        // 7. Round-1 Audit Vector 1C: honest Wallet A (0 notes) vs Wallet B (1 unfrozen frontier note)
+        //    both synced at next_leaf=10 -> RPC jumps to fc=20 (>25 MemoPages) with forged Pass 1A/1C
+        {
+            let mut wallet_a = CompactWalletStore::new(0, 0);
+            wallet_a.lanes[0].next_memo_leaf = 10;
+            wallet_a.lanes[0].frontier_sub_seq = 0;
+            wallet_a.lanes[0].frontier_leaves = vec![fr_to_be_bytes(&Fr::from(1u64)); 10];
+            let mut wallet_b = make_unfrozen_store();
+            wallet_b.lanes[0].next_memo_leaf = 10;
+            wallet_b.lanes[0].frontier_sub_seq = 0;
+            wallet_b.lanes[0].frontier_leaves = vec![fr_to_be_bytes(&Fr::from(1u64)); 10];
+            let jump_leaves = 20 * SUBTREE_LEAVES as u64; // 5120 leaves = 54 MemoPages (>25)
+            let jump_root = compute_lane_root_from_subroots_and_frontier(&[Fr::from(33u64); 20], None, 0).unwrap();
+            let lane0_jump = make_lane_with_root(0, jump_leaves, 0, jump_root);
+            let memo_pda_map: BTreeMap<Address, Vec<u8>> = (0..54u64)
+                .map(|m| {
+                    (
+                        derive_memo_pda(&program_id, 0, 0, m).0,
+                        make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0),
+                    )
+                })
+                .collect();
+            let run_1c = |mut st: CompactWalletStore| -> Vec<Vec<Address>> {
+                let batches = RefCell::new(Vec::<Vec<Address>>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _slice| {
+                        batches.borrow_mut().push(addrs.to_vec());
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_jump.clone())
+                                } else if *a == sr0_pda {
+                                    Some(sr0_raw.clone())
+                                } else {
+                                    memo_pda_map.get(a).cloned()
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                batches.into_inner()
+            };
+            assert_eq!(
+                run_1c(wallet_a),
+                run_1c(wallet_b),
+                "Vector 1C: honest 0-note and 1-unfrozen-frontier-note wallets MUST emit byte-identical RPC batches"
+            );
+        }
+
+        // 8. Round-1 Audit Finding #2: spoofing pool.active_lanes (1 vs 8) across failed retries
+        //    MUST NOT rotate sync_scope or HRW decoy sets!
+        {
+            let jump_leaves = 20 * SUBTREE_LEAVES as u64;
+            let jump_root = compute_lane_root_from_subroots_and_frontier(&[Fr::from(33u64); 20], None, 0).unwrap();
+            let lane0_jump = make_lane_with_root(0, jump_leaves, 0, jump_root);
+            let empty_lanes: BTreeMap<Address, Vec<u8>> = (1..8u8)
+                .map(|lid| (derive_lane_pda(&program_id, 0, lid).0, make_lane(lid, 0, 0)))
+                .collect();
+            let memo_pda_map: BTreeMap<Address, Vec<u8>> = (0..54u64)
+                .map(|m| {
+                    (
+                        derive_memo_pda(&program_id, 0, 0, m).0,
+                        make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0),
+                    )
+                })
+                .collect();
+            let sub_pda_set: BTreeSet<Address> = (0..20u64)
+                .map(|s| derive_subtree_pda(&program_id, 0, 0, s).0)
+                .collect();
+            let run_retry = |active_lanes: u8| -> Vec<Address> {
+                let mut st = CompactWalletStore::new(0, 0);
+                let pool_k = make_pool(active_lanes);
+                let pass1d_subs = RefCell::new(Vec::<Address>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _slice| {
+                        for a in addrs {
+                            if sub_pda_set.contains(a) {
+                                pass1d_subs.borrow_mut().push(*a);
+                            }
+                        }
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool_k.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_jump.clone())
+                                } else if let Some(lraw) = empty_lanes.get(a) {
+                                    Some(lraw.clone())
+                                } else if *a == sr0_pda {
+                                    Some(sr0_raw.clone())
+                                } else {
+                                    memo_pda_map.get(a).cloned()
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                pass1d_subs.into_inner()
+            };
+            let retry_1 = run_retry(1);
+            let retry_8 = run_retry(8);
+            assert_eq!(retry_1.len(), 16);
+            assert_eq!(
+                retry_1, retry_8,
+                "Finding #2: spoofing pool.active_lanes across retries MUST NOT rotate HRW decoys"
+            );
+        }
+    }
+
+    #[test]
+    fn round2_audit_strict_privacy_dyadic_hrw_and_atomicity_regressions() {
+        use std::cell::RefCell;
+
+        let program_id = Address::new_from_array([0x3au8; 32]);
+        let keys = AudrenKeys::from_seed(&[0x61u8; 32]);
+        let fvk = keys.full_viewing_key();
+        let pool_pda = derive_pool_pda(&program_id, 0).0;
+        let lane0_pda = derive_lane_pda(&program_id, 0, 0).0;
+        let lane1_pda = derive_lane_pda(&program_id, 0, 1).0;
+
+        let dummy_leaves = vec![Fr::from(1u64); SUBTREE_LEAVES];
+        let dummy_subroot = compute_subtree_256_root(&dummy_leaves, SUBTREE_LEAVES);
+
+        // =========================================================================
+        // 1. Round-2 Finding #1 Trigger 1A (100% honest 2-lane sync exhausting
+        //    MAX_SYNC_PAGES_PER_CALL=4096 on Lane 0): Wallet A (0 notes) vs
+        //    Wallet B (1 unfrozen note at lane=1, leaf=5) MUST emit 100% identical
+        //    RPC batches across Sync #2, Sync #3, and Sync #4, and Wallet B MUST
+        //    freeze (1, 5) once Lane 1 completes subtree 0!
+        // =========================================================================
+        {
+            let fc0: u64 = 3_375; // 864,000 leaves = 9,000 MemoPages (> 2 * 4096)
+            let fc1: u64 = 2_000; // 512,000 leaves = 5,334 MemoPages
+            let (tw_b, bl_b, _) =
+                encrypt_note_memo(&keys.view_pk, [0x91u8; 32], 77_000, &WSOL_MINT).unwrap();
+            let cm_b = compute_note_commitment(
+                fvk.stealth_owner(tw_b).unwrap(),
+                derive_asset_id(&WSOL_MINT),
+                77_000,
+                bl_b,
+            );
+            let mut lane1_sub0_leaves = dummy_leaves.clone();
+            lane1_sub0_leaves[5] = cm_b;
+            let lane1_sub0_root = compute_subtree_256_root(&lane1_sub0_leaves, SUBTREE_LEAVES);
+
+            let lane0_roots = vec![dummy_subroot; fc0 as usize];
+            let mut lane1_roots = vec![dummy_subroot; fc1 as usize];
+            lane1_roots[0] = lane1_sub0_root;
+            let lane0_root =
+                compute_lane_root_from_subroots_and_frontier(&lane0_roots, None, 0).unwrap();
+            let lane1_root =
+                compute_lane_root_from_subroots_and_frontier(&lane1_roots, None, 0).unwrap();
+
+            let pool2_raw = make_pool(2);
+            let lane0_raw = make_lane_with_root(0, fc0 * SUBTREE_LEAVES as u64, 0, lane0_root);
+            let lane1_raw = make_lane_with_root(1, fc1 * SUBTREE_LEAVES as u64, 0, lane1_root);
+
+            // Build lookup maps for SR pages, SubtreePages, and MemoPages (on-demand PDA map)
+            let mut static_accounts: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+            static_accounts.insert(pool_pda, pool2_raw);
+            static_accounts.insert(lane0_pda, lane0_raw);
+            static_accounts.insert(lane1_pda, lane1_raw);
+            for sr_seq in 0..(fc0 as usize).div_ceil(SUBROOTS_PER_PAGE) {
+                let start = sr_seq * SUBROOTS_PER_PAGE;
+                let end = (start + SUBROOTS_PER_PAGE).min(fc0 as usize);
+                static_accounts.insert(
+                    derive_subroot_pda(&program_id, 0, 0, sr_seq as u64).0,
+                    make_subroot(0, sr_seq as u64, &lane0_roots[start..end]),
+                );
+            }
+            for sr_seq in 0..(fc1 as usize).div_ceil(SUBROOTS_PER_PAGE) {
+                let start = sr_seq * SUBROOTS_PER_PAGE;
+                let end = (start + SUBROOTS_PER_PAGE).min(fc1 as usize);
+                static_accounts.insert(
+                    derive_subroot_pda(&program_id, 0, 1, sr_seq as u64).0,
+                    make_subroot(1, sr_seq as u64, &lane1_roots[start..end]),
+                );
+            }
+            let lane1_sub0_pda = derive_subtree_pda(&program_id, 0, 1, 0).0;
+            static_accounts.insert(lane1_sub0_pda, make_subtree(1, 0, &lane1_sub0_leaves));
+            let mut pda_to_meta: BTreeMap<Address, (u8, u8, u64)> = BTreeMap::new(); // (kind: 0=sub, 1=memo; lane; seq)
+            for s in 0..fc0 {
+                pda_to_meta.insert(derive_subtree_pda(&program_id, 0, 0, s).0, (0, 0, s));
+            }
+            for s in 1..fc1 {
+                pda_to_meta.insert(derive_subtree_pda(&program_id, 0, 1, s).0, (0, 1, s));
+            }
+            for m in 0..(fc0 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64) {
+                pda_to_meta.insert(derive_memo_pda(&program_id, 0, 0, m).0, (1, 0, m));
+            }
+            for m in 0..10u64 {
+                pda_to_meta.insert(derive_memo_pda(&program_id, 0, 1, m).0, (1, 1, m));
+            }
+
+            let make_synced_10 = |with_note: bool| -> CompactWalletStore {
+                let mut st = CompactWalletStore::new(0, 0);
+                st.lanes[0].next_memo_leaf = 10;
+                st.lanes[0].frontier_sub_seq = 0;
+                st.lanes[0].frontier_leaves =
+                    dummy_leaves[..10].iter().map(fr_to_be_bytes).collect();
+                st.lanes[1].next_memo_leaf = 10;
+                st.lanes[1].frontier_sub_seq = 0;
+                st.lanes[1].frontier_leaves =
+                    lane1_sub0_leaves[..10].iter().map(fr_to_be_bytes).collect();
+                if with_note {
+                    let dec = crate::keys::DecryptedMemo {
+                        tweak: tw_b,
+                        blinding: bl_b,
+                        amount: 77_000,
+                        mint: WSOL_MINT,
+                        memo_version: 1,
+                        memo_flags: 0,
+                        payment_id: [0u8; 14],
+                        is_dynamic: false,
+                    };
+                    st.record_verified_memo(&fvk, 1, 5, &dec, fr_to_be_bytes(&cm_b))
+                        .unwrap();
+                }
+                st
+            };
+
+            let mut w_a = make_synced_10(false);
+            let mut w_b = make_synced_10(true);
+
+            let run_sync_step = |st: &mut CompactWalletStore| -> Vec<Vec<Address>> {
+                let log = RefCell::new(Vec::<Vec<Address>>::new());
+                sync_compact_store_with_batch(
+                    st,
+                    &fvk,
+                    |addrs, _slice| {
+                        log.borrow_mut().push(addrs.to_vec());
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if let Some(raw) = static_accounts.get(a) {
+                                    Some(raw.clone())
+                                } else if let Some(&(kind, lid, seq)) = pda_to_meta.get(a) {
+                                    if kind == 0 {
+                                        Some(make_subtree(lid, seq, &dummy_leaves))
+                                    } else {
+                                        Some(make_memo(lid, seq, MEMO_NOTES_PER_PAGE as u16, 0))
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                log.into_inner()
+            };
+
+            // Sync #2: Lane 0 consumes all 4096 MemoPages -> Lane 1 holds frontier & subroots!
+            let s2_a = run_sync_step(&mut w_a);
+            let s2_b = run_sync_step(&mut w_b);
+            assert_eq!(s2_a, s2_b, "Trigger 1A Sync #2 MUST be 100% byte-identical");
+            assert_eq!(w_a.lanes[1].finalized_subroots.len(), 0);
+            assert_eq!(w_b.lanes[1].finalized_subroots.len(), 0);
+            assert_eq!(w_a.lanes[1].frontier_leaves.len(), 10);
+            assert_eq!(w_b.lanes[1].frontier_leaves.len(), 10);
+
+            // Sync #3: Lane 0 consumes next 4096 MemoPages -> STILL 100% identical (0 Lane 1 leak!)
+            let s3_a = run_sync_step(&mut w_a);
+            let s3_b = run_sync_step(&mut w_b);
+            assert_eq!(s3_a, s3_b, "Trigger 1A Sync #3 MUST be 100% byte-identical");
+
+            // Sync #4: Lane 0 finishes & Lane 1 scans past leaf 256 -> BOTH fetch (1, 0) uniformly,
+            //          Wallet B freezes (1, 5), and BOTH commit Lane 1 finalized_subroots!
+            let s4_a = run_sync_step(&mut w_a);
+            let s4_b = run_sync_step(&mut w_b);
+            assert_eq!(s4_a, s4_b, "Trigger 1A Sync #4 MUST be 100% byte-identical");
+            assert_eq!(w_a.lanes[1].finalized_subroots.len(), fc1 as usize);
+            assert_eq!(w_b.lanes[1].finalized_subroots.len(), fc1 as usize);
+            assert!(
+                w_b.notes[0].frozen_intra_siblings.is_some(),
+                "Wallet B note (1, 5) MUST freeze atomically when Lane 1 completes subtree 0"
+            );
+        }
+
+        // =========================================================================
+        // 2. Round-2 Finding #1 Trigger 1B (single-lane adversarial MemoPage(0, 0)=None,
+        //    fc=3000): Sync #2 and Sync #3 MUST be 100% byte-identical for 0-note vs 1-note!
+        // =========================================================================
+        {
+            let fc: u64 = 3_000;
+            let (tw, bl, _) =
+                encrypt_note_memo(&keys.view_pk, [0x92u8; 32], 55_000, &WSOL_MINT).unwrap();
+            let cm = compute_note_commitment(
+                fvk.stealth_owner(tw).unwrap(),
+                derive_asset_id(&WSOL_MINT),
+                55_000,
+                bl,
+            );
+            let mut sub0_leaves = dummy_leaves.clone();
+            sub0_leaves[5] = cm;
+            let sub0_root = compute_subtree_256_root(&sub0_leaves, SUBTREE_LEAVES);
+            let mut roots = vec![dummy_subroot; fc as usize];
+            roots[0] = sub0_root;
+            let lane0_root =
+                compute_lane_root_from_subroots_and_frontier(&roots, None, 0).unwrap();
+
+            let mut acc: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+            acc.insert(pool_pda, make_pool(1));
+            acc.insert(lane0_pda, make_lane_with_root(0, fc * SUBTREE_LEAVES as u64, 0, lane0_root));
+            for sr_seq in 0..(fc as usize).div_ceil(SUBROOTS_PER_PAGE) {
+                let start = sr_seq * SUBROOTS_PER_PAGE;
+                let end = (start + SUBROOTS_PER_PAGE).min(fc as usize);
+                acc.insert(
+                    derive_subroot_pda(&program_id, 0, 0, sr_seq as u64).0,
+                    make_subroot(0, sr_seq as u64, &roots[start..end]),
+                );
+            }
+            acc.insert(derive_subtree_pda(&program_id, 0, 0, 0).0, make_subtree(0, 0, &sub0_leaves));
+            let mut sub_seq_by_pda: BTreeMap<Address, u64> = BTreeMap::new();
+            for s in 1..fc {
+                sub_seq_by_pda.insert(derive_subtree_pda(&program_id, 0, 0, s).0, s);
+            }
+
+            let make_st = |with_note: bool| -> CompactWalletStore {
+                let mut st = CompactWalletStore::new(0, 0);
+                st.lanes[0].next_memo_leaf = 10;
+                st.lanes[0].frontier_sub_seq = 0;
+                st.lanes[0].frontier_leaves = sub0_leaves[..10].iter().map(fr_to_be_bytes).collect();
+                if with_note {
+                    let dec = crate::keys::DecryptedMemo {
+                        tweak: tw,
+                        blinding: bl,
+                        amount: 55_000,
+                        mint: WSOL_MINT,
+                        memo_version: 1,
+                        memo_flags: 0,
+                        payment_id: [0u8; 14],
+                        is_dynamic: false,
+                    };
+                    st.record_verified_memo(&fvk, 0, 5, &dec, fr_to_be_bytes(&cm))
+                        .unwrap();
+                }
+                st
+            };
+            let mut w_a = make_st(false);
+            let mut w_b = make_st(true);
+            let run_1b = |st: &mut CompactWalletStore| -> Vec<Vec<Address>> {
+                let log = RefCell::new(Vec::<Vec<Address>>::new());
+                sync_compact_store_with_batch(
+                    st,
+                    &fvk,
+                    |addrs, _slice| {
+                        log.borrow_mut().push(addrs.to_vec());
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if let Some(raw) = acc.get(a) {
+                                    Some(raw.clone())
+                                } else if let Some(&s) = sub_seq_by_pda.get(a) {
+                                    Some(make_subtree(0, s, &dummy_leaves))
+                                } else {
+                                    None // MemoPage(0, 0) dropped!
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                log.into_inner()
+            };
+            assert_eq!(run_1b(&mut w_a), run_1b(&mut w_b), "Trigger 1B Sync #2 MUST match");
+            assert_eq!(run_1b(&mut w_a), run_1b(&mut w_b), "Trigger 1B Sync #3 MUST match");
+        }
+
+        // =========================================================================
+        // 3. Round-2 Finding #2: Sub-subtree MemoPage-drop, MM_OFF_COUNT truncation,
+        //    birthday_slot mid-scan closed_slot toggle, Pass 1B alignment, and
+        //    1-shot (vt, epk, ct) replay amplification + cross-lane memo griefing.
+        // =========================================================================
+        {
+            let fc: u64 = 20; // 5,120 leaves = 54 MemoPages (>25)
+            let (tw_h, bl_h, memo_h) =
+                encrypt_note_memo(&keys.view_pk, [0x93u8; 32], 42_000, &WSOL_MINT).unwrap();
+            let cm_h = compute_note_commitment(
+                fvk.stealth_owner(tw_h).unwrap(),
+                derive_asset_id(&WSOL_MINT),
+                42_000,
+                bl_h,
+            );
+            // Note at leaf 4900 (subtree 19, MemoPage 51, slot 4)
+            let mut sub19_leaves = dummy_leaves.clone();
+            sub19_leaves[4900 % SUBTREE_LEAVES] = cm_h;
+            let sub19_root = compute_subtree_256_root(&sub19_leaves, SUBTREE_LEAVES);
+            let mut roots20 = vec![dummy_subroot; fc as usize];
+            roots20[19] = sub19_root;
+            let lane0_root20 =
+                compute_lane_root_from_subroots_and_frontier(&roots20, None, 0).unwrap();
+            let sr0_20 = make_subroot(0, 0, &roots20);
+            let sr0_pda = derive_subroot_pda(&program_id, 0, 0, 0).0;
+            let lane0_20 = make_lane_with_root(0, fc * SUBTREE_LEAVES as u64, 0, lane0_root20);
+            let pool1 = make_pool(1);
+            let sub_pdas: BTreeSet<Address> = (0..fc)
+                .map(|s| derive_subtree_pda(&program_id, 0, 0, s).0)
+                .collect();
+
+            let probe_pass1d = |birthday: u64,
+                                max_memo_served: u64,
+                                custom_memo_count: Option<(u64, u16)>,
+                                custom_closed_slot: Option<(u64, u64)>,
+                                with_real_hit: bool|
+             -> Vec<Address> {
+                let mut st = CompactWalletStore::new(0, birthday);
+                let mut memo_map: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                for m in 0..=max_memo_served {
+                    let cnt = custom_memo_count
+                        .filter(|&(cm_seq, _)| cm_seq == m)
+                        .map(|(_, c)| c)
+                        .unwrap_or(MEMO_NOTES_PER_PAGE as u16);
+                    let closed = custom_closed_slot
+                        .filter(|&(cs_seq, _)| cs_seq == m)
+                        .map(|(_, s)| s)
+                        .unwrap_or(9_999);
+                    let mut raw = make_memo(0, m, cnt, closed);
+                    if with_real_hit && m == 51 && cnt > 4 {
+                        write_memo(&mut raw, 4, &memo_h);
+                    }
+                    memo_map.insert(derive_memo_pda(&program_id, 0, 0, m).0, raw);
+                }
+                let pass1d = RefCell::new(Vec::<Address>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _slice| {
+                        for a in addrs {
+                            if sub_pdas.contains(a) {
+                                pass1d.borrow_mut().push(*a);
+                            }
+                        }
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_20.clone())
+                                } else if *a == sr0_pda {
+                                    Some(sr0_20.clone())
+                                } else {
+                                    memo_map.get(a).cloned()
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                pass1d.into_inner()
+            };
+
+            // 3a. Pure MemoPage-drop Probe A (0..=50 -> 4896) vs Probe B (0..=51 -> 4992):
+            //     BOTH floor to actual_end_sub=19 -> 100% byte-identical even with hit at 4900!
+            let probe_a_hit = probe_pass1d(0, 50, None, None, true);
+            let probe_b_hit = probe_pass1d(0, 51, None, None, true);
+            let probe_b_zero = probe_pass1d(0, 51, None, None, false);
+            assert_eq!(probe_a_hit.len(), 16);
+            assert_eq!(probe_a_hit, probe_b_hit, "2A: Probe A vs Probe B MUST be byte-identical");
+            assert_eq!(probe_b_hit, probe_b_zero, "2A: partial-tail hit MUST NOT leak vs 0-note");
+
+            // 3b. MM_OFF_COUNT truncation on MemoPage 51 (1..=96) & MemoPage 53 (1..31 vs 32..96)
+            assert_eq!(
+                probe_pass1d(0, 51, Some((51, 1)), None, true),
+                probe_pass1d(0, 51, Some((51, 96)), None, true),
+                "2B: MM_OFF_COUNT sweep on MemoPage 51 MUST leak 0 bits"
+            );
+            assert_eq!(
+                probe_pass1d(0, 53, Some((53, 1)), None, true),
+                probe_pass1d(0, 53, Some((53, 31)), None, true),
+                "2B: MemoPage 53 count 1..31 (<5120) MUST exclude subtree 19 uniformly"
+            );
+            assert_eq!(
+                probe_pass1d(0, 53, Some((53, 32)), None, true),
+                probe_pass1d(0, 53, Some((53, 96)), None, true),
+                "2B: MemoPage 53 count 32..96 (>=5120) MUST emit identical Pass 1D"
+            );
+
+            // 3c. birthday_slot > 0 mid-scan closed_slot=1 toggle on MemoPage 51 MUST NOT skip
+            let cs_normal = probe_pass1d(500, 53, None, Some((51, 9_999)), true);
+            let cs_forged = probe_pass1d(500, 53, None, Some((51, 1)), true);
+            assert_eq!(
+                cs_normal, cs_forged,
+                "2C: mid-scan closed_slot < birthday_slot MUST NOT toggle MemoPage 51 visibility"
+            );
+
+            // 3d. Pass 1B skip 0..=133 (12864) vs 0..=134 (12960) on 80-subtree pool (hit at 12900):
+            //     both leave > 25 MemoPages (non-uniform strict mode) and align down to 12800 = 50 * 256 -> 100% identical Pass 1D!
+            let fc60: u64 = 80;
+            let roots60 = vec![dummy_subroot; fc60 as usize];
+            let lane0_root60 =
+                compute_lane_root_from_subroots_and_frontier(&roots60, None, 0).unwrap();
+            let sr0_60 = make_subroot(0, 0, &roots60);
+            let lane0_60 = make_lane_with_root(0, fc60 * SUBTREE_LEAVES as u64, 0, lane0_root60);
+            let sub60_pdas: BTreeSet<Address> = (0..fc60)
+                .map(|s| derive_subtree_pda(&program_id, 0, 0, s).0)
+                .collect();
+            let run_pass1b_align = |last_pre_bday_memo: u64| -> Vec<Address> {
+                let mut st = CompactWalletStore::new(0, 500);
+                let mut m_map: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                for m in 0..(fc60 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64) {
+                    let closed = if m <= last_pre_bday_memo { 100 } else { 900 };
+                    let mut raw = make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, closed);
+                    if m == 134 {
+                        // leaf 12900 = 134 * 96 + 36 (inside subtree 50 = [12800..13056))
+                        write_memo(&mut raw, 36, &memo_h);
+                    }
+                    m_map.insert(derive_memo_pda(&program_id, 0, 0, m).0, raw);
+                }
+                let p1d = RefCell::new(Vec::<Address>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    &fvk,
+                    |addrs, _slice| {
+                        for a in addrs {
+                            if sub60_pdas.contains(a) {
+                                p1d.borrow_mut().push(*a);
+                            }
+                        }
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_60.clone())
+                                } else if *a == sr0_pda {
+                                    Some(sr0_60.clone())
+                                } else {
+                                    m_map.get(a).cloned()
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                p1d.into_inner()
+            };
+            assert_eq!(
+                run_pass1b_align(133),
+                run_pass1b_align(134),
+                "2C: Pass 1B skips 0..=133 and 0..=134 MUST both align to 50*256 with identical Pass 1D"
+            );
+
+            // 3e. 1-shot replay amplification: single `(vt, epk, junk_ct)` filtered in Pass 1C;
+            //     17 clones of valid `memo_h` OR `junk_memo` resolved identically for Alice (owner)
+            //     and Bob (0-note non-owner) via public `canon_epk` tracking (zero bits leaked!).
+            let mut junk_memo = memo_h;
+            junk_memo[40] ^= 0xff; // corrupt AEAD ciphertext while keeping (vt, epk) valid!
+            let bob_replay_fvk = AudrenKeys::from_seed(&[0x63u8; 32]).full_viewing_key();
+            let run_replay = |clone_memo: Option<[u8; MEMO_ENTRY_WIRE_LEN]>,
+                              copies: u64,
+                              who: &FullViewingKey|
+             -> Vec<Address> {
+                let mut st = CompactWalletStore::new(0, 0);
+                let mut m_map: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                for m in 0..54u64 {
+                    m_map.insert(
+                        derive_memo_pda(&program_id, 0, 0, m).0,
+                        make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0),
+                    );
+                }
+                if let Some(mbytes) = clone_memo {
+                    for s in 0..copies {
+                        let leaf = s * SUBTREE_LEAVES as u64;
+                        let m_seq = leaf / MEMO_NOTES_PER_PAGE as u64;
+                        let slot = (leaf % MEMO_NOTES_PER_PAGE as u64) as usize;
+                        let raw = m_map.get_mut(&derive_memo_pda(&program_id, 0, 0, m_seq).0).unwrap();
+                        write_memo(raw, slot, &mbytes);
+                    }
+                }
+                let p1d = RefCell::new(Vec::<Address>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st,
+                    who,
+                    |addrs, _slice| {
+                        for a in addrs {
+                            if sub_pdas.contains(a) {
+                                p1d.borrow_mut().push(*a);
+                            }
+                        }
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane0_20.clone())
+                                } else if *a == sr0_pda {
+                                    Some(sr0_20.clone())
+                                } else {
+                                    m_map.get(a).cloned()
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                p1d.into_inner()
+            };
+            let zero_subs = run_replay(None, 0, &fvk);
+            let junk_single_subs = run_replay(Some(junk_memo), 1, &fvk);
+            let valid_17_alice = run_replay(Some(memo_h), 17, &fvk);
+            let valid_17_bob = run_replay(Some(memo_h), 17, &bob_replay_fvk);
+            let junk_17_alice = run_replay(Some(junk_memo), 17, &fvk);
+            assert_eq!(zero_subs.len(), 16);
+            assert_eq!(
+                junk_single_subs, zero_subs,
+                "2D: single (vt, epk, junk_ct) probe MUST be filtered in Pass 1C -> identical to 0-note"
+            );
+            assert_eq!(
+                valid_17_alice, valid_17_bob,
+                "2D + R7-1: 17 clones of valid memo MUST yield 100% byte-identical Pass 1D for Alice (owner) and Bob (non-owner)"
+            );
+            assert_eq!(
+                junk_17_alice, valid_17_alice,
+                "2D + R7-1: 17 junk_ct clones MUST yield byte-identical Pass 1D to 17 valid clones"
+            );
+
+            // 3f. Round-3 Issue #2: 2-sync duplicate-memo / batch binary-search oracle MUST NOT
+            //     cap `next_memo_leaf` or roll back `next_nf_index` on Sync #1 or diverge on Sync #2!
+            {
+                let bob_keys = AudrenKeys::from_seed(&[0x62u8; 32]);
+                let bob_fvk = bob_keys.full_viewing_key();
+                let fc_d: u64 = 20; // 5,120 leaves = 54 MemoPages (>25)
+                let d_roots = vec![dummy_subroot; fc_d as usize];
+                let d_lane_root =
+                    compute_lane_root_from_subroots_and_frontier(&d_roots, None, 0).unwrap();
+                let mut nf0 = vec![0u8; NF_PAGE_LEN];
+                nf0[0..8].copy_from_slice(&NF_PAGE_MAGIC);
+                nf0[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&50u16.to_le_bytes());
+
+                let mut d_acc: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                d_acc.insert(pool_pda, make_pool(1));
+                d_acc.insert(
+                    lane0_pda,
+                    make_lane_with_root(0, fc_d * SUBTREE_LEAVES as u64, 50, d_lane_root),
+                );
+                d_acc.insert(sr0_pda, make_subroot(0, 0, &d_roots));
+                d_acc.insert(derive_nf_page_pda(&program_id, 0, 0, 0).0, nf0);
+                for s in 0..fc_d {
+                    d_acc.insert(
+                        derive_subtree_pda(&program_id, 0, 0, s).0,
+                        make_subtree(0, s, &dummy_leaves),
+                    );
+                }
+                for m in 0..54u64 {
+                    let mut raw = make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0);
+                    // Place Alice's valid memo in Subtree 0 (leaf 0) AND Subtree 1 (leaf 256)
+                    // where on-chain commitments do NOT match!
+                    if m == 0 {
+                        write_memo(&mut raw, 0, &memo_h);
+                    } else if m == 256 / MEMO_NOTES_PER_PAGE as u64 {
+                        write_memo(&mut raw, 256 % MEMO_NOTES_PER_PAGE, &memo_h);
+                    }
+                    d_acc.insert(derive_memo_pda(&program_id, 0, 0, m).0, raw);
+                }
+
+                let mut alice_st = CompactWalletStore::new(0, 0);
+                let mut bob_st = CompactWalletStore::new(0, 0);
+                let run_d = |st: &mut CompactWalletStore, who: &FullViewingKey| -> Vec<Vec<Address>> {
+                    let batches = RefCell::new(Vec::<Vec<Address>>::new());
+                    sync_compact_store_with_batch(
+                        st,
+                        who,
+                        |addrs, _| {
+                            batches.borrow_mut().push(addrs.to_vec());
+                            addrs.iter().map(|a| d_acc.get(a).cloned()).collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    batches.into_inner()
+                };
+                // Sync #1: BOTH Alice (owner of duplicated memo) and Bob (non-owner) advance identically!
+                let _ = run_d(&mut alice_st, &fvk);
+                let _ = run_d(&mut bob_st, &bob_fvk);
+                assert_eq!(alice_st.lanes[0].next_memo_leaf, fc_d * SUBTREE_LEAVES as u64);
+                assert_eq!(bob_st.lanes[0].next_memo_leaf, fc_d * SUBTREE_LEAVES as u64);
+                assert_eq!(alice_st.lanes[0].next_nf_index, 50);
+                assert_eq!(bob_st.lanes[0].next_nf_index, 50);
+                // Sync #2: 100% byte-identical batches (0 re-fetches, 0 watermark oracle!)
+                assert_eq!(
+                    run_d(&mut alice_st, &fvk),
+                    run_d(&mut bob_st, &bob_fvk),
+                    "Round-3 Issue #2: Sync #2 after duplicated memo probe MUST be byte-identical"
+                );
+            }
+
+            // 3g. Round-3 Issue #3: All 16 Curve25519 torsion + bit-255 `epk` variants of a single
+            //     `AUD1DYN1` dynamic swap memo MUST collapse to 1 shared-secret dedup tag in Pass 1D!
+            {
+                let (_, _, dyn_head, dyn_mask) =
+                    crate::keys::prepare_dynamic_swap_memo(&keys.view_pk, [0x95u8; 32]).unwrap();
+                let mut plain72 = [0u8; MEMO_CT_LEN];
+                plain72[0..8].copy_from_slice(b"AUD1DYN1");
+                plain72[8..16].copy_from_slice(&123_456u64.to_le_bytes());
+                plain72[16..48].copy_from_slice(&WSOL_MINT);
+                let mut ct72 = [0u8; MEMO_CT_LEN];
+                for i in 0..MEMO_CT_LEN {
+                    ct72[i] = plain72[i] ^ dyn_mask[i];
+                }
+                let vt = [dyn_head[0], dyn_head[1]];
+                // All 16 pairwise distinct Curve25519 torsion (P + k*T_8, k=0..7) x bit-255 variants
+                let torsion_epks_hex: [&str; 16] = [
+                    "066a931ab81e21612b08dfe188b228739987edf34ae116246d1519bff1bfa864",
+                    "066a931ab81e21612b08dfe188b228739987edf34ae116246d1519bff1bfa8e4",
+                    "61afece328d0bbf272266a924af5f171c0bacbaa43db0a25d7f5ad414f23e624",
+                    "61afece328d0bbf272266a924af5f171c0bacbaa43db0a25d7f5ad414f23e6a4",
+                    "71236b3d0eebd0bda154cf3d71bf191f3fc5a7373f36167158087bc2d60b0d7e",
+                    "71236b3d0eebd0bda154cf3d71bf191f3fc5a7373f36167158087bc2d60b0dfe",
+                    "957ba0f0a7650a904c08930e8c08b4f15dc532fc39e81afc5ec0819d0a311d2f",
+                    "957ba0f0a7650a904c08930e8c08b4f15dc532fc39e81afc5ec0819d0a311daf",
+                    "553ad91bcdcbdf0705575fa25b8b61b4a043f86be7ca3b44bcd06bee4c2b017e",
+                    "553ad91bcdcbdf0705575fa25b8b61b4a043f86be7ca3b44bcd06bee4c2b01fe",
+                    "85602b9d9ec94c219a638fb19e9b50bfa358642a53a50d2472a84d9f07515c1f",
+                    "85602b9d9ec94c219a638fb19e9b50bfa358642a53a50d2472a84d9f07515c9f",
+                    "1020194047a5e4de808c8054615d7f312f7b6475450d56b48c76cdd9b672906a",
+                    "1020194047a5e4de808c8054615d7f312f7b6475450d56b48c76cdd9b67290ea",
+                    "eb10757c22c0897939f8a3221d1caf188819f1b6d90cdf140e8ec09ebbd5be05",
+                    "eb10757c22c0897939f8a3221d1caf188819f1b6d90cdf140e8ec09ebbd5be85",
+                ];
+                let parse_hex32 = |s: &str| -> [u8; 32] {
+                    let mut out = [0u8; 32];
+                    for i in 0..32 {
+                        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+                    }
+                    out
+                };
+                let mut distinct_tags: BTreeSet<[u8; 32]> = BTreeSet::new();
+                let mut distinct_canon_epks: BTreeSet<[u8; 32]> = BTreeSet::new();
+                let mut variant_memos: Vec<[u8; MEMO_ENTRY_WIRE_LEN]> = Vec::with_capacity(16);
+                for hex_epk in torsion_epks_hex {
+                    let epk = parse_hex32(hex_epk);
+                    assert!(check_memo_view_tag(&fvk, vt, &epk));
+                    let tag = compute_memo_scan_dedup_tag(&fvk, vt, &epk, &ct72)
+                        .expect("all 16 torsion variants must pass AUD1DYN1 scan pre-filter");
+                    distinct_tags.insert(*tag);
+                    let canon = canonicalize_public_epk(&epk)
+                        .expect("contributory torsion variant must canonicalize cleanly");
+                    distinct_canon_epks.insert(canon);
+                    let mut m106 = [0u8; MEMO_ENTRY_WIRE_LEN];
+                    m106[0..2].copy_from_slice(&vt);
+                    m106[2..34].copy_from_slice(&epk);
+                    m106[34..MEMO_ENTRY_WIRE_LEN].copy_from_slice(&ct72);
+                    variant_memos.push(m106);
+                }
+                assert_eq!(
+                    distinct_tags.len(),
+                    1,
+                    "All 16 Curve25519 torsion + bit-255 variants MUST collapse to 1 dedup_tag"
+                );
+                assert_eq!(
+                    distinct_canon_epks.len(),
+                    1,
+                    "All 16 Curve25519 torsion + bit-255 variants MUST collapse to 1 public canon_epk"
+                );
+
+                // Place all 16 distinct variants into subtrees 0..16 of a 32-subtree pool:
+                // Both Alice (owner) AND Bob (0-note non-owner) MUST issue byte-identical Pass 1D!
+                let fc32: u64 = 32;
+                let roots32 = vec![dummy_subroot; fc32 as usize];
+                let lane0_root32 =
+                    compute_lane_root_from_subroots_and_frontier(&roots32, None, 0).unwrap();
+                let sr0_32 = make_subroot(0, 0, &roots32);
+                let lane0_32 =
+                    make_lane_with_root(0, fc32 * SUBTREE_LEAVES as u64, 0, lane0_root32);
+                let mut m32: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                let n_m32 = (fc32 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                for m in 0..n_m32 {
+                    m32.insert(
+                        derive_memo_pda(&program_id, 0, 0, m).0,
+                        make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0),
+                    );
+                }
+                for (s, m106) in variant_memos.iter().enumerate() {
+                    let leaf = (s as u64) * SUBTREE_LEAVES as u64;
+                    let m_seq = leaf / MEMO_NOTES_PER_PAGE as u64;
+                    let slot = (leaf % MEMO_NOTES_PER_PAGE as u64) as usize;
+                    let raw = m32.get_mut(&derive_memo_pda(&program_id, 0, 0, m_seq).0).unwrap();
+                    write_memo(raw, slot, m106);
+                }
+                let sub32_set: BTreeSet<Address> = (0..fc32)
+                    .map(|s| derive_subtree_pda(&program_id, 0, 0, s).0)
+                    .collect();
+                let run_dyn_torsion = |who: &FullViewingKey| -> Vec<Address> {
+                    let p1d_dyn = RefCell::new(Vec::<Address>::new());
+                    let mut st_dyn = CompactWalletStore::new(0, 0);
+                    let _ = sync_compact_store_with_batch(
+                        &mut st_dyn,
+                        who,
+                        |addrs, _| {
+                            for a in addrs {
+                                if sub32_set.contains(a) {
+                                    p1d_dyn.borrow_mut().push(*a);
+                                }
+                            }
+                            addrs
+                                .iter()
+                                .map(|a| {
+                                    if *a == pool_pda {
+                                        Some(pool1.clone())
+                                    } else if *a == lane0_pda {
+                                        Some(lane0_32.clone())
+                                    } else if *a == sr0_pda {
+                                        Some(sr0_32.clone())
+                                    } else {
+                                        m32.get(a).cloned()
+                                    }
+                                })
+                                .collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    p1d_dyn.into_inner()
+                };
+                let bob_dyn_fvk = AudrenKeys::from_seed(&[0x64u8; 32]).full_viewing_key();
+                let dyn_alice = run_dyn_torsion(&fvk);
+                let dyn_bob = run_dyn_torsion(&bob_dyn_fvk);
+                assert_eq!(dyn_alice.len(), 32, "16 public torsion subtrees + 16 non-public = 32");
+                assert_eq!(
+                    dyn_alice, dyn_bob,
+                    "Round-3 Issue #3 + Round-7 Finding #1: 16 torsion AUD1DYN1 variants MUST yield byte-identical Pass 1D for Alice & Bob"
+                );
+            }
+
+            // 3h. Round-3 Issue #1: Zero livelock on honest >786,433-note fresh catch-up (Trigger 1A)
+            //     AND birthday_slot > 0 after transient Sync #1 MemoPage drop (Trigger 1B)!
+            {
+                // Trigger 1A: next_leaf = 800,010 -> 800,260 (fresh wallet catches up cleanly in 3 syncs)
+                let fc_a1: u64 = 3_125;
+                let rem_a1: usize = 10;
+                let fc_a2: u64 = 3_126;
+                let rem_a2: usize = 4;
+                let roots_a1 = vec![dummy_subroot; fc_a1 as usize];
+                let roots_a2 = vec![dummy_subroot; fc_a2 as usize];
+                let lroot_a1 = compute_lane_root_from_subroots_and_frontier(
+                    &roots_a1,
+                    Some(&dummy_leaves[..rem_a1]),
+                    rem_a1,
+                )
+                .unwrap();
+                let lroot_a2 = compute_lane_root_from_subroots_and_frontier(
+                    &roots_a2,
+                    Some(&dummy_leaves[..rem_a2]),
+                    rem_a2,
+                )
+                .unwrap();
+                let mut sr_a1: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                for sr in 0..(fc_a1 as usize).div_ceil(SUBROOTS_PER_PAGE) {
+                    let s0 = sr * SUBROOTS_PER_PAGE;
+                    let s1 = (s0 + SUBROOTS_PER_PAGE).min(fc_a1 as usize);
+                    sr_a1.insert(
+                        derive_subroot_pda(&program_id, 0, 0, sr as u64).0,
+                        make_subroot(0, sr as u64, &roots_a1[s0..s1]),
+                    );
+                }
+                let mut sr_a2: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                for sr in 0..(fc_a2 as usize).div_ceil(SUBROOTS_PER_PAGE) {
+                    let s0 = sr * SUBROOTS_PER_PAGE;
+                    let s1 = (s0 + SUBROOTS_PER_PAGE).min(fc_a2 as usize);
+                    sr_a2.insert(
+                        derive_subroot_pda(&program_id, 0, 0, sr as u64).0,
+                        make_subroot(0, sr as u64, &roots_a2[s0..s1]),
+                    );
+                }
+                let mut sub_meta_a: BTreeMap<Address, u64> = BTreeMap::new();
+                for s in 0..=fc_a2 {
+                    sub_meta_a.insert(derive_subtree_pda(&program_id, 0, 0, s).0, s);
+                }
+                let mut memo_meta_a: BTreeMap<Address, u64> = BTreeMap::new();
+                for m in 0..(fc_a2 * SUBTREE_LEAVES as u64 + rem_a2 as u64)
+                    .div_ceil(MEMO_NOTES_PER_PAGE as u64)
+                {
+                    memo_meta_a.insert(derive_memo_pda(&program_id, 0, 0, m).0, m);
+                }
+
+                let mut st_live = CompactWalletStore::new(0, 0);
+                // Sync 1 at 800,010 leaves
+                let lane_a1 = make_lane_with_root(
+                    0,
+                    fc_a1 * SUBTREE_LEAVES as u64 + rem_a1 as u64,
+                    0,
+                    lroot_a1,
+                );
+                sync_compact_store_with_batch(
+                    &mut st_live,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == lane0_pda {
+                                    Some(lane_a1.clone())
+                                } else if let Some(sr) = sr_a1.get(a) {
+                                    Some(sr.clone())
+                                } else if let Some(&s) = sub_meta_a.get(a) {
+                                    let lvs = if s == fc_a1 { &dummy_leaves[..rem_a1] } else { &dummy_leaves };
+                                    Some(make_subtree(0, s, lvs))
+                                } else {
+                                    memo_meta_a
+                                        .get(a)
+                                        .map(|&m| make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0))
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(st_live.lanes[0].next_memo_leaf, 393_216);
+                assert_eq!(st_live.lanes[0].frontier_sub_seq, fc_a1);
+
+                // Pool appends 250 notes -> 800,260 leaves (frontier 3125 seals -> 3126!)
+                let lane_a2 = make_lane_with_root(
+                    0,
+                    fc_a2 * SUBTREE_LEAVES as u64 + rem_a2 as u64,
+                    0,
+                    lroot_a2,
+                );
+                let run_a2 = |st: &mut CompactWalletStore| {
+                    sync_compact_store_with_batch(
+                        st,
+                        &fvk,
+                        |addrs, _| {
+                            addrs
+                                .iter()
+                                .map(|a| {
+                                    if *a == pool_pda {
+                                        Some(pool1.clone())
+                                    } else if *a == lane0_pda {
+                                        Some(lane_a2.clone())
+                                    } else if let Some(sr) = sr_a2.get(a) {
+                                        Some(sr.clone())
+                                    } else if let Some(&s) = sub_meta_a.get(a) {
+                                        let lvs = if s == fc_a2 { &dummy_leaves[..rem_a2] } else { &dummy_leaves };
+                                        Some(make_subtree(0, s, lvs))
+                                    } else {
+                                        memo_meta_a
+                                            .get(a)
+                                            .map(|&m| make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0))
+                                    }
+                                })
+                                .collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                };
+                // Sync 2 MUST advance to 786,432 (NOT livelock at 393,216!)
+                run_a2(&mut st_live);
+                assert_eq!(st_live.lanes[0].next_memo_leaf, 786_432);
+                assert_eq!(st_live.lanes[0].finalized_subroots.len(), fc_a2 as usize);
+                // Sync 3 MUST catch up completely to 800,260!
+                run_a2(&mut st_live);
+                assert_eq!(
+                    st_live.lanes[0].next_memo_leaf,
+                    fc_a2 * SUBTREE_LEAVES as u64 + rem_a2 as u64
+                );
+
+                // Trigger 1B: birthday_slot=1000, Sync 1 MemoPage(0,0)=None at 10 leaves ->
+                // Sync 2 at 500 leaves with pre-birthday MemoPages 0..=2 MUST catch up to 500!
+                let lroot_10 = compute_lane_root_from_subroots_and_frontier(
+                    &[],
+                    Some(&dummy_leaves[..10]),
+                    10,
+                )
+                .unwrap();
+                let lroot_500 = compute_lane_root_from_subroots_and_frontier(
+                    &[dummy_subroot],
+                    Some(&dummy_leaves[..244]),
+                    244,
+                )
+                .unwrap();
+                let mut st_bday = CompactWalletStore::new(0, 1_000);
+                sync_compact_store_with_batch(
+                    &mut st_bday,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == lane0_pda {
+                                    Some(make_lane_with_root(0, 10, 0, lroot_10))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                    Some(make_subtree(0, 0, &dummy_leaves[..10]))
+                                } else {
+                                    None // MemoPage(0, 0) transiently dropped!
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(st_bday.lanes[0].next_memo_leaf, 0);
+                assert_eq!(st_bday.lanes[0].frontier_leaves.len(), 10);
+
+                let mut acc_500: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                acc_500.insert(pool_pda, pool1.clone());
+                acc_500.insert(lane0_pda, make_lane_with_root(0, 500, 0, lroot_500));
+                acc_500.insert(sr0_pda, make_subroot(0, 0, &[dummy_subroot]));
+                acc_500.insert(derive_subtree_pda(&program_id, 0, 0, 0).0, make_subtree(0, 0, &dummy_leaves));
+                acc_500.insert(
+                    derive_subtree_pda(&program_id, 0, 0, 1).0,
+                    make_subtree(0, 1, &dummy_leaves[..244]),
+                );
+                for m in 0..6u64 {
+                    let cnt = if m < 5 { MEMO_NOTES_PER_PAGE as u16 } else { 20 };
+                    let closed = if m <= 2 { 500 } else { 1_500 };
+                    acc_500.insert(
+                        derive_memo_pda(&program_id, 0, 0, m).0,
+                        make_memo(0, m, cnt, closed),
+                    );
+                }
+                sync_compact_store_with_batch(
+                    &mut st_bday,
+                    &fvk,
+                    |addrs, _| addrs.iter().map(|a| acc_500.get(a).cloned()).collect(),
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    st_bday.lanes[0].next_memo_leaf, 500,
+                    "Round-3 Issue #1 Trigger 1B MUST advance cleanly to 500 without livelock"
+                );
+                assert_eq!(st_bday.lanes[0].finalized_subroots.len(), 1);
+                assert_eq!(st_bday.lanes[0].frontier_sub_seq, 1);
+            }
+
+            // 3i. Round-3 Issue #4: O(log N) lagging `lane_hdr.next_leaf` binary-search & multi-lane
+            //     shrink oracle on legacy `locally_finalized_unfrozen` notes MUST leak 0 bits!
+            {
+                let mut leg = CompactWalletStore::new(0, 0);
+                leg.lanes[0].next_memo_leaf = 100 * SUBTREE_LEAVES as u64;
+                leg.lanes[0].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot); 100];
+                let dec42 = crate::keys::DecryptedMemo {
+                    tweak: tw_h,
+                    blinding: bl_h,
+                    amount: 42_000,
+                    mint: WSOL_MINT,
+                    memo_version: 1,
+                    memo_flags: 0,
+                    payment_id: [0u8; 14],
+                    is_dynamic: false,
+                };
+                leg.record_verified_memo(&fvk, 0, 42 * SUBTREE_LEAVES as u64 + 7, &dec42, fr_to_be_bytes(&cm_h))
+                    .unwrap();
+                assert!(leg.notes[0].frozen_intra_siblings.is_none());
+
+                let sub100_set: BTreeSet<Address> = (0..100u64)
+                    .map(|s| derive_subtree_pda(&program_id, 0, 0, s).0)
+                    .collect();
+                let probe_lag = |base: &CompactWalletStore, mid_fc: u64| -> Vec<Address> {
+                    let mut st = base.clone();
+                    let p1d = RefCell::new(Vec::<Address>::new());
+                    let _ = sync_compact_store_with_batch(
+                        &mut st,
+                        &fvk,
+                        |addrs, _| {
+                            for a in addrs {
+                                if sub100_set.contains(a) {
+                                    p1d.borrow_mut().push(*a);
+                                }
+                            }
+                            addrs
+                                .iter()
+                                .map(|a| {
+                                    if *a == pool_pda {
+                                        Some(pool1.clone())
+                                    } else if *a == lane0_pda {
+                                        let root = if mid_fc == 0 {
+                                            audren_circuits::merkle::zero_hashes_4ary()[LANE_DEPTH_4ARY]
+                                        } else if mid_fc <= 100 {
+                                            compute_lane_root_from_subroots_and_frontier(
+                                                &vec![dummy_subroot; mid_fc as usize],
+                                                None,
+                                                0,
+                                            )
+                                            .unwrap()
+                                        } else {
+                                            Fr::from(77u64)
+                                        };
+                                        Some(make_lane_with_root(
+                                            0,
+                                            mid_fc * SUBTREE_LEAVES as u64,
+                                            0,
+                                            root,
+                                        ))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    p1d.into_inner()
+                };
+                // Every lagging mid < 100 (both <= 42 AND > 42!) MUST emit 0 Pass 1D subtrees!
+                for mid in [0u64, 10, 41, 42, 43, 50, 99] {
+                    assert!(
+                        probe_lag(&leg, mid).is_empty(),
+                        "Round-3 Issue #4: lagging mid={mid} < 100 MUST emit 0 Pass 1D subtrees"
+                    );
+                }
+                // Every non-lagging mid >= 100 MUST emit the EXACT SAME 16 Pass 1D subtrees!
+                let non_lag_100 = probe_lag(&leg, 100);
+                assert_eq!(non_lag_100.len(), 16);
+                assert_eq!(probe_lag(&leg, 150), non_lag_100);
+                assert_eq!(probe_lag(&leg, 1_000), non_lag_100);
+
+                // Multi-lane shrink: adding 50 local subroots on Lane 1 and returning lagging Lane 1
+                // OR spoofed active_lanes=1 MUST also emit 0 Pass 1D subtrees!
+                leg.lanes[1].next_memo_leaf = 50 * SUBTREE_LEAVES as u64;
+                leg.lanes[1].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot); 50];
+                assert!(
+                    probe_lag(&leg, 100).is_empty(),
+                    "Round-3 Issue #4: omitting persisted Lane 1 via active_lanes=1 MUST emit 0 Pass 1D subtrees"
+                );
+            }
+        }
+
+        // =========================================================================
+        // 4. Round-2 Finding #3: Exact monotone dyadic Poisson-split large-pool HRW
+        //    (zero multi-lane shift on +1 growth, zero power-of-2 cliff) +
+        //    legacy `locally_finalized_unfrozen` 100% immune to next_leaf 2^19..2^26 inflation!
+        // =========================================================================
+        {
+            let scope = make_sync_decoy_scope(&[(0, 0), (1, 0)]);
+            let d_base = select_large_pool_hrw_sealed_decoys(
+                &fvk.view_sk,
+                &scope,
+                0,
+                &[(0, 200_000), (1, 200_000)],
+                &BTreeSet::new(),
+                16,
+            )
+            .unwrap();
+            let d_plus1 = select_large_pool_hrw_sealed_decoys(
+                &fvk.view_sk,
+                &scope,
+                0,
+                &[(0, 200_001), (1, 200_000)],
+                &BTreeSet::new(),
+                16,
+            )
+            .unwrap();
+            assert_eq!(d_base.len(), 16);
+            assert_eq!(d_plus1.len(), 16);
+            assert_eq!(
+                d_base,
+                vec![
+                    (1, 198615),
+                    (0, 109445),
+                    (1, 184529),
+                    (1, 41970),
+                    (1, 123773),
+                    (1, 119560),
+                    (0, 93805),
+                    (0, 148551),
+                    (1, 13461),
+                    (1, 22508),
+                    (0, 89835),
+                    (0, 191803),
+                    (0, 26692),
+                    (1, 181517),
+                    (1, 66812),
+                    (1, 169712),
+                ],
+                "Rust<->TS exact bit-for-bit dyadic large-pool HRW parity vector"
+            );
+            let set_base: BTreeSet<(u8, u64)> = d_base.iter().copied().collect();
+            let set_plus1: BTreeSet<(u8, u64)> = d_plus1.iter().copied().collect();
+            assert!(
+                set_base.intersection(&set_plus1).count() >= 15,
+                "Finding #3: +1 growth on Lane 0 MUST preserve >=15/16 decoys (zero Lane 1 shift!)"
+            );
+            // Every Lane 1 decoy MUST survive +1 growth on Lane 0 unless evicted by the 1 new Lane 0 leaf
+            let lane1_base: BTreeSet<(u8, u64)> =
+                d_base.iter().copied().filter(|&(l, _)| l == 1).collect();
+            assert!(!lane1_base.is_empty(), "two equal lanes must both receive decoys");
+            assert!(
+                lane1_base.difference(&set_plus1).count() <= 1,
+                "Lane 1 decoys must NEVER shift on Lane 0 +1 growth"
+            );
+
+            // Power-of-2 boundary crossing: 262_144 -> 262_145 (2^18 -> 2^18 + 1)
+            let d_pow2 = select_large_pool_hrw_sealed_decoys(
+                &fvk.view_sk,
+                &scope,
+                0,
+                &[(0, 262_144)],
+                &BTreeSet::new(),
+                16,
+            )
+            .unwrap();
+            let d_pow2_plus1 = select_large_pool_hrw_sealed_decoys(
+                &fvk.view_sk,
+                &scope,
+                0,
+                &[(0, 262_145)],
+                &BTreeSet::new(),
+                16,
+            )
+            .unwrap();
+            let s_p2: BTreeSet<(u8, u64)> = d_pow2.iter().copied().collect();
+            let s_p2p1: BTreeSet<(u8, u64)> = d_pow2_plus1.iter().copied().collect();
+            assert!(
+                s_p2.intersection(&s_p2p1).count() >= 15,
+                "Finding #3: crossing 2^18 -> 2^18 + 1 MUST preserve >=15/16 decoys (zero cliff!)"
+            );
+
+            // Adversarial RPC forging lane0.next_leaf = 2^19..2^26 (Pass 1A returns None) against
+            // legacy `locally_finalized_unfrozen` store (both local_fc=20 AND tiny local_fc=4):
+            // Pass 1D decoy set MUST remain 100% IDENTICAL across all 8 exponential jumps!
+            let (tw_l, bl_l, _) =
+                encrypt_note_memo(&keys.view_pk, [0x94u8; 32], 33_000, &WSOL_MINT).unwrap();
+            let cm_l = compute_note_commitment(
+                fvk.stealth_owner(tw_l).unwrap(),
+                derive_asset_id(&WSOL_MINT),
+                33_000,
+                bl_l,
+            );
+            for local_fc in [20usize, 4usize] {
+                let mut base_st = CompactWalletStore::new(0, 0);
+                base_st.lanes[0].next_memo_leaf = (local_fc as u64) * SUBTREE_LEAVES as u64;
+                base_st.lanes[0].finalized_subroots =
+                    vec![fr_to_be_bytes(&dummy_subroot); local_fc];
+                let dec_l = crate::keys::DecryptedMemo {
+                    tweak: tw_l,
+                    blinding: bl_l,
+                    amount: 33_000,
+                    mint: WSOL_MINT,
+                    memo_version: 1,
+                    memo_flags: 0,
+                    payment_id: [0u8; 14],
+                    is_dynamic: false,
+                };
+                base_st
+                    .record_verified_memo(&fvk, 0, 5, &dec_l, fr_to_be_bytes(&cm_l))
+                    .unwrap();
+                assert!(base_st.notes[0].frozen_intra_siblings.is_none());
+
+                let mut prev_pass1d: Option<Vec<Address>> = None;
+                for exp in 19u32..=26u32 {
+                    let mut st = base_st.clone();
+                    let forged_next_leaf = (1u64 << exp) * SUBTREE_LEAVES as u64;
+                    let lane0_forged =
+                        make_lane_with_root(0, forged_next_leaf, 0, Fr::from(99u64));
+                    let p1d_batch = RefCell::new(Vec::<Address>::new());
+                    let _ = sync_compact_store_with_batch(
+                        &mut st,
+                        &fvk,
+                        |addrs, _slice| {
+                            if addrs.len() == 16 {
+                                p1d_batch.borrow_mut().extend_from_slice(addrs);
+                            }
+                            addrs
+                                .iter()
+                                .map(|a| {
+                                    if *a == pool_pda {
+                                        Some(make_pool(1))
+                                    } else if *a == lane0_pda {
+                                        Some(lane0_forged.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    let cur = p1d_batch.into_inner();
+                    assert_eq!(cur.len(), 16, "local_fc={local_fc}, exp={exp} must fetch 16 subtrees");
+                    if let Some(ref prev) = prev_pass1d {
+                        assert_eq!(
+                            cur, *prev,
+                            "Finding #3: forged next_leaf=2^{exp}*256 MUST yield 0% decoy rotation (local_fc={local_fc})"
+                        );
+                    }
+                    prev_pass1d = Some(cur);
+                }
+            }
+        }
+
+        // =========================================================================
+        // 5. Round-4 Issues #1 & #2: `public_sealed_subtrees` NEVER cannibalizes the
+        //    private 16-subtree decoy budget (returning frontiers M=15/16, dropped
+        //    frontier MemoPage, uniform_new_subtrees U=15/9, and legacy + catch-up
+        //    disjoint domain padding for both normal & tiny legacy stores)!
+        // =========================================================================
+        {
+            let dummy_leaves: Vec<Fr> = (0..SUBTREE_LEAVES)
+                .map(|i| Fr::from((i + 501) as u64))
+                .collect();
+            let dummy_subroot = compute_subtree_256_root(&dummy_leaves, SUBTREE_LEAVES);
+            let pool1 = make_pool(1);
+            let pool16 = make_pool(16);
+            let pool_pda = derive_pool_pda(&program_id, 0).0;
+
+            let (tw_r4, bl_r4, memo_r4) =
+                encrypt_note_memo(&keys.view_pk, [0xa1u8; 32], 77_000, &WSOL_MINT).unwrap();
+            let cm_r4 = compute_note_commitment(
+                fvk.stealth_owner(tw_r4).unwrap(),
+                derive_asset_id(&WSOL_MINT),
+                77_000,
+                bl_r4,
+            );
+
+            // --- 5a. Issue #1 POCs 1A (M=16), 1B (M=15), and 1C (M=16 with 1 dropped MemoPage) ---
+            {
+                let fc10: u64 = 10;
+                let roots10 = vec![dummy_subroot; fc10 as usize];
+                let lroot10 =
+                    compute_lane_root_from_subroots_and_frontier(&roots10, None, 0).unwrap();
+                let mut hit_leaves = dummy_leaves.clone();
+                hit_leaves[3] = cm_r4;
+                let hit_subroot = compute_subtree_256_root(&hit_leaves, SUBTREE_LEAVES);
+                let mut roots10_hit = roots10.clone();
+                roots10_hit[5] = hit_subroot;
+                let lroot10_hit =
+                    compute_lane_root_from_subroots_and_frontier(&roots10_hit, None, 0).unwrap();
+
+                let mut all_sub16: BTreeMap<Address, (u8, u64)> = BTreeMap::new();
+                for l in 0..16u8 {
+                    for s in 0..fc10 {
+                        all_sub16.insert(derive_subtree_pda(&program_id, 0, l, s).0, (l, s));
+                    }
+                }
+                let n_memos_10 = (fc10 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+
+                let run_returning = |m_frontiers: usize, drop_lane15_m2: bool, with_hit: bool| -> Vec<(u8, u64)> {
+                    let mut st = CompactWalletStore::new(0, 0);
+                    for l in 0..m_frontiers {
+                        st.lanes[l].next_memo_leaf = 10;
+                        st.lanes[l].frontier_sub_seq = 0;
+                        st.lanes[l].frontier_leaves =
+                            dummy_leaves[..10].iter().map(fr_to_be_bytes).collect();
+                    }
+                    let mut acc: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                    acc.insert(pool_pda, pool16.clone());
+                    let hit_leaf = 5 * SUBTREE_LEAVES as u64 + 3;
+                    let hit_m = hit_leaf / MEMO_NOTES_PER_PAGE as u64;
+                    let hit_slot = (hit_leaf % MEMO_NOTES_PER_PAGE as u64) as usize;
+                    for l in 0..16u8 {
+                        let use_hit = with_hit && l == 0;
+                        acc.insert(
+                            derive_lane_pda(&program_id, 0, l).0,
+                            make_lane_with_root(
+                                l,
+                                fc10 * SUBTREE_LEAVES as u64,
+                                0,
+                                if use_hit { lroot10_hit } else { lroot10 },
+                            ),
+                        );
+                        acc.insert(
+                            derive_subroot_pda(&program_id, 0, l, 0).0,
+                            make_subroot(l, 0, if use_hit { &roots10_hit } else { &roots10 }),
+                        );
+                        for m in 0..n_memos_10 {
+                            if drop_lane15_m2 && l == 15 && m == 2 {
+                                continue;
+                            }
+                            let cnt = ((fc10 * SUBTREE_LEAVES as u64)
+                                .saturating_sub(m * MEMO_NOTES_PER_PAGE as u64))
+                            .min(MEMO_NOTES_PER_PAGE as u64) as u16;
+                            let mut raw = make_memo(l, m, cnt, 0);
+                            if use_hit && m == hit_m {
+                                write_memo(&mut raw, hit_slot, &memo_r4);
+                            }
+                            acc.insert(derive_memo_pda(&program_id, 0, l, m).0, raw);
+                        }
+                    }
+                    let p1d = RefCell::new(Vec::<(u8, u64)>::new());
+                    let _ = sync_compact_store_with_batch(
+                        &mut st,
+                        &fvk,
+                        |addrs, _| {
+                            for a in addrs {
+                                if let Some(&ls) = all_sub16.get(a) {
+                                    p1d.borrow_mut().push(ls);
+                                }
+                            }
+                            addrs.iter().map(|a| acc.get(a).cloned()).collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    p1d.into_inner()
+                };
+
+                // POC 1A (M=16): 0 new notes vs 1 new note BOTH fetch 32 (16 frontiers + 16 non-frontier)
+                let p1a_zero = run_returning(16, false, false);
+                let p1a_hit = run_returning(16, false, true);
+                assert_eq!(p1a_zero.len(), 32, "Round-4 POC 1A (0 hits): must fetch 16 frontiers + 16 decoys = 32");
+                assert_eq!(p1a_hit.len(), 32, "Round-4 POC 1A (1 hit): must fetch 16 frontiers + 16 non-frontier = 32");
+                assert!(p1a_hit.contains(&(0, 5)), "Round-4 POC 1A: hit subtree (0, 5) must be fetched");
+                assert_eq!(
+                    p1a_hit.iter().filter(|&&(_, s)| s != 0).count(),
+                    16,
+                    "Round-4 POC 1A: non-frontier anonymity set must be full 16"
+                );
+
+                // POC 1B (M=15): 0 new notes vs 1 new note BOTH fetch 31 (15 frontiers + 16 non-frontier)
+                let p1b_zero = run_returning(15, false, false);
+                let p1b_hit = run_returning(15, false, true);
+                assert_eq!(p1b_zero.len(), 31, "Round-4 POC 1B (M=15, 0 hits): must fetch 31");
+                assert_eq!(p1b_hit.len(), 31, "Round-4 POC 1B (M=15, 1 hit): must fetch 31 (NOT 16 = 1-of-1 pinpoint!)");
+                assert!(p1b_hit.contains(&(0, 5)));
+                assert_eq!(
+                    p1b_hit.iter().filter(|&&(l, s)| !(l < 15 && s == 0)).count(),
+                    16,
+                    "Round-4 POC 1B: hit (0, 5) must have full 16-subtree anonymity set"
+                );
+
+                // POC 1C (M=16 with dropped MemoPage(15, 2) -> 15 active frontiers): BOTH fetch 31
+                let p1c_zero = run_returning(16, true, false);
+                let p1c_hit = run_returning(16, true, true);
+                assert_eq!(p1c_zero.len(), 31, "Round-4 POC 1C (dropped MemoPage, 0 hits): must fetch 31");
+                assert_eq!(p1c_hit.len(), 31, "Round-4 POC 1C (dropped MemoPage, 1 hit): must fetch 31");
+                assert!(p1c_hit.contains(&(0, 5)));
+            }
+
+            // --- 5b. Issue #2 POC 2A (U=15 spoofed active_lanes=16) & POC 2B (U=9 on Lane 0) ---
+            {
+                let dec_leg = crate::keys::DecryptedMemo {
+                    tweak: tw_r4,
+                    blinding: bl_r4,
+                    amount: 77_000,
+                    mint: WSOL_MINT,
+                    memo_version: 1,
+                    memo_flags: 0,
+                    payment_id: [0u8; 14],
+                    is_dynamic: false,
+                };
+                let make_legacy100 = |bday: u64| -> CompactWalletStore {
+                    let mut st = CompactWalletStore::new(0, bday);
+                    st.lanes[0].next_memo_leaf = 100 * SUBTREE_LEAVES as u64;
+                    st.lanes[0].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot); 100];
+                    st.record_verified_memo(&fvk, 0, 3 * SUBTREE_LEAVES as u64 + 7, &dec_leg, fr_to_be_bytes(&cm_r4))
+                        .unwrap();
+                    st
+                };
+
+                // POC 2A: birthday_slot=100, RPC spoofs active_lanes=16 with U=15 uniform new sealed
+                // subtrees `(l, 1)` on Lanes 1..15 (`next_leaf = 512`, `target_memo_max = 5 > 2`,
+                // Pass 1B skips MemoPages 0..=4 -> `skip_to = 480`, 15 MemoPages <= 25 & 15 SubtreePages <= 25
+                // -> `fetch_new_subtrees_uniformly = true` with `U = 15`!)
+                let roots100 = vec![dummy_subroot; 100];
+                let lroot100 =
+                    compute_lane_root_from_subroots_and_frontier(&roots100, None, 0).unwrap();
+                let lroot2 = compute_lane_root_from_subroots_and_frontier(
+                    &[dummy_subroot, dummy_subroot],
+                    None,
+                    0,
+                )
+                .unwrap();
+                let mut acc2a: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                acc2a.insert(pool_pda, pool16.clone());
+                acc2a.insert(
+                    derive_lane_pda(&program_id, 0, 0).0,
+                    make_lane_with_root(0, 100 * SUBTREE_LEAVES as u64, 0, lroot100),
+                );
+                let mut sub_lookup_2a: BTreeMap<Address, (u8, u64)> = BTreeMap::new();
+                for s in 0..100u64 {
+                    sub_lookup_2a.insert(derive_subtree_pda(&program_id, 0, 0, s).0, (0, s));
+                }
+                for l in 1..16u8 {
+                    acc2a.insert(
+                        derive_lane_pda(&program_id, 0, l).0,
+                        make_lane_with_root(l, 2 * SUBTREE_LEAVES as u64, 0, lroot2),
+                    );
+                    acc2a.insert(
+                        derive_subroot_pda(&program_id, 0, l, 0).0,
+                        make_subroot(l, 0, &[dummy_subroot, dummy_subroot]),
+                    );
+                    for m in 0..5u64 {
+                        acc2a.insert(derive_memo_pda(&program_id, 0, l, m).0, make_memo(l, m, 96, 50));
+                    }
+                    acc2a.insert(derive_memo_pda(&program_id, 0, l, 5).0, make_memo(l, 5, 32, 200));
+                    sub_lookup_2a.insert(derive_subtree_pda(&program_id, 0, l, 0).0, (l, 0));
+                    sub_lookup_2a.insert(derive_subtree_pda(&program_id, 0, l, 1).0, (l, 1));
+                }
+                let mut st2a = make_legacy100(100);
+                let p1d_2a = RefCell::new(Vec::<(u8, u64)>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st2a,
+                    &fvk,
+                    |addrs, slice| {
+                        for a in addrs {
+                            if let Some(&ls) = sub_lookup_2a.get(a) {
+                                p1d_2a.borrow_mut().push(ls);
+                            }
+                        }
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                let full = acc2a.get(a)?;
+                                if let Some(sl) = slice {
+                                    Some(full[sl.offset..(sl.offset + sl.length).min(full.len())].to_vec())
+                                } else {
+                                    Some(full.clone())
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                let req2a = p1d_2a.into_inner();
+                let lane0_2a: Vec<(u8, u64)> = req2a.iter().copied().filter(|&(l, _)| l == 0).collect();
+                assert_eq!(
+                    lane0_2a.len(),
+                    16,
+                    "Round-4 POC 2A: Lane 0 [0..100) MUST still receive full 16-subtree anonymity set (NOT 1-of-1 pinpoint!)"
+                );
+                assert!(lane0_2a.contains(&(0, 3)));
+                assert_eq!(req2a.len(), 31, "Round-4 POC 2A: 16 on Lane 0 + 15 uniform on Lanes 1..15 = 31");
+
+                // POC 2B: 1-lane legacy local_fc=100, birthday_slot=0, U=9 uniform new sealed subtrees 100..109
+                // (9*256 = 2304 leaves = 24 MemoPages <= 25 -> fetch_new_subtrees_uniformly = true)
+                let roots109 = vec![dummy_subroot; 109];
+                let lroot109 =
+                    compute_lane_root_from_subroots_and_frontier(&roots109, None, 0).unwrap();
+                let mut acc2b: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                acc2b.insert(pool_pda, pool1.clone());
+                acc2b.insert(
+                    derive_lane_pda(&program_id, 0, 0).0,
+                    make_lane_with_root(0, 109 * SUBTREE_LEAVES as u64, 0, lroot109),
+                );
+                acc2b.insert(
+                    derive_subroot_pda(&program_id, 0, 0, 0).0,
+                    make_subroot(0, 0, &roots109),
+                );
+                let m_start = (100 * SUBTREE_LEAVES as u64) / MEMO_NOTES_PER_PAGE as u64;
+                let m_end = (109 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                for m in m_start..m_end {
+                    let cnt = ((109 * SUBTREE_LEAVES as u64)
+                        .saturating_sub(m * MEMO_NOTES_PER_PAGE as u64))
+                    .min(MEMO_NOTES_PER_PAGE as u64) as u16;
+                    acc2b.insert(derive_memo_pda(&program_id, 0, 0, m).0, make_memo(0, m, cnt, 0));
+                }
+                let sub_lookup_2b: BTreeMap<Address, u64> = (0..109u64)
+                    .map(|s| (derive_subtree_pda(&program_id, 0, 0, s).0, s))
+                    .collect();
+                let mut st2b = make_legacy100(0);
+                let p1d_2b = RefCell::new(Vec::<u64>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st2b,
+                    &fvk,
+                    |addrs, _| {
+                        for a in addrs {
+                            if let Some(&s) = sub_lookup_2b.get(a) {
+                                p1d_2b.borrow_mut().push(s);
+                            }
+                        }
+                        addrs.iter().map(|a| acc2b.get(a).cloned()).collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                let req2b = p1d_2b.into_inner();
+                let legacy_2b = req2b.iter().filter(|&&s| s < 100).count();
+                let uniform_2b = req2b.iter().filter(|&&s| s >= 100).count();
+                assert_eq!(legacy_2b, 16, "Round-4 POC 2B: Lane 0 [0..100) MUST still get 16 (zero 16->7 shrinkage!)");
+                assert_eq!(uniform_2b, 9, "Round-4 POC 2B: all 9 uniform new subtrees 100..109 fetched");
+                assert_eq!(req2b.len(), 25);
+
+                // --- 5c. Step 3B + Disjoint Partition: normal (local_fc=100) & tiny (local_fc=4) legacy ---
+                // Normal legacy (local_fc=100) catching up on [100..150): 0 hits vs 1 hit in [100..150)
+                // BOTH fetch 16 in [0..100) AND 16 in [100..150) = 32 total!
+                let run_legacy_catchup = |local_fc: usize, extra_fc: usize, hit_subs: &[u64]| -> Vec<u64> {
+                    let total_fc = local_fc + extra_fc;
+                    let mut st = CompactWalletStore::new(0, 0);
+                    st.lanes[0].next_memo_leaf = (local_fc as u64) * SUBTREE_LEAVES as u64;
+                    st.lanes[0].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot); local_fc];
+                    st.record_verified_memo(&fvk, 0, 2 * SUBTREE_LEAVES as u64 + 5, &dec_leg, fr_to_be_bytes(&cm_r4))
+                        .unwrap();
+
+                    let roots = vec![dummy_subroot; total_fc];
+                    let lroot = compute_lane_root_from_subroots_and_frontier(&roots, None, 0).unwrap();
+                    let mut acc: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                    acc.insert(pool_pda, pool1.clone());
+                    acc.insert(
+                        derive_lane_pda(&program_id, 0, 0).0,
+                        make_lane_with_root(0, (total_fc as u64) * SUBTREE_LEAVES as u64, 0, lroot),
+                    );
+                    acc.insert(derive_subroot_pda(&program_id, 0, 0, 0).0, make_subroot(0, 0, &roots));
+                    let m0 = ((local_fc as u64) * SUBTREE_LEAVES as u64) / MEMO_NOTES_PER_PAGE as u64;
+                    let m1 = ((total_fc as u64) * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                    for m in m0..m1 {
+                        let cnt = (((total_fc as u64) * SUBTREE_LEAVES as u64)
+                            .saturating_sub(m * MEMO_NOTES_PER_PAGE as u64))
+                        .min(MEMO_NOTES_PER_PAGE as u64) as u16;
+                        acc.insert(derive_memo_pda(&program_id, 0, 0, m).0, make_memo(0, m, cnt, 0));
+                    }
+                    for (idx, &hs) in hit_subs.iter().enumerate() {
+                        let (_, _, m_bytes) = encrypt_note_memo(
+                            &keys.view_pk,
+                            [(0xb0u8).wrapping_add(idx as u8); 32],
+                            10_000 + idx as u64,
+                            &WSOL_MINT,
+                        )
+                        .unwrap();
+                        let leaf = hs * SUBTREE_LEAVES as u64 + 1;
+                        let m_seq = leaf / MEMO_NOTES_PER_PAGE as u64;
+                        let slot = (leaf % MEMO_NOTES_PER_PAGE as u64) as usize;
+                        write_memo(
+                            acc.get_mut(&derive_memo_pda(&program_id, 0, 0, m_seq).0).unwrap(),
+                            slot,
+                            &m_bytes,
+                        );
+                    }
+                    let sub_lu: BTreeMap<Address, u64> = (0..total_fc as u64)
+                        .map(|s| (derive_subtree_pda(&program_id, 0, 0, s).0, s))
+                        .collect();
+                    let p1d = RefCell::new(Vec::<u64>::new());
+                    let _ = sync_compact_store_with_batch(
+                        &mut st,
+                        &fvk,
+                        |addrs, _| {
+                            for a in addrs {
+                                if let Some(&s) = sub_lu.get(a) {
+                                    p1d.borrow_mut().push(s);
+                                }
+                            }
+                            addrs.iter().map(|a| acc.get(a).cloned()).collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    p1d.into_inner()
+                };
+
+                let norm_zero = run_legacy_catchup(100, 50, &[]);
+                let norm_one = run_legacy_catchup(100, 50, &[120]);
+                assert_eq!(norm_zero.iter().filter(|&&s| s < 100).count(), 16);
+                assert_eq!(norm_zero.iter().filter(|&&s| s >= 100).count(), 16);
+                assert_eq!(norm_one.iter().filter(|&&s| s < 100).count(), 16);
+                assert_eq!(norm_one.iter().filter(|&&s| s >= 100).count(), 16);
+                assert!(norm_one.contains(&120));
+
+                // Tiny legacy (local_fc=4) catching up on [4..54): 0, 1, AND 5 new hits ALL fetch
+                // 4 in [0..4) + 16 in [4..54) = 20 total (zero hits>=5 bucket split!)
+                let tiny_zero = run_legacy_catchup(4, 50, &[]);
+                let tiny_one = run_legacy_catchup(4, 50, &[30]);
+                let tiny_five = run_legacy_catchup(4, 50, &[10, 20, 30, 40, 50]);
+                for (lbl, v) in [("0 hits", &tiny_zero), ("1 hit", &tiny_one), ("5 hits", &tiny_five)] {
+                    assert_eq!(v.iter().filter(|&&s| s < 4).count(), 4, "Round-4 tiny legacy ({lbl}): [0..4)");
+                    assert_eq!(v.iter().filter(|&&s| s >= 4).count(), 16, "Round-4 tiny legacy ({lbl}): [4..54)");
+                    assert_eq!(v.len(), 20, "Round-4 tiny legacy ({lbl}): total must stay 20");
+                }
+            }
+
+            // --- 5d. Round-5 Finding #1: Pass 1A `SubtreeRootPage`-drop frontier oracle ---
+            {
+                let fc50: u64 = 50;
+                let roots50 = vec![dummy_subroot; fc50 as usize];
+                let lroot50 =
+                    compute_lane_root_from_subroots_and_frontier(&roots50, None, 0).unwrap();
+                let mut f_hit_leaves = dummy_leaves.clone();
+                f_hit_leaves[20] = cm_r4;
+                let f_hit_subroot = compute_subtree_256_root(&f_hit_leaves, SUBTREE_LEAVES);
+                let mut roots50_hit = roots50.clone();
+                roots50_hit[0] = f_hit_subroot;
+                let lroot50_hit =
+                    compute_lane_root_from_subroots_and_frontier(&roots50_hit, None, 0).unwrap();
+                let n_m50 = (fc50 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                let sub50_lu: BTreeMap<Address, u64> = (0..fc50)
+                    .map(|s| (derive_subtree_pda(&program_id, 0, 0, s).0, s))
+                    .collect();
+
+                let run_p1a_drop = |with_frontier_note: bool, drop_pass1a_sr: bool| -> (Vec<u64>, bool) {
+                    let mut st = CompactWalletStore::new(0, 0);
+                    st.lanes[0].next_memo_leaf = 10;
+                    st.lanes[0].frontier_sub_seq = 0;
+                    st.lanes[0].frontier_leaves =
+                        dummy_leaves[..10].iter().map(fr_to_be_bytes).collect();
+                    let mut acc: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                    acc.insert(pool_pda, pool1.clone());
+                    acc.insert(
+                        derive_lane_pda(&program_id, 0, 0).0,
+                        make_lane_with_root(
+                            0,
+                            fc50 * SUBTREE_LEAVES as u64,
+                            0,
+                            if with_frontier_note { lroot50_hit } else { lroot50 },
+                        ),
+                    );
+                    if !drop_pass1a_sr {
+                        acc.insert(
+                            derive_subroot_pda(&program_id, 0, 0, 0).0,
+                            make_subroot(0, 0, if with_frontier_note { &roots50_hit } else { &roots50 }),
+                        );
+                    }
+                    for m in 0..n_m50 {
+                        let cnt = ((fc50 * SUBTREE_LEAVES as u64)
+                            .saturating_sub(m * MEMO_NOTES_PER_PAGE as u64))
+                        .min(MEMO_NOTES_PER_PAGE as u64) as u16;
+                        let mut raw = make_memo(0, m, cnt, 0);
+                        if with_frontier_note && m == 0 {
+                            write_memo(&mut raw, 20, &memo_r4);
+                        }
+                        acc.insert(derive_memo_pda(&program_id, 0, 0, m).0, raw);
+                    }
+                    let p1d = RefCell::new(Vec::<u64>::new());
+                    let _ = sync_compact_store_with_batch(
+                        &mut st,
+                        &fvk,
+                        |addrs, _| {
+                            for a in addrs {
+                                if let Some(&s) = sub50_lu.get(a) {
+                                    p1d.borrow_mut().push(s);
+                                }
+                            }
+                            addrs.iter().map(|a| acc.get(a).cloned()).collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    (p1d.into_inner(), st.lanes[0].next_memo_leaf == 10)
+                };
+
+                for with_note in [false, true] {
+                    let (s1, unmut1) = run_p1a_drop(with_note, false);
+                    let (s2, unmut2) = run_p1a_drop(with_note, true);
+                    assert_eq!(s1.len(), 17, "Round-5 Finding #1: 1 returning frontier + 16 non-frontier = 17");
+                    assert_eq!(
+                        s1, s2,
+                        "Round-5 Finding #1: dropping Pass 1A SubtreeRootPage MUST yield byte-identical Pass 1D (with_note={with_note})"
+                    );
+                    assert!(s2.contains(&0), "Round-5 Finding #1: returning frontier 0 must stay in S_2 uniformly");
+                    assert!(unmut1 && unmut2, "Round-5 Finding #1: store must remain unmutated on Pass 1A/1D miss");
+                }
+            }
+
+            // --- 5e. Round-5 Finding #2: Branch 3 `legacy_fc` bounded by `local_scanned_fc` ---
+            {
+                let dec_leg = crate::keys::DecryptedMemo {
+                    tweak: tw_r4,
+                    blinding: bl_r4,
+                    amount: 77_000,
+                    mint: WSOL_MINT,
+                    memo_version: 1,
+                    memo_flags: 0,
+                    payment_id: [0u8; 14],
+                    is_dynamic: false,
+                };
+                // POC 2A: 16 lanes each with finalized_subroots.len()=200, but only Lane 0 scanned
+                // (next_memo_leaf = 20*256; Lanes 1..15 have next_memo_leaf = 0). Legacy note at (0, 3).
+                let fc200: u64 = 200;
+                let roots200 = vec![dummy_subroot; fc200 as usize];
+                let lroot200 =
+                    compute_lane_root_from_subroots_and_frontier(&roots200, None, 0).unwrap();
+                let mut st_multi = CompactWalletStore::new(0, 0);
+                for l in 0..16 {
+                    st_multi.lanes[l].finalized_subroots =
+                        vec![fr_to_be_bytes(&dummy_subroot); fc200 as usize];
+                }
+                st_multi.lanes[0].next_memo_leaf = 20 * SUBTREE_LEAVES as u64;
+                st_multi
+                    .record_verified_memo(&fvk, 0, 3 * SUBTREE_LEAVES as u64 + 7, &dec_leg, fr_to_be_bytes(&cm_r4))
+                    .unwrap();
+
+                let mut sub_lu_16: BTreeMap<Address, (u8, u64)> = BTreeMap::new();
+                let mut acc_multi: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                acc_multi.insert(pool_pda, pool16.clone());
+                for l in 0..16u8 {
+                    acc_multi.insert(
+                        derive_lane_pda(&program_id, 0, l).0,
+                        make_lane_with_root(l, fc200 * SUBTREE_LEAVES as u64, 0, lroot200),
+                    );
+                    for s in 0..fc200 {
+                        sub_lu_16.insert(derive_subtree_pda(&program_id, 0, l, s).0, (l, s));
+                    }
+                }
+                // Drop MemoPages on all lanes (so window_sealed_subtrees == 0 -> only L' runs)
+                let p1d_multi = RefCell::new(Vec::<(u8, u64)>::new());
+                let _ = sync_compact_store_with_batch(
+                    &mut st_multi,
+                    &fvk,
+                    |addrs, _| {
+                        for a in addrs {
+                            if let Some(&ls) = sub_lu_16.get(a) {
+                                p1d_multi.borrow_mut().push(ls);
+                            }
+                        }
+                        addrs.iter().map(|a| acc_multi.get(a).cloned()).collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                let req_multi = p1d_multi.into_inner();
+                assert_eq!(req_multi.len(), 16);
+                assert!(
+                    req_multi.iter().all(|&(l, s)| l == 0 && s < 20),
+                    "Round-5 Finding #2 POC 2A: ALL 16 legacy decoys MUST stay in scanned Lane 0 [0..20), zero dilution to unscanned Lanes 1..15!"
+                );
+                assert!(req_multi.contains(&(0, 3)));
+
+                // POC 2B: single-lane finalized_subroots.len()=200, next_memo_leaf=18*256.
+                // Toggling MemoPage(0, 48) between dropped vs served MUST yield IDENTICAL 16 subtrees in [0..18)!
+                let mut base_1l = CompactWalletStore::new(0, 0);
+                base_1l.lanes[0].finalized_subroots =
+                    vec![fr_to_be_bytes(&dummy_subroot); fc200 as usize];
+                base_1l.lanes[0].next_memo_leaf = 18 * SUBTREE_LEAVES as u64;
+                base_1l
+                    .record_verified_memo(&fvk, 0, 3 * SUBTREE_LEAVES as u64 + 7, &dec_leg, fr_to_be_bytes(&cm_r4))
+                    .unwrap();
+                let run_1l = |serve_memos: bool| -> Vec<u64> {
+                    let mut st = base_1l.clone();
+                    let mut acc: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                    acc.insert(pool_pda, pool1.clone());
+                    acc.insert(
+                        derive_lane_pda(&program_id, 0, 0).0,
+                        make_lane_with_root(0, fc200 * SUBTREE_LEAVES as u64, 0, lroot200),
+                    );
+                    if serve_memos {
+                        let m0 = (18 * SUBTREE_LEAVES as u64) / MEMO_NOTES_PER_PAGE as u64;
+                        let m1 = (68 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                        for m in m0..m1 {
+                            acc.insert(
+                                derive_memo_pda(&program_id, 0, 0, m).0,
+                                make_memo(0, m, MEMO_NOTES_PER_PAGE as u16, 0),
+                            );
+                        }
+                    }
+                    let p1d = RefCell::new(Vec::<u64>::new());
+                    let _ = sync_compact_store_with_batch(
+                        &mut st,
+                        &fvk,
+                        |addrs, _| {
+                            for a in addrs {
+                                if let Some(&(l, s)) = sub_lu_16.get(a) {
+                                    if l == 0 {
+                                        p1d.borrow_mut().push(s);
+                                    }
+                                }
+                            }
+                            addrs.iter().map(|a| acc.get(a).cloned()).collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    p1d.into_inner()
+                };
+                let dropped_1l = run_1l(false);
+                let served_1l = run_1l(true);
+                let served_legacy_part: Vec<u64> =
+                    served_1l.iter().copied().filter(|&s| s < 18).collect();
+                assert_eq!(dropped_1l.len(), 16);
+                assert!(
+                    dropped_1l.iter().all(|&s| s < 18),
+                    "Round-5 Finding #2 POC 2B: dropped MemoPage MUST keep all 16 legacy decoys in [0..18)"
+                );
+                assert_eq!(
+                    dropped_1l, served_legacy_part,
+                    "Round-5 Finding #2 POC 2B: toggling MemoPage(0, 48) MUST yield 0% decoy rotation on [0..18)"
+                );
+            }
+
+            // --- 5f. Round-6 Finding #1: Unverified frontier prefix rewrite rejected uniformly ---
+            {
+                let mut honest_leaves = dummy_leaves.clone();
+                honest_leaves[3] = cm_r4;
+                let honest_f10_root = compute_lane_root_from_subroots_and_frontier(
+                    &[],
+                    Some(&honest_leaves[..10]),
+                    10,
+                )
+                .unwrap();
+                let mut m0_honest = make_memo(0, 0, 10, 0);
+                write_memo(&mut m0_honest, 3, &memo_r4);
+
+                let bob_keys = AudrenKeys::from_seed(&[0xa9u8; 32]);
+                let bob_fvk = bob_keys.full_viewing_key();
+                let mut st_alice = CompactWalletStore::new(0, 0);
+                let mut st_bob = CompactWalletStore::new(0, 0);
+                let sync_honest_10 = |st: &mut CompactWalletStore, who: &FullViewingKey| {
+                    sync_compact_store_with_batch(
+                        st,
+                        who,
+                        |addrs, _| {
+                            addrs
+                                .iter()
+                                .map(|a| {
+                                    if *a == pool_pda {
+                                        Some(pool1.clone())
+                                    } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                        Some(make_lane_with_root(0, 10, 0, honest_f10_root))
+                                    } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                        Some(make_subtree(0, 0, &honest_leaves[..10]))
+                                    } else if *a == derive_memo_pda(&program_id, 0, 0, 0).0 {
+                                        Some(m0_honest.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                };
+                sync_honest_10(&mut st_alice, &fvk);
+                sync_honest_10(&mut st_bob, &bob_fvk);
+                assert_eq!(st_alice.notes.len(), 1);
+                assert!(st_alice.notes[0].frozen_intra_siblings.is_none());
+                assert_eq!(st_bob.notes.len(), 0);
+
+                // Forge leaf 3 -> Fr::from(999999u64) with self-consistent SubtreeRootPage & LaneRoot
+                let mut forged_leaves = honest_leaves.clone();
+                forged_leaves[3] = Fr::from(999_999u64);
+                let forged_subroot = compute_subtree_256_root(&forged_leaves, SUBTREE_LEAVES);
+                let forged_sealed_lroot =
+                    compute_lane_root_from_subroots_and_frontier(&[forged_subroot], None, 0)
+                        .unwrap();
+                let forged_grow_lroot = compute_lane_root_from_subroots_and_frontier(
+                    &[],
+                    Some(&forged_leaves[..20]),
+                    20,
+                )
+                .unwrap();
+
+                // Both sealing (next_leaf=256) AND growing unsealed (next_leaf=20) MUST error
+                // uniformly for BOTH Alice (note owner) and Bob (0 notes), with zero store mutation!
+                for (label, is_sealed) in [("sealing rewrite", true), ("unsealed grow rewrite", false)] {
+                    for (who_lbl, base_st, who_fvk) in [
+                        ("Alice (note owner)", &st_alice, &fvk),
+                        ("Bob (0 notes)", &st_bob, &bob_fvk),
+                    ] {
+                        let mut st = base_st.clone();
+                        let res = sync_compact_store_with_batch(
+                            &mut st,
+                            who_fvk,
+                            |addrs, _| {
+                                addrs
+                                    .iter()
+                                    .map(|a| {
+                                        if *a == pool_pda {
+                                            Some(pool1.clone())
+                                        } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                            if is_sealed {
+                                                Some(make_lane_with_root(
+                                                    0,
+                                                    SUBTREE_LEAVES as u64,
+                                                    0,
+                                                    forged_sealed_lroot,
+                                                ))
+                                            } else {
+                                                Some(make_lane_with_root(0, 20, 0, forged_grow_lroot))
+                                            }
+                                        } else if *a == derive_subroot_pda(&program_id, 0, 0, 0).0 && is_sealed {
+                                            Some(make_subroot(0, 0, &[forged_subroot]))
+                                        } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                            if is_sealed {
+                                                Some(make_subtree(0, 0, &forged_leaves))
+                                            } else {
+                                                Some(make_subtree(0, 0, &forged_leaves[..20]))
+                                            }
+                                        } else if *a == derive_memo_pda(&program_id, 0, 0, 0).0 {
+                                            Some(make_memo(0, 0, if is_sealed { 96 } else { 20 }, 0))
+                                        } else if *a == derive_memo_pda(&program_id, 0, 0, 1).0 && is_sealed {
+                                            Some(make_memo(0, 1, 96, 0))
+                                        } else if *a == derive_memo_pda(&program_id, 0, 0, 2).0 && is_sealed {
+                                            Some(make_memo(0, 2, 64, 0))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect()
+                            },
+                            &program_id,
+                            SyncOptions::default(),
+                        );
+                        assert!(
+                            res.is_err(),
+                            "Round-6 Finding #1 ({label}, {who_lbl}): mutated frontier prefix MUST return Err"
+                        );
+                        assert_eq!(st.lanes[0].finalized_subroots.len(), 0);
+                        assert_eq!(st.lanes[0].next_memo_leaf, 10);
+                    }
+                }
+
+                // Direct offline `ingest_lane_pages` MUST also reject mutated frontier prefix
+                let mut st_off = st_alice.clone();
+                let forged_sub_raw = make_subtree(0, 0, &forged_leaves[..20]);
+                assert!(
+                    st_off
+                        .ingest_lane_pages(&fvk, 0, &[(0, &forged_sub_raw)], &[], &[])
+                        .is_err(),
+                    "Round-6 Finding #1: ingest_lane_pages must reject mutated frontier prefix"
+                );
+
+                // Honest lagging replica returning truncated matching prefix (5 < 10) must NOT error
+                let mut st_lag = st_alice.clone();
+                let lag_f5_root = compute_lane_root_from_subroots_and_frontier(
+                    &[],
+                    Some(&honest_leaves[..5]),
+                    5,
+                )
+                .unwrap();
+                sync_compact_store_with_batch(
+                    &mut st_lag,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 5, 0, lag_f5_root))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                    Some(make_subtree(0, 0, &honest_leaves[..5]))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(st_lag.lanes[0].frontier_leaves.len(), 10);
+            }
+
+            // --- 5g. Round-6 Finding #2: Mid-subtree boundary (`18*256 + 10`) zero pinpoint & liveness ---
+            {
+                let fc50: u64 = 50;
+                let mut sub18_leaves = dummy_leaves.clone();
+                sub18_leaves[5] = cm_r4;
+                let sub18_root = compute_subtree_256_root(&sub18_leaves, SUBTREE_LEAVES);
+                let mut roots50 = vec![dummy_subroot; fc50 as usize];
+                roots50[18] = sub18_root;
+                let lroot50 =
+                    compute_lane_root_from_subroots_and_frontier(&roots50, None, 0).unwrap();
+                let sub50_lu: BTreeMap<Address, u64> = (0..fc50)
+                    .map(|s| (derive_subtree_pda(&program_id, 0, 0, s).0, s))
+                    .collect();
+
+                let dec_mid = crate::keys::DecryptedMemo {
+                    tweak: tw_r4,
+                    blinding: bl_r4,
+                    amount: 77_000,
+                    mint: WSOL_MINT,
+                    memo_version: 1,
+                    memo_flags: 0,
+                    payment_id: [0u8; 14],
+                    is_dynamic: false,
+                };
+                // Store with mid-subtree next_memo_leaf = 18*256 + 10 and legacy unfrozen note at (0, 18*256 + 5)
+                let make_mid_store = |note_leaf: Option<u64>| -> CompactWalletStore {
+                    let mut st = CompactWalletStore::new(0, 0);
+                    st.lanes[0].next_memo_leaf = 18 * SUBTREE_LEAVES as u64 + 10;
+                    st.lanes[0].finalized_subroots = roots50.iter().map(fr_to_be_bytes).collect();
+                    if let Some(leaf) = note_leaf {
+                        st.record_verified_memo(&fvk, 0, leaf, &dec_mid, fr_to_be_bytes(&cm_r4))
+                            .unwrap();
+                    }
+                    st
+                };
+
+                let run_mid = |base: &CompactWalletStore, serve_memos: bool, serve_subs: bool| -> (Vec<u64>, CompactWalletStore) {
+                    let mut st = base.clone();
+                    let mut acc: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                    acc.insert(pool_pda, pool1.clone());
+                    acc.insert(
+                        derive_lane_pda(&program_id, 0, 0).0,
+                        make_lane_with_root(0, fc50 * SUBTREE_LEAVES as u64, 0, lroot50),
+                    );
+                    if serve_memos {
+                        let m0 = (18 * SUBTREE_LEAVES as u64) / MEMO_NOTES_PER_PAGE as u64;
+                        let m1 = (fc50 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                        for m in m0..m1 {
+                            let cnt = ((fc50 * SUBTREE_LEAVES as u64)
+                                .saturating_sub(m * MEMO_NOTES_PER_PAGE as u64))
+                            .min(MEMO_NOTES_PER_PAGE as u64) as u16;
+                            acc.insert(derive_memo_pda(&program_id, 0, 0, m).0, make_memo(0, m, cnt, 0));
+                        }
+                    }
+                    if serve_subs {
+                        for s in 0..fc50 {
+                            let lvs = if s == 18 { &sub18_leaves } else { &dummy_leaves };
+                            acc.insert(derive_subtree_pda(&program_id, 0, 0, s).0, make_subtree(0, s, lvs));
+                        }
+                    }
+                    let p1d = RefCell::new(Vec::<u64>::new());
+                    let _ = sync_compact_store_with_batch(
+                        &mut st,
+                        &fvk,
+                        |addrs, _| {
+                            for a in addrs {
+                                if let Some(&s) = sub50_lu.get(a) {
+                                    p1d.borrow_mut().push(s);
+                                }
+                            }
+                            addrs.iter().map(|a| acc.get(a).cloned()).collect()
+                        },
+                        &program_id,
+                        SyncOptions::default(),
+                    )
+                    .unwrap();
+                    (p1d.into_inner(), st)
+                };
+
+                let st_note18 = make_mid_store(Some(18 * SUBTREE_LEAVES as u64 + 5));
+                let st_zero = make_mid_store(None);
+                let (b1_note18, _) = run_mid(&st_note18, true, false);
+                let (b2_note18, _) = run_mid(&st_note18, false, false);
+                let (b2_zero, _) = run_mid(&st_zero, false, false);
+                assert_eq!(b1_note18.len(), 16);
+                assert!(b1_note18.contains(&18));
+                assert!(b1_note18.iter().all(|&s| s >= 18));
+                assert_eq!(b2_note18.len(), 16);
+                assert!(
+                    b2_note18.iter().all(|&s| s < 18),
+                    "Round-6 Finding #2: dropped MemoPage 48 MUST NOT fetch subtree 18 (zero singleton pinpoint!)"
+                );
+                assert_eq!(
+                    b2_note18, b2_zero,
+                    "Round-6 Finding #2: note at (0, 18*256+5) MUST be byte-identical to 0-note wallet on dropped MemoPage 48"
+                );
+                // Liveness: honest sync MUST freeze the unfrozen note at (0, 18*256+5)!
+                let (_, st_frozen) = run_mid(&st_note18, true, true);
+                assert!(
+                    st_frozen.notes[0].frozen_intra_siblings.is_some(),
+                    "Round-6 Finding #2 liveness: honest sync MUST freeze mid-subtree note at (0, 18*256+5)"
+                );
+
+                // Legacy note at (0, 3) with mid-subtree next_memo_leaf = 18*256+10:
+                // L' MUST be [0..18) with 0% rotation across served vs dropped MemoPage 48!
+                let st_note3 = make_mid_store(Some(3 * SUBTREE_LEAVES as u64 + 5));
+                let (b1_note3, _) = run_mid(&st_note3, true, false);
+                let (b2_note3, _) = run_mid(&st_note3, false, false);
+                let b1_note3_legacy: Vec<u64> = b1_note3.into_iter().filter(|&s| s < 18).collect();
+                assert_eq!(b2_note3.len(), 16);
+                assert!(b2_note3.iter().all(|&s| s < 18));
+                assert_eq!(
+                    b2_note3, b1_note3_legacy,
+                    "Round-6 Finding #2: legacy note at (0, 3) with mid-subtree watermark MUST have 0% L' rotation on MemoPage drop"
+                );
+            }
+
+            // --- 5h. Round-7 Finding #1: Permissionless cross-lane griefing (1-copy & 70-copy > 64) ---
+            {
+                let bob_g_fvk = AudrenKeys::from_seed(&[0xb7u8; 32]).full_viewing_key();
+                // POC 1A: 100% honest RPC, 16 lanes * 4 sealed subtrees = 64 subtrees (176 MemoPages > 25).
+                // Griefer copied Alice's memo onto Lane 0 Subtree 0 with dummy cm; Alice's real 77k note
+                // is on Lane 15 Subtree 2. Cold restore MUST recover Alice's note with 0-bit leak vs Bob!
+                let fc4: u64 = 4;
+                let n_m4 = (fc4 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                let mut real_l15_s2 = dummy_leaves.clone();
+                real_l15_s2[9] = cm_r4;
+                let real_l15_s2_root = compute_subtree_256_root(&real_l15_s2, SUBTREE_LEAVES);
+                let roots4 = vec![dummy_subroot; fc4 as usize];
+                let lroot4 = compute_lane_root_from_subroots_and_frontier(&roots4, None, 0).unwrap();
+                let mut roots4_l15 = roots4.clone();
+                roots4_l15[2] = real_l15_s2_root;
+                let lroot4_l15 =
+                    compute_lane_root_from_subroots_and_frontier(&roots4_l15, None, 0).unwrap();
+
+                let mut acc_g1: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                let mut sub_g1: BTreeSet<Address> = BTreeSet::new();
+                acc_g1.insert(pool_pda, pool16.clone());
+                for l in 0..16u8 {
+                    acc_g1.insert(
+                        derive_lane_pda(&program_id, 0, l).0,
+                        make_lane_with_root(
+                            l,
+                            fc4 * SUBTREE_LEAVES as u64,
+                            0,
+                            if l == 15 { lroot4_l15 } else { lroot4 },
+                        ),
+                    );
+                    acc_g1.insert(
+                        derive_subroot_pda(&program_id, 0, l, 0).0,
+                        make_subroot(l, 0, if l == 15 { &roots4_l15 } else { &roots4 }),
+                    );
+                    for s in 0..fc4 {
+                        let a = derive_subtree_pda(&program_id, 0, l, s).0;
+                        sub_g1.insert(a);
+                        acc_g1.insert(
+                            a,
+                            make_subtree(
+                                l,
+                                s,
+                                if l == 15 && s == 2 { &real_l15_s2 } else { &dummy_leaves },
+                            ),
+                        );
+                    }
+                    for m in 0..n_m4 {
+                        let cnt = ((fc4 * SUBTREE_LEAVES as u64)
+                            .saturating_sub(m * MEMO_NOTES_PER_PAGE as u64))
+                        .min(MEMO_NOTES_PER_PAGE as u64) as u16;
+                        let mut raw = make_memo(l, m, cnt, 0);
+                        if l == 0 && m == 0 {
+                            write_memo(&mut raw, 0, &memo_r4); // Griefer's Lane 0 decoy copy!
+                        } else if l == 15 {
+                            let real_leaf = 2 * SUBTREE_LEAVES as u64 + 9;
+                            if m == real_leaf / MEMO_NOTES_PER_PAGE as u64 {
+                                write_memo(&mut raw, (real_leaf % MEMO_NOTES_PER_PAGE as u64) as usize, &memo_r4);
+                            }
+                        }
+                        acc_g1.insert(derive_memo_pda(&program_id, 0, l, m).0, raw);
+                    }
+                }
+                let mut st_g1_a = CompactWalletStore::new(0, 0);
+                let mut st_g1_b = CompactWalletStore::new(0, 0);
+                let p1d_a = RefCell::new(Vec::<Address>::new());
+                let p1d_b = RefCell::new(Vec::<Address>::new());
+                let (_, _, disc_a) = sync_compact_store_with_batch(
+                    &mut st_g1_a,
+                    &fvk,
+                    |addrs, _| {
+                        for a in addrs {
+                            if sub_g1.contains(a) {
+                                p1d_a.borrow_mut().push(*a);
+                            }
+                        }
+                        addrs.iter().map(|a| acc_g1.get(a).cloned()).collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                let (_, _, disc_b) = sync_compact_store_with_batch(
+                    &mut st_g1_b,
+                    &bob_g_fvk,
+                    |addrs, _| {
+                        for a in addrs {
+                            if sub_g1.contains(a) {
+                                p1d_b.borrow_mut().push(*a);
+                            }
+                        }
+                        addrs.iter().map(|a| acc_g1.get(a).cloned()).collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(disc_a, 1, "Round-7 Finding #1 POC 1A: Alice MUST recover her Lane 15 note despite Lane 0 griefer copy!");
+                assert_eq!(st_g1_a.notes[0].lane_id, 15);
+                assert!(st_g1_a.notes[0].frozen_intra_siblings.is_some());
+                assert_eq!(disc_b, 0);
+                assert_eq!(p1d_a.into_inner().len(), 18, "2 public dup subtrees + 16 non-public = 18");
+                assert_eq!(p1d_b.into_inner().len(), 18, "Bob must fetch exact same 18 sealed subtrees");
+
+                // POC 1B: 70 fake copies on Lane 0 (`> MAX_PUBLIC_DUP_SUBTREES = 64`) + Alice's real note
+                // on Lane 15 Subtree 0! Two syncs MUST monotonically recover Alice's note with identical
+                // watermarks between Alice and Bob on Sync #1 and Sync #2!
+                let fc70: u64 = 70;
+                let n_m70 = (fc70 * SUBTREE_LEAVES as u64).div_ceil(MEMO_NOTES_PER_PAGE as u64);
+                let roots70 = vec![dummy_subroot; fc70 as usize];
+                let lroot70 = compute_lane_root_from_subroots_and_frontier(&roots70, None, 0).unwrap();
+                let mut real_l15_s0 = dummy_leaves.clone();
+                real_l15_s0[4] = cm_r4;
+                let lroot_l15_1 = compute_lane_root_from_subroots_and_frontier(
+                    &[compute_subtree_256_root(&real_l15_s0, SUBTREE_LEAVES)],
+                    None,
+                    0,
+                )
+                .unwrap();
+                let mut acc_g70: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
+                acc_g70.insert(pool_pda, pool16.clone());
+                acc_g70.insert(
+                    derive_lane_pda(&program_id, 0, 0).0,
+                    make_lane_with_root(0, fc70 * SUBTREE_LEAVES as u64, 0, lroot70),
+                );
+                acc_g70.insert(derive_subroot_pda(&program_id, 0, 0, 0).0, make_subroot(0, 0, &roots70));
+                for s in 0..fc70 {
+                    acc_g70.insert(derive_subtree_pda(&program_id, 0, 0, s).0, make_subtree(0, s, &dummy_leaves));
+                }
+                for m in 0..n_m70 {
+                    let cnt = ((fc70 * SUBTREE_LEAVES as u64)
+                        .saturating_sub(m * MEMO_NOTES_PER_PAGE as u64))
+                    .min(MEMO_NOTES_PER_PAGE as u64) as u16;
+                    acc_g70.insert(derive_memo_pda(&program_id, 0, 0, m).0, make_memo(0, m, cnt, 0));
+                }
+                for s in 0..fc70 {
+                    let leaf = s * SUBTREE_LEAVES as u64;
+                    let m = leaf / MEMO_NOTES_PER_PAGE as u64;
+                    let slot = (leaf % MEMO_NOTES_PER_PAGE as u64) as usize;
+                    write_memo(
+                        acc_g70.get_mut(&derive_memo_pda(&program_id, 0, 0, m).0).unwrap(),
+                        slot,
+                        &memo_r4,
+                    );
+                }
+                for l in 1..15u8 {
+                    acc_g70.insert(
+                        derive_lane_pda(&program_id, 0, l).0,
+                        make_lane_with_root(l, 0, 0, zero_hashes_4ary()[LANE_DEPTH_4ARY]),
+                    );
+                }
+                acc_g70.insert(
+                    derive_lane_pda(&program_id, 0, 15).0,
+                    make_lane_with_root(15, SUBTREE_LEAVES as u64, 0, lroot_l15_1),
+                );
+                acc_g70.insert(
+                    derive_subroot_pda(&program_id, 0, 15, 0).0,
+                    make_subroot(15, 0, &[compute_subtree_256_root(&real_l15_s0, SUBTREE_LEAVES)]),
+                );
+                acc_g70.insert(
+                    derive_subtree_pda(&program_id, 0, 15, 0).0,
+                    make_subtree(15, 0, &real_l15_s0),
+                );
+                for m in 0..3u64 {
+                    let cnt = if m < 2 { 96 } else { 64 };
+                    let mut raw = make_memo(15, m, cnt, 0);
+                    if m == 0 {
+                        write_memo(&mut raw, 4, &memo_r4);
+                    }
+                    acc_g70.insert(derive_memo_pda(&program_id, 0, 15, m).0, raw);
+                }
+                let mut st70_a = CompactWalletStore::new(0, 0);
+                let mut st70_b = CompactWalletStore::new(0, 0);
+                // Sync #1: Lane 0 advances to 64*256, Lane 15 capped at 0 identically for Alice & Bob!
+                sync_compact_store_with_batch(
+                    &mut st70_a,
+                    &fvk,
+                    |addrs, _| addrs.iter().map(|a| acc_g70.get(a).cloned()).collect(),
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                sync_compact_store_with_batch(
+                    &mut st70_b,
+                    &bob_g_fvk,
+                    |addrs, _| addrs.iter().map(|a| acc_g70.get(a).cloned()).collect(),
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(st70_a.lanes[0].next_memo_leaf, 64 * SUBTREE_LEAVES as u64);
+                assert_eq!(st70_b.lanes[0].next_memo_leaf, 64 * SUBTREE_LEAVES as u64);
+                assert_eq!(st70_a.lanes[15].next_memo_leaf, 0);
+                assert_eq!(st70_b.lanes[15].next_memo_leaf, 0);
+                // Sync #2: finishes remaining 6 copies on Lane 0 + recovers Alice's real note on Lane 15!
+                let (_, _, disc70_2) = sync_compact_store_with_batch(
+                    &mut st70_a,
+                    &fvk,
+                    |addrs, _| addrs.iter().map(|a| acc_g70.get(a).cloned()).collect(),
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                sync_compact_store_with_batch(
+                    &mut st70_b,
+                    &bob_g_fvk,
+                    |addrs, _| addrs.iter().map(|a| acc_g70.get(a).cloned()).collect(),
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(disc70_2, 1, "Round-7 Finding #1 POC 1B: Alice MUST recover her note on Sync #2 despite 70 copies!");
+                assert_eq!(st70_a.notes[0].lane_id, 15);
+                assert!(st70_a.notes[0].frozen_intra_siblings.is_some());
+                assert_eq!(st70_a.lanes[0].next_memo_leaf, fc70 * SUBTREE_LEAVES as u64);
+                assert_eq!(st70_a.lanes[15].next_memo_leaf, SUBTREE_LEAVES as u64);
+                assert_eq!(st70_b.lanes[0].next_memo_leaf, fc70 * SUBTREE_LEAVES as u64);
+                assert_eq!(st70_b.lanes[15].next_memo_leaf, SUBTREE_LEAVES as u64);
+            }
+
+            // --- 5i. Round-7 Finding #2: Lagging `next_leaf` inside already-finalized `finalized_subroots` ---
+            {
+                let mut st_lag_inj = CompactWalletStore::new(0, 0);
+                st_lag_inj.lanes[0].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot); 50];
+                st_lag_inj.lanes[0].frontier_sub_seq = 50;
+                st_lag_inj.lanes[0].next_memo_leaf = 20 * SUBTREE_LEAVES as u64;
+
+                let fake_root = compute_lane_root_from_subroots_and_frontier(
+                    &vec![dummy_subroot; 20],
+                    Some(&[cm_r4]),
+                    1,
+                )
+                .unwrap();
+                let fake_leaf = 20 * SUBTREE_LEAVES as u64;
+                let fake_m = fake_leaf / MEMO_NOTES_PER_PAGE as u64;
+                let fake_slot = (fake_leaf % MEMO_NOTES_PER_PAGE as u64) as usize;
+                let mut fake_memo_page = make_memo(0, fake_m, (fake_slot + 1) as u16, 0);
+                write_memo(&mut fake_memo_page, fake_slot, &memo_r4);
+
+                let (_, _, disc_inj) = sync_compact_store_with_batch(
+                    &mut st_lag_inj,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, fake_leaf + 1, 0, fake_root))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 20).0 {
+                                    Some(make_subtree(0, 20, &[cm_r4]))
+                                } else if *a == derive_memo_pda(&program_id, 0, 0, fake_m).0 {
+                                    Some(fake_memo_page.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(disc_inj, 0, "Round-7 Finding #2: lagging next_leaf into finalized_subroots MUST NOT inject forged note!");
+                assert!(st_lag_inj.notes.is_empty());
+                assert_eq!(
+                    st_lag_inj.lanes[0].next_memo_leaf,
+                    20 * SUBTREE_LEAVES as u64,
+                    "Round-7 Finding #2: lagging lane MUST NOT advance next_memo_leaf past unverified real leaves!"
+                );
+
+                // Also verify a forged 256-leaf page at seq=20 (< finalized_subroots.len()) returns Err!
+                let mut forged_256 = dummy_leaves.clone();
+                forged_256[0] = cm_r4;
+                let res_256 = sync_compact_store_with_batch(
+                    &mut st_lag_inj,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, fake_leaf + 1, 0, fake_root))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 20).0 {
+                                    Some(make_subtree(0, 20, &forged_256))
+                                } else if *a == derive_memo_pda(&program_id, 0, 0, fake_m).0 {
+                                    Some(fake_memo_page.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                );
+                assert!(
+                    res_256.is_err(),
+                    "Round-7 Finding #2: forged 256-leaf SubtreePage covering persisted finalized_subroots[20] MUST return Err"
+                );
+            }
+
+            // --- 5j. Round-7 Finding #3: Immutable `finalized_subroots` across store & Pass 1A ---
+            {
+                let mut st_imm = CompactWalletStore::new(0, 0);
+                st_imm.lanes[0].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot); 5];
+                st_imm.lanes[0].frontier_sub_seq = 5;
+                let orig_root1 = st_imm.lanes[0].finalized_subroots[1];
+
+                // 3a. ingest_lane_pages rejects forged sealed SubtreePage(0, 1)
+                let mut bad_leaves = dummy_leaves.clone();
+                bad_leaves[0] = Fr::from(123_456_789u64);
+                let bad_sub1 = make_subtree(0, 1, &bad_leaves);
+                assert!(
+                    st_imm
+                        .ingest_lane_pages(&fvk, 0, &[(1, &bad_sub1)], &[], &[])
+                        .is_err(),
+                    "Round-7 Finding #3: ingest_lane_pages must reject forged sealed SubtreePage contradicting finalized_subroots[1]"
+                );
+                assert_eq!(st_imm.lanes[0].finalized_subroots[1], orig_root1);
+
+                // 3b. ingest_subroot_pages rejects tampered overlapping slot 1
+                let mut bad_roots = vec![dummy_subroot; 6];
+                bad_roots[1] = Fr::from(987_654_321u64);
+                let bad_sr0 = make_subroot(0, 0, &bad_roots);
+                assert!(
+                    st_imm.ingest_subroot_pages(0, &[(0, &bad_sr0)], None).is_err(),
+                    "Round-7 Finding #3: ingest_subroot_pages must reject tampered overlapping finalized_subroots[1]"
+                );
+                assert_eq!(st_imm.lanes[0].finalized_subroots.len(), 5);
+                assert_eq!(st_imm.lanes[0].finalized_subroots[1], orig_root1);
+
+                // 3c. Pass 1A rejects tampered overlapping slot 1 before Pass 2
+                let lroot6 = compute_lane_root_from_subroots_and_frontier(&bad_roots, None, 0).unwrap();
+                let res_p1a = sync_compact_store_with_batch(
+                    &mut st_imm,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 6 * SUBTREE_LEAVES as u64, 0, lroot6))
+                                } else if *a == derive_subroot_pda(&program_id, 0, 0, 0).0 {
+                                    Some(bad_sr0.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                );
+                assert!(
+                    res_p1a.is_err(),
+                    "Round-7 Finding #3: Pass 1A must reject tampered overlapping SubtreeRootPage slot 1"
+                );
+            }
+
+            // --- 5k. Round-8 Finding #1: `all_caught_up` rolls back `next_nf_index` under lagging
+            //     `next_leaf` (1A), lagging unsealed frontier (1B), AND lagging `active_lanes` (1C) ---
+            {
+                let mut nf0_500 = vec![0u8; NF_PAGE_LEN];
+                nf0_500[0..8].copy_from_slice(&NF_PAGE_MAGIC);
+                nf0_500[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&500u16.to_le_bytes());
+                let empty_root = zero_hashes_4ary()[LANE_DEPTH_4ARY];
+
+                // Trigger 1A: Lane 15 has 1 persisted finalized subroot (next_memo_leaf = 0),
+                // Sync receives lagging Lane 15 next_leaf=0 + Lane 0 nf_count=500 -> MUST roll back next_nf_index!
+                let mut st_1a = CompactWalletStore::new(0, 0);
+                st_1a.lanes[15].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot)];
+                sync_compact_store_with_batch(
+                    &mut st_1a,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool16.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 0, 500, empty_root))
+                                } else if *a == derive_nf_page_pda(&program_id, 0, 0, 0).0 {
+                                    Some(nf0_500.clone())
+                                } else {
+                                    (1..16u8)
+                                        .find(|&l| *a == derive_lane_pda(&program_id, 0, l).0)
+                                        .map(|l| make_lane_with_root(l, 0, 0, empty_root))
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    st_1a.lanes[0].next_nf_index, 0,
+                    "Round-8 Finding #1 (1A): lagging Lane 15 next_leaf=0 with persisted subroot MUST roll back Lane 0 next_nf_index"
+                );
+
+                // Trigger 1B: Lane 0 has frontier_leaves.len()=50, next_memo_leaf=10; Sync receives
+                // lagging next_leaf=10 (matching prefix) + nf_count=500 -> MUST roll back next_nf_index!
+                let mut st_1b = CompactWalletStore::new(0, 0);
+                st_1b.lanes[0].frontier_sub_seq = 0;
+                st_1b.lanes[0].frontier_leaves =
+                    dummy_leaves[..50].iter().map(fr_to_be_bytes).collect();
+                st_1b.lanes[0].next_memo_leaf = 10;
+                let root10 = compute_lane_root_from_subroots_and_frontier(
+                    &[],
+                    Some(&dummy_leaves[..10]),
+                    10,
+                )
+                .unwrap();
+                sync_compact_store_with_batch(
+                    &mut st_1b,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 10, 500, root10))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                    Some(make_subtree(0, 0, &dummy_leaves[..10]))
+                                } else if *a == derive_nf_page_pda(&program_id, 0, 0, 0).0 {
+                                    Some(nf0_500.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    st_1b.lanes[0].next_nf_index, 0,
+                    "Round-8 Finding #1 (1B): lagging frontier next_leaf=10 < persisted frontier_leaves.len()=50 MUST roll back next_nf_index"
+                );
+
+                // Trigger 1C: Lane 15 has persisted finalized subroot (next_memo_leaf=0), Sync
+                // receives lagging PoolState.active_lanes=1 + Lane 0 nf_count=500 -> MUST roll back!
+                let mut st_1c = CompactWalletStore::new(0, 0);
+                st_1c.lanes[15].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot)];
+                sync_compact_store_with_batch(
+                    &mut st_1c,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 0, 500, empty_root))
+                                } else if *a == derive_nf_page_pda(&program_id, 0, 0, 0).0 {
+                                    Some(nf0_500.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    st_1c.lanes[0].next_nf_index, 0,
+                    "Round-8 Finding #1 (1C): lagging active_lanes=1 hiding unscanned Lane 15 MUST roll back next_nf_index"
+                );
+            }
+
+            // --- 5l. Round-8 Finding #2: `ingest_lane_pages` rejects truncated `< 256`-leaf
+            //     `SubtreePage` covering already-finalized `seq < finalized_subroots.len()` ---
+            {
+                let mut forged_10 = dummy_leaves[..10].to_vec();
+                forged_10[0] = cm_r4;
+                let forged_sub0_10 = make_subtree(0, 0, &forged_10);
+                let mut forged_memo0 = make_memo(0, 0, 10, 0);
+                write_memo(&mut forged_memo0, 0, &memo_r4);
+
+                // Trigger 2A (after ingest_subroot_pages: frontier_sub_seq=0, frontier_leaves=[])
+                let mut st_2a = CompactWalletStore::new(0, 0);
+                let sr0_5 = make_subroot(0, 0, &[dummy_subroot; 5]);
+                st_2a.ingest_subroot_pages(0, &[(0, &sr0_5)], None).unwrap();
+                assert!(
+                    st_2a
+                        .ingest_lane_pages(&fvk, 0, &[(0, &forged_sub0_10)], &[(0, &forged_memo0)], &[])
+                        .is_err(),
+                    "Round-8 Finding #2 (2A): truncated SubtreePage at finalized seq=0 must be rejected"
+                );
+                assert!(st_2a.notes.is_empty());
+                assert_eq!(st_2a.lanes[0].next_memo_leaf, 0);
+                assert!(st_2a.lanes[0].frontier_leaves.is_empty());
+
+                // Trigger 2C (partial frontier_leaves.len()=10 + finalized_subroots[0])
+                let mut st_2c = CompactWalletStore::new(0, 0);
+                st_2c.lanes[0].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot)];
+                st_2c.lanes[0].frontier_sub_seq = 0;
+                st_2c.lanes[0].frontier_leaves =
+                    dummy_leaves[..10].iter().map(fr_to_be_bytes).collect();
+                st_2c.lanes[0].next_memo_leaf = 10;
+                let mut forged_20 = dummy_leaves[..20].to_vec();
+                forged_20[15] = cm_r4;
+                let forged_sub0_20 = make_subtree(0, 0, &forged_20);
+                assert!(
+                    st_2c
+                        .ingest_lane_pages(&fvk, 0, &[(0, &forged_sub0_20)], &[], &[])
+                        .is_err(),
+                    "Round-8 Finding #2 (2C): truncated 20-leaf SubtreePage extending partial frontier at finalized seq=0 must be rejected"
+                );
+                assert_eq!(st_2c.lanes[0].frontier_leaves.len(), 10);
+            }
+
+            // --- 5m. Round-9 Finding #1: Caught-up returning wallet MUST roll back `next_nf_index`
+            //     whenever Phase 0 lags below persisted monotonic high-water marks (1A, 1B, 1C) ---
+            {
+                let mut nf0_1 = vec![0u8; NF_PAGE_LEN];
+                nf0_1[0..8].copy_from_slice(&NF_PAGE_MAGIC);
+                nf0_1[NF_OFF_COUNT..NF_OFF_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+                let empty_root = zero_hashes_4ary()[LANE_DEPTH_4ARY];
+                let root_100 = compute_lane_root_from_subroots_and_frontier(
+                    &[],
+                    Some(&dummy_leaves[..100]),
+                    100,
+                )
+                .unwrap();
+                let root_260 = compute_lane_root_from_subroots_and_frontier(
+                    &[dummy_subroot],
+                    Some(&dummy_leaves[..4]),
+                    4,
+                )
+                .unwrap();
+
+                let make_caught_up = || -> CompactWalletStore {
+                    let mut st = CompactWalletStore::new(0, 0);
+                    st.lanes[0].frontier_sub_seq = 0;
+                    st.lanes[0].frontier_leaves =
+                        dummy_leaves[..100].iter().map(fr_to_be_bytes).collect();
+                    st.lanes[0].next_memo_leaf = 100;
+                    st.lanes[15].finalized_subroots = vec![fr_to_be_bytes(&dummy_subroot)];
+                    st.lanes[15].frontier_sub_seq = 1;
+                    st.lanes[15].frontier_leaves =
+                        dummy_leaves[..44].iter().map(fr_to_be_bytes).collect();
+                    st.lanes[15].next_memo_leaf = 300;
+                    st
+                };
+
+                // Trigger 1A: Lane 15 next_leaf=100 < finalized_subroots.len()*256 (256)
+                let mut st_r9_1a = make_caught_up();
+                sync_compact_store_with_batch(
+                    &mut st_r9_1a,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool16.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 100, 1, root_100))
+                                } else if *a == derive_lane_pda(&program_id, 0, 15).0 {
+                                    Some(make_lane_with_root(15, 100, 0, root_100))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                    Some(make_subtree(0, 0, &dummy_leaves[..100]))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 15, 0).0 {
+                                    Some(make_subtree(15, 0, &dummy_leaves[..100]))
+                                } else if *a == derive_nf_page_pda(&program_id, 0, 0, 0).0 {
+                                    Some(nf0_1.clone())
+                                } else {
+                                    (1..15u8)
+                                        .find(|&l| *a == derive_lane_pda(&program_id, 0, l).0)
+                                        .map(|l| make_lane_with_root(l, 0, 0, empty_root))
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    st_r9_1a.lanes[0].next_nf_index, 0,
+                    "Round-9 Finding #1 (1A): caught-up wallet with lagging Lane 15 next_leaf=100 < 300 MUST roll back next_nf_index"
+                );
+
+                // Trigger 1B: Lane 15 next_leaf=260 < persisted frontier (300)
+                let mut st_r9_1b = make_caught_up();
+                sync_compact_store_with_batch(
+                    &mut st_r9_1b,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool16.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 100, 1, root_100))
+                                } else if *a == derive_lane_pda(&program_id, 0, 15).0 {
+                                    Some(make_lane_with_root(15, 260, 0, root_260))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                    Some(make_subtree(0, 0, &dummy_leaves[..100]))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 15, 1).0 {
+                                    Some(make_subtree(15, 1, &dummy_leaves[..4]))
+                                } else if *a == derive_nf_page_pda(&program_id, 0, 0, 0).0 {
+                                    Some(nf0_1.clone())
+                                } else {
+                                    (1..15u8)
+                                        .find(|&l| *a == derive_lane_pda(&program_id, 0, l).0)
+                                        .map(|l| make_lane_with_root(l, 0, 0, empty_root))
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    st_r9_1b.lanes[0].next_nf_index, 0,
+                    "Round-9 Finding #1 (1B): caught-up wallet with lagging Lane 15 frontier 260 < 300 MUST roll back next_nf_index"
+                );
+
+                // Trigger 1C: lagging PoolState.active_lanes=1 hiding caught-up Lane 15
+                let mut st_r9_1c = make_caught_up();
+                sync_compact_store_with_batch(
+                    &mut st_r9_1c,
+                    &fvk,
+                    |addrs, _| {
+                        addrs
+                            .iter()
+                            .map(|a| {
+                                if *a == pool_pda {
+                                    Some(pool1.clone())
+                                } else if *a == derive_lane_pda(&program_id, 0, 0).0 {
+                                    Some(make_lane_with_root(0, 100, 1, root_100))
+                                } else if *a == derive_subtree_pda(&program_id, 0, 0, 0).0 {
+                                    Some(make_subtree(0, 0, &dummy_leaves[..100]))
+                                } else if *a == derive_nf_page_pda(&program_id, 0, 0, 0).0 {
+                                    Some(nf0_1.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    },
+                    &program_id,
+                    SyncOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    st_r9_1c.lanes[0].next_nf_index, 0,
+                    "Round-9 Finding #1 (1C): caught-up wallet with lagging active_lanes=1 hiding Lane 15 MUST roll back next_nf_index"
+                );
+            }
         }
     }
 }

@@ -464,12 +464,12 @@ fn derive_rlc_scalars(domain_tag: &[u8], prev_sha256: &str, next_sha256: &str, l
     out
 }
 
-fn apply_delta(pk: &mut ProvingKey<Bn254>, delta: Fr) {
+fn apply_delta(pk: &mut ProvingKey<Bn254>, delta: &Fr) {
     assert!(!delta.is_zero(), "delta must be non-zero");
     let mut delta_inv = delta.inverse().expect("delta invertible");
 
-    pk.delta_g1 = (pk.delta_g1.into_group() * delta).into_affine();
-    pk.vk.delta_g2 = (pk.vk.delta_g2.into_group() * delta).into_affine();
+    pk.delta_g1 = (pk.delta_g1.into_group() * *delta).into_affine();
+    pk.vk.delta_g2 = (pk.vk.delta_g2.into_group() * *delta).into_affine();
 
     let l_proj: Vec<G1Projective> = pk.l_query.iter().map(|p| p.into_group() * delta_inv).collect();
     pk.l_query = G1Projective::normalize_batch(&l_proj);
@@ -918,7 +918,7 @@ fn verify_transcript(
             if idx + 1 == steps.len() {
                 let inv_delta = exp_delta.inverse().expect("beacon delta invertible");
                 let mut pre_beacon_pk = final_pk.clone();
-                apply_delta(&mut pre_beacon_pk, inv_delta);
+                apply_delta(&mut pre_beacon_pk, &inv_delta);
                 let recovered_pre_sha = sha256_hex(&serialize_pk(&pre_beacon_pk));
                 assert_eq!(
                     recovered_pre_sha, cur_sha,
@@ -1042,7 +1042,7 @@ fn main() {
             let pok_r_g1 = (G1Affine::generator().into_group() * r).into_affine();
 
             let mut next_pk = prev_pk.clone();
-            apply_delta(&mut next_pk, delta);
+            apply_delta(&mut next_pk, &delta);
 
             let e = schnorr_challenge(
                 &prev_sha,
@@ -1120,7 +1120,7 @@ fn main() {
             let pok_r_g1 = (G1Affine::generator().into_group() * r).into_affine();
 
             let mut next_pk = prev_pk.clone();
-            apply_delta(&mut next_pk, delta);
+            apply_delta(&mut next_pk, &delta);
 
             let e = schnorr_challenge(
                 &prev_sha,
@@ -1209,7 +1209,7 @@ fn main() {
                         let bh = parse_json_str(&att, "solana_mainnet_blockhash");
                         let exp_delta = derive_beacon_delta(&cur_sha, dr, &drand_rand, slot, &bh);
                         let mut exp_next = cur_pk.clone();
-                        apply_delta(&mut exp_next, exp_delta);
+                        apply_delta(&mut exp_next, &exp_delta);
                         assert_eq!(
                             sha256_hex(&serialize_pk(&exp_next)),
                             next_sha,

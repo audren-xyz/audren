@@ -9,6 +9,9 @@
 #![no_std]
 #![allow(unexpected_cfgs)]
 
+#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
+extern crate alloc;
+
 pub mod instruction;
 pub mod layout;
 
@@ -269,10 +272,19 @@ pub const fn pack_u64_pair_be32(public_amount_out: u64, relayer_fee_amount: u64)
     out
 }
 
-/// Compile-time Base58 decoder for 32-byte Solana addresses (zero runtime overhead).
+/// Compile-time Base58 decoder for exact 32-byte canonical Solana addresses (zero runtime overhead).
+/// Rejects empty strings, short addresses, non-Base58 characters, >32-byte overflows, and
+/// non-canonical leading `'1'` prefixes.
 pub const fn decode_base58(input: &str) -> Bytes32 {
     const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let bytes = input.as_bytes();
+    assert!(!bytes.is_empty(), "empty base58 string");
+
+    let mut leading_ones = 0usize;
+    while leading_ones < bytes.len() && bytes[leading_ones] == b'1' {
+        leading_ones += 1;
+    }
+
     let mut out = [0u8; 32];
     let mut i = 0;
     while i < bytes.len() {
@@ -297,6 +309,15 @@ pub const fn decode_base58(input: &str) -> Bytes32 {
         assert!(carry == 0, "base58 value overflows 32 bytes");
         i += 1;
     }
+
+    let mut first_nz = 0usize;
+    while first_nz < 32 && out[first_nz] == 0 {
+        first_nz += 1;
+    }
+    assert!(
+        leading_ones == first_nz,
+        "base58 decoded length must be exactly 32 bytes"
+    );
     out
 }
 
@@ -312,5 +333,39 @@ mod tests {
             0xd6, 0x3a, 0xa6, 0x87,
         ];
         assert_eq!(ELGAMAL_REGISTRY_PROGRAM_ID, expected);
+        assert_eq!(
+            decode_base58("11111111111111111111111111111111"),
+            SYSTEM_PROGRAM_ID
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "empty base58 string")]
+    fn decode_base58_rejects_empty() {
+        let _ = decode_base58("");
+    }
+
+    #[test]
+    #[should_panic(expected = "base58 decoded length must be exactly 32 bytes")]
+    fn decode_base58_rejects_short_ones() {
+        let _ = decode_base58("1");
+    }
+
+    #[test]
+    #[should_panic(expected = "base58 decoded length must be exactly 32 bytes")]
+    fn decode_base58_rejects_overlong_ones() {
+        let _ = decode_base58("111111111111111111111111111111111");
+    }
+
+    #[test]
+    #[should_panic(expected = "base58 decoded length must be exactly 32 bytes")]
+    fn decode_base58_rejects_short_nonzero() {
+        let _ = decode_base58("2");
+    }
+
+    #[test]
+    #[should_panic(expected = "base58 decoded length must be exactly 32 bytes")]
+    fn decode_base58_rejects_extra_leading_one() {
+        let _ = decode_base58("1AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3");
     }
 }

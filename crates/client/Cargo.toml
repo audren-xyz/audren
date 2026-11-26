@@ -22,6 +22,7 @@ serde_json = "1"
 sha2 = "0.10"
 solana-address = { version = "~2.7.0", features = ["copy", "curve25519", "std"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1.9", features = ["derive"] }
 
 [dev-dependencies]
 agave-feature-set = "=4.3.0"

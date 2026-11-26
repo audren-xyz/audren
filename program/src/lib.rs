@@ -367,7 +367,7 @@ fn create_pda_safe<'a>(
 
 // =============================================================================
 // Disjoint 32 KiB SBF Heap Arenas (`no_allocator!()`, zero stack bloat)
-//   [ 0 ..  8 KiB): WatchedEscrowBuf (`2,312 B`)
+//   [ 0 ..  8 KiB): WatchedEscrowBuf (`5,640 B`)
 //   [ 8 .. 12 KiB): RouterAccsHashBuf (`2,112 B`)
 //   [16 .. 20 KiB): InstructionAccount metas (`<= 4 KiB`)
 //   [20 .. 32 KiB): CpiAccount views (`<= 12 KiB`)
@@ -377,7 +377,10 @@ fn create_pda_safe<'a>(
 struct WatchedEscrowSnap {
     idx: u8,
     data_len: u16,
+    amount: u64,
+    lamports: u64,
     token_program: Address,
+    mint: Address,
 }
 
 struct WatchedEscrowBuf {
@@ -412,12 +415,23 @@ impl WatchedEscrowBuf {
     }
 
     #[inline(always)]
-    fn push(&mut self, idx: usize, token_program: Address, data_len: u16) {
+    fn push(
+        &mut self,
+        idx: usize,
+        token_program: Address,
+        mint: Address,
+        amount: u64,
+        lamports: u64,
+        data_len: u16,
+    ) {
         if self.len < MAX_ROUTER_CPI_ACCOUNTS {
             self.entries[self.len] = WatchedEscrowSnap {
                 idx: idx as u8,
                 data_len,
+                amount,
+                lamports,
                 token_program,
+                mint,
             };
             self.len += 1;
         }
@@ -919,7 +933,10 @@ fn load_and_verify_pool(
 ) -> Result<PoolConfig, ProgramError> {
     check_owned_and_magic(pool_acc, program_id, POOL_STATE_LEN, &POOL_MAGIC)?;
     let pd = pool_acc.try_borrow()?;
-    ensure(read_u32(&pd, PL_OFF_POOL_ID) == pool_id, AudrenError::InvalidAccount)?;
+    ensure(
+        pd[PL_OFF_VERSION] == PROTOCOL_VERSION && read_u32(&pd, PL_OFF_POOL_ID) == pool_id,
+        AudrenError::InvalidAccount,
+    )?;
     let pool_le = pool_id.to_le_bytes();
     let pb = pd[PL_OFF_BUMP];
     let exp = Address::create_program_address(&[POOL_SEED, &pool_le, &[pb]], program_id)
@@ -945,7 +962,9 @@ fn verify_lane_pda(
     check_owned_and_magic(lane_acc, program_id, LANE_STATE_LEN, &LANE_MAGIC)?;
     let ld = lane_acc.try_borrow()?;
     ensure(
-        ld[LN_OFF_LANE_ID] == lane_id && read_u32(&ld, LN_OFF_POOL_ID) == pool_id,
+        ld[LN_OFF_VERSION] == PROTOCOL_VERSION
+            && ld[LN_OFF_LANE_ID] == lane_id
+            && read_u32(&ld, LN_OFF_POOL_ID) == pool_id,
         AudrenError::InvalidLane,
     )?;
     let pool_le = pool_id.to_le_bytes();
@@ -996,6 +1015,7 @@ fn verify_roots_pda(
     ensure(
         rd.len() == ROOT_HISTORY_LEN
             && rd[RT_OFF_MAGIC..RT_OFF_MAGIC + 8] == ROOTS_MAGIC
+            && rd[RT_OFF_VERSION] == PROTOCOL_VERSION
             && read_u32(&rd, RT_OFF_POOL_ID) == pool_id,
         AudrenError::RootHistoryMismatch,
     )?;
@@ -2167,7 +2187,9 @@ fn ix_open_page(
     }
 
     ensure(
-        page_acc.owned_by(&SYSTEM_PROGRAM_ID) && page_acc.is_data_empty(),
+        page_acc.is_writable()
+            && page_acc.owned_by(&SYSTEM_PROGRAM_ID)
+            && page_acc.is_data_empty(),
         AudrenError::InvalidAccount,
     )?;
 
@@ -2186,6 +2208,9 @@ fn ix_open_page(
         payer_deficit <= max_payer_deficit,
         AudrenError::InsufficientVaultBalance,
     )?;
+    if subsidy > 0 {
+        ensure(lane_rent_vault.is_writable(), AudrenError::InvalidAccount)?;
+    }
 
     let pool_le = pool_id.to_le_bytes();
     let lane_b = [lane_id];
@@ -2660,19 +2685,35 @@ fn ix_transact(
     // Economy mode: `nf1 == [0;32]` is ONLY provable when `is_dummy[1] == true && amount[1] == 0`.
     let has_nf1 = nf1 != [0u8; 32];
 
-    let (public_asset_id, recipient_key, relayer_fee_key, spl_mint_info, vault_before, unwrap_bump): (
-        [u8; 32],
-        [u8; 32],
-        [u8; 32],
-        Option<MintInfo>,
-        u64,
-        Option<u8>,
-    ) = match asset_mode {
+    struct TransactOutflowCtx {
+        public_asset_id: [u8; 32],
+        recipient_key: [u8; 32],
+        relayer_fee_key: [u8; 32],
+        spl_mint_info: Option<MintInfo>,
+        vault_before: u64,
+        unwrap_bump: Option<u8>,
+    }
+
+    let TransactOutflowCtx {
+        public_asset_id,
+        recipient_key,
+        relayer_fee_key,
+        spl_mint_info,
+        vault_before,
+        unwrap_bump,
+    } = match asset_mode {
         ASSET_MODE_PRIVATE => {
             // Pure private transfers MUST NOT pay a public asset-disclosing relayer fee!
             // Relayers are compensated privately via shielded output `cm2`.
             ensure(total_outflow == 0, AudrenError::InvalidInstruction)?;
-            ([0u8; 32], [0u8; 32], [0u8; 32], None, 0, None)
+            TransactOutflowCtx {
+                public_asset_id: [0u8; 32],
+                recipient_key: [0u8; 32],
+                relayer_fee_key: [0u8; 32],
+                spl_mint_info: None,
+                vault_before: 0,
+                unwrap_bump: None,
+            }
         }
         ASSET_MODE_PUBLIC => {
             // Public outflow mode requires `public_amount_out > 0`.
@@ -2792,7 +2833,14 @@ fn ix_transact(
             if relayer_fee_amount > 0 {
                 fk.copy_from_slice(relayer_fee_acc.address().as_ref());
             }
-            (derive_asset_id(&m32), rk, fk, Some(mi), bal, unwrap_bump)
+            TransactOutflowCtx {
+                public_asset_id: derive_asset_id(&m32),
+                recipient_key: rk,
+                relayer_fee_key: fk,
+                spl_mint_info: Some(mi),
+                vault_before: bal,
+                unwrap_bump,
+            }
         }
         _ => return Err(err(AudrenError::InvalidInstruction)),
     };
@@ -3152,7 +3200,7 @@ fn ix_exec_via_escrow(
 
     // Validate SPL/Token-2022 input leg (enforcing canonical vault & escrow ATAs) and derive `asset_in`
     let mut relayer_fee_key = [0u8; 32];
-    let (asset_in, in_mint_info, pre_vault_in_spl, pre_escrow_in_spl) = {
+    let (asset_in, in_mint_info, pre_vault_in_spl, pre_escrow_in_spl, pre_escrow_in_lamports) = {
         let va_in = &in_leg[0];
         let mint_in = &in_leg[1];
         let vault_in_ata = &in_leg[2];
@@ -3173,6 +3221,7 @@ fn ix_exec_via_escrow(
             mint_in.address(),
             escrow_acc.address(),
         )?;
+        let e_lamports = escrow_in_ata.lamports();
         forbidden_keys[forbidden_len] = *vault_in_ata.address();
         forbidden_len += 1;
         if has_in_fee {
@@ -3205,11 +3254,11 @@ fn ix_exec_via_escrow(
         }
         let mut m32 = [0u8; 32];
         m32.copy_from_slice(mint_in.address().as_ref());
-        (derive_asset_id(&m32), mi, v_bal, e_bal)
+        (derive_asset_id(&m32), mi, v_bal, e_bal, e_lamports)
     };
 
     // Validate SPL/Token-2022 output leg (enforcing canonical vault & escrow ATAs) and derive `asset_out`
-    let (asset_out, mint_out_32, out_mint_info, pre_escrow_out_spl) = {
+    let (asset_out, mint_out_32, out_mint_info, pre_escrow_out_spl, pre_escrow_out_lamports) = {
         let va_out = &out_leg[0];
         let mint_out = &out_leg[1];
         let vault_out_ata = &out_leg[2];
@@ -3229,6 +3278,7 @@ fn ix_exec_via_escrow(
             mint_out.address(),
             escrow_acc.address(),
         )?;
+        let e_lamports = escrow_out_ata.lamports();
         forbidden_keys[forbidden_len] = *vault_out_ata.address();
         forbidden_len += 1;
         if has_out_fee {
@@ -3261,7 +3311,7 @@ fn ix_exec_via_escrow(
         }
         let mut m32 = [0u8; 32];
         m32.copy_from_slice(mint_out.address().as_ref());
-        (derive_asset_id(&m32), m32, mi, e_bal)
+        (derive_asset_id(&m32), m32, mi, e_bal, e_lamports)
     };
 
     // Forbid self-swaps (Mint X -> Mint X)
@@ -3415,6 +3465,8 @@ fn ix_exec_via_escrow(
         &exp_va,
     ];
 
+    let escrow_in_key = *in_leg[3].address();
+    let escrow_out_key = *out_leg[3].address();
     let escrow_sol_baseline = escrow_acc.lamports();
     WatchedEscrowBuf::with_buf(|watched_escrow_accs| -> ProgramResult {
         let mut pre_token_mask: u128 = 0;
@@ -3447,7 +3499,14 @@ fn ix_exec_via_escrow(
                             && !snap.has_restrictive_ext,
                         AudrenError::EscrowAccountAltered,
                     )?;
-                    watched_escrow_accs.push(idx, snap.token_program, snap.data_len);
+                    watched_escrow_accs.push(
+                        idx,
+                        snap.token_program,
+                        snap.mint,
+                        snap.amount,
+                        acc.lamports(),
+                        snap.data_len,
+                    );
                 }
             }
         }
@@ -3517,7 +3576,8 @@ fn ix_exec_via_escrow(
             AudrenError::EscrowAuthorityAltered,
         )?;
 
-        // Verify every pre-existing writable escrow-owned token account against tampering & TLV edits.
+        // Verify every pre-existing writable escrow-owned token account against tampering, TLV edits,
+        // and non-in/out token or lamport drainage.
         for entry in watched_escrow_accs.as_slice() {
             let acc = &router_accounts[entry.idx as usize];
             let Some(snap) = token_account_security(acc) else {
@@ -3526,6 +3586,7 @@ fn ix_exec_via_escrow(
             ensure(
                 snap.token_program == entry.token_program
                     && snap.owner == exp_escrow
+                    && snap.mint == entry.mint
                     && !snap.is_frozen
                     && !snap.has_delegate
                     && snap.close_authority.is_none()
@@ -3533,6 +3594,13 @@ fn ix_exec_via_escrow(
                     && snap.data_len == entry.data_len,
                 AudrenError::EscrowAccountAltered,
             )?;
+            let key = acc.address();
+            if key != &escrow_in_key && key != &escrow_out_key {
+                ensure(
+                    snap.amount >= entry.amount && acc.lamports() >= entry.lamports,
+                    AudrenError::EscrowAccountAltered,
+                )?;
+            }
         }
 
         // Post-CPI rescan for newly created token accounts (blocks creating & hijacking a canonical escrow ATA!)
@@ -3559,7 +3627,7 @@ fn ix_exec_via_escrow(
         Ok(())
     })?;
 
-    // Exact input drain check (ZERO trapped input dust!)
+    // Exact input drain & non-drain lamport check (ZERO trapped input dust or excess-lamport skim!)
     let post_escrow_in = validate_token_account(
         &in_leg[3],
         in_leg[4].address(),
@@ -3567,7 +3635,10 @@ fn ix_exec_via_escrow(
         escrow_acc.address(),
         true,
     )?;
-    ensure(post_escrow_in == pre_escrow_in_spl, AudrenError::EscrowNotDrained)?;
+    ensure(
+        post_escrow_in == pre_escrow_in_spl && in_leg[3].lamports() >= pre_escrow_in_lamports,
+        AudrenError::EscrowNotDrained,
+    )?;
 
     // Sweep actual output from isolated escrow -> unified output vault (& optional output-side
     // relayer fee directly from escrow) & measure exact net user vault delta!
@@ -3638,7 +3709,8 @@ fn ix_exec_via_escrow(
             true,
         )?;
         ensure(
-            post_sweep_escrow_out == pre_escrow_out_spl,
+            post_sweep_escrow_out == pre_escrow_out_spl
+                && escrow_out_ata.lamports() >= pre_escrow_out_lamports,
             AudrenError::CustodyInvariantViolated,
         )?;
         let vault_after_sweep = validate_token_account(

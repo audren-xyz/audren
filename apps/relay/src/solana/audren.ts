@@ -270,6 +270,10 @@ export function decodeGlobalRootHistoryHeader(data: Uint8Array): DecodedGlobalRo
   if (data.byteLength < 64 || ASCII_DECODER.decode(data.subarray(0, 8)) !== ROOTS_MAGIC) {
     throw new Error(`Invalid GlobalRootHistory header (len=${data.byteLength})`)
   }
+  const version = data[RT_OFF_VERSION]!
+  if (version !== PROTOCOL_VERSION) {
+    throw new Error(`Invalid GlobalRootHistory version=${version} (expected ${PROTOCOL_VERSION})`)
+  }
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength)
   const slotCursor = dv.getUint16(RT_OFF_SLOT_CURSOR, true)
   const epochCursor = dv.getUint16(RT_OFF_EPOCH_CURSOR, true)
