@@ -602,7 +602,7 @@ def main() -> None:
             continue
         if any(part in skip_dirs for part in path.parts):
             continue
-        if path.name in ("Cargo.lock", "pnpm-lock.yaml") or path == Path(__file__).resolve():
+        if path.name in ("Cargo.lock", "pnpm-lock.yaml", "wrangler.prod.jsonc") or path == Path(__file__).resolve():
             continue
         txt = path.read_text(encoding="utf-8", errors="ignore")
         assert not stale_re.search(txt), f"Stale monorepo path reference in {path.relative_to(ROOT)}"

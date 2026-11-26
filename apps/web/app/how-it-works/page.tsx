@@ -11,6 +11,22 @@ export const metadata: Metadata = {
   description:
     'Follow existing assets, private ownership records, local proofs and public settlement through Audren.',
   alternates: { canonical: 'https://audren.xyz/how-it-works/' },
+  openGraph: {
+    title: 'How Audren works · Audren',
+    description:
+      'Follow existing assets, private ownership records, local proofs and public settlement through Audren.',
+    url: 'https://audren.xyz/how-it-works/',
+    siteName: 'Audren',
+    type: 'website',
+    images: [{ url: '/og-image.png', width: 1280, height: 640, alt: 'How Audren works' }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'How Audren works · Audren',
+    description:
+      'Follow existing assets, private ownership records, local proofs and public settlement through Audren.',
+    images: ['/og-image.png'],
+  },
 }
 
 export default function HowItWorksPage() {

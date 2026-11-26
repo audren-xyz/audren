@@ -460,7 +460,7 @@ export const MEASURED_CU_ROWS = [
     cu: 17_169,
     maxCu: 41_755,
     budgetCu: 75_000,
-    note: 'One-shot GlobalRootHistory (AUD1RT01, 10,216 B) setup across 4 to 16 active lanes (17,169 CU at 4 lanes, 41,755 CU at 16 lanes) · dual ring (64–128 active slots / ~13.8s–27.5s recent + >= 2,848 slots / >= 10.2m stable) updated inline on every deposit and spend',
+    note: 'One-shot GlobalRootHistory (AUD1RT01, 10,216 B) setup across 4 to 16 active lanes (17,169 CU at 4 lanes, 41,755 CU at 16 lanes) · dual ring (64–128 active slots / ~13.8s–27.5s recent + 2,848 active slots / ~9.5–10.5 min estimated at ~200–215 ms slots stable) updated inline on every deposit and spend',
   },
   {
     ix: 'Deposit · SOL & SPL / Token-2022 (Tag 3)',

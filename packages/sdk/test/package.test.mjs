@@ -6,6 +6,7 @@ import {
   ASSET_MODE_PUBLIC,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   AUDREN_ANCHOR_IDL,
+  AUDREN_AUDITED_SWAP_ROUTERS,
   AUDREN_CODAMA_IDL,
   AUDREN_ERRORS,
   AUDREN_PROGRAM_ID,
@@ -14,6 +15,7 @@ import {
   AUTO_OPEN_SUBROOT_SLOT_THRESHOLD,
   AUTO_OPEN_SUBTREE_REM_THRESHOLD,
   AudrenRelayClient,
+  AudrenRelayError,
   BN254_FR_MODULUS,
   CANONICAL_WASM_BYTES,
   CLASSIC_TOKEN_PROGRAM_ID,
@@ -11137,5 +11139,115 @@ test('Round-2 audit regressions: strict returning-wallet hold, subtree-atomic Pa
         assert.equal(stR9_1c.lanes[0].nextNfIndex, 0n, 'TS Round-9 Finding #1 (1C): must roll back nextNfIndex');
       }
     }
+  }
+});
+
+test('CompactWalletStore bidirectional Rust snake_case/byte-array/u64>2^53 JSON interop', () => {
+  const bigU64 = 18446744073709551608n; // > Number.MAX_SAFE_INTEGER (2^53 - 1)
+  const globalLeaf = (2n << 36n) | 41n;
+  const arr32 = (fill) => `[${new Array(32).fill(fill).join(',')}]`;
+  const arr14 = (fill) => `[${new Array(14).fill(fill).join(',')}]`;
+  const lanesJson = Array.from({ length: NUM_LANES }, (_, i) =>
+    i === 2
+      ? `{"finalized_subroots":[${arr32(0x1a)}],"frontier_sub_seq":1,"frontier_leaves":[${arr32(0x1b)}],"next_memo_leaf":42,"next_nf_index":17}`
+      : `{"finalized_subroots":[],"frontier_sub_seq":0,"frontier_leaves":[],"next_memo_leaf":0,"next_nf_index":0}`,
+  ).join(',');
+  const frozenSibs = `[${[
+    `[${arr32(1)},${arr32(2)},${arr32(3)}]`,
+    `[${arr32(4)},${arr32(5)},${arr32(6)}]`,
+    `[${arr32(7)},${arr32(8)},${arr32(9)}]`,
+    `[${arr32(10)},${arr32(11)},${arr32(12)}]`,
+  ].join(',')}]`;
+  const rustJson = `{"pool_id":0,"birthday_slot":${bigU64.toString()},"lanes":[${lanesJson}],"notes":[{"pool_id":0,"lane_id":2,"leaf_index":41,"global_leaf_index":${globalLeaf.toString()},"mint":${arr32(0x11)},"amount":${bigU64.toString()},"tweak":${arr32(0x12)},"blinding":${arr32(0x13)},"stealth_owner":${arr32(0x14)},"commitment":${arr32(0x15)},"nullifier":${arr32(0x16)},"payment_id":${arr14(0x44)},"is_dynamic":false,"spent":false,"frozen_intra_siblings":${frozenSibs},"frozen_intra_positions":[1,2,0,3]}]}`;
+
+  const store = CompactWalletStore.fromJSON(rustJson);
+  assert.equal(store.poolId, 0);
+  assert.equal(store.birthdaySlot, bigU64, 'lossless u64 > 2^53 birthday_slot');
+  assert.equal(store.lanes[2].nextMemoLeaf, 42n);
+  assert.equal(store.lanes[2].nextNfIndex, 17n);
+  assert.equal(store.lanes[2].finalizedSubroots[0][0], 0x1a);
+  assert.equal(store.lanes[2].frontierLeaves[0][0], 0x1b);
+  assert.equal(store.notes.length, 1);
+  assert.equal(store.notes[0].poolId, 0);
+  assert.equal(store.notes[0].globalLeafIndex, globalLeaf);
+  assert.equal(store.notes[0].amount, bigU64, 'lossless u64 > 2^53 note amount');
+  assert.equal(store.notes[0].mint[0], 0x11);
+  assert.equal(store.notes[0].stealthOwner[0], 0x14);
+  assert.equal(store.notes[0].paymentId.byteLength, 14);
+  assert.equal(store.notes[0].paymentId[0], 0x44);
+  assert.deepEqual(store.notes[0].frozenIntraPositions, [1, 2, 0, 3]);
+  assert.equal(store.notes[0].frozenIntraSiblings[3][2][0], 12);
+
+  // Round-trip TS camelCase JSON back into TS as well.
+  const roundTripped = CompactWalletStore.fromJSON(store.toJSON());
+  assert.equal(roundTripped.birthdaySlot, bigU64);
+  assert.equal(roundTripped.notes[0].amount, bigU64);
+  assert.equal(roundTripped.notes[0].frozenIntraSiblings[3][2][0], 12);
+});
+
+test('AudrenRelayClient typed AudrenRelayError + allowedRouterPrograms guard', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          error: 'broadcast confirmation timed out',
+          code: 'BROADCAST_AMBIGUOUS',
+          signature: '5abc123Sig',
+        }),
+        { status: 504, headers: { 'content-type': 'application/json', 'retry-after': '12' } },
+      );
+    const relayErrClient = new AudrenRelayClient('https://relay.example.test');
+    await assert.rejects(
+      () =>
+        relayErrClient.submitRelayedInstruction({
+          cluster: 'mainnet',
+          instructionDataB64: 'AA==',
+          accounts: [],
+        }),
+      (err) => {
+        assert.ok(err instanceof AudrenRelayError);
+        assert.equal(err.status, 504);
+        assert.equal(err.code, 'BROADCAST_AMBIGUOUS');
+        assert.equal(err.signature, '5abc123Sig');
+        assert.equal(err.retryAfterSec, 12);
+        return true;
+      },
+    );
+
+    // Rogue router program rejection in buildSwapInstructions
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          provider: 'jupiter',
+          swapInstruction: {
+            programId: '11111111111111111111111111111111',
+            accounts: [],
+            data: '',
+          },
+          missingAtas: [],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    const rogueClient = new AudrenRelayClient('https://relay.example.test');
+    await assert.rejects(
+      () =>
+        rogueClient.buildSwapInstructions(
+          {
+            provider: 'jupiter',
+            quoteResponse: {},
+            inputMint: WSOL_MINT,
+            outputMint: WSOL_MINT,
+          },
+          { allowedRouterPrograms: AUDREN_AUDITED_SWAP_ROUTERS },
+        ),
+      (err) => {
+        assert.ok(err instanceof AudrenRelayError);
+        assert.equal(err.code, 'UNAPPROVED_SWAP_ROUTER');
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = origFetch;
   }
 });

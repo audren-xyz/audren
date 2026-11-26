@@ -464,7 +464,12 @@ function decryptMemoPayloadInternal(
 
   let memo: DecryptedMemo | null = null;
   const plain = chacha20Poly1305Decrypt(aeadKey, nonce, ct72, aad);
-  if (plain && plain.byteLength === MEMO_PLAINTEXT_LEN && plain[40] === MEMO_VERSION_V1) {
+  if (plain !== null) {
+    if (plain.byteLength !== MEMO_PLAINTEXT_LEN || plain[40] !== MEMO_VERSION_V1) {
+      plain.fill(0);
+      shared.fill(0);
+      return null;
+    }
     const dv = new DataView(plain.buffer, plain.byteOffset, plain.byteLength);
     memo = {
       tweak,
@@ -476,6 +481,7 @@ function decryptMemoPayloadInternal(
       paymentId: plain.slice(42, 42 + MEMO_PAYMENT_ID_LEN),
       isDynamic: false,
     };
+    plain.fill(0);
   } else {
     const unmasked = new Uint8Array(MEMO_CT_LEN);
     for (let i = 0; i < MEMO_CT_LEN; i++) {

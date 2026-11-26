@@ -222,7 +222,7 @@ const PEER_COMPARISONS: readonly PeerComparison[] = [
       },
       {
         label: 'Sync & local state',
-        text: 'Audren syncs directly from ordinary Solana RPC getMultipleAccounts over fixed <10 KiB pages (CompactWalletStore keeps ~1.28 MB at 10M notes) without a dedicated indexer. A cold sync still downloads every memo and nullifier page, so bandwidth grows with the pool.',
+        text: 'Audren syncs directly from ordinary Solana RPC getMultipleAccounts over fixed <= 10 KiB pages (CompactWalletStore keeps ~1.28 MB at 10M notes) without a dedicated indexer. A cold sync still downloads every memo and nullifier page, so bandwidth grows with the pool.',
       },
       {
         label: 'Review & maturity',

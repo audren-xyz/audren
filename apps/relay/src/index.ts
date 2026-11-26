@@ -637,14 +637,20 @@ interface ReadRateBucket {
 const READ_RATE_WINDOW_MS = 60_000
 const MAX_READ_RATE_LIMIT_BUCKETS = 4096
 const READ_RATE_LIMIT_BUCKETS = new Map<string, ReadRateBucket>()
+const BALANCE_CACHE_TTL_MS = 15_000
+const BALANCE_CACHE = new Map<string, { expiresAt: number; balanceSol: number }>()
+const STATS_CACHE_TTL_MS = 15_000
+let STATS_CACHE: { key: string; expiresAt: number; payload: Record<string, unknown> } | null = null
 
 export function resetReadRateLimits(): void {
   READ_RATE_LIMIT_BUCKETS.clear()
+  BALANCE_CACHE.clear()
+  STATS_CACHE = null
 }
 
 function checkReadEndpointRateLimit(
   request: Request,
-  endpoint: 'fee-quote' | 'swap-quote' | 'swap-instructions',
+  endpoint: 'fee-quote' | 'swap-quote' | 'swap-instructions' | 'info' | 'stats',
   maxPerMin: number,
 ): { allowed: true } | { allowed: false; retryAfterSec: number } {
   const now = Date.now()
@@ -730,6 +736,20 @@ function getRelayerPubkeyForCluster(
 
 async function handleInfo(request: Request, env: Env): Promise<Response> {
   const cfg = loadPolicyConfig(env)
+  const rl = checkReadEndpointRateLimit(request, 'info', 60)
+  if (!rl.allowed) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      {
+        error: 'Info endpoint rate limit reached for this IP. Please retry shortly.',
+        code: 'RATE_LIMITED',
+        retryAfterSec: rl.retryAfterSec,
+      },
+      429,
+      { 'retry-after': String(rl.retryAfterSec) },
+    )
+  }
   const url = new URL(request.url)
   const requestedCluster = parseCluster(url.searchParams.get('cluster'), 'mainnet')
 
@@ -748,11 +768,20 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
         lowBalance: false,
       }
     }
+    const balKey = `${rpcUrl}|${relayer.pubkeyB58}`
+    const now = Date.now()
+    const cachedBal = BALANCE_CACHE.get(balKey)
     let balanceSol: number | null = null
-    try {
-      balanceSol = Number(((await fetchBalance(rpcUrl, relayer.pubkeyB58)) / 1e9).toFixed(6))
-    } catch {
-      balanceSol = null
+    if (cachedBal && cachedBal.expiresAt > now) {
+      balanceSol = cachedBal.balanceSol
+    } else {
+      try {
+        balanceSol = Number(((await fetchBalance(rpcUrl, relayer.pubkeyB58)) / 1e9).toFixed(6))
+        if (BALANCE_CACHE.size >= 512) BALANCE_CACHE.clear()
+        BALANCE_CACHE.set(balKey, { expiresAt: now + BALANCE_CACHE_TTL_MS, balanceSol })
+      } catch {
+        balanceSol = null
+      }
     }
     return {
       configured: true,
@@ -773,7 +802,7 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
 
   const activeCluster = requestedCluster === 'devnet' ? devnet : mainnet
   const rootsPda = base58Encode(deriveRootsPda(0).address)
-  return json(request, cfg.corsOrigins, {
+  const infoPayload: Record<string, unknown> = {
     ok: true,
     version: RELAY_VERSION,
     protocolVersion: PROTOCOL_VERSION,
@@ -854,17 +883,39 @@ async function handleInfo(request: Request, env: Env): Promise<Response> {
           swapBaselineLamports: rentSchedule.swapBaselineLamports.toString(),
         }
       : null,
-  })
+  }
+  return json(request, cfg.corsOrigins, infoPayload)
 }
 
 async function handleStats(request: Request, env: Env): Promise<Response> {
   const cfg = loadPolicyConfig(env)
+  const rl = checkReadEndpointRateLimit(request, 'stats', 60)
+  if (!rl.allowed) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      {
+        error: 'Stats endpoint rate limit reached for this IP. Please retry shortly.',
+        code: 'RATE_LIMITED',
+        retryAfterSec: rl.retryAfterSec,
+      },
+      429,
+      { 'retry-after': String(rl.retryAfterSec) },
+    )
+  }
+  const now = Date.now()
+  const statsKey = `${cfg.maxDailySponsoredLamports.mainnet.toString()}|${cfg.maxDailySponsoredLamports.devnet.toString()}`
+  if (STATS_CACHE && STATS_CACHE.key === statsKey && STATS_CACHE.expiresAt > now) {
+    return json(request, cfg.corsOrigins, STATS_CACHE.payload)
+  }
   const guard = getGuardStub(env)
   const stats = await guard.stats({
     mainnet: Number(cfg.maxDailySponsoredLamports.mainnet) / 1e9,
     devnet: Number(cfg.maxDailySponsoredLamports.devnet) / 1e9,
   })
-  return json(request, cfg.corsOrigins, { ok: true, ...stats })
+  const payload = { ok: true, ...stats }
+  STATS_CACHE = { key: statsKey, expiresAt: now + STATS_CACHE_TTL_MS, payload }
+  return json(request, cfg.corsOrigins, payload)
 }
 
 async function handleFeeQuote(request: Request, env: Env): Promise<Response> {
@@ -1990,7 +2041,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   const maxPriorityFeeLamports = hasUntrustedCpiTarget
     ? MAX_UNAUDITED_ROUTER_PRIORITY_FEE_LAMPORTS
     : MAX_RELAY_PRIORITY_FEE_LAMPORTS
-  const cappedPriority =
+  let cappedPriority =
     parsedPriority > maxPriorityFeeLamports ? maxPriorityFeeLamports : parsedPriority
 
   const clientIp = extractClientIp(request)
@@ -1999,19 +2050,34 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
   // Pre-simulation guard: hashes IP inside DO using ephemeral in-memory daily 32-byte random salt,
   // atomically deduplicates all nullifiers across the single ix or batch without linking IP to nullifiers,
   // and short-circuits already revert-blocked IPs (plus concurrent untrusted-CPI bursts) before RPC simulation.
-  const beginDecision = await guard.begin({
-    clientIp,
-    nullifiers: verdict.nullifiers,
-    cluster,
-    hasUntrustedCpiTarget,
-    limits: {
-      ipCooldownSec: cfg.sponsoredCooldownSec[cluster],
-      ipMaxSponsoredPerHour: cfg.sponsoredPerIpPerHour[cluster],
-      ipMaxSponsoredPerDay: cfg.sponsoredPerIpPerDay[cluster],
-      maxDailySponsoredLamports: Number(cfg.maxDailySponsoredLamports[cluster]),
-      maxDailyRevertBurnLamports: Number(cfg.maxDailyRevertBurnLamports[cluster]),
-    },
-  })
+  let beginDecision: Awaited<ReturnType<typeof guard.begin>>
+  try {
+    beginDecision = await guard.begin({
+      clientIp,
+      nullifiers: verdict.nullifiers,
+      cluster,
+      hasUntrustedCpiTarget,
+      limits: {
+        ipCooldownSec: cfg.sponsoredCooldownSec[cluster],
+        ipMaxSponsoredPerHour: cfg.sponsoredPerIpPerHour[cluster],
+        ipMaxSponsoredPerDay: cfg.sponsoredPerIpPerDay[cluster],
+        maxDailySponsoredLamports: Number(cfg.maxDailySponsoredLamports[cluster]),
+        maxDailyRevertBurnLamports: Number(cfg.maxDailyRevertBurnLamports[cluster]),
+      },
+    })
+  } catch (guardErr) {
+    return json(
+      request,
+      cfg.corsOrigins,
+      {
+        error: sanitizeError(guardErr, 'Relay anti-abuse guard temporarily unavailable. Please retry.'),
+        code: 'GUARD_UNAVAILABLE',
+        retryAfterSec: 5,
+      },
+      503,
+      { 'retry-after': '5' },
+    )
+  }
   if (!beginDecision.allowed) {
     return json(
       request,
@@ -2027,7 +2093,11 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         : undefined,
     )
   }
+  if (beginDecision.hasRecentRevert && cappedPriority > MAX_UNAUDITED_ROUTER_PRIORITY_FEE_LAMPORTS) {
+    cappedPriority = MAX_UNAUDITED_ROUTER_PRIORITY_FEE_LAMPORTS
+  }
   const ipHash = beginDecision.ipHash ?? ''
+  const lockOwner = beginDecision.lockOwner
 
   let lockHeld = true
   let reservationId: string | undefined
@@ -2080,9 +2150,11 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     }
 
     const [bhRes, initialPreCtx, liveRentSchedule] = await Promise.all([
-      rpcCall<{ value: { blockhash: string } }>(rpcUrl, 'getLatestBlockhash', [
-        { commitment: 'confirmed' },
-      ]),
+      rpcCall<{ value: { blockhash: string; lastValidBlockHeight?: number } }>(
+        rpcUrl,
+        'getLatestBlockhash',
+        [{ commitment: 'confirmed' }],
+      ),
       fetchMultipleAccountsWithContext(rpcUrl, preFetchAddresses),
       fetchLiveRentSchedule(rpcUrl).catch(() => null),
     ])
@@ -3155,6 +3227,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     // 7. Post-simulation guard: atomically reserve simulated net sponsored cost against daily budget & IP limits
     const reservation = await guard.authorizeSpend({
       ipHash,
+      lockOwner,
       cluster,
       opKind: verdict.opKind,
       nullifiers: verdict.nullifiers,
@@ -3210,6 +3283,8 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         ? 'processed'
         : 'confirmed'
     let sentSig: string
+    const deterministicSig = txAttempt.signed.signatureB58
+    const burnedFeeLamports = Number(5_000n + txAttempt.priorityFeeLamports)
     try {
       sentSig = await rpcCall<string>(rpcUrl, 'sendTransaction', [
         toBase64(txAttempt.signed.wireBytes),
@@ -3217,9 +3292,25 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       ])
     } catch (sendErr) {
       if (!isDefiniteSendPreflightRejection(sendErr)) {
-        // M-7: Ambiguous broadcast error (timeout, HTTP 5xx, network reset): the signed tx may
-        // already be in flight on Solana. Retain pending budget reservation & nullifier locks
-        // until TTL expiry, and keep the 10s grace lease on `open_page_locks`.
+        // M-7 + Durable Reconciliation: Ambiguous broadcast error (timeout, HTTP 5xx, network reset):
+        // persist signature + lastValidBlockHeight in RelayGuard so the 2-minute cron reconciles it
+        // to exact confirmation, revert-burn, or expiry while holding the reservation & grace lease.
+        if (typeof guard.recordPendingBroadcast === 'function') {
+          await guard
+            .recordPendingBroadcast({
+              signature: deterministicSig,
+              cluster,
+              payerPubkey: relayer.pubkeyB58,
+              ipHash,
+              opKind: verdict.opKind,
+              selfPaying: isSelfPaying,
+              sponsoredLamports: Number(netSponsoredLamports),
+              burnedFeeLamports,
+              lastValidBlockHeight: bhRes.value.lastValidBlockHeight ?? 0,
+              reservationId,
+            })
+            .catch(() => {})
+        }
         lockHeld = false
         openPageBroadcasted = true
         return json(
@@ -3228,9 +3319,10 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
           {
             error: sanitizeError(
               sendErr,
-              'Privacy relay broadcast status unknown; reservation held pending expiry',
+              'Privacy relay broadcast status unknown; reservation held pending reconciliation',
             ),
             code: 'BROADCAST_AMBIGUOUS',
+            signature: deterministicSig,
           },
           502,
         )
@@ -3250,10 +3342,10 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
         // a failure strike (`failed = 1`), and release `open_page_locks` immediately since no
         // `LaneRentVault` spend occurred.
         openPageFailedOnChain = true
-        const burnedFeeLamports = Number(5_000n + txAttempt.priorityFeeLamports)
         await guard
           .commit({
             reservationId,
+            lockOwner,
             ipHash,
             cluster,
             opKind: verdict.opKind,
@@ -3264,19 +3356,24 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
           })
           .catch(() => {})
       } else {
-        // Transaction was already broadcast and confirmation timed out/errored transiently —
-        // it may still land on-chain, so commit conservatively and retain the 10s grace lease.
-        await guard
-          .commit({
-            reservationId,
-            ipHash,
-            cluster,
-            opKind: verdict.opKind,
-            nullifiers: verdict.nullifiers,
-            sponsoredLamports: Number(netSponsoredLamports),
-            selfPaying: isSelfPaying,
-          })
-          .catch(() => {})
+        // Transaction was broadcast and confirmation timed out transiently — persist it in
+        // `pending_broadcasts` so the cron reconciles actual confirmed vs reverted vs expired outcome.
+        if (typeof guard.recordPendingBroadcast === 'function') {
+          await guard
+            .recordPendingBroadcast({
+              signature: sentSig,
+              cluster,
+              payerPubkey: relayer.pubkeyB58,
+              ipHash,
+              opKind: verdict.opKind,
+              selfPaying: isSelfPaying,
+              sponsoredLamports: Number(netSponsoredLamports),
+              burnedFeeLamports,
+              lastValidBlockHeight: bhRes.value.lastValidBlockHeight ?? 0,
+              reservationId,
+            })
+            .catch(() => {})
+        }
       }
       lockHeld = false
       reservationId = undefined
@@ -3286,6 +3383,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
     // 9. Commit EXACT simulated cost into SQLite Durable Object & clear pending reservation
     await guard.commit({
       reservationId,
+      lockOwner,
       ipHash,
       cluster,
       opKind: verdict.opKind,
@@ -3368,6 +3466,7 @@ async function handleRelaySubmit(request: Request, env: Env): Promise<Response> 
       await guard
         .release({
           reservationId,
+          lockOwner,
           ipHash,
           cluster,
           nullifiers: verdict.nullifiers,
@@ -3422,6 +3521,65 @@ function timingSafeEqualStrings(a: string, b: string): boolean {
   return diff === 0
 }
 
+async function reconcilePendingBroadcasts(env: Env): Promise<{ checked: number; settled: number }> {
+  const guard = getGuardStub(env)
+  const pending = await guard.listPendingBroadcasts()
+  if (pending.length === 0) return { checked: 0, settled: 0 }
+  let settled = 0
+  for (const cluster of ['mainnet', 'devnet'] as const) {
+    const group = pending.filter((p) => p.cluster === cluster)
+    if (group.length === 0) continue
+    const rpcUrl = getRpcUrl(env, cluster)
+    if (!rpcUrl) continue
+    try {
+      const [statusesRes, blockHeight] = await Promise.all([
+        rpcCall<{ value: Array<{ err: unknown; confirmationStatus?: string } | null> }>(
+          rpcUrl,
+          'getSignatureStatuses',
+          [group.map((g) => g.signature), { searchTransactionHistory: true }],
+        ),
+        rpcCall<number>(rpcUrl, 'getBlockHeight', [{ commitment: 'confirmed' }]),
+      ])
+      const statuses = statusesRes?.value ?? []
+      const now = Date.now()
+      for (let i = 0; i < group.length; i++) {
+        const item = group[i]!
+        const st = statuses[i]
+        if (st) {
+          const outcome = st.err ? 'failed' : 'confirmed'
+          if (await guard.settlePendingBroadcast({ signature: item.signature, outcome })) {
+            settled += 1
+          }
+        } else if (
+          (item.lastValidBlockHeight > 0 && blockHeight > item.lastValidBlockHeight) ||
+          now - item.createdAt > 180_000
+        ) {
+          if (await guard.settlePendingBroadcast({ signature: item.signature, outcome: 'expired' })) {
+            settled += 1
+          }
+        }
+      }
+    } catch {
+      // Transient RPC error — leave rows pending for next 2-minute cron tick
+    }
+  }
+  return { checked: pending.length, settled }
+}
+
+async function runLockedAutoRefill(env: Env, cfg: ReturnType<typeof loadPolicyConfig>) {
+  const guard = getGuardStub(env)
+  const leaseId = crypto.randomUUID()
+  const acquired = await guard.acquireRefillLock({ lockKey: 'global-refill', leaseId, ttlMs: 120_000 })
+  if (!acquired) {
+    return { skipped: true, reason: 'Another refill run is currently in progress' }
+  }
+  try {
+    return await runAutoRefill(env, cfg)
+  } finally {
+    await guard.releaseRefillLock({ lockKey: 'global-refill', leaseId }).catch(() => {})
+  }
+}
+
 async function handleAdminRefill(request: Request, env: Env): Promise<Response> {
   const cfg = loadPolicyConfig(env)
   const expected = env.RELAY_ADMIN_TOKEN?.trim()
@@ -3429,8 +3587,11 @@ async function handleAdminRefill(request: Request, env: Env): Promise<Response> 
   if (!expected || !provided || !timingSafeEqualStrings(provided, expected)) {
     return json(request, cfg.corsOrigins, { error: 'Unauthorized' }, 401)
   }
-  const report = await runAutoRefill(env, cfg)
-  return json(request, cfg.corsOrigins, { ok: true, report })
+  const [reconcile, report] = await Promise.all([
+    reconcilePendingBroadcasts(env),
+    runLockedAutoRefill(env, cfg),
+  ])
+  return json(request, cfg.corsOrigins, { ok: true, reconcile, report })
 }
 
 const RELAY_ENDPOINTS = [
@@ -3541,9 +3702,9 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const cfg = loadPolicyConfig(env)
     ctx.waitUntil(
-      runAutoRefill(env, cfg)
-        .then((report) => {
-          console.log('[audren-relay cron refill]', JSON.stringify(report))
+      Promise.all([reconcilePendingBroadcasts(env), runLockedAutoRefill(env, cfg)])
+        .then(([reconcile, report]) => {
+          console.log('[audren-relay cron]', JSON.stringify({ reconcile, report }))
         })
         .catch((err) => {
           console.error('[audren-relay cron error]', err)

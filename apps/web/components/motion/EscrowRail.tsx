@@ -26,7 +26,7 @@ export const RAIL_FLOWS: readonly RailFlow[] = [
     stopNotes: ['1 of 16, signs the CPI', 'Jupiter, DFlow, OKX'],
     chips: ['sealed note', '100 USDC', 'SOL ≥ min out', 'sealed note'],
     caption:
-      'Your note pays a shared escrow, the escrow trades through a public aggregator route, and the output is sealed back into the pool in the same transaction. This is the flow the app ships today.',
+      'Your note funds a shared escrow shard, the escrow trades through a public aggregator route, and the public output passes through the escrow ATA before being swept into the unified vault and sealed as a fresh recipient note commitment in the same transaction. This is the flow the app ships today.',
   },
   {
     id: 'lend',
@@ -132,7 +132,7 @@ export function EscrowRail() {
             { title: flow.stops[1], note: flow.stopNotes[1] },
             {
               title: 'Shared pool',
-              note: flow.id === 'session' ? 'Public deposit → new note' : 'Fresh sealed note',
+              note: flow.id === 'session' ? 'Public deposit → new note' : 'Escrow ATA → sealed note',
             },
           ].map((node, idx) => (
             <div

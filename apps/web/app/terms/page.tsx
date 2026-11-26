@@ -10,6 +10,20 @@ export const metadata: Metadata = {
   title: 'Protocol Terms',
   description: 'Open-source cryptographic software notice for audren.xyz.',
   alternates: { canonical: 'https://audren.xyz/terms/' },
+  openGraph: {
+    title: 'Protocol Terms · Audren',
+    description: 'Open-source cryptographic software notice for audren.xyz.',
+    url: 'https://audren.xyz/terms/',
+    siteName: 'Audren',
+    type: 'website',
+    images: [{ url: '/og-image.png', width: 1280, height: 640, alt: 'Audren Protocol Terms' }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Protocol Terms · Audren',
+    description: 'Open-source cryptographic software notice for audren.xyz.',
+    images: ['/og-image.png'],
+  },
 }
 
 export default function TermsPage() {
@@ -59,7 +73,7 @@ export default function TermsPage() {
               </p>
               <ul className={styles.dashList}>
                 <li>During pre-audit releases, the program&rsquo;s upgrade authority can replace the program code, including its custody logic. Verify the deployed hash below before use.</li>
-                <li>The pool authority cannot spend notes, but it can pause deposits and private spends (full exits stay open with read-only GlobalRootHistory) and adjust rent-fee caps within fixed bounds. Because GlobalRootHistory updates inline with zero idle wall-clock expiry and immutable root_epoch_interval, no authority can delay or block full exits.</li>
+                <li>The pool authority cannot spend notes, but it can pause deposits and private spends (full exits stay open with read-only GlobalRootHistory) and configure rent-fee parameters while on-chain fee charges remain bounded by fixed program ceilings. Because GlobalRootHistory updates inline with zero idle wall-clock expiry and immutable root_epoch_interval, no authority can delay or block full exits.</li>
                 <li>Both authorities are currently one operator key (<code style={{ wordBreak: 'break-all' }}>{AUDREN.operatorAuthority}</code>), not a multisig.</li>
                 <li>Token issuers keep their own controls: a freeze authority, permanent delegate, pausable mint, or upgradable transfer hook applies to the shared vault account for that token and so to every Audren holder of it.</li>
                 <li>Users and institutions are solely responsible for safeguarding master seeds, viewing keys, and auditor keys.</li>

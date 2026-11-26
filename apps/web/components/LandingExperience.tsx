@@ -188,12 +188,12 @@ function PrivacyComparisonCard() {
       ref={ref}
       className={styles.comparison}
       data-play={!hydrated ? 'static' : started ? 'on' : 'off'}
-      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances and Helius default ring, and Audren shielded pool transfer"
+      aria-label="Public visibility comparison: ordinary Solana transfer, Token-2022 Confidential Balances on eligible mints or third-party Helius Privacy Rings, and Audren shielded pool transfer"
     >
       <figcaption className={styles.figureHeader}>
         <div>
           <h3>What Solscan shows on a transfer</h3>
-          <span className={styles.figureSub}>The same 420 USDC payment, three ways</span>
+          <span className={styles.figureSub}>A 420-unit payment, three ways</span>
         </div>
         <button
           type="button"
@@ -232,8 +232,8 @@ function PrivacyComparisonCard() {
 
         <div className={styles.comparisonRow} style={at(0.7)}>
           <div className={styles.rowName}>
-            <span className={styles.rowTitle}>Token&#8209;2022 CB / Helius</span>
-            <span className={styles.rowMeta}>Wallets public · Helius default ring</span>
+            <span className={styles.rowTitle}>Token&#8209;2022 CB / Helius Rings</span>
+            <span className={styles.rowMeta}>Wallets public · Token&#8209;2022 mints only (CB) or Helius default ring</span>
           </div>
           <div className={styles.people}>
             <span>Wallet A</span>
@@ -242,13 +242,13 @@ function PrivacyComparisonCard() {
           </div>
           <div className={styles.value}>
             <span className={`${styles.valueUnit} ${styles.inkBar} ${styles.inkBarPartial}`} style={at(1.35)} aria-hidden="true">
-              USDC
+              TOKEN
             </span>
             <span className={`${styles.valueAmount} ${styles.inkBar}`} style={at(1.15)} aria-hidden="true">
               420.00
             </span>
             <span className={styles.visuallyHidden}>
-              Amount hidden; sender and recipient wallets stay public; mint public on Token-2022 or encrypted in Helius default ring
+              Amount hidden; sender and recipient wallets stay public; Token-2022 Confidential Balances requires eligible Token-2022 mints (not classic SPL USDC) with a public mint, while third-party Helius default ring encrypts token and amount with public wallets
             </span>
           </div>
         </div>
@@ -644,9 +644,9 @@ export function LandingExperience() {
                 <code>Token A → Token B</code> Solana program call through 16 isolated escrow PDAs
                 and reshields the exact net output on-chain (~165k–238k CU base / 285k budget,
                 leaving &gt;1.11M CU for DeFi). No per-protocol circuits and no SDK lock-in: any
-                wallet, frontend, or raw client can call Tag 6 directly from the open on-chain IDL,
-                or use our optional SDKs for faster integration. Stateful protocols use
-                self-funded, zero-dust session wallets.
+                wallet, frontend, or raw client can build Tag 6 directly from the open binary wire
+                spec and Groth16 circuit, or use our optional SDKs for faster integration. Stateful
+                protocols use self-funded, zero-dust session wallets.
               </p>
             </div>
 
@@ -656,9 +656,9 @@ export function LandingExperience() {
               <article className={styles.defiCell} data-flow="dex">
                 <h3>DEX aggregators</h3>
                 <p>
-                  Live on Mainnet and in the web app: route through Jupiter, DFlow, or OKX DEX
-                  (reaching AMMs such as Raydium, Orca, and Meteora), or target any other CPI-safe
-                  router directly on-chain. Every call cryptographically binds{' '}
+                  Verified on Mainnet with Jupiter and DFlow (and quoted for OKX via the hosted
+                  relay, reaching AMMs such as Raydium, Orca, and Meteora), or target any other
+                  CPI-safe router directly on-chain. Every call cryptographically binds{' '}
                   <code>router_accounts</code>, <code>min_amount_out</code>, and relayer fee into{' '}
                   <code>ctx_hash</code>, with input-leg or output-leg fees via{' '}
                   <code>EXEC_FLAG_FEE_ON_OUTPUT</code>.
@@ -925,10 +925,11 @@ export function LandingExperience() {
                   Verified Mainnet txs across Jupiter, DFlow, JitoSOL, JLP, Kamino Lending, and
                   Kamino Prime USDC Vault (hosted relay also quotes OKX)
                 </li>
-                <li>
-                  Call the program directly via the on-chain Codama/Anchor IDL, or use our optional
-                  Rust, TypeScript, Swift, and Kotlin SDKs
-                </li>
+                  <li>
+                    Call the program directly via the on-chain Codama/Anchor IDL (deposits, page
+                    openings, and admin) and open binary wire spec (Groth16 spends), or use our
+                    optional Rust, TypeScript, Swift, and Kotlin SDKs
+                  </li>
                 <li>
                   Zero protocol fee; spends pay permanent nullifier and page rent (~0.0007–0.0036
                   SOL at current <code>SysvarRent</code>), dropping automatically whenever Solana
@@ -1029,7 +1030,10 @@ export function LandingExperience() {
                     target="_blank"
                     rel="noreferrer"
                   >
-                    Security.txt <ArrowUpRight size={13} />
+                    Program security.txt <ArrowUpRight size={13} />
+                  </a>
+                  <a href="/.well-known/security.txt" target="_blank" rel="noreferrer">
+                    Web security.txt <ArrowUpRight size={13} />
                   </a>
                   <a href={solscanAddress(AUDREN.programId)} target="_blank" rel="noreferrer">
                     Program account <ArrowUpRight size={13} />

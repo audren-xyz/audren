@@ -22,6 +22,7 @@ import {
   type Blockhash,
   type Instruction,
 } from '@solana/kit'
+import { ed25519 } from '@noble/curves/ed25519.js'
 import { getWallets } from '@wallet-standard/app'
 import { SOLANA_DEVNET_CHAIN, SOLANA_MAINNET_CHAIN } from '@solana/wallet-standard-chains'
 import {
@@ -236,6 +237,44 @@ export async function disconnectSolanaWallet(connected: ConnectedSolanaWallet): 
   }
 }
 
+function readCompactU16(bytes: Uint8Array, offset: number): { value: number; next: number } {
+  let value = 0
+  let shift = 0
+  let pos = offset
+  for (let i = 0; i < 3; i++) {
+    if (pos >= bytes.length) throw new Error('Truncated Solana transaction wire encoding')
+    const b = bytes[pos++]!
+    value |= (b & 0x7f) << shift
+    if ((b & 0x80) === 0) return { value, next: pos }
+    shift += 7
+  }
+  throw new Error('Malformed compact-u16 in Solana transaction')
+}
+
+function extractTxSignaturesAndMessage(wire: Uint8Array): {
+  signatures: Uint8Array[]
+  messageBytes: Uint8Array
+} {
+  const { value: sigCount, next } = readCompactU16(wire, 0)
+  const msgOffset = next + sigCount * 64
+  if (sigCount <= 0 || msgOffset >= wire.length) {
+    throw new Error('Invalid Solana transaction signature header')
+  }
+  const signatures: Uint8Array[] = []
+  for (let i = 0; i < sigCount; i++) {
+    signatures.push(wire.subarray(next + i * 64, next + (i + 1) * 64))
+  }
+  return { signatures, messageBytes: wire.subarray(msgOffset) }
+}
+
+function bytesEqualExact(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
 export async function signUtf8MessageWithWallet(
   connected: ConnectedSolanaWallet,
   message: string,
@@ -246,15 +285,30 @@ export async function signUtf8MessageWithWallet(
   if (!feature) {
     throw new Error(`${connected.name} does not support solana:signMessage`)
   }
+  const msgBytes = utf8(message)
   const results = await feature.signMessage({
     account: connected.account,
-    message: utf8(message),
+    message: msgBytes,
   })
   const first = results[0]
   if (!first?.signature) {
     throw new Error('Wallet returned an empty signature')
   }
-  return new Uint8Array(first.signature)
+  const sig = new Uint8Array(first.signature)
+  if (sig.byteLength !== 64) {
+    throw new Error(`Wallet returned invalid Ed25519 signature length (${sig.byteLength} B)`)
+  }
+  if (first.signedMessage) {
+    const returnedMsg = new Uint8Array(first.signedMessage)
+    if (!bytesEqualExact(returnedMsg, msgBytes)) {
+      throw new Error('Wallet signed a different message than requested; vault unlock aborted')
+    }
+  }
+  const pubkeyBytes = new Uint8Array(connected.account.publicKey)
+  if (pubkeyBytes.byteLength !== 32 || !ed25519.verify(sig, msgBytes, pubkeyBytes)) {
+    throw new Error('Wallet returned an invalid Ed25519 signature for the connected public key')
+  }
+  return sig
 }
 
 function toKitRole(isSigner: boolean, isWritable: boolean): AccountRole {
@@ -367,7 +421,33 @@ export async function signCompiledTransactionsWithWallet(
     chain,
   }))
   const signedOutputs = await feature.signTransaction(...inputs)
-  return signedOutputs.map((out) => new Uint8Array(out.signedTransaction))
+  if (signedOutputs.length !== unsignedTransactions.length) {
+    throw new Error(
+      `Wallet returned ${signedOutputs.length} signed transaction(s), expected ${unsignedTransactions.length}`,
+    )
+  }
+  const pubkeyBytes = new Uint8Array(connected.account.publicKey)
+  const verified: Uint8Array[] = []
+  for (let i = 0; i < signedOutputs.length; i++) {
+    const signedWire = new Uint8Array(signedOutputs[i]!.signedTransaction)
+    const expected = extractTxSignaturesAndMessage(unsignedTransactions[i]!)
+    const actual = extractTxSignaturesAndMessage(signedWire)
+    if (!bytesEqualExact(expected.messageBytes, actual.messageBytes)) {
+      throw new Error(
+        `Wallet modified transaction #${i + 1} message bytes during signing; broadcast aborted for safety`,
+      )
+    }
+    if (
+      pubkeyBytes.byteLength === 32 &&
+      !ed25519.verify(actual.signatures[0]!, actual.messageBytes, pubkeyBytes)
+    ) {
+      throw new Error(
+        `Wallet signature #${i + 1} failed Ed25519 verification against the connected fee payer`,
+      )
+    }
+    verified.push(signedWire)
+  }
+  return verified
 }
 
 /**
@@ -380,11 +460,12 @@ export async function sendAndConfirmSignedTransactions(
   options?: {
     onProgress?: (idx: number, total: number, signature: string) => void
   },
-): Promise<Array<{ signature: string; slot: number; wireBytes: number }>> {
+): Promise<Array<{ signature: string; slot: number; wireBytes: number; pending?: boolean }>> {
   const results: Array<{
     signature: string
     slot: number
     wireBytes: number
+    pending?: boolean
   }> = []
   for (let i = 0; i < signedTransactions.length; i++) {
     const wire = signedTransactions[i]
@@ -400,9 +481,20 @@ export async function sendAndConfirmSignedTransactions(
     const sendJson = (rawJson && typeof rawJson === 'object' ? rawJson : {}) as {
       signature?: string
       slot?: number
+      timedOut?: boolean
       error?: string
     }
     const sig = typeof sendJson.signature === 'string' ? sendJson.signature.trim() : ''
+    if (sendRes.status === 504 && sendJson.timedOut === true && sig) {
+      options?.onProgress?.(i, signedTransactions.length, sig)
+      results.push({
+        signature: sig,
+        slot: 0,
+        wireBytes: wire.length,
+        pending: true,
+      })
+      continue
+    }
     if (!sendRes.ok || !sig) {
       const baseMsg =
         (typeof sendJson.error === 'string' && sendJson.error.trim()) ||

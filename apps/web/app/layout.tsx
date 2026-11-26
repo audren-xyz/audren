@@ -5,20 +5,20 @@ import './globals.css'
 const serif = Newsreader({
   subsets: ['latin'],
   variable: '--font-serif',
-  weight: ['400', '500', '600'],
-  style: ['normal', 'italic'],
+  weight: ['400', '500'],
+  style: ['normal'],
 })
 
 const sans = Instrument_Sans({
   subsets: ['latin'],
   variable: '--font-sans',
-  weight: ['400', '500', '600', '700'],
+  weight: ['400', '500'],
 })
 
 const mono = IBM_Plex_Mono({
   subsets: ['latin'],
   variable: '--font-mono',
-  weight: ['400', '500', '600'],
+  weight: ['400', '500'],
 })
 
 export const metadata: Metadata = {

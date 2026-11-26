@@ -911,8 +911,8 @@ async function handleRpcAccounts(request: Request, env: Env): Promise<Response> 
     commitment?: 'confirmed' | 'finalized'
     dataSlice?: { offset?: unknown; length?: unknown } | null
   }>(request)
-  if (!body || !Array.isArray(body.addresses) || body.addresses.length === 0 || body.addresses.length > 200) {
-    return jsonResponse({ error: 'addresses must be a non-empty array of <= 200 Solana pubkeys' }, 400)
+  if (!body || !Array.isArray(body.addresses) || body.addresses.length === 0 || body.addresses.length > 100) {
+    return jsonResponse({ error: 'addresses must be a non-empty array of <= 100 Solana pubkeys' }, 400)
   }
   const addresses: string[] = []
   for (let i = 0; i < body.addresses.length; i++) {
@@ -925,19 +925,25 @@ async function handleRpcAccounts(request: Request, env: Env): Promise<Response> 
   const cluster = parseCluster(body.cluster)
   const commitment = body.commitment === 'finalized' ? 'finalized' : 'confirmed'
   let dataSlice: { offset: number; length: number } | undefined
-  if (body.dataSlice && typeof body.dataSlice === 'object') {
+  if (body.dataSlice !== undefined && body.dataSlice !== null) {
+    if (typeof body.dataSlice !== 'object' || Array.isArray(body.dataSlice)) {
+      return jsonResponse({ error: 'dataSlice must be an object with integer offset >= 0 and 1 <= length <= 16384' }, 400)
+    }
     const offset = Number(body.dataSlice.offset)
     const length = Number(body.dataSlice.length)
     if (
-      Number.isInteger(offset) &&
-      Number.isInteger(length) &&
-      offset >= 0 &&
-      length > 0 &&
-      length <= 16_384
+      !Number.isInteger(offset) ||
+      !Number.isInteger(length) ||
+      offset < 0 ||
+      length <= 0 ||
+      length > 16_384
     ) {
-      dataSlice = { offset, length }
+      return jsonResponse({ error: 'dataSlice offset must be >= 0 and length must be in 1..=16384' }, 400)
     }
+    dataSlice = { offset, length }
   }
+  const MAX_TOTAL_B64_CHARS = 3_000_000 // ~2.25 MiB decoded (covers 100 x 10,240 B MemoPages with headroom)
+  let totalB64Chars = 0
   const out: Array<string | null> = []
   const owners: Array<string | null> = []
   const lamports: Array<number | null> = []
@@ -946,16 +952,23 @@ async function handleRpcAccounts(request: Request, env: Env): Promise<Response> 
     commitment,
     ...(dataSlice ? { dataSlice } : {}),
   }
-  for (let off = 0; off < addresses.length; off += 100) {
-    const chunk = addresses.slice(off, off + 100)
-    const res = await solanaRpc<{
-      value: Array<{ data: [string, string]; owner?: string; lamports?: number } | null>
-    }>(env, cluster, 'getMultipleAccounts', [chunk, rpcCfg])
-    for (let i = 0; i < chunk.length; i++) {
-      out.push(res.value[i]?.data?.[0] ?? null)
-      owners.push(res.value[i]?.owner ?? null)
-      lamports.push(typeof res.value[i]?.lamports === 'number' ? res.value[i]!.lamports! : null)
+  const res = await solanaRpc<{
+    value: Array<{ data: [string, string]; owner?: string; lamports?: number } | null>
+  }>(env, cluster, 'getMultipleAccounts', [addresses, rpcCfg])
+  for (let i = 0; i < addresses.length; i++) {
+    const b64 = res.value[i]?.data?.[0] ?? null
+    if (b64) {
+      totalB64Chars += b64.length
+      if (totalB64Chars > MAX_TOTAL_B64_CHARS) {
+        return jsonResponse(
+          { error: 'Account batch response exceeds maximum payload budget; pass dataSlice or smaller batch' },
+          413,
+        )
+      }
     }
+    out.push(b64)
+    owners.push(res.value[i]?.owner ?? null)
+    lamports.push(typeof res.value[i]?.lamports === 'number' ? res.value[i]!.lamports! : null)
   }
   return jsonResponse({ cluster, accounts: out, owners, lamports })
 }

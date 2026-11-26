@@ -237,17 +237,79 @@ export interface RelaySubmitResponse {
 }
 
 export const AUDREN_DEFAULT_RELAY_URL = 'https://relay.audren.xyz';
+export const AUDREN_DEFAULT_RELAY_TIMEOUT_MS = 45_000;
+
+/** Audited production swap aggregator router programs supported by Audren `ExecViaEscrow`. */
+export const AUDREN_AUDITED_SWAP_ROUTERS: readonly string[] = [
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter Swap v1
+  'DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH', // DFlow Trading API
+  '6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma', // OKX DEX Aggregator
+  'T1TANpTeScyeqVzzgNViGDNrkQ6qHz9KrSBS4aNXvGT', // Titan Meta-Aggregator
+];
+
+export class AudrenRelayError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly retryAfterSec?: number;
+  readonly signature?: string;
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    opts: {
+      status: number;
+      code?: string;
+      retryAfterSec?: number;
+      signature?: string;
+      details?: Record<string, unknown>;
+    },
+  ) {
+    super(message);
+    this.name = 'AudrenRelayError';
+    this.status = opts.status;
+    this.code = opts.code;
+    this.retryAfterSec = opts.retryAfterSec;
+    this.signature = opts.signature;
+    this.details = opts.details;
+  }
+}
 
 export class AudrenRelayClient {
   readonly baseUrl: string;
+  readonly timeoutMs: number;
 
-  constructor(baseUrl: string = AUDREN_DEFAULT_RELAY_URL) {
+  constructor(
+    baseUrl: string = AUDREN_DEFAULT_RELAY_URL,
+    options?: { timeoutMs?: number },
+  ) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.timeoutMs = options?.timeoutMs ?? AUDREN_DEFAULT_RELAY_TIMEOUT_MS;
   }
 
   private async requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, init);
-    const text = await res.text();
+    const controller = new AbortController();
+    const timer =
+      this.timeoutMs > 0
+        ? setTimeout(() => controller.abort(new Error(`Relay request timed out after ${this.timeoutMs} ms`)), this.timeoutMs)
+        : null;
+    const onCallerAbort = () => controller.abort(init?.signal?.reason);
+    if (init?.signal) {
+      if (init.signal.aborted) {
+        if (timer !== null) clearTimeout(timer);
+        controller.abort(init.signal.reason);
+      } else {
+        init.signal.addEventListener('abort', onCallerAbort, { once: true });
+      }
+    }
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, { ...init, signal: controller.signal });
+      text = await res.text();
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      init?.signal?.removeEventListener('abort', onCallerAbort);
+    }
     let parsed: unknown = null;
     let parseFailed = false;
     try {
@@ -256,14 +318,33 @@ export class AudrenRelayClient {
       parseFailed = true;
     }
     if (!res.ok) {
+      const obj =
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : undefined;
       const msg =
-        parsed && typeof parsed === 'object' && 'error' in parsed
-          ? String((parsed as { error: unknown }).error)
-          : `Relay HTTP ${res.status}`;
-      throw new Error(msg);
+        obj && 'error' in obj ? String(obj.error) : `Relay HTTP ${res.status}`;
+      const code =
+        obj && typeof obj.code === 'string' ? obj.code : undefined;
+      const retryHeader = res.headers?.get?.('retry-after');
+      const retryAfterSec =
+        obj && typeof obj.retryAfterSec === 'number'
+          ? obj.retryAfterSec
+          : retryHeader && /^\d+$/.test(retryHeader)
+            ? Number(retryHeader)
+            : undefined;
+      const signature =
+        obj && typeof obj.signature === 'string' ? obj.signature : undefined;
+      throw new AudrenRelayError(msg, {
+        status: res.status,
+        code,
+        retryAfterSec,
+        signature,
+        details: obj,
+      });
     }
     if (parseFailed) {
-      throw new Error('Relay returned invalid JSON');
+      throw new AudrenRelayError('Relay returned invalid JSON', { status: res.status });
     }
     return parsed as T;
   }
@@ -330,12 +411,23 @@ export class AudrenRelayClient {
 
   async buildSwapInstructions(
     params: RelaySwapInstructionsRequest,
+    options?: { allowedRouterPrograms?: readonly string[] },
   ): Promise<RelaySwapInstructionsResponse> {
-    return this.requestJson<RelaySwapInstructionsResponse>('/v1/swap/instructions', {
+    const res = await this.requestJson<RelaySwapInstructionsResponse>('/v1/swap/instructions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(params),
     });
+    if (options?.allowedRouterPrograms && options.allowedRouterPrograms.length > 0) {
+      const routerProg = res?.swapInstruction?.programId;
+      if (typeof routerProg !== 'string' || !options.allowedRouterPrograms.includes(routerProg)) {
+        throw new AudrenRelayError(
+          `Relay returned unapproved swap router program: ${String(routerProg)}`,
+          { status: 422, code: 'UNAPPROVED_SWAP_ROUTER' },
+        );
+      }
+    }
+    return res;
   }
 
   async submitRelayedInstruction(params: RelaySubmitRequest): Promise<RelaySubmitResponse> {

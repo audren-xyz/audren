@@ -115,33 +115,38 @@ async function idbGet(key: string): Promise<string | null> {
 async function idbSet(key: string, value: string): Promise<void> {
   const db = await openVaultDb()
   if (!db) {
-    try {
-      window.localStorage.setItem(key, value)
-    } catch {
-      // ignore quota errors
-    }
+    window.localStorage.setItem(key, value)
     return
   }
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let settled = false
-    const finish = () => {
-      if (settled) return
-      settled = true
+    const closeDb = () => {
       try {
         db.close()
       } catch {
         // ignore
       }
+    }
+    const succeed = () => {
+      if (settled) return
+      settled = true
+      closeDb()
       resolve()
+    }
+    const fail = (err: unknown) => {
+      if (settled) return
+      settled = true
+      closeDb()
+      reject(err instanceof Error ? err : new Error('IndexedDB write failed'))
     }
     try {
       const tx = db.transaction(IDB_STORE, 'readwrite')
       tx.objectStore(IDB_STORE).put(value, key)
-      tx.oncomplete = finish
-      tx.onerror = finish
-      tx.onabort = finish
-    } catch {
-      finish()
+      tx.oncomplete = succeed
+      tx.onerror = () => fail(tx.error ?? new Error('IndexedDB transaction error'))
+      tx.onabort = () => fail(tx.error ?? new Error('IndexedDB transaction aborted'))
+    } catch (err) {
+      fail(err)
     }
   })
 }
@@ -227,12 +232,115 @@ export async function loadEncryptedCompactStore(
     )
     const store = CompactWalletStore.fromJSON(decoder.decode(new Uint8Array(plain)))
     if (migratedFromLegacy) {
-      await idbSet(hashedKey, raw)
-      await idbDelete(legKey)
+      try {
+        await idbSet(hashedKey, raw)
+        await idbDelete(legKey)
+      } catch {
+        // Keep legacy entry intact if writing the migrated key failed
+      }
     }
     return store
   } catch {
     return null
+  }
+}
+
+export interface PersistedMintMeta {
+  symbol: string
+  name: string
+  decimals: number
+  tokenProgram: string
+}
+
+async function mintMetaKey(
+  spendPkBytes: Uint8Array,
+  cluster: string,
+  poolId: number,
+  walletScope = 'local',
+): Promise<string> {
+  const base = await hashedStoreKey(cluster, poolId, spendPkBytes, walletScope)
+  return `${base}:mints`
+}
+
+export async function loadEncryptedMintMeta(
+  keys: Pick<AudrenKeys, 'spendPkBytes' | 'viewSk'>,
+  cluster: string,
+  poolId: number,
+  walletScope = 'local',
+): Promise<Record<string, PersistedMintMeta>> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const key = await mintMetaKey(keys.spendPkBytes, cluster, poolId, walletScope)
+    const raw = await idbGet(key)
+    if (!raw) return {}
+    const env = JSON.parse(raw) as { v: number; iv: string; ct: string }
+    if (env.v !== 1 || !env.iv || !env.ct) return {}
+    const aesKey = await deriveStoreAesKey(keys.viewSk, cluster, poolId)
+    const plain = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: toArrayBuffer(fromBase64(env.iv)),
+        additionalData: toArrayBuffer(keys.spendPkBytes),
+      },
+      aesKey,
+      toArrayBuffer(fromBase64(env.ct)),
+    )
+    const parsed = JSON.parse(decoder.decode(new Uint8Array(plain))) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out: Record<string, PersistedMintMeta> = {}
+    for (const [mint, val] of Object.entries(parsed)) {
+      if (!val || typeof val !== 'object') continue
+      const m = val as Record<string, unknown>
+      if (
+        typeof m.decimals === 'number' &&
+        Number.isInteger(m.decimals) &&
+        m.decimals >= 0 &&
+        m.decimals <= 18 &&
+        typeof m.symbol === 'string' &&
+        typeof m.name === 'string' &&
+        typeof m.tokenProgram === 'string'
+      ) {
+        out[mint] = {
+          symbol: m.symbol,
+          name: m.name,
+          decimals: m.decimals,
+          tokenProgram: m.tokenProgram,
+        }
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+export async function saveEncryptedMintMeta(
+  keys: Pick<AudrenKeys, 'spendPkBytes' | 'viewSk'>,
+  cluster: string,
+  poolId: number,
+  meta: Record<string, PersistedMintMeta>,
+  walletScope = 'local',
+): Promise<void> {
+  if (typeof window === 'undefined') return
+  try {
+    const iv = crypto.getRandomValues(new Uint8Array(12))
+    const aesKey = await deriveStoreAesKey(keys.viewSk, cluster, poolId)
+    const ct = await crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: toArrayBuffer(iv),
+        additionalData: toArrayBuffer(keys.spendPkBytes),
+      },
+      aesKey,
+      toArrayBuffer(encoder.encode(JSON.stringify(meta))),
+    )
+    const key = await mintMetaKey(keys.spendPkBytes, cluster, poolId, walletScope)
+    await idbSet(
+      key,
+      JSON.stringify({ v: 1, iv: toBase64(iv), ct: toBase64(new Uint8Array(ct)) }),
+    )
+  } catch {
+    // non-fatal
   }
 }
 

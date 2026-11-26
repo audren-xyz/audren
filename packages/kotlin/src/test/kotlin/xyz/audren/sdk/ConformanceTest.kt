@@ -266,7 +266,19 @@ class ConformanceTest {
         assertEquals(g16.getString("public_input_hash_hex"), bytesToHex(proved.publicInputHash))
         assertEquals(g16.getString("proof_192_hex"), bytesToHex(proved.proof192))
 
-        // 6. UniFFI zero-panic & extraWritablePubkeys & strict address/bounds checks
+        // 6. UniFFI zero-panic, secret-redacted toString(), extraWritablePubkeys & strict address/bounds checks
+        val fvk = exportFullViewingKey(alice)
+        val sentinelKeysStr = alice.toString()
+        val sentinelFvkStr = fvk.toString()
+        val sentinelSessionStr = s0.toString()
+        assertTrue(sentinelKeysStr.contains("<REDACTED>"))
+        assertTrue(sentinelFvkStr.contains("<REDACTED>"))
+        assertTrue(sentinelSessionStr.contains("<REDACTED>"))
+        assertFalse(sentinelKeysStr.contains(alice.spendSk.contentToString()))
+        assertFalse(sentinelKeysStr.contains(alice.viewSk.contentToString()))
+        assertFalse(sentinelFvkStr.contains(fvk.viewSk.contentToString()))
+        assertFalse(sentinelFvkStr.contains(fvk.nk.contentToString()))
+        assertFalse(sentinelSessionStr.contains(s0.secretSeed.contentToString()))
         assertFailsWith<AudrenFfiException> { decodeAudrenAddress(" " + alice.address) }
         assertFailsWith<AudrenFfiException> { buildOpenPageIx(pid, s0.pubkeyB58, 4u, 0u, 0u, 0uL) }
         assertFailsWith<AudrenFfiException> { deriveLanePda(pid, 0u, 16u) }

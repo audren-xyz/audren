@@ -30,6 +30,8 @@ export interface GuardAuthorizeRequest {
   cluster: Cluster
   opKind: AudrenOpKind
   nullifiers: string[]
+  /** Lock ownership token returned by `begin()` preventing stale requests from deleting newer locks. */
+  lockOwner?: string
   sponsoredLamports: number
   selfPaying: boolean
   /** True when the tx invokes an untrusted CPI target (unaudited router, non-allowlisted Token-2022 leg, or TransferHook). */
@@ -51,6 +53,10 @@ export interface GuardDecision {
   allowed: boolean
   /** Ephemeral daily-salted client IP hash computed inside `RelayGuard` (returned by `begin`). */
   ipHash?: string
+  /** Unique lock ownership token returned by `begin()` for safe nullifier lock release/commit. */
+  lockOwner?: string
+  /** True when this IP already has >= 1 confirmed on-chain revert today (callers clamp priority fee). */
+  hasRecentRevert?: boolean
   reservationId?: string
   status?: number
   code?: string
@@ -60,6 +66,7 @@ export interface GuardDecision {
 
 export interface GuardCommitRequest {
   reservationId?: string
+  lockOwner?: string
   ipHash: string
   cluster: Cluster
   opKind: AudrenOpKind
@@ -75,10 +82,25 @@ export interface GuardCommitRequest {
 
 export interface GuardReleaseRequest {
   reservationId?: string
+  lockOwner?: string
   ipHash: string
   cluster: Cluster
   nullifiers: string[]
   recordFailure?: boolean
+}
+
+export interface PendingBroadcastRecord {
+  signature: string
+  cluster: Cluster
+  payerPubkey: string
+  ipHash: string
+  opKind: AudrenOpKind
+  selfPaying: boolean
+  sponsoredLamports: number
+  burnedFeeLamports: number
+  lastValidBlockHeight: number
+  reservationId?: string
+  createdAt: number
 }
 
 export interface OpenPageLockAcquireRequest {
@@ -310,7 +332,8 @@ export class RelayGuard extends DurableObject<Env> {
 
         CREATE TABLE IF NOT EXISTS inflight_nullifiers (
           nullifier TEXT PRIMARY KEY,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL,
+          owner_token TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS pending_reservations (
@@ -332,6 +355,26 @@ export class RelayGuard extends DurableObject<Env> {
           lease_id TEXT NOT NULL,
           expires_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS pending_broadcasts (
+          signature TEXT PRIMARY KEY,
+          cluster TEXT NOT NULL,
+          payer_pubkey TEXT NOT NULL,
+          ip_hash TEXT NOT NULL,
+          op_kind TEXT NOT NULL,
+          self_paying INTEGER NOT NULL,
+          sponsored_lamports INTEGER NOT NULL,
+          burned_fee_lamports INTEGER NOT NULL,
+          last_valid_block_height INTEGER NOT NULL,
+          reservation_id TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS refill_locks (
+          lock_key TEXT PRIMARY KEY,
+          lease_id TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
       `)
 
       // Privacy migration: drop & recreate legacy `inflight_nullifiers` if it carried `ip_hash`
@@ -342,9 +385,14 @@ export class RelayGuard extends DurableObject<Env> {
         this.sql.exec(`
           CREATE TABLE inflight_nullifiers (
             nullifier TEXT PRIMARY KEY,
-            expires_at INTEGER NOT NULL
+            expires_at INTEGER NOT NULL,
+            owner_token TEXT NOT NULL DEFAULT ''
           );
         `)
+      } else if (!nfCols.some((c) => String(c.name) === 'owner_token')) {
+        this.sql.exec(
+          "ALTER TABLE inflight_nullifiers ADD COLUMN owner_token TEXT NOT NULL DEFAULT ''",
+        )
       }
 
       // Schema migration: add `burn_risk_lamports` to existing `pending_reservations` tables
@@ -512,6 +560,7 @@ export class RelayGuard extends DurableObject<Env> {
     this.sql.exec('DELETE FROM pending_reservations WHERE expires_at < ?', now)
     this.sql.exec('DELETE FROM ip_events WHERE created_at < ?', now - DAY_MS - HOUR_MS)
     this.sql.exec('DELETE FROM open_page_locks WHERE expires_at <= ?', now)
+    this.sql.exec('DELETE FROM refill_locks WHERE expires_at <= ?', now)
   }
 
   /**
@@ -727,6 +776,7 @@ export class RelayGuard extends DurableObject<Env> {
       }
     }
 
+    let hasRecentRevert = false
     if (req.cluster && req.limits) {
       const globalCircuitBreaker = this.checkGlobalRevertBurnCircuitBreaker({
         day: utcDayKey(now),
@@ -749,18 +799,21 @@ export class RelayGuard extends DurableObject<Env> {
       if (revertCheck.denied) {
         return { ...revertCheck.denied, ipHash }
       }
+      hasRecentRevert = revertCheck.revertBurnsDay > 0
     }
 
     const expiresAt = now + INFLIGHT_TTL_MS
+    const lockOwner = crypto.randomUUID()
     for (const nf of req.nullifiers) {
       this.sql.exec(
-        'INSERT OR REPLACE INTO inflight_nullifiers (nullifier, expires_at) VALUES (?, ?)',
+        'INSERT OR REPLACE INTO inflight_nullifiers (nullifier, expires_at, owner_token) VALUES (?, ?, ?)',
         nf,
         expiresAt,
+        lockOwner,
       )
     }
 
-    return { allowed: true, ipHash }
+    return { allowed: true, ipHash, lockOwner, hasRecentRevert }
   }
 
   /**
@@ -775,7 +828,15 @@ export class RelayGuard extends DurableObject<Env> {
 
     const deny = (decision: GuardDecision): GuardDecision => {
       for (const nf of req.nullifiers) {
-        this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
+        if (req.lockOwner) {
+          this.sql.exec(
+            'DELETE FROM inflight_nullifiers WHERE nullifier = ? AND owner_token = ?',
+            nf,
+            req.lockOwner,
+          )
+        } else {
+          this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
+        }
       }
       return decision
     }
@@ -1102,18 +1163,35 @@ export class RelayGuard extends DurableObject<Env> {
         )
       }
       for (const nf of req.nullifiers) {
-        this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
+        if (req.lockOwner) {
+          this.sql.exec(
+            'DELETE FROM inflight_nullifiers WHERE nullifier = ? AND owner_token = ?',
+            nf,
+            req.lockOwner,
+          )
+        } else {
+          this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
+        }
       }
       return
     }
 
     const grace = now + 10_000
     for (const nf of req.nullifiers) {
-      this.sql.exec(
-        'UPDATE inflight_nullifiers SET expires_at = ? WHERE nullifier = ?',
-        grace,
-        nf,
-      )
+      if (req.lockOwner) {
+        this.sql.exec(
+          'UPDATE inflight_nullifiers SET expires_at = ? WHERE nullifier = ? AND owner_token = ?',
+          grace,
+          nf,
+          req.lockOwner,
+        )
+      } else {
+        this.sql.exec(
+          'UPDATE inflight_nullifiers SET expires_at = ? WHERE nullifier = ?',
+          grace,
+          nf,
+        )
+      }
     }
   }
 
@@ -1123,7 +1201,15 @@ export class RelayGuard extends DurableObject<Env> {
       this.sql.exec('DELETE FROM pending_reservations WHERE id = ?', req.reservationId)
     }
     for (const nf of req.nullifiers) {
-      this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
+      if (req.lockOwner) {
+        this.sql.exec(
+          'DELETE FROM inflight_nullifiers WHERE nullifier = ? AND owner_token = ?',
+          nf,
+          req.lockOwner,
+        )
+      } else {
+        this.sql.exec('DELETE FROM inflight_nullifiers WHERE nullifier = ?', nf)
+      }
     }
     if (req.recordFailure) {
       this.sql.exec(
@@ -1134,6 +1220,137 @@ export class RelayGuard extends DurableObject<Env> {
         now,
       )
     }
+  }
+
+  /**
+   * Persist an ambiguous or confirmation-timed-out signed broadcast so the 2-minute cron
+   * reconciles it to exact on-chain confirmation, revert-burn, or blockhash expiry instead of
+   * silently expiring the reservation or misreporting a later revert as a confirmed success.
+   */
+  async recordPendingBroadcast(req: Omit<PendingBroadcastRecord, 'createdAt'>): Promise<void> {
+    const now = Date.now()
+    this.sql.exec(
+      `INSERT OR IGNORE INTO pending_broadcasts
+         (signature, cluster, payer_pubkey, ip_hash, op_kind, self_paying, sponsored_lamports, burned_fee_lamports, last_valid_block_height, reservation_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      req.signature,
+      req.cluster,
+      req.payerPubkey,
+      req.ipHash,
+      req.opKind,
+      req.selfPaying ? 1 : 0,
+      Math.max(0, Math.trunc(req.sponsoredLamports)),
+      Math.max(0, Math.trunc(req.burnedFeeLamports)),
+      Math.max(0, Math.trunc(req.lastValidBlockHeight)),
+      req.reservationId ?? null,
+      now,
+    )
+    if (req.reservationId) {
+      // Keep reservation active across the 2-minute cron reconciliation window (3 minutes)
+      this.sql.exec(
+        'UPDATE pending_reservations SET expires_at = ? WHERE id = ?',
+        now + 180_000,
+        req.reservationId,
+      )
+    }
+  }
+
+  async listPendingBroadcasts(cluster?: Cluster): Promise<PendingBroadcastRecord[]> {
+    const rows = cluster
+      ? this.sql
+          .exec('SELECT * FROM pending_broadcasts WHERE cluster = ? ORDER BY created_at ASC LIMIT 64', cluster)
+          .toArray()
+      : this.sql
+          .exec('SELECT * FROM pending_broadcasts ORDER BY created_at ASC LIMIT 64')
+          .toArray()
+    return rows.map((r) => ({
+      signature: String(r.signature),
+      cluster: (String(r.cluster) === 'devnet' ? 'devnet' : 'mainnet') as Cluster,
+      payerPubkey: String(r.payer_pubkey),
+      ipHash: String(r.ip_hash),
+      opKind: String(r.op_kind) as AudrenOpKind,
+      selfPaying: Number(r.self_paying ?? 0) === 1,
+      sponsoredLamports: Number(r.sponsored_lamports ?? 0),
+      burnedFeeLamports: Number(r.burned_fee_lamports ?? 0),
+      lastValidBlockHeight: Number(r.last_valid_block_height ?? 0),
+      reservationId: r.reservation_id ? String(r.reservation_id) : undefined,
+      createdAt: Number(r.created_at ?? 0),
+    }))
+  }
+
+  async settlePendingBroadcast(req: {
+    signature: string
+    outcome: 'confirmed' | 'failed' | 'expired'
+  }): Promise<boolean> {
+    const rows = this.sql
+      .exec('SELECT * FROM pending_broadcasts WHERE signature = ?', req.signature)
+      .toArray()
+    const r = rows[0]
+    if (!r) return false
+
+    this.sql.exec('DELETE FROM pending_broadcasts WHERE signature = ?', req.signature)
+    const reservationId = r.reservation_id ? String(r.reservation_id) : undefined
+    const ipHash = String(r.ip_hash)
+    const cluster = (String(r.cluster) === 'devnet' ? 'devnet' : 'mainnet') as Cluster
+    const opKind = String(r.op_kind) as AudrenOpKind
+    const selfPaying = Number(r.self_paying ?? 0) === 1
+    const sponsoredLamports = Number(r.sponsored_lamports ?? 0)
+    const burnedFeeLamports = Number(r.burned_fee_lamports ?? 0)
+
+    if (req.outcome === 'expired') {
+      if (reservationId) {
+        this.sql.exec('DELETE FROM pending_reservations WHERE id = ?', reservationId)
+      }
+      return true
+    }
+
+    await this.commit({
+      reservationId,
+      ipHash,
+      cluster,
+      opKind,
+      nullifiers: [],
+      sponsoredLamports: req.outcome === 'failed' ? burnedFeeLamports : sponsoredLamports,
+      selfPaying: req.outcome === 'failed' ? false : selfPaying,
+      recordFailure: req.outcome === 'failed',
+    })
+    return true
+  }
+
+  async acquireRefillLock(req: {
+    lockKey: string
+    leaseId: string
+    ttlMs?: number
+  }): Promise<boolean> {
+    const now = Date.now()
+    this.sql.exec('DELETE FROM refill_locks WHERE expires_at <= ?', now)
+    const rows = this.sql
+      .exec('SELECT lease_id, expires_at FROM refill_locks WHERE lock_key = ?', req.lockKey)
+      .toArray()
+    const row = rows[0]
+    if (row && String(row.lease_id) !== req.leaseId && Number(row.expires_at ?? 0) > now) {
+      return false
+    }
+    const ttlMs = Math.min(Math.max(Math.trunc(req.ttlMs ?? 120_000), 5_000), 300_000)
+    this.sql.exec(
+      `INSERT INTO refill_locks (lock_key, lease_id, expires_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (lock_key) DO UPDATE SET
+         lease_id = excluded.lease_id,
+         expires_at = excluded.expires_at`,
+      req.lockKey,
+      req.leaseId,
+      now + ttlMs,
+    )
+    return true
+  }
+
+  async releaseRefillLock(req: { lockKey: string; leaseId: string }): Promise<void> {
+    this.sql.exec(
+      'DELETE FROM refill_locks WHERE lock_key = ? AND lease_id = ?',
+      req.lockKey,
+      req.leaseId,
+    )
   }
 
   /**

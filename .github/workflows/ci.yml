@@ -67,8 +67,15 @@ jobs:
           cargo test -p audren-client --release --lib
           cargo test -p audren-client --release --test conformance_vectors
           cargo test -p audren-ffi --release --test conformance_ffi
-      - name: Verify wasm32 Groth16 prover builds cleanly
-        run: cargo build -p audren-circuits --target wasm32-unknown-unknown --release --no-default-features --features wasm
+      - name: Verify wasm32 Groth16 prover builds cleanly and matches committed WASM bytes
+        run: |
+          cargo build -p audren-circuits --target wasm32-unknown-unknown --release --no-default-features --features wasm
+          BUILT_SHA=$(sha256sum target/wasm32-unknown-unknown/release/audren_circuits.wasm | awk '{print $1}')
+          SDK_SHA=$(sha256sum packages/sdk/wasm/audren_circuits.wasm | awk '{print $1}')
+          WEB_SHA=$(sha256sum apps/web/public/wasm/audren_circuits.wasm | awk '{print $1}')
+          echo "WASM SHA-256: built=$BUILT_SHA sdk=$SDK_SHA web=$WEB_SHA"
+          test "$BUILT_SHA" = "$SDK_SHA"
+          test "$BUILT_SHA" = "$WEB_SHA"
       - uses: pnpm/action-setup@v6
         with:
           version: 10

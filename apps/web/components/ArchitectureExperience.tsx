@@ -39,7 +39,7 @@ const INSTRUCTIONS = [
     tag: '0x04',
     name: 'InitRootHistory',
     summary:
-      'One-shot initializer creating canonical GlobalRootHistory (AUD1RT01, 10,216 B PDA, 249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7) across all active lanes (17,169 CU measured for 4 lanes, 41,755 CU for 16 lanes, 75k budget). Its dual ring (128-entry recent slot_ring holding 64–128 active slots / ~13.8s–27.5s under saturation + 89-entry stable epoch_ring holding >= 2,848 slots / >= 10.2m with zero idle wall-clock expiry) updates inline on every note-appending deposit and spend with zero external cranks.',
+      'One-shot initializer creating canonical GlobalRootHistory (AUD1RT01, 10,216 B PDA, 249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7) across all active lanes (17,169 CU measured for 4 lanes, 41,755 CU for 16 lanes, 75k budget). Its dual ring (128-entry recent slot_ring holding 64–128 active slots / ~13.8s–27.5s under saturation + 89-entry stable epoch_ring holding 2,848 active slots / ~9.5–10.5 min estimated at ~200–215 ms slots with zero idle wall-clock expiry) updates inline on every note-appending deposit and spend with zero external cranks.',
   },
   {
     tag: '0x05',
@@ -568,7 +568,7 @@ export function ArchitectureExperience() {
                   <li>
                     True zero-crank architecture: inline <code>GlobalRootHistory</code> (
                     <code>AUD1RT01</code>, 10,216 B PDA) updates on every deposit and spend with
-                    zero checkpoint requests, zero checkpoint cranks, and zero checkpoint fees,
+                    zero external root-update requests, zero cranks, and zero crank fees,
                     while relayers and direct wallets auto-prepend idempotent <code>OpenPage</code>{' '}
                     instructions subsidized by <code>LaneRentVault</code>. Rate limits use an
                     ephemeral daily secret IP-hash salt never stored alongside nullifiers, and

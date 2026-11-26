@@ -34,7 +34,126 @@ use audren_core::{
 };
 
 const MAX_SUBROOTS_PER_LANE: u64 = MAX_LEAVES_PER_LANE / SUBTREE_LEAVES as u64;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_u64_flex<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FlexU64 {
+        Num(u64),
+        Str(String),
+    }
+    match FlexU64::deserialize(d)? {
+        FlexU64::Num(n) => Ok(n),
+        FlexU64::Str(s) => s.parse::<u64>().map_err(serde::de::Error::custom),
+    }
+}
+
+fn deserialize_opt_u64_flex<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FlexOptU64 {
+        Num(u64),
+        Str(String),
+    }
+    match Option::<FlexOptU64>::deserialize(d)? {
+        None => Ok(None),
+        Some(FlexOptU64::Num(n)) => Ok(Some(n)),
+        Some(FlexOptU64::Str(s)) => s.parse::<u64>().map(Some).map_err(serde::de::Error::custom),
+    }
+}
+
+fn parse_hex_exact<const N: usize>(s: &str) -> Result<[u8; N], String> {
+    if s.len() != N * 2 || !s.is_ascii() {
+        return Err(format!("expected {} hex chars", N * 2));
+    }
+    let bytes = s.as_bytes();
+    let mut out = [0u8; N];
+    for i in 0..N {
+        let hi = (bytes[i * 2] as char)
+            .to_digit(16)
+            .ok_or_else(|| "invalid hex digit".to_string())?;
+        let lo = (bytes[i * 2 + 1] as char)
+            .to_digit(16)
+            .ok_or_else(|| "invalid hex digit".to_string())?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Ok(out)
+}
+
+fn deserialize_bytes_flex<'de, D: Deserializer<'de>, const N: usize>(
+    d: D,
+) -> Result<[u8; N], D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FlexBytes {
+        Arr(Vec<u8>),
+        Hex(String),
+    }
+    match FlexBytes::deserialize(d)? {
+        FlexBytes::Arr(v) => v
+            .try_into()
+            .map_err(|_| serde::de::Error::custom(format!("expected {N} bytes"))),
+        FlexBytes::Hex(s) => parse_hex_exact::<N>(&s).map_err(serde::de::Error::custom),
+    }
+}
+
+fn deserialize_vec_bytes_flex<'de, D: Deserializer<'de>, const N: usize>(
+    d: D,
+) -> Result<Vec<[u8; N]>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FlexBytes {
+        Arr(Vec<u8>),
+        Hex(String),
+    }
+    let items = Vec::<FlexBytes>::deserialize(d)?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let arr = match item {
+            FlexBytes::Arr(v) => v
+                .try_into()
+                .map_err(|_| serde::de::Error::custom(format!("expected {N} bytes")))?,
+            FlexBytes::Hex(s) => parse_hex_exact::<N>(&s).map_err(serde::de::Error::custom)?,
+        };
+        out.push(arr);
+    }
+    Ok(out)
+}
+
+type FrozenIntraSiblings = [[[u8; 32]; 3]; SUBTREE_LEVELS_4ARY];
+
+fn deserialize_opt_frozen_sibs_flex<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<FrozenIntraSiblings>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FlexBytes {
+        Arr(Vec<u8>),
+        Hex(String),
+    }
+    let Some(levels) = Option::<Vec<Vec<FlexBytes>>>::deserialize(d)? else {
+        return Ok(None);
+    };
+    if levels.len() != SUBTREE_LEVELS_4ARY {
+        return Err(serde::de::Error::custom("invalid frozen_intra_siblings level count"));
+    }
+    let mut out = [[[0u8; 32]; 3]; SUBTREE_LEVELS_4ARY];
+    for (h, lvl) in levels.into_iter().enumerate() {
+        if lvl.len() != 3 {
+            return Err(serde::de::Error::custom("invalid frozen_intra_siblings width"));
+        }
+        for (k, item) in lvl.into_iter().enumerate() {
+            out[h][k] = match item {
+                FlexBytes::Arr(v) => v
+                    .try_into()
+                    .map_err(|_| serde::de::Error::custom("expected 32 bytes"))?,
+                FlexBytes::Hex(s) => parse_hex_exact::<32>(&s).map_err(serde::de::Error::custom)?,
+            };
+        }
+    }
+    Ok(Some(out))
+}
 
 use crate::{
     keys::{
@@ -47,24 +166,46 @@ use crate::{
 /// An owned shielded note tracked by `CompactWalletStore`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedNote {
+    #[serde(alias = "poolId")]
     pub pool_id: u32,
+    #[serde(alias = "laneId")]
     pub lane_id: u8,
+    #[serde(alias = "leafIndex", deserialize_with = "deserialize_u64_flex")]
     pub leaf_index: u64,
+    #[serde(alias = "globalLeafIndex", deserialize_with = "deserialize_u64_flex")]
     pub global_leaf_index: u64,
+    #[serde(deserialize_with = "deserialize_bytes_flex")]
     pub mint: [u8; 32],
+    #[serde(deserialize_with = "deserialize_u64_flex")]
     pub amount: u64,
+    #[serde(deserialize_with = "deserialize_bytes_flex")]
     pub tweak: [u8; 32],
+    #[serde(deserialize_with = "deserialize_bytes_flex")]
     pub blinding: [u8; 32],
+    #[serde(alias = "stealthOwner", deserialize_with = "deserialize_bytes_flex")]
     pub stealth_owner: [u8; 32],
+    #[serde(deserialize_with = "deserialize_bytes_flex")]
     pub commitment: [u8; 32],
+    #[serde(deserialize_with = "deserialize_bytes_flex")]
     pub nullifier: [u8; 32],
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "paymentId",
+        deserialize_with = "deserialize_bytes_flex"
+    )]
     pub payment_id: [u8; MEMO_PAYMENT_ID_LEN],
+    #[serde(alias = "isDynamic")]
     pub is_dynamic: bool,
     pub spent: bool,
     /// Frozen 4-level intra-subtree siblings (`12 x 32 B = 384 B`) populated once the note's
     /// 256-leaf `SubtreePage` seals (allowing the `8,256 B` page to be permanently discarded).
+    #[serde(
+        default,
+        alias = "frozenIntraSiblings",
+        deserialize_with = "deserialize_opt_frozen_sibs_flex"
+    )]
     pub frozen_intra_siblings: Option<[[[u8; 32]; 3]; SUBTREE_LEVELS_4ARY]>,
+    #[serde(default, alias = "frozenIntraPositions")]
     pub frozen_intra_positions: Option<[u8; SUBTREE_LEVELS_4ARY]>,
 }
 
@@ -99,27 +240,50 @@ impl OwnedNote {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CompactLaneState {
     /// Finalized 256-leaf level-4 subtree roots (`32 B` per 256 pool notes).
+    #[serde(
+        alias = "finalizedSubroots",
+        deserialize_with = "deserialize_vec_bytes_flex"
+    )]
     pub finalized_subroots: Vec<[u8; 32]>,
     /// Unsealed frontier `SubtreePage` sequence (`== finalized_subroots.len()`).
+    #[serde(alias = "frontierSubSeq", deserialize_with = "deserialize_u64_flex")]
     pub frontier_sub_seq: u64,
     /// Current leaves in the unsealed frontier `SubtreePage` (`< 256` entries).
+    #[serde(
+        alias = "frontierLeaves",
+        deserialize_with = "deserialize_vec_bytes_flex"
+    )]
     pub frontier_leaves: Vec<[u8; 32]>,
     /// Most recently sealed `SubtreePage` sequence retained until a newer `GlobalRootHistory` stable snapshot crosses it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "prevSealedSubSeq",
+        deserialize_with = "deserialize_opt_u64_flex"
+    )]
     pub prev_sealed_sub_seq: Option<u64>,
     /// Leaves of `prev_sealed_sub_seq` (at most 1 page = 8 KB per lane), pruned once crossed by the stable snapshot.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        alias = "prevSealedLeaves",
+        deserialize_with = "deserialize_vec_bytes_flex"
+    )]
     pub prev_sealed_leaves: Vec<[u8; 32]>,
     /// Next memo index (`lane_leaf_index`) to scan in this lane.
+    #[serde(alias = "nextMemoLeaf", deserialize_with = "deserialize_u64_flex")]
     pub next_memo_leaf: u64,
     /// Next nullifier prefix index to scan in this lane.
+    #[serde(alias = "nextNfIndex", deserialize_with = "deserialize_u64_flex")]
     pub next_nf_index: u64,
 }
 
 /// Persistent, indexer-free mobile & desktop wallet store (`1.28 MB` @ 10M notes, `0` targeted RPCs).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompactWalletStore {
+    #[serde(alias = "poolId")]
     pub pool_id: u32,
+    #[serde(alias = "birthdaySlot", deserialize_with = "deserialize_u64_flex")]
     pub birthday_slot: u64,
     pub lanes: Vec<CompactLaneState>,
     pub notes: Vec<OwnedNote>,
@@ -127,11 +291,17 @@ pub struct CompactWalletStore {
 
 #[derive(Deserialize)]
 struct CompactWalletStoreWire {
+    #[serde(alias = "poolId")]
     pool_id: u32,
+    #[serde(alias = "birthdaySlot", deserialize_with = "deserialize_u64_flex")]
     birthday_slot: u64,
     lanes: Vec<CompactLaneState>,
     notes: Vec<OwnedNote>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "seenNfPrefixes",
+        deserialize_with = "deserialize_vec_bytes_flex"
+    )]
     seen_nf_prefixes: Vec<[u8; NF_PREFIX_LEN]>,
 }
 
@@ -2919,5 +3089,77 @@ mod tests {
             Err(ClientError::InvalidFieldElement)
         ));
         assert!(strict_sr_store.lanes[0].finalized_subroots.is_empty());
+    }
+
+    #[test]
+    fn compact_store_bidirectional_ts_camel_case_json_roundtrip() {
+        let mut ts_json = String::new();
+        let big_u64 = 18_446_744_073_709_551_615u64 - 7; // > 2^53
+        let global_leaf = (2u64 << 36) | 41u64;
+        let ts_lanes: Vec<String> = (0..NUM_LANES)
+            .map(|lane_id| {
+                if lane_id == 2 {
+                    format!(
+                        r#"{{"finalizedSubroots":["{}"],"frontierSubSeq":"1","frontierLeaves":["{}"],"prevSealedSubSeq":null,"prevSealedLeaves":[],"nextMemoLeaf":"42","nextNfIndex":"17"}}"#,
+                        "1a".repeat(32),
+                        "1b".repeat(32)
+                    )
+                } else {
+                    r#"{"finalizedSubroots":[],"frontierSubSeq":"0","frontierLeaves":[],"prevSealedSubSeq":null,"prevSealedLeaves":[],"nextMemoLeaf":"0","nextNfIndex":"0"}"#
+                        .to_string()
+                }
+            })
+            .collect();
+        ts_json.push_str(&format!(
+            r#"{{"poolId":0,"birthdaySlot":"{big_u64}","lanes":[{}],"notes":[{{"poolId":0,"laneId":2,"leafIndex":"41","globalLeafIndex":"{global_leaf}","mint":"{}","amount":"{big_u64}","tweak":"{}","blinding":"{}","stealthOwner":"{}","commitment":"{}","nullifier":"{}","paymentId":"{}","isDynamic":false,"spent":false,"frozenIntraSiblings":[["{}","{}","{}"],["{}","{}","{}"],["{}","{}","{}"],["{}","{}","{}"]],"frozenIntraPositions":[1,2,0,3]}}]}}"#,
+            ts_lanes.join(","),
+            "11".repeat(32),
+            "12".repeat(32),
+            "13".repeat(32),
+            "14".repeat(32),
+            "15".repeat(32),
+            "16".repeat(32),
+            "44".repeat(14),
+            "01".repeat(32),
+            "02".repeat(32),
+            "03".repeat(32),
+            "04".repeat(32),
+            "05".repeat(32),
+            "06".repeat(32),
+            "07".repeat(32),
+            "08".repeat(32),
+            "09".repeat(32),
+            "0a".repeat(32),
+            "0b".repeat(32),
+            "0c".repeat(32),
+        ));
+
+        let parsed: CompactWalletStore =
+            serde_json::from_str(&ts_json).expect("Rust must deserialize TS camelCase/hex/string JSON");
+        assert_eq!(parsed.pool_id, 0);
+        assert_eq!(parsed.birthday_slot, big_u64);
+        assert_eq!(parsed.lanes[2].next_memo_leaf, 42);
+        assert_eq!(parsed.lanes[2].next_nf_index, 17);
+        assert_eq!(parsed.lanes[2].finalized_subroots, vec![[0x1au8; 32]]);
+        assert_eq!(parsed.lanes[2].frontier_leaves, vec![[0x1bu8; 32]]);
+        assert_eq!(parsed.notes.len(), 1);
+        assert_eq!(parsed.notes[0].pool_id, 0);
+        assert_eq!(parsed.notes[0].global_leaf_index, global_leaf);
+        assert_eq!(parsed.notes[0].amount, big_u64);
+        assert_eq!(parsed.notes[0].mint, [0x11u8; 32]);
+        assert_eq!(parsed.notes[0].stealth_owner, [0x14u8; 32]);
+        assert_eq!(parsed.notes[0].payment_id, [0x44u8; 14]);
+        assert_eq!(parsed.notes[0].frozen_intra_positions, Some([1, 2, 0, 3]));
+        assert_eq!(
+            parsed.notes[0].frozen_intra_siblings.unwrap()[3][2],
+            [0x0cu8; 32]
+        );
+
+        // Round-trip Rust serde_json output back into Rust cleanly as well.
+        let rust_json = serde_json::to_string(&parsed).unwrap();
+        let reparsed: CompactWalletStore = serde_json::from_str(&rust_json).unwrap();
+        assert_eq!(reparsed.birthday_slot, big_u64);
+        assert_eq!(reparsed.notes[0].amount, big_u64);
+        assert_eq!(reparsed.notes[0].frozen_intra_siblings, parsed.notes[0].frozen_intra_siblings);
     }
 }

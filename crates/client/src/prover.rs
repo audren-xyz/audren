@@ -60,8 +60,32 @@ impl AudrenProver {
         Self { pk, vk }
     }
 
-    /// Load from a compressed `ProvingKey<Bn254>` byte buffer (`~3.75 MB`, validated on curve).
+    /// Load from a compressed `ProvingKey<Bn254>` byte buffer (`~3.75 MB`), enforcing canonical
+    /// ceremony `CANONICAL_PK_BYTES` and `CANONICAL_PK_SHA256` digest parity before curve validation.
     pub fn from_compressed_pk(bytes: &[u8]) -> Result<Self, ClientError> {
+        use sha2::{Digest, Sha256};
+        if bytes.len() != audren_circuits::CANONICAL_PK_BYTES {
+            return Err(ClientError::InvalidEncoding(
+                "proving key length does not match CANONICAL_PK_BYTES",
+            ));
+        }
+        let digest = Sha256::digest(bytes);
+        let mut hex = String::with_capacity(64);
+        for b in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex, "{b:02x}");
+        }
+        if hex != audren_circuits::CANONICAL_PK_SHA256 {
+            return Err(ClientError::InvalidEncoding(
+                "proving key SHA-256 does not match CANONICAL_PK_SHA256",
+            ));
+        }
+        Self::from_custom_compressed_pk(bytes)
+    }
+
+    /// Load an arbitrary custom/test compressed `ProvingKey<Bn254>` byte buffer without pinning
+    /// `CANONICAL_PK_SHA256` (still validates on-curve points and structural invariants).
+    pub fn from_custom_compressed_pk(bytes: &[u8]) -> Result<Self, ClientError> {
         let pk = deserialize_pk_compressed(bytes)
             .map_err(|_| ClientError::InvalidEncoding("invalid compressed proving key"))?;
         let vk = pk.vk.clone();

@@ -34,7 +34,7 @@ Every note-appending instruction (`Deposit`, `Transact` with `output_mask != 0`,
 - `192..864`: `latest` snapshot (`672 B`) — `latest_super_root` (`192..224`), `latest_lane_roots[16]` (`224..736`), `latest_lane_counts[16]` (`736..864`).
 - `864..1536`: `stable` snapshot (`672 B`) — `stable_super_root` (`864..896`), `stable_lane_roots[16]` (`896..1408`), `stable_lane_counts[16]` (`1408..1536`).
 - `1536..6656`: `slot_ring[128]` (`128 * 40 B`, each `super_root[32] || slot_le8`) — recent ring (`ROOT_RING_SLOT = 0`), retaining `64–128` active slots (`~13.8s–27.5s` under continuous slot saturation, since `same_slot_bumped` allows up to 2 advances per slot).
-- `6656..10216`: `epoch_ring[89]` (`89 * 40 B`, each `super_root[32] || slot_le8`) — stable epoch ring (`ROOT_RING_EPOCH = 1`), snapshotting at every `epoch_interval` boundary (`default = 32` slots, retaining `>= 2,848` slots / `>= 10.2m` under saturation, zero idle wall-clock expiry).
+- `6656..10216`: `epoch_ring[89]` (`89 * 40 B`, each `super_root[32] || slot_le8`) — stable epoch ring (`ROOT_RING_EPOCH = 1`), snapshotting at every `epoch_interval` boundary (`default = 32` slots, retaining up to `2,848` active slots — roughly `~9.5–10.5 min` at `~200–215 ms` slots under continuous activity, with zero idle wall-clock expiry).
 
 ### sBPFv3 Rent Emulation, Zero-Rent Floor, Calibrated CU Limits & Canonical ALTs
 

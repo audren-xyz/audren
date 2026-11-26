@@ -365,7 +365,25 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-function hexToBytesExact(h: unknown, expectedLen: number, label: string): Uint8Array {
+function hexOrBytesExact(h: unknown, expectedLen: number, label: string): Uint8Array {
+  if (Array.isArray(h)) {
+    if (h.length !== expectedLen) {
+      throw new Error(
+        `Invalid CompactWalletStore JSON ${label}: expected ${expectedLen} bytes (or ${expectedLen * 2} hex characters)`,
+      );
+    }
+    const out = new Uint8Array(expectedLen);
+    for (let i = 0; i < expectedLen; i++) {
+      const v = h[i];
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 255) {
+        throw new Error(
+          `Invalid CompactWalletStore JSON ${label}: invalid byte value at index ${i}`,
+        );
+      }
+      out[i] = v;
+    }
+    return out;
+  }
   if (typeof h !== 'string' || h.length !== expectedLen * 2 || !HEX_RE.test(h)) {
     throw new Error(
       `Invalid CompactWalletStore JSON ${label}: expected ${expectedLen * 2} hex characters`,
@@ -379,6 +397,14 @@ function hexToBytesExact(h: unknown, expectedLen: number, label: string): Uint8A
 }
 
 function parseU64Decimal(v: unknown, label: string): bigint {
+  if (typeof v === 'number') {
+    if (!Number.isSafeInteger(v) || v < 0) {
+      throw new Error(
+        `Invalid CompactWalletStore JSON ${label}: expected unsigned decimal string or safe u64 integer`,
+      );
+    }
+    return BigInt(v);
+  }
   if (typeof v !== 'string' || !DEC_UINT_RE.test(v)) {
     throw new Error(`Invalid CompactWalletStore JSON ${label}: expected unsigned decimal string`);
   }
@@ -1469,19 +1495,36 @@ export class CompactWalletStore {
   }
 
   static fromJSON(json: string): CompactWalletStore {
-    const raw = JSON.parse(json) as Record<string, unknown>;
+    // Losslessly preserve bare >2^53-1 JSON u64 integers emitted by Rust/UniFFI stores before JSON.parse.
+    const safeJson = json.replace(
+      /(:\s*)(\d{16,20})(?=\s*[,}\]])/g,
+      (full, prefix: string, digits: string) => {
+        try {
+          const n = BigInt(digits);
+          if (n > BigInt(Number.MAX_SAFE_INTEGER) && n <= U64_MAX) {
+            return `${prefix}"${digits}"`;
+          }
+        } catch {
+          // leave unchanged
+        }
+        return full;
+      },
+    );
+    const raw = JSON.parse(safeJson) as Record<string, unknown>;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       throw new Error('Invalid CompactWalletStore JSON');
     }
+    const rawPoolId = raw.poolId !== undefined ? raw.poolId : raw.pool_id;
     if (
-      typeof raw.poolId !== 'number' ||
-      !Number.isInteger(raw.poolId) ||
-      raw.poolId < 0 ||
-      raw.poolId > U32_MAX
+      typeof rawPoolId !== 'number' ||
+      !Number.isInteger(rawPoolId) ||
+      rawPoolId < 0 ||
+      rawPoolId > U32_MAX
     ) {
-      throw new Error(`Invalid CompactWalletStore JSON poolId=${String(raw.poolId)}`);
+      throw new Error(`Invalid CompactWalletStore JSON poolId=${String(rawPoolId)}`);
     }
-    const birthdaySlot = parseU64Decimal(raw.birthdaySlot, 'birthdaySlot');
+    const rawBirthday = raw.birthdaySlot !== undefined ? raw.birthdaySlot : raw.birthday_slot;
+    const birthdaySlot = parseU64Decimal(rawBirthday, 'birthdaySlot');
     if (!Array.isArray(raw.lanes) || raw.lanes.length !== NUM_LANES) {
       throw new Error(
         `Invalid CompactWalletStore JSON: expected ${NUM_LANES} lanes, got ${Array.isArray(raw.lanes) ? raw.lanes.length : typeof raw.lanes}`,
@@ -1490,51 +1533,59 @@ export class CompactWalletStore {
     if (!Array.isArray(raw.notes)) {
       throw new Error('Invalid CompactWalletStore JSON: notes must be an array');
     }
-    const store = new CompactWalletStore(raw.poolId, birthdaySlot);
+    const store = new CompactWalletStore(rawPoolId, birthdaySlot);
     store.lanes = raw.lanes.map((laneRaw, laneIdx) => {
       if (!laneRaw || typeof laneRaw !== 'object' || Array.isArray(laneRaw)) {
         throw new Error(`Invalid CompactWalletStore JSON lane[${laneIdx}]`);
       }
       const l = laneRaw as Record<string, unknown>;
-      if (!Array.isArray(l.finalizedSubroots)) {
+      const rawFinalizedSubroots =
+        l.finalizedSubroots !== undefined ? l.finalizedSubroots : l.finalized_subroots;
+      if (!Array.isArray(rawFinalizedSubroots)) {
         throw new Error(`Invalid CompactWalletStore JSON lane[${laneIdx}].finalizedSubroots`);
       }
-      if (BigInt(l.finalizedSubroots.length) > MAX_SUBROOTS_PER_LANE) {
+      if (BigInt(rawFinalizedSubroots.length) > MAX_SUBROOTS_PER_LANE) {
         throw new Error(
           `Invalid CompactWalletStore JSON lane[${laneIdx}].finalizedSubroots exceeds limit`,
         );
       }
-      if (!Array.isArray(l.frontierLeaves)) {
+      const rawFrontierLeaves =
+        l.frontierLeaves !== undefined ? l.frontierLeaves : l.frontier_leaves;
+      if (!Array.isArray(rawFrontierLeaves)) {
         throw new Error(`Invalid CompactWalletStore JSON lane[${laneIdx}].frontierLeaves`);
       }
-      if (l.frontierLeaves.length > SUBTREE_LEAVES) {
+      if (rawFrontierLeaves.length > SUBTREE_LEAVES) {
         throw new Error('Invalid CompactWalletStore JSON: lane leaves exceed SUBTREE_LEAVES');
       }
-      if (l.prevSealedLeaves !== undefined && !Array.isArray(l.prevSealedLeaves)) {
+      const rawPrevSealedLeaves =
+        l.prevSealedLeaves !== undefined ? l.prevSealedLeaves : l.prev_sealed_leaves;
+      if (rawPrevSealedLeaves !== undefined && !Array.isArray(rawPrevSealedLeaves)) {
         throw new Error(`Invalid CompactWalletStore JSON lane[${laneIdx}].prevSealedLeaves`);
       }
-      if (Array.isArray(l.prevSealedLeaves) && l.prevSealedLeaves.length > SUBTREE_LEAVES) {
+      if (Array.isArray(rawPrevSealedLeaves) && rawPrevSealedLeaves.length > SUBTREE_LEAVES) {
         throw new Error('Invalid CompactWalletStore JSON: lane leaves exceed SUBTREE_LEAVES');
       }
-      const finalizedSubroots = l.finalizedSubroots.map((h, i) => {
-        const b = hexToBytesExact(h, 32, `lane[${laneIdx}].finalizedSubroots[${i}]`);
+      const finalizedSubroots = rawFinalizedSubroots.map((h, i) => {
+        const b = hexOrBytesExact(h, 32, `lane[${laneIdx}].finalizedSubroots[${i}]`);
         frFromBeBytesStrict(b);
         return b;
       });
-      const frontierLeaves = l.frontierLeaves.map((h, i) => {
-        const b = hexToBytesExact(h, 32, `lane[${laneIdx}].frontierLeaves[${i}]`);
+      const frontierLeaves = rawFrontierLeaves.map((h, i) => {
+        const b = hexOrBytesExact(h, 32, `lane[${laneIdx}].frontierLeaves[${i}]`);
         frFromBeBytesStrict(b);
         return b;
       });
-      const prevSealedLeaves = Array.isArray(l.prevSealedLeaves)
-        ? l.prevSealedLeaves.map((h, i) => {
-            const b = hexToBytesExact(h, 32, `lane[${laneIdx}].prevSealedLeaves[${i}]`);
+      const prevSealedLeaves = Array.isArray(rawPrevSealedLeaves)
+        ? rawPrevSealedLeaves.map((h, i) => {
+            const b = hexOrBytesExact(h, 32, `lane[${laneIdx}].prevSealedLeaves[${i}]`);
             frFromBeBytesStrict(b);
             return b;
           })
         : [];
+      const rawFrontierSubSeq =
+        l.frontierSubSeq !== undefined ? l.frontierSubSeq : l.frontier_sub_seq;
       const frontierSubSeq = parseU64Decimal(
-        l.frontierSubSeq,
+        rawFrontierSubSeq,
         `lane[${laneIdx}].frontierSubSeq`,
       );
       if (frontierSubSeq > MAX_SUBROOTS_PER_LANE) {
@@ -1542,22 +1593,26 @@ export class CompactWalletStore {
           `Invalid CompactWalletStore JSON lane[${laneIdx}].frontierSubSeq out of range`,
         );
       }
+      const rawPrevSealedSubSeq =
+        l.prevSealedSubSeq !== undefined ? l.prevSealedSubSeq : l.prev_sealed_sub_seq;
       const prevSealedSubSeq =
-        l.prevSealedSubSeq !== undefined && l.prevSealedSubSeq !== null
-          ? parseU64Decimal(l.prevSealedSubSeq, `lane[${laneIdx}].prevSealedSubSeq`)
+        rawPrevSealedSubSeq !== undefined && rawPrevSealedSubSeq !== null
+          ? parseU64Decimal(rawPrevSealedSubSeq, `lane[${laneIdx}].prevSealedSubSeq`)
           : null;
       if (prevSealedSubSeq !== null && prevSealedSubSeq >= MAX_SUBROOTS_PER_LANE) {
         throw new Error(
           `Invalid CompactWalletStore JSON lane[${laneIdx}].prevSealedSubSeq out of range`,
         );
       }
-      const nextMemoLeaf = parseU64Decimal(l.nextMemoLeaf, `lane[${laneIdx}].nextMemoLeaf`);
+      const rawNextMemoLeaf = l.nextMemoLeaf !== undefined ? l.nextMemoLeaf : l.next_memo_leaf;
+      const nextMemoLeaf = parseU64Decimal(rawNextMemoLeaf, `lane[${laneIdx}].nextMemoLeaf`);
       if (nextMemoLeaf > MAX_LEAVES_PER_LANE) {
         throw new Error(
           `Invalid CompactWalletStore JSON lane[${laneIdx}].nextMemoLeaf out of range`,
         );
       }
-      const nextNfIndex = parseU64Decimal(l.nextNfIndex, `lane[${laneIdx}].nextNfIndex`);
+      const rawNextNfIndex = l.nextNfIndex !== undefined ? l.nextNfIndex : l.next_nf_index;
+      const nextNfIndex = parseU64Decimal(rawNextNfIndex, `lane[${laneIdx}].nextNfIndex`);
       return {
         finalizedSubroots,
         frontierSubSeq,
@@ -1574,62 +1629,73 @@ export class CompactWalletStore {
         throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}]`);
       }
       const n = noteRaw as Record<string, unknown>;
+      const notePoolId = n.poolId !== undefined ? n.poolId : n.pool_id;
       if (
-        typeof n.poolId !== 'number' ||
-        !Number.isInteger(n.poolId) ||
-        n.poolId < 0 ||
-        n.poolId > U32_MAX
+        typeof notePoolId !== 'number' ||
+        !Number.isInteger(notePoolId) ||
+        notePoolId < 0 ||
+        notePoolId > U32_MAX
       ) {
-        throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}].poolId=${String(n.poolId)}`);
+        throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}].poolId=${String(notePoolId)}`);
       }
-      if (n.poolId !== raw.poolId) {
+      if (notePoolId !== rawPoolId) {
         throw new Error(
-          `Invalid CompactWalletStore JSON note[${noteIdx}].poolId=${n.poolId} does not match store poolId=${raw.poolId}`,
+          `Invalid CompactWalletStore JSON note[${noteIdx}].poolId=${notePoolId} does not match store poolId=${rawPoolId}`,
         );
       }
+      const noteLaneId = n.laneId !== undefined ? n.laneId : n.lane_id;
       if (
-        typeof n.laneId !== 'number' ||
-        !Number.isInteger(n.laneId) ||
-        n.laneId < 0 ||
-        n.laneId >= NUM_LANES
+        typeof noteLaneId !== 'number' ||
+        !Number.isInteger(noteLaneId) ||
+        noteLaneId < 0 ||
+        noteLaneId >= NUM_LANES
       ) {
-        throw new Error(`Invalid CompactWalletStore JSON note laneId=${String(n.laneId)}`);
+        throw new Error(`Invalid CompactWalletStore JSON note laneId=${String(noteLaneId)}`);
       }
-      const leafIndex = parseU64Decimal(n.leafIndex, `note[${noteIdx}].leafIndex`);
+      const leafIndex = parseU64Decimal(
+        n.leafIndex !== undefined ? n.leafIndex : n.leaf_index,
+        `note[${noteIdx}].leafIndex`,
+      );
       if (leafIndex >= MAX_LEAVES_PER_LANE) {
         throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}].leafIndex out of range`);
       }
-      const noteKey = `${n.laneId}:${leafIndex.toString()}`;
+      const noteKey = `${noteLaneId}:${leafIndex.toString()}`;
       if (seenNotes.has(noteKey)) {
         throw new Error(
-          `Invalid CompactWalletStore JSON: duplicate note at (laneId=${n.laneId}, leafIndex=${leafIndex})`,
+          `Invalid CompactWalletStore JSON: duplicate note at (laneId=${noteLaneId}, leafIndex=${leafIndex})`,
         );
       }
       seenNotes.add(noteKey);
       const globalLeafIndex = parseU64Decimal(
-        n.globalLeafIndex,
+        n.globalLeafIndex !== undefined ? n.globalLeafIndex : n.global_leaf_index,
         `note[${noteIdx}].globalLeafIndex`,
       );
-      const expectedGlobalLeaf = (BigInt(n.laneId) << 36n) | leafIndex;
+      const expectedGlobalLeaf = (BigInt(noteLaneId) << 36n) | leafIndex;
       if (globalLeafIndex !== expectedGlobalLeaf) {
         throw new Error(
           `Invalid CompactWalletStore JSON note[${noteIdx}].globalLeafIndex mismatch`,
         );
       }
       const amount = parseU64Decimal(n.amount, `note[${noteIdx}].amount`);
-      if (typeof n.isDynamic !== 'boolean') {
+      const isDynamic = n.isDynamic !== undefined ? n.isDynamic : n.is_dynamic;
+      if (typeof isDynamic !== 'boolean') {
         throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}].isDynamic`);
       }
       if (typeof n.spent !== 'boolean') {
         throw new Error(`Invalid CompactWalletStore JSON note[${noteIdx}].spent`);
       }
+      const rawPaymentId = n.paymentId !== undefined ? n.paymentId : n.payment_id;
       const paymentId =
-        n.paymentId === undefined
+        rawPaymentId === undefined
           ? new Uint8Array(MEMO_PAYMENT_ID_LEN)
-          : hexToBytesExact(n.paymentId, MEMO_PAYMENT_ID_LEN, `note[${noteIdx}].paymentId`);
+          : hexOrBytesExact(rawPaymentId, MEMO_PAYMENT_ID_LEN, `note[${noteIdx}].paymentId`);
 
-      const hasSibs = n.frozenIntraSiblings !== null && n.frozenIntraSiblings !== undefined;
-      const hasPos = n.frozenIntraPositions !== null && n.frozenIntraPositions !== undefined;
+      const rawFrozenSibs =
+        n.frozenIntraSiblings !== undefined ? n.frozenIntraSiblings : n.frozen_intra_siblings;
+      const rawFrozenPos =
+        n.frozenIntraPositions !== undefined ? n.frozenIntraPositions : n.frozen_intra_positions;
+      const hasSibs = rawFrozenSibs !== null && rawFrozenSibs !== undefined;
+      const hasPos = rawFrozenPos !== null && rawFrozenPos !== undefined;
       if (hasSibs !== hasPos) {
         throw new Error(
           `Invalid CompactWalletStore JSON note[${noteIdx}]: frozenIntraSiblings and frozenIntraPositions must both be present or both null`,
@@ -1639,21 +1705,21 @@ export class CompactWalletStore {
       let frozenIntraPositions: number[] | null = null;
       if (hasSibs && hasPos) {
         if (
-          !Array.isArray(n.frozenIntraSiblings) ||
-          n.frozenIntraSiblings.length !== SUBTREE_LEVELS_4ARY
+          !Array.isArray(rawFrozenSibs) ||
+          rawFrozenSibs.length !== SUBTREE_LEVELS_4ARY
         ) {
           throw new Error(
             `Invalid CompactWalletStore JSON note[${noteIdx}].frozenIntraSiblings length`,
           );
         }
-        frozenIntraSiblings = n.frozenIntraSiblings.map((lvl, h) => {
+        frozenIntraSiblings = rawFrozenSibs.map((lvl, h) => {
           if (!Array.isArray(lvl) || lvl.length !== 3) {
             throw new Error(
               `Invalid CompactWalletStore JSON note[${noteIdx}].frozenIntraSiblings[${h}]`,
             );
           }
           return lvl.map((entry, k) => {
-            const b = hexToBytesExact(
+            const b = hexOrBytesExact(
               entry,
               32,
               `note[${noteIdx}].frozenIntraSiblings[${h}][${k}]`,
@@ -1663,14 +1729,14 @@ export class CompactWalletStore {
           });
         });
         if (
-          !Array.isArray(n.frozenIntraPositions) ||
-          n.frozenIntraPositions.length !== SUBTREE_LEVELS_4ARY
+          !Array.isArray(rawFrozenPos) ||
+          rawFrozenPos.length !== SUBTREE_LEVELS_4ARY
         ) {
           throw new Error(
             `Invalid CompactWalletStore JSON note[${noteIdx}].frozenIntraPositions length`,
           );
         }
-        frozenIntraPositions = n.frozenIntraPositions.map((p, h) => {
+        frozenIntraPositions = rawFrozenPos.map((p, h) => {
           if (typeof p !== 'number' || !Number.isInteger(p) || p < 0 || p > 3) {
             throw new Error(
               `Invalid CompactWalletStore JSON note[${noteIdx}].frozenIntraPositions[${h}]=${String(p)}`,
@@ -1679,22 +1745,26 @@ export class CompactWalletStore {
           return p;
         });
       }
-      const tweak = hexToBytesExact(n.tweak, 32, `note[${noteIdx}].tweak`);
-      const blinding = hexToBytesExact(n.blinding, 32, `note[${noteIdx}].blinding`);
-      const stealthOwner = hexToBytesExact(n.stealthOwner, 32, `note[${noteIdx}].stealthOwner`);
-      const commitment = hexToBytesExact(n.commitment, 32, `note[${noteIdx}].commitment`);
-      const nullifier = hexToBytesExact(n.nullifier, 32, `note[${noteIdx}].nullifier`);
+      const tweak = hexOrBytesExact(n.tweak, 32, `note[${noteIdx}].tweak`);
+      const blinding = hexOrBytesExact(n.blinding, 32, `note[${noteIdx}].blinding`);
+      const stealthOwner = hexOrBytesExact(
+        n.stealthOwner !== undefined ? n.stealthOwner : n.stealth_owner,
+        32,
+        `note[${noteIdx}].stealthOwner`,
+      );
+      const commitment = hexOrBytesExact(n.commitment, 32, `note[${noteIdx}].commitment`);
+      const nullifier = hexOrBytesExact(n.nullifier, 32, `note[${noteIdx}].nullifier`);
       frFromBeBytesStrict(tweak);
       frFromBeBytesStrict(blinding);
       frFromBeBytesStrict(stealthOwner);
       frFromBeBytesStrict(commitment);
       frFromBeBytesStrict(nullifier);
       return {
-        poolId: n.poolId,
-        laneId: n.laneId,
+        poolId: notePoolId,
+        laneId: noteLaneId,
         leafIndex,
         globalLeafIndex,
-        mint: hexToBytesExact(n.mint, 32, `note[${noteIdx}].mint`),
+        mint: hexOrBytesExact(n.mint, 32, `note[${noteIdx}].mint`),
         amount,
         tweak,
         blinding,
@@ -1702,19 +1772,27 @@ export class CompactWalletStore {
         commitment,
         nullifier,
         paymentId,
-        isDynamic: n.isDynamic,
+        isDynamic,
         spent: n.spent,
         frozenIntraSiblings,
         frozenIntraPositions,
       };
     });
-    // Backwards-compatible migration: honor any legacy `seenNfPrefixes` against owned notes,
-    // then discard stranger prefixes permanently so RAM & disk stay bounded.
-    if (Array.isArray(raw.seenNfPrefixes) && raw.seenNfPrefixes.length > 0) {
+    // Backwards-compatible migration: honor any legacy `seenNfPrefixes` / `seen_nf_prefixes`
+    // against owned notes, then discard stranger prefixes permanently so RAM & disk stay bounded.
+    const rawSeenNfPrefixes =
+      raw.seenNfPrefixes !== undefined ? raw.seenNfPrefixes : raw.seen_nf_prefixes;
+    if (Array.isArray(rawSeenNfPrefixes) && rawSeenNfPrefixes.length > 0) {
       const legacySet = new Set<string>();
-      for (const p of raw.seenNfPrefixes) {
+      for (const p of rawSeenNfPrefixes) {
         if (typeof p === 'string' && p.length === NF_PREFIX_LEN * 2 && HEX_RE.test(p)) {
           legacySet.add(p.toLowerCase());
+        } else if (Array.isArray(p) && p.length === NF_PREFIX_LEN) {
+          try {
+            legacySet.add(bytesToHex(hexOrBytesExact(p, NF_PREFIX_LEN, 'seenNfPrefixes')));
+          } catch {
+            // ignore malformed legacy entry
+          }
         }
       }
       for (const note of store.notes) {

@@ -48,7 +48,7 @@ pub fn proof_to_solana_compressed_192(proof: &Proof<Bn254>) -> [u8; 192] {
 }
 
 /// Canonical ceremony provenance string embedded in `program/src/vk_generated.rs`.
-pub const CANONICAL_VK_PROVENANCE: &str = "Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 71+ contributors) + Audren BGM17 Phase-2 Ceremony (drand Quicknet #34194203 & Solana Mainnet slot 472705896)";
+pub const CANONICAL_VK_PROVENANCE: &str = "Perpetual Powers of Tau (powersOfTau28_hez_final_15.ptau, 54 contributions + beacon) + Audren BGM17 Phase-2 Ceremony (drand Quicknet #34194203 & Solana Mainnet slot 472705896)";
 
 /// Render the full `program/src/vk_generated.rs` file (shared identically by `gen_vk` and `ceremony`).
 pub fn render_vk_generated_rs(
@@ -62,10 +62,10 @@ pub fn render_vk_generated_rs(
     src.push_str(&format!("//! Provenance: {provenance}\n"));
     src.push_str(&format!("//! ProvingKey compressed SHA-256: `{pk_sha256}`\n"));
     src.push_str(
-        "//! Phase 1: Official Hermez/PSE Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`,\n",
+        "//! Phase 1: Official Hermez Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`,\n",
     );
     src.push_str(
-        "//!          71+ public contributors, BLAKE2b-512 `982372c8...69ae6e`, SHA-256 `3ef2ecc5...9e7f`).\n",
+        "//!          54 public contributions + beacon, BLAKE2b-512 `982372c8...69ae6e`, SHA-256 `3ef2ecc5...9e7f`).\n",
     );
     src.push_str("//! Phase 2: BGM17 Groth16 MPC ceremony (`ceremony/transcript.json`, verifiable via\n");
     src.push_str("//!          `cargo run -p audren-circuits --release --bin ceremony -- verify`).\n\n");

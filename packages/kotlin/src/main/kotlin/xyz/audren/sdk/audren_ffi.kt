@@ -1523,11 +1523,9 @@ data class FfiAudrenKeys (
     var `address`: kotlin.String
     
 ){
-    
+    override fun toString(): String =
+        "FfiAudrenKeys(spendSk=<REDACTED>, spendPk=<32B>, nk=<REDACTED>, viewSk=<REDACTED>, viewPk=<32B>, address=$address)"
 
-    
-
-    
     companion object
 }
 
@@ -1643,11 +1641,9 @@ data class FfiDefiSessionKeypair (
     var `pubkeyB58`: kotlin.String
     
 ){
-    
+    override fun toString(): String =
+        "FfiDefiSessionKeypair(sessionIndex=$sessionIndex, secretSeed=<REDACTED>, pubkeyB58=$pubkeyB58)"
 
-    
-
-    
     companion object
 }
 
@@ -2298,11 +2294,9 @@ data class FfiFullViewingKey (
     var `viewPk`: kotlin.ByteArray
     
 ){
-    
+    override fun toString(): String =
+        "FfiFullViewingKey(spendPk=<32B>, nk=<REDACTED>, viewSk=<REDACTED>, viewPk=<32B>)"
 
-    
-
-    
     companion object
 }
 

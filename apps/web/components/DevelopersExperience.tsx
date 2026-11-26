@@ -467,11 +467,12 @@ export function DevelopersExperience() {
                 <span className={styles.cellIndex}>Examples and escrow DeFi CPI</span>
                 <h3>Runnable examples across all four languages</h3>
                 <p className={styles.cellLead}>
-                  <code>audren-xyz/examples</code> mirrors the canonical Audren flows (keys,
-                  sub-accounts, pseudonymous DeFi Sessions (<code>B₀, B₁…</code>), ordinary-RPC{' '}
-                  <code>CompactWalletStore</code> sync, local WASM/native Groth16 proving,
-                  selective disclosure, and <code>ExecViaEscrow</code> planning) in Rust,
-                  TypeScript, Swift, and Kotlin.
+                  <code>audren-xyz/examples</code> mirrors the core Audren flows (keys,
+                  sub-accounts, pseudonymous DeFi Sessions (<code>B₀, B₁…</code>), local
+                  WASM/native Groth16 proving, memo decryption, selective disclosure, and{' '}
+                  <code>ExecViaEscrow</code> instruction building) across Rust, TypeScript, Swift,
+                  and Kotlin, with full ordinary-RPC <code>CompactWalletStore</code> sync and
+                  Mainnet/Devnet submission examples in Rust and TypeScript.
                 </p>
                 <ul className={styles.dashList}>
                   <li><code>ExecViaEscrow</code> (Tag 6) supports any compatible PDA-signing SPL or Token-2022 Token A → Token B CPI with input or output relayer fees (<code>EXEC_FLAG_FEE_ON_OUTPUT</code>) and hardened pre/post escrow checks.</li>

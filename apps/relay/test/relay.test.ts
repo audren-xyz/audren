@@ -1182,7 +1182,7 @@ test('RelayGuard DO: strictly in-memory ephemeral daily IP salt (zero SQLite sal
     .prepare('PRAGMA table_info(inflight_nullifiers)')
     .all() as Array<{ name: string }>
   const colNames = cols.map((c) => c.name)
-  assert.deepEqual(colNames, ['nullifier', 'expires_at'])
+  assert.deepEqual(colNames, ['nullifier', 'expires_at', 'owner_token'])
   assert.ok(!colNames.includes('ip_hash'), 'inflight_nullifiers must NEVER contain ip_hash')
 
   // 3. Verify ephemeral in-memory daily salt rotates by UTC day and NEVER equals pubkey-derived hash
@@ -1226,7 +1226,7 @@ test('RelayGuard DO: strictly in-memory ephemeral daily IP salt (zero SQLite sal
   assert.equal(nfRows.length, 2)
   for (const row of nfRows) {
     assert.equal('ip_hash' in row, false)
-    assert.deepEqual(Object.keys(row).sort(), ['expires_at', 'nullifier'])
+    assert.deepEqual(Object.keys(row).sort(), ['expires_at', 'nullifier', 'owner_token'])
   }
 
   // Concurrent duplicate nullifier MUST be blocked with 409
@@ -1234,6 +1234,61 @@ test('RelayGuard DO: strictly in-memory ephemeral daily IP salt (zero SQLite sal
   assert.equal(dupRes.allowed, false)
   assert.equal(dupRes.status, 409)
   assert.equal(dupRes.code, 'DUPLICATE_NULLIFIER')
+
+  // Lock ownership protection: a stale lockOwner CANNOT delete a newer request's lock
+  assert.ok(beginRes.lockOwner && beginRes.lockOwner.length > 0)
+  await guard.release({
+    ipHash: beginRes.ipHash!,
+    lockOwner: 'wrong-stale-owner-token',
+    cluster: 'mainnet',
+    nullifiers: [nfA, nfB],
+  })
+  const stillLocked = await guard.begin({ clientIp: '198.51.100.9', nullifiers: [nfA] })
+  assert.equal(stillLocked.allowed, false)
+  assert.equal(stillLocked.code, 'DUPLICATE_NULLIFIER')
+  await guard.release({
+    ipHash: beginRes.ipHash!,
+    lockOwner: beginRes.lockOwner,
+    cluster: 'mainnet',
+    nullifiers: [nfA, nfB],
+  })
+  const unlockedNow = await guard.begin({ clientIp: '198.51.100.9', nullifiers: [nfA] })
+  assert.equal(unlockedNow.allowed, true)
+
+  // Durable pending_broadcasts reconciliation (confirmed, failed revert-burn, expired)
+  await guard.recordPendingBroadcast({
+    signature: 'sigPendingFail111111111111111111111111111111',
+    cluster: 'mainnet',
+    payerPubkey: 'Payer11111111111111111111111111111111111111',
+    ipHash: beginRes.ipHash!,
+    opKind: 'exec_escrow',
+    selfPaying: true,
+    sponsoredLamports: 0,
+    burnedFeeLamports: 10_000,
+    lastValidBlockHeight: 100,
+  })
+  const pendingList = await guard.listPendingBroadcasts('mainnet')
+  assert.equal(pendingList.length, 1)
+  assert.equal(
+    await guard.settlePendingBroadcast({
+      signature: 'sigPendingFail111111111111111111111111111111',
+      outcome: 'failed',
+    }),
+    true,
+  )
+  const burnedRow = harness.db
+    .prepare('SELECT burned_lamports, revert_count FROM daily_revert_burns WHERE cluster = ?')
+    .get('mainnet') as { burned_lamports: number; revert_count: number }
+  assert.equal(burnedRow.burned_lamports, 10_000)
+  assert.equal(burnedRow.revert_count, 1)
+
+  // Refill lock mutual exclusion
+  assert.equal(await guard.acquireRefillLock({ lockKey: 'global-refill', leaseId: 'lease-a' }), true)
+  assert.equal(await guard.acquireRefillLock({ lockKey: 'global-refill', leaseId: 'lease-b' }), false)
+  await guard.releaseRefillLock({ lockKey: 'global-refill', leaseId: 'lease-b' })
+  assert.equal(await guard.acquireRefillLock({ lockKey: 'global-refill', leaseId: 'lease-b' }), false)
+  await guard.releaseRefillLock({ lockKey: 'global-refill', leaseId: 'lease-a' })
+  assert.equal(await guard.acquireRefillLock({ lockKey: 'global-refill', leaseId: 'lease-b' }), true)
 })
 
 // ============================================================================

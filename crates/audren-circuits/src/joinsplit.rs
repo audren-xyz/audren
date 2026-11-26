@@ -145,6 +145,12 @@ impl JoinSplit4AryCircuit {
     }
 }
 
+impl Drop for JoinSplit4AryCircuit {
+    fn drop(&mut self) {
+        self.zeroize_secrets();
+    }
+}
+
 impl JoinSplit4AryCircuit {
     /// Deterministic empty instance for Groth16 setup / R1CS synthesis.
     pub fn empty_for_setup() -> Self {

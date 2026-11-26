@@ -187,6 +187,11 @@ export function DevnetDemoExperience() {
   const [copied, setCopied] = useState(false)
 
   const sandboxEpochRef = useRef(0)
+  const unsavedEphemeralRef = useRef(false)
+
+  const handleUnsavedEphemeralChange = useCallback((unsaved: boolean) => {
+    unsavedEphemeralRef.current = unsaved
+  }, [])
 
   const initSandboxKeys = useCallback(() => {
     sandboxEpochRef.current += 1
@@ -206,6 +211,16 @@ export function DevnetDemoExperience() {
 
   const selectMode = useCallback(
     (next: DemoMode) => {
+      if (
+        next === 'sandbox' &&
+        unsavedEphemeralRef.current &&
+        typeof window !== 'undefined' &&
+        !window.confirm(
+          'Your ephemeral local vault seed has not been backed up. Switching to the Sandbox will clear it from memory. Continue?',
+        )
+      ) {
+        return
+      }
       setMode(next)
       if (next === 'sandbox' && !keys) {
         initSandboxKeys()
@@ -832,7 +847,7 @@ export function DevnetDemoExperience() {
         </header>
 
         {mode === 'wallet' ? (
-          <LiveWalletVault />
+          <LiveWalletVault onUnsavedEphemeralChange={handleUnsavedEphemeralChange} />
         ) : (
           <div className="lv-shell">
             <div className="lv-topbar">

@@ -196,7 +196,7 @@ pub fn extract_intra_subtree_siblings(
 }
 
 /// Assemble a full 20-level `MerklePath4Ary` from pre-frozen intra-subtree siblings (`levels 0..4`)
-/// plus upper level-4 finalized subroots (`levels 4..18`) and checkpoint `lane_roots` (`levels 18..20`).
+/// plus upper level-4 finalized subroots (`levels 4..18`) and `GlobalRootHistory` snapshot `lane_roots` (`levels 18..20`).
 #[allow(clippy::too_many_arguments)]
 pub fn build_witness_from_frozen_subsiblings(
     lane_id: usize,
@@ -317,7 +317,7 @@ pub fn build_witness_from_frozen_subsiblings(
 }
 
 /// Reconstruct the exact historical 4-ary Depth-20 Merkle path for `(lane_id, target_leaf_idx)`
-/// at `RootCheckpoint(E)`.
+/// at a `GlobalRootHistory` snapshot.
 pub fn build_historical_witness_4ary(
     lane_id: usize,
     target_leaf_idx: u64,

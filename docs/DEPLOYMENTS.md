@@ -49,11 +49,12 @@ Mainnet releases use deterministic Linux/Docker builds via the Solana Foundation
 
 ## Empirically Verified Mainnet Transactions (`v1.3.0`)
 
-Every protocol flow below has been executed and confirmed on Solana Mainnet against `AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3` (latest verified upgrade at slot `474,171,894`, commit `385d032129d90483e4394d7a1f2d5cae012b9d4a`) and `https://relay.audren.xyz`:
+The latest deterministic `sBPFv3` binary (`385d032129d90483e4394d7a1f2d5cae012b9d4a`, `158,056 B`) was deployed at Mainnet slot `474,171,894` (verified via OtterSec `verify.osec.io` and 14/14 LiteSVM E2E suites against the exact compiled ELF). The 15 empirical DeFi, lending, vault, transfer, withdrawal, and session-wallet transactions below were executed on Solana Mainnet against the prior `v1.3.0` deployment (`842ada95af872735a6daf187223a310bb9629954`, slot `473,476,583`, sharing the same frozen verifying key and instruction wire format) and `https://relay.audren.xyz`:
 
 | Flow | Instruction & Mode | Mainnet Slot | CU | Transaction Signature |
 |---|---|---|---|---|
-| **Program Upgrade (`v1.3.0`)** | `BPFLoaderUpgradeable` deterministic ELF | `474,171,894` | — | `Rs8FmnsumQqg1RJbHXuscrKyKxr78SpuaenW3EjKFNu2pCkbXyQTzBD1mFn9Dm74ZN9M3K2m8DaJuL8JCVxLmfN` |
+| **Program Upgrade (`v1.3.0`, current `385d032`)** | `BPFLoaderUpgradeable` deterministic ELF (`158,056 B`) | `474,171,894` | — | `Rs8FmnsumQqg1RJbHXuscrKyKxr78SpuaenW3EjKFNu2pCkbXyQTzBD1mFn9Dm74ZN9M3K2m8DaJuL8JCVxLmfN` |
+| **Prior Program Upgrade (`v1.3.0`, `842ada9`)** | `BPFLoaderUpgradeable` deterministic ELF (`157,008 B`) | `473,476,583` | — | `cLnyzjJyqs4nPqsFaA4xPV9hd3SSwyVCryVHsaBd6AxujPU2DGhQP6XYjfKe5KMHJ9PR1AUsmFKt4s67tWPLodv` |
 | **Native SOL Deposit** | Tag 3 `Deposit` (`DEPOSIT_FLAG_NATIVE_SOL`) | `473,479,958` | `53,950` | `2sxVUPJL4V5EUeXg66jV7Spg4ASMwLE5TCS3Mzyzt37sHuiTFn41B1EwfMevMy9EFVNhgWeeMbdDjYzPTuvnSWPY` |
 | **Relayed Private Transfer** | Tag 5 `Transact` (`2-in/3-out`, 0 user signers) | `473,479,987` | `200,561` | `2tYSzyMcSTJpgYXGiWe1uZJLxjZagQobSsVjcnzm4cy86Mty359VHUKJdHaqG6d5FTqRSYS7qZCECfistrzKtXV3` |
 | **Relayed Full Exit + WSOL Unwrap** | Tag 5 `Transact` (`WITHDRAW_FLAG_UNWRAP_WSOL`, self-paying) | `473,480,014` | `117,732` | `4mkKXz4cLt5Z3qj5m6xgFoRvtzQ8d5VFYYSkXvnnkxfKn7F9anoBiXa2uTK73DeqwGhC6okfCMxeG7bKr2y5KQc7` |

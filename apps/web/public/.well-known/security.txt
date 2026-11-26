@@ -1,0 +1,6 @@
+Contact: mailto:security@audren.xyz
+Expires: 2027-11-26T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://audren.xyz/.well-known/security.txt
+Policy: https://github.com/audren-xyz/audren/blob/main/SECURITY.md
+Acknowledgments: https://audren.xyz/terms/

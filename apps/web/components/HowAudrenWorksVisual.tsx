@@ -95,7 +95,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'CompactWalletStore scans MemoPages and freezes siblings',
         packetLabel: '+500 USDC Private',
         detail:
-          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts and checks each memo’s 2-byte view tag (one cheap key exchange per memo; about 65,535 of every 65,536 stranger memos are skipped without decryption). It verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages. Because Deposit updates GlobalRootHistory inline on-chain, the note is spendable immediately upon confirmation (~150ms Alpenglow finality, zero checkpoint wait, zero cranks, zero checkpoint fees).',
+          'Your device scans MemoPage PDAs using ordinary Solana RPC getMultipleAccounts and checks each memo’s 2-byte view tag (one cheap key exchange per memo; about 65,535 of every 65,536 stranger memos are skipped without decryption). It verifies every decrypted note against SubtreePage to block forged memos, freezes 12 intra-subtree siblings on sealed pages, and discards raw pages. Because Deposit updates GlobalRootHistory inline on-chain, the note is spendable immediately upon confirmation (~150ms Alpenglow finality, zero external root-update wait, zero cranks, zero crank fees).',
         cryptoTag: 'Ordinary Solana RPC · Zero indexer · ~150ms Alpenglow finality',
       },
     ],
@@ -144,7 +144,7 @@ const FLOWS: FlowDefinition[] = [
         shortLabel: 'BN254 Groth16 over 20-level 4-ary super_root',
         packetLabel: '192 B Groth16 Proof',
         detail:
-          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in a dedicated WASM Web Worker against GlobalRootHistory (preferring the 89-entry stable epoch_ring covering >= 2,848 slots / >= 10.2m under saturation, or the 128-entry recent slot_ring covering 64–128 active slots / ~13.8s–27.5s for instant spends, with zero idle wall-clock expiry): “I own 1 or 2 notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and these are their correctly derived, key-separated nullifiers.” Solana then rejects the spend if either nullifier was already recorded.',
+          'Your browser builds a 192-byte BN254 Groth16 proof (17,861 R1CS) locally in a dedicated WASM Web Worker against GlobalRootHistory (preferring the 89-entry stable epoch_ring covering 2,848 active slots / ~9.5–10.5 min estimated at ~200–215 ms slots under saturation, or the 128-entry recent slot_ring covering 64–128 active slots / ~13.8s–27.5s for instant spends, with zero idle wall-clock expiry): “I own 1 or 2 notes anywhere in the global 4^20 Multi-Asset Shielded Pool, and these are their correctly derived, key-separated nullifiers.” Solana then rejects the spend if either nullifier was already recorded.',
         cryptoTag: 'Tag 5 Transact · 17,861 R1CS · Key-separated nk nullifiers',
       },
       {

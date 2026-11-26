@@ -4,7 +4,7 @@ import { callProverWorker, PROVER_PROVE_TIMEOUT_MS, PROVER_WARM_TIMEOUT_MS } fro
 export * from '@audren/sdk/prover'
 export * from './vault-storage'
 
-const WASM_URL = '/wasm/audren_circuits.wasm?v=7e3aa592'
+const WASM_URL = '/wasm/audren_circuits.wasm?v=bf646d66'
 const PK_URL = '/wasm/audren_joinsplit.pk?v=2b22603e'
 
 let cached: Promise<AudrenWasmProver> | null = null

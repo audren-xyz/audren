@@ -982,7 +982,11 @@ fn verify_transcript(
         );
         println!("5. Verified {vk_rs_path} SHA-256 ({actual_vk_sha}) & VK_JOINSPLIT_DEFAULT bytes match byte-for-byte.");
     }
-    println!("\nCEREMONY VERIFICATION PASSED 100% (final PK SHA-256: {final_pk_sha})");
+    if ptau_opt.is_some() {
+        println!("\nCEREMONY FULL PHASE-1 + PHASE-2 VERIFICATION PASSED 100% (final PK SHA-256: {final_pk_sha})");
+    } else {
+        println!("\nCEREMONY PHASE-2 + VK VERIFICATION PASSED (Phase-1 .ptau skipped; pass --ptau for full verification; final PK SHA-256: {final_pk_sha})");
+    }
 }
 
 fn main() {

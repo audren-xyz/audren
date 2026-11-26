@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// SHA-256 hex digest of the canonical Groth16 ceremony proving key (`audren_joinsplit.pk`).
-/// Phase 1: Official Hermez/PSE Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`, 71+ contributors).
+/// Phase 1: Official Hermez Perpetual Powers of Tau (`powersOfTau28_hez_final_15.ptau`, 54 public contributions plus a beacon).
 /// Phase 2: Audren BGM17 ceremony (`ceremony/transcript.json`, drand Quicknet #34194203 & Solana Mainnet slot 472705896).
 pub const CANONICAL_PK_SHA256: &str =
     "2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4";

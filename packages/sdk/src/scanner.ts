@@ -812,7 +812,12 @@ export async function syncCompactStoreWithRpc(params: {
   latestRootHistory?: DecodedGlobalRootHistory | RootSnapshotChoice;
   privacyMode?: SyncPrivacyMode;
   decoyEpochBucket?: bigint;
-}): Promise<{ pool: DecodedPoolState; lanes: DecodedLaneHeader[]; discoveredNotes: number }> {
+}): Promise<{
+  pool: DecodedPoolState;
+  lanes: DecodedLaneHeader[];
+  discoveredNotes: number;
+  incomplete: boolean;
+}> {
   if (!params || typeof params !== 'object') {
     throw new RangeError('syncCompactStoreWithRpc params must be an object');
   }
@@ -2550,7 +2555,7 @@ export async function syncCompactStoreWithRpc(params: {
     }
   }
 
-  return { pool, lanes, discoveredNotes };
+  return { pool, lanes, discoveredNotes, incomplete: pass1Incomplete || !allLanesCaughtUp };
 }
 
 const U32_MAX = 0xffff_ffff;
@@ -3120,6 +3125,28 @@ export async function reconstructWitnessesForNotes(params: {
   if (params.rootSnapshot !== undefined) {
     if (params.rootHistory !== undefined) {
       validateGlobalRootHistory(params.rootHistory, params.poolId);
+      const ringEntries =
+        params.rootSnapshot.ringKind === ROOT_RING_SLOT
+          ? params.rootHistory.slotRing
+          : params.rootHistory.epochRing;
+      const ringEntry = ringEntries[params.rootSnapshot.ringIdx];
+      let rootMatches =
+        Boolean(ringEntry) &&
+        ringEntry!.slot === params.rootSnapshot.slot &&
+        ringEntry!.superRoot.byteLength === params.rootSnapshot.superRoot.byteLength;
+      if (rootMatches) {
+        for (let i = 0; i < ringEntry!.superRoot.byteLength; i++) {
+          if (ringEntry!.superRoot[i] !== params.rootSnapshot.superRoot[i]) {
+            rootMatches = false;
+            break;
+          }
+        }
+      }
+      if (!rootMatches) {
+        throw new Error(
+          'Supplied rootSnapshot is stale or mismatched against supplied rootHistory ring entry',
+        );
+      }
     }
     chosen = params.rootSnapshot;
     for (const n of notesToCover) {

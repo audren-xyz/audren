@@ -541,7 +541,7 @@ export class AudrenWasmProver {
   proveJoinsplit(witness: JoinSplitWitness, seed32?: Uint8Array): JoinSplitProofResult {
     const exp = this.assertUsable();
     if (!this.pkReady) {
-      throw new Error('Proving key not initialized — pass pkUrl/pkCompressed or call loadProvingKeyCompressed()');
+      throw new Error('Proving key not initialized: pass pkUrl/pkCompressed or call loadProvingKeyCompressed()');
     }
     if (seed32 !== undefined && (!(seed32 instanceof Uint8Array) || seed32.byteLength !== 32)) {
       throw new RangeError(

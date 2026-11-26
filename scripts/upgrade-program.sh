@@ -670,7 +670,13 @@ solana-verify verify-from-repo -um \\
 EOF
 
   if gh release view "$tag" --repo "$REPO_OWNER_NAME" >/dev/null 2>&1; then
-    echo "Updating existing GitHub Release ${tag} on ${REPO_OWNER_NAME}..."
+    local existing_rel_target=""
+    existing_rel_target="$(gh api "repos/${REPO_OWNER_NAME}/releases/tags/${tag}" --jq '.target_commitish // ""' 2>/dev/null || true)"
+    if [[ -n "$existing_rel_target" && "$existing_rel_target" != "$commit" && "${ALLOW_RELEASE_RETARGET:-0}" != "1" ]]; then
+      echo "Error: GitHub Release ${tag} already targets ${existing_rel_target}, refusing to retarget to ${commit}. Cut a new patch version (or set ALLOW_RELEASE_RETARGET=1 explicitly)." >&2
+      exit 1
+    fi
+    echo "Updating existing GitHub Release ${tag} on ${REPO_OWNER_NAME} (same commit ${commit})..."
     if gh release edit --help >/dev/null 2>&1; then
       gh release edit "$tag" \
         --repo "$REPO_OWNER_NAME" \
