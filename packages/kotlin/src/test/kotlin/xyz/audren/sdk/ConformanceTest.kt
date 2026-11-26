@@ -267,7 +267,6 @@ class ConformanceTest {
         assertEquals(g16.getString("proof_192_hex"), bytesToHex(proved.proof192))
 
         // 6. UniFFI zero-panic, secret-redacted toString(), extraWritablePubkeys & strict address/bounds checks
-        val fvk = exportFullViewingKey(alice)
         val sentinelKeysStr = alice.toString()
         val sentinelFvkStr = fvk.toString()
         val sentinelSessionStr = s0.toString()
