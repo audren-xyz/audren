@@ -646,16 +646,17 @@ def main() -> None:
     assert f"releases/tag/v{prog_version}" in readme_txt, (
         f"README.md release badge must reference releases/tag/v{prog_version}"
     )
-    ci_txt = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    for deprecated_action in (
-        "actions/checkout@v4",
-        "actions/setup-python@v5",
-        "actions/setup-node@v4",
-        "pnpm/action-setup@v4",
-    ):
-        assert deprecated_action not in ci_txt, (
-            f".github/workflows/ci.yml uses deprecated Node 20 action: {deprecated_action}"
-        )
+    for wf_path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        wf_txt = wf_path.read_text(encoding="utf-8")
+        for deprecated_action in (
+            "actions/checkout@v4",
+            "actions/setup-python@v5",
+            "actions/setup-node@v4",
+            "pnpm/action-setup@v4",
+        ):
+            assert deprecated_action not in wf_txt, (
+                f"{wf_path.relative_to(ROOT)} uses deprecated Node 20 action: {deprecated_action}"
+            )
 
     # 17. Cross-language SDK unity (Rust, TypeScript, Swift, Kotlin), canonical test vectors & zero duplicated prover
     vectors_path = ROOT / "spec" / "test-vectors.json"

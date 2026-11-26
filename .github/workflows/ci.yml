@@ -14,6 +14,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   drift-and-docs:
     name: Zero-Drift & Docs Verification
@@ -23,12 +27,18 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
       - name: Verify IDL, 4-language SDKs, WASM prover, Relayer, Web protocol.ts, docs & toolchain parity
         run: python3 idl/verify-idl.py
-      - name: Syntax-check operator & mobile SDK scripts
+      - name: Syntax-check operator, build, & mobile SDK scripts
         run: |
+          set -euo pipefail
           bash -n scripts/upgrade-program.sh
           bash -n scripts/build-mobile-sdks.sh
+          python3 -m py_compile scripts/build-sbf.py idl/verify-idl.py
+          node --check scripts/live-cluster-e2e.mjs
 
   rust-and-kotlin:
     name: Rust Circuits, sBPFv3, SDK, FFI & Kotlin (Android/JVM)
@@ -146,13 +156,52 @@ jobs:
           pnpm --dir packages/sdk install --frozen-lockfile
           pnpm --dir packages/sdk typecheck
           pnpm --dir packages/sdk test
-      - name: Typecheck & unit-test apps/relay
+      - name: Typecheck, unit-test & bundle-check apps/relay
         run: |
+          set -euo pipefail
           pnpm --dir apps/relay install --frozen-lockfile
           pnpm --dir apps/relay typecheck
           pnpm --dir apps/relay test
-      - name: Typecheck, lint, build & WASM-audit apps/web
+          pnpm --dir apps/relay exec wrangler deploy --dry-run --outdir /tmp/wrangler-relay-dry
+          rm -rf /tmp/wrangler-relay-dry
+      - name: Typecheck, lint, build, zero-slop/SEO/WASM audit & bundle-check apps/web
         run: |
+          set -euo pipefail
           pnpm --dir apps/web install --frozen-lockfile
           pnpm --dir apps/web check
           pnpm --dir apps/web e2e:audit
+          test -f apps/web/out/.well-known/security.txt
+          H1=$(sha256sum packages/sdk/wasm/audren_circuits.wasm | awk '{print $1}')
+          H2=$(sha256sum apps/web/public/wasm/audren_circuits.wasm | awk '{print $1}')
+          H3=$(sha256sum apps/web/out/wasm/audren_circuits.wasm | awk '{print $1}')
+          test "$H1" = "$H2" && test "$H1" = "$H3"
+          python3 - <<'PY'
+          import glob, re, sys
+          html_files = sorted(glob.glob('apps/web/out/**/*.html', recursive=True))
+          css_files = sorted(glob.glob('apps/web/out/**/*.css', recursive=True))
+          assert len(html_files) >= 9, f'expected >= 9 html files, got {len(html_files)}'
+          for f in html_files:
+              s = open(f, encoding='utf-8').read()
+              if '<strong' in s.lower():
+                  sys.exit(f'FAIL: <strong> found in {f}')
+              body = re.sub(r'<script[^>]*>.*?</script>', '', s, flags=re.S | re.I)
+              body = re.sub(r'<style[^>]*>.*?</style>', '', body, flags=re.S | re.I)
+              if '—' in body:
+                  sys.exit(f'FAIL: rendered em-dash found in {f}')
+              if not f.endswith('404.html') and not f.endswith('_not-found.html'):
+                  if 'property="og:url"' not in s:
+                      sys.exit(f'FAIL: missing og:url in {f}')
+                  if 'name="twitter:card"' not in s:
+                      sys.exit(f'FAIL: missing twitter:card in {f}')
+          for f in css_files:
+              s = open(f, encoding='utf-8').read()
+              if re.search(r'font-weight\s*:\s*(600|700|800|900|bold)\b', s):
+                  sys.exit(f'FAIL: bold font-weight >= 600 found in {f}')
+              if re.search(r'font-style\s*:\s*italic\b', s):
+                  sys.exit(f'FAIL: italic font-style found in {f}')
+              if re.search(r'text-transform\s*:\s*uppercase\b', s):
+                  sys.exit(f'FAIL: text-transform uppercase found in {f}')
+          print(f'OK: zero-slop + SEO verified across {len(html_files)} HTML pages and {len(css_files)} CSS bundles')
+          PY
+          pnpm --dir apps/web exec wrangler deploy --dry-run --outdir /tmp/wrangler-web-dry
+          rm -rf /tmp/wrangler-web-dry

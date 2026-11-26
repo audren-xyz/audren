@@ -1,0 +1,93 @@
+name: Production Verification
+
+permissions:
+  contents: read
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    branches: [main]
+    types: [completed]
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: verify-production
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify-live:
+    name: Live Web, Relayer, WASM & On-Chain Verification
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install web E2E dependencies
+        run: |
+          set -euo pipefail
+          pnpm --dir packages/sdk install --frozen-lockfile
+          pnpm --dir packages/sdk build
+          pnpm --dir apps/web install --frozen-lockfile
+      - name: Verify live audren.xyz API, 9 UI routes, security.txt & WASM SHA-256 parity
+        env:
+          BASE_URL: https://audren.xyz
+        run: |
+          set -euo pipefail
+          pnpm --dir apps/web e2e:api
+          pnpm --dir apps/web e2e:ui
+          SEC_TXT=$(curl -fsSL https://audren.xyz/.well-known/security.txt)
+          echo "$SEC_TXT" | grep -q "^Contact: mailto:security@audren.xyz"
+          echo "$SEC_TXT" | grep -q "^Canonical: https://audren.xyz/.well-known/security.txt"
+          LIVE_WASM=$(curl -fsSL https://audren.xyz/wasm/audren_circuits.wasm | sha256sum | awk '{print $1}')
+          REPO_WASM=$(sha256sum packages/sdk/wasm/audren_circuits.wasm | awk '{print $1}')
+          echo "WASM SHA-256: live=$LIVE_WASM repo=$REPO_WASM"
+          test "$LIVE_WASM" = "$REPO_WASM"
+      - name: Verify live relay.audren.xyz health, info & cluster liquidity
+        run: |
+          set -euo pipefail
+          curl -fsSL https://relay.audren.xyz/health | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          assert d.get('ok') is True, d
+          assert d.get('programId') == 'AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3', d
+          assert d.get('rootsPda') == '249YJTuRtiKAnh346Tc18kF9bHrktdrTzyJMtvUKUgC7', d
+          print('Relay health OK:', d['version'], d['domain'])
+          "
+          curl -fsSL "https://relay.audren.xyz/v1/info?cluster=mainnet" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          assert d.get('ok') is True and d.get('configured') is True, d
+          assert d['clusters']['mainnet']['configured'] is True, d
+          assert d['clusters']['devnet']['configured'] is True, d
+          print('Relay /v1/info OK: mainnet=', d['clusters']['mainnet']['balanceSol'], 'SOL, devnet=', d['clusters']['devnet']['balanceSol'], 'SOL')
+          "
+      - name: Verify live Solana Mainnet OtterSec Verified Build parity
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://verify.osec.io/status/AUDRBK6kVkQoEGm3EB7swd34SUPqrHZeNEkB5vZWVSv3" | python3 -c "
+          import json, re, sys
+          d = json.load(sys.stdin)
+          assert d.get('is_verified') is True, d
+          proto = open('apps/web/lib/protocol.ts', encoding='utf-8').read()
+          m = re.search(r\"executableHash:\s*'([0-9a-f]{64})'\", proto)
+          assert m, 'executableHash not found in protocol.ts'
+          assert d['on_chain_hash'] == m.group(1), (d['on_chain_hash'], m.group(1))
+          assert d['executable_hash'] == m.group(1), (d['executable_hash'], m.group(1))
+          print('OtterSec Verified Build OK:', d['on_chain_hash'], 'commit:', d['commit'])
+          "
