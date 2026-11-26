@@ -67,7 +67,7 @@ async function main() {
   if (
     !workerJs.includes('wasm_prove_joinsplit') ||
     !workerJs.includes('wasm_load_pk_compressed') ||
-    !workerJs.includes('?v=bf646d66') ||
+    !workerJs.includes('?v=b1316246') ||
     !workerJs.includes('WebAssembly.RuntimeError')
   ) {
     throw new Error('Invalid or stale /wasm/prover-worker.js payload')

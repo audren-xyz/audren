@@ -69,7 +69,9 @@ jobs:
           cargo test -p audren-ffi --release --test conformance_ffi
       - name: Verify wasm32 Groth16 prover builds cleanly and matches committed WASM bytes
         run: |
-          cargo build -p audren-circuits --target wasm32-unknown-unknown --release --no-default-features --features wasm
+          CARGO_HOME_EFF="${CARGO_HOME:-$HOME/.cargo}"
+          CARGO_INCREMENTAL=0 RUSTFLAGS="--remap-path-prefix=${CARGO_HOME_EFF}=/cargo --remap-path-prefix=$(pwd)=/audren" \
+            cargo build -p audren-circuits --target wasm32-unknown-unknown --release --no-default-features --features wasm
           BUILT_SHA=$(sha256sum target/wasm32-unknown-unknown/release/audren_circuits.wasm | awk '{print $1}')
           SDK_SHA=$(sha256sum packages/sdk/wasm/audren_circuits.wasm | awk '{print $1}')
           WEB_SHA=$(sha256sum apps/web/public/wasm/audren_circuits.wasm | awk '{print $1}')

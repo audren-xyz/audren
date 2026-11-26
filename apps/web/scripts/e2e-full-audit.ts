@@ -284,14 +284,14 @@ async function main() {
   }
   const workerSrc = await readFile(resolve(process.cwd(), 'public/wasm/prover-worker.js'), 'utf8')
   if (
-    !workerSrc.includes('?v=bf646d66') ||
+    !workerSrc.includes('?v=b1316246') ||
     !workerSrc.includes('CANONICAL_WASM_BYTES') ||
     !workerSrc.includes('WebAssembly.RuntimeError') ||
     !workerSrc.includes('CANONICAL_WASM_SHA256') ||
     !workerSrc.includes('pkPtr, pkBytes.byteLength).fill(0)') ||
     !workerSrc.includes('oPtr, PROVE_OUTPUT_BYTES).fill(0)')
   ) {
-    throw new Error('prover-worker.js missing bf646d66 cache-buster, byte-length check, RuntimeError reset, WASM SHA-256 pin, or pkPtr/oPtr scrub')
+    throw new Error('prover-worker.js missing b1316246 cache-buster, byte-length check, RuntimeError reset, WASM SHA-256 pin, or pkPtr/oPtr scrub')
   }
   const sampleMemos = new Uint8Array(MEMO_ENTRY_WIRE_LEN * 3)
   sampleMemos.set(memo, 0)
