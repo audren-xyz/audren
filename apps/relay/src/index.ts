@@ -256,7 +256,7 @@ export async function planRolloverOpenPages(params: {
   allowProactive?: boolean
   /** Optional ceiling on new unique accounts proactive lookahead may add (keeps Solana v1 <= 64 accounts). */
   maxExtraAccounts?: number
-  /** Optional ceiling on proactive `OpenPage` count allowed by remaining 4,096 B v1 wire budget (`57 B`/page). */
+  /** Optional ceiling on proactive `OpenPage` count allowed by remaining 4,096 B v1 wire budget (`65 B`/page). */
   maxExtraByBytes?: number
   /** Optional ceiling on proactive `OpenPage` count allowed by remaining 1,400,000 CU budget (`40,000` CU/page). */
   maxExtraByCu?: number

@@ -1323,10 +1323,14 @@ test('Token-2022 epoch-aware TransferFeeConfig parser, net calculation & self-pa
   assert.equal(inspectToken2022UnsafeSelfPay(new Uint8Array(82)), false);
 });
 
-test('AudrenWasmProver rejects corrupted proving key when verifyPkHash is enabled', async () => {
+test('AudrenWasmProver rejects corrupted proving key and wrong-size WASM when hash pins are enabled', async () => {
   await assert.rejects(
     () => AudrenWasmProver.init({ pkCompressed: new Uint8Array(64).fill(0xaa), verifyPkHash: true }),
-    /SHA-256 mismatch/,
+    /size\/SHA-256 mismatch/,
+  );
+  await assert.rejects(
+    () => AudrenWasmProver.init({ wasmBytes: new Uint8Array(64).fill(0xbb), deferPk: true }),
+    /size\/SHA-256 mismatch/,
   );
 });
 

@@ -16,7 +16,7 @@ interface PendingJob {
   cleanupAbort?: () => void
 }
 
-export const PROVER_WORKER_URL = '/wasm/prover-worker.js?v=1.3.0'
+export const PROVER_WORKER_URL = '/wasm/prover-worker.js?v=97b0fd67'
 export const PROVER_WARM_TIMEOUT_MS = 30_000
 export const PROVER_PROVE_TIMEOUT_MS = 45_000
 

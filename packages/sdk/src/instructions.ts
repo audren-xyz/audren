@@ -1026,7 +1026,7 @@ export function buildInitLaneInstruction(params: {
   };
 }
 
-/** Tag 2: `OpenPage` (6 accounts, 15 B). */
+/** Tag 2: `OpenPage` (6 accounts, 23 B). */
 export function buildOpenPageInstruction(params: {
   programId?: string;
   payer: string;

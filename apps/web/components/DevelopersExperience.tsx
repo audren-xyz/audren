@@ -221,7 +221,8 @@ export function DevelopersExperience() {
           <div className={styles.heroSingle}>
             <h1>Build your own way in.</h1>
             <p className={styles.heroLead}>
-              No Audren account, API gate, or mandatory indexer. Four Apache-2.0 SDKs (Rust,
+              No Audren account, API gate, or mandatory indexer. Call the program directly via its
+              published Codama and Anchor IDLs, or use four optional Apache-2.0 SDKs (Rust,
               TypeScript with WASM Groth16 prover, Swift for iOS, and Kotlin for Android), verified
               byte-for-byte against <code>spec/test-vectors.json</code> on every CI run.
             </p>

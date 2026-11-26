@@ -590,10 +590,12 @@ export function ArchitectureExperience() {
         <section className={styles.closing}>
           <div className={`container ${styles.closingInner}`}>
             <div>
-              <h2>Start integrating with the Audren SDKs.</h2>
+              <h2>Integrate directly or with the Audren SDKs.</h2>
               <p>
-                Start with our Rust, TypeScript (+ WASM prover), Swift (iOS), or Kotlin (Android)
-                SDK, all four verified byte-for-byte against <code>spec/test-vectors.json</code>.
+                Call the permissionless program directly via its published Codama and Anchor IDLs,
+                or use our optional Rust, TypeScript (+ WASM prover), Swift (iOS), or Kotlin
+                (Android) SDK, all four verified byte-for-byte against{' '}
+                <code>spec/test-vectors.json</code>.
               </p>
             </div>
             <div className={styles.closingActions}>

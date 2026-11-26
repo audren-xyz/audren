@@ -6,13 +6,15 @@
  * browser UI thread stays completely responsive during 17,861-R1CS proving.
  */
 
+const CANONICAL_PK_BYTES = 3927280
 const CANONICAL_PK_SHA256 =
   '2b22603e466c79b6710e01898dc8b458b09a3ee905b25db996f0c59e76187ee4'
+const CANONICAL_WASM_BYTES = 2440081
 const CANONICAL_WASM_SHA256 =
   '7e3aa59205009e07cfe48981d428c4650087ed7421b894e43de8f396b91f2dc3'
 const WITNESS_TOTAL_BYTES = 4611
 const PROVE_OUTPUT_BYTES = 384
-const DEFAULT_WASM_URL = '/wasm/audren_circuits.wasm?v=1.3.0'
+const DEFAULT_WASM_URL = '/wasm/audren_circuits.wasm?v=7e3aa592'
 const DEFAULT_PK_URL = '/wasm/audren_joinsplit.pk?v=2b22603e'
 
 let readyPromise = null
@@ -43,6 +45,16 @@ async function initWasmProver(wasmUrl, pkUrl) {
   const [wasmBuf, pkBuf] = await Promise.all([wasmRes.arrayBuffer(), pkRes.arrayBuffer()])
   const wasmBytes = new Uint8Array(wasmBuf)
   const pkBytes = new Uint8Array(pkBuf)
+  if (wasmBytes.byteLength !== CANONICAL_WASM_BYTES) {
+    throw new Error(
+      `Audren WASM prover size/SHA-256 mismatch: got ${wasmBytes.byteLength} B, expected ${CANONICAL_WASM_BYTES} B`,
+    )
+  }
+  if (pkBytes.byteLength !== CANONICAL_PK_BYTES) {
+    throw new Error(
+      `Audren proving key size/SHA-256 mismatch: got ${pkBytes.byteLength} B, expected ${CANONICAL_PK_BYTES} B`,
+    )
+  }
   const [wasmDigest, pkDigest] = await Promise.all([sha256Hex(wasmBytes), sha256Hex(pkBytes)])
   if (wasmDigest !== CANONICAL_WASM_SHA256) {
     throw new Error(
@@ -61,6 +73,9 @@ async function initWasmProver(wasmUrl, pkUrl) {
   let deallocFailed = false
   try {
     pkPtr = exports.wasm_alloc(pkBytes.byteLength)
+    if (!pkPtr) {
+      throw new Error('wasm_alloc returned null pointer for proving key')
+    }
     new Uint8Array(exports.memory.buffer, pkPtr, pkBytes.byteLength).set(pkBytes)
     const rc = exports.wasm_load_pk_compressed(pkPtr, pkBytes.byteLength)
     if (rc !== 0) {
@@ -69,6 +84,7 @@ async function initWasmProver(wasmUrl, pkUrl) {
   } finally {
     if (pkPtr) {
       try {
+        new Uint8Array(exports.memory.buffer, pkPtr, pkBytes.byteLength).fill(0)
         exports.wasm_dealloc(pkPtr, pkBytes.byteLength)
       } catch {
         deallocFailed = true

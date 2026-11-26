@@ -9,7 +9,9 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
   BN254_FR_MODULUS,
+  CANONICAL_PK_BYTES,
   CANONICAL_PK_SHA256,
+  CANONICAL_WASM_BYTES,
   CANONICAL_WASM_SHA256,
   PROVE_OUTPUT_BYTES,
   TOTAL_DEPTH_4ARY,
@@ -385,6 +387,11 @@ export class AudrenWasmProver {
     const [bytes, pkBytes] = await Promise.all([wasmPromise, pkPromise]);
 
     if (options.verifyWasmHash !== false) {
+      if (bytes.byteLength !== CANONICAL_WASM_BYTES) {
+        throw new Error(
+          `Audren WASM prover size/SHA-256 mismatch: got ${bytes.byteLength} B, expected ${CANONICAL_WASM_BYTES} B`,
+        );
+      }
       const wasmDigest = await sha256Hex(bytes);
       if (wasmDigest !== CANONICAL_WASM_SHA256) {
         throw new Error(
@@ -422,6 +429,11 @@ export class AudrenWasmProver {
       );
     }
     if (!options?.allowCustomPk) {
+      if (pkCompressed.byteLength !== CANONICAL_PK_BYTES) {
+        throw new Error(
+          `Audren proving key size/SHA-256 mismatch: got ${pkCompressed.byteLength} B, expected ${CANONICAL_PK_BYTES} B`,
+        );
+      }
       const digest = bytesToHex(sha256(pkCompressed));
       if (digest !== CANONICAL_PK_SHA256) {
         throw new Error(

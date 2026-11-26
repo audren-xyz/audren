@@ -835,6 +835,7 @@ export function LiveWalletVault() {
   const [busy, setBusy] = useState(false)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [syncError, setSyncError] = useState<string | null>(null)
   const [lastReceipt, setLastReceipt] = useState<ActionReceipt | null>(null)
   const [copiedField, setCopiedField] = useState<string | null>(null)
 
@@ -1117,6 +1118,7 @@ export function LiveWalletVault() {
     setComplianceNoteKey('')
     setBackupStatus(null)
     setErrorMsg(null)
+    setSyncError(null)
     setStatusMsg(nextStatusMsg)
   }, [])
 
@@ -1363,6 +1365,7 @@ export function LiveWalletVault() {
         (activeSource !== 'wallet' || connectedAddrRef.current === scope)
       setSyncing(true)
       setErrorMsg(null)
+      setSyncError(null)
       try {
         let curStore = options?.resetStore ? null : existingStore
         if (!curStore && !options?.resetStore) {
@@ -1414,7 +1417,6 @@ export function LiveWalletVault() {
         } catch (syncErr) {
           if (!isCurrent()) return
           syncWarning = syncErr instanceof Error ? syncErr.message : String(syncErr)
-          await saveEncryptedCompactStore(activeKeys, targetCluster, 0, curStore, scope)
         }
         if (!isCurrent()) return
 
@@ -1433,8 +1435,10 @@ export function LiveWalletVault() {
           setComplianceNoteKey('')
         }
         if (syncWarning) {
-          setStatusMsg(`Vault ready (RPC sync skipped: ${syncWarning})`)
+          setSyncError(syncWarning)
+          setStatusMsg(null)
         } else {
+          setSyncError(null)
           const slotNote =
             effectiveBirthdaySlot > 0n ? ` · birthday slot #${effectiveBirthdaySlot.toString()}` : ''
           setStatusMsg(
@@ -1467,6 +1471,7 @@ export function LiveWalletVault() {
     setComplianceNoteKey('')
     setBackupStatus(null)
     setErrorMsg(null)
+    setSyncError(null)
     setStatusMsg(null)
     resetTransientActionState()
     setSwapEscrowShard(pickRandomEscrowShard(NUM_ESCROW_SHARDS))
@@ -7161,6 +7166,7 @@ export function LiveWalletVault() {
                       <button
                         type="button"
                         className="lv-mini-btn"
+                        disabled={syncing || busy || connecting}
                         onClick={async () => {
                           const targetCluster = cluster
                           const startVaultEpoch = vaultEpochRef.current
@@ -7168,7 +7174,15 @@ export function LiveWalletVault() {
                           if (vaultEpochRef.current !== startVaultEpoch || clusterRef.current !== targetCluster) {
                             return
                           }
-                          setBackupStatus('Cleared local encrypted IndexedDB CompactWalletStore cache')
+                          setStore(null)
+                          setUnspentNotes([])
+                          setSyncError(null)
+                          setBackupStatus('Cleared local cache; rescanning from birthday slot...')
+                          void syncVault(keys, targetCluster, null, walletScope, {
+                            birthdaySlot: birthdayByCluster[targetCluster],
+                            resetStore: true,
+                            source: unlockSourceRef.current,
+                          })
                         }}
                       >
                         Clear cache
@@ -7177,6 +7191,36 @@ export function LiveWalletVault() {
                     {backupStatus && <p className="lv-backup-status mono">{backupStatus}</p>}
                   </div>
                 </>
+              )}
+
+              {syncError && (
+                <div className="lv-error-bar" style={{ alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  <AlertCircle size={14} />
+                  <span style={{ flex: 1 }}>RPC sync failed: {syncError}</span>
+                  <button
+                    type="button"
+                    className="lv-mini-btn"
+                    disabled={syncing || busy || connecting}
+                    onClick={async () => {
+                      const targetCluster = cluster
+                      const startVaultEpoch = vaultEpochRef.current
+                      await clearEncryptedCompactStore(keys.spendPkBytes, targetCluster, 0, walletScope)
+                      if (vaultEpochRef.current !== startVaultEpoch || clusterRef.current !== targetCluster) {
+                        return
+                      }
+                      setStore(null)
+                      setUnspentNotes([])
+                      setSyncError(null)
+                      void syncVault(keys, targetCluster, null, walletScope, {
+                        birthdaySlot: birthdayByCluster[targetCluster],
+                        resetStore: true,
+                        source: unlockSourceRef.current,
+                      })
+                    }}
+                  >
+                    <RefreshCw size={12} /> Reset &amp; rescan
+                  </button>
+                </div>
               )}
 
               {statusMsg && (
