@@ -10,22 +10,13 @@ updates:
           - minor
           - patch
     ignore:
-      # Keep arkworks 0.5, Agave 4.3 SDK crates, and crypto primitives pinned across majors.
-      - dependency-name: 'ark-*'
+      # Block breaking major bumps (arkworks 0.5, Agave 4.3, crypto primitives, Cargo 0.x majors).
+      - dependency-name: '*'
         update-types:
           - version-update:semver-major
-      - dependency-name: 'solana-*'
-        update-types:
-          - version-update:semver-major
-      - dependency-name: tracing-subscriber
-        update-types:
-          - version-update:semver-major
-      - dependency-name: hkdf
-        update-types:
-          - version-update:semver-major
-      - dependency-name: ed25519-dalek
-        update-types:
-          - version-update:semver-major
+      # Exact-pinned to Agave 4.3.0 / sBPFv3 test runtime.
+      - dependency-name: litesvm
+      - dependency-name: agave-feature-set
   - package-ecosystem: npm
     directory: /packages/sdk
     schedule:
@@ -36,10 +27,7 @@ updates:
           - minor
           - patch
     ignore:
-      - dependency-name: typescript
-        update-types:
-          - version-update:semver-major
-      - dependency-name: '@types/node'
+      - dependency-name: '*'
         update-types:
           - version-update:semver-major
   - package-ecosystem: npm
@@ -52,10 +40,7 @@ updates:
           - minor
           - patch
     ignore:
-      - dependency-name: typescript
-        update-types:
-          - version-update:semver-major
-      - dependency-name: '@types/node'
+      - dependency-name: '*'
         update-types:
           - version-update:semver-major
   - package-ecosystem: npm
@@ -68,10 +53,7 @@ updates:
           - minor
           - patch
     ignore:
-      - dependency-name: typescript
-        update-types:
-          - version-update:semver-major
-      - dependency-name: '@types/node'
+      - dependency-name: '*'
         update-types:
           - version-update:semver-major
   - package-ecosystem: github-actions
