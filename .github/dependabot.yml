@@ -4,26 +4,81 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      rust-minor-patch:
+        update-types:
+          - minor
+          - patch
     ignore:
-      # Upstream ark-relations 0.5.1 (used by the frozen BN254 Groth16 circuit)
-      # requires tracing-subscriber ^0.2; upgrading to 0.3 requires breaking arkworks 0.6.
-      # Audren never logs untrusted input through tracing-subscriber.
+      # Keep arkworks 0.5, Agave 4.3 SDK crates, and crypto primitives pinned across majors.
+      - dependency-name: 'ark-*'
+        update-types:
+          - version-update:semver-major
+      - dependency-name: 'solana-*'
+        update-types:
+          - version-update:semver-major
       - dependency-name: tracing-subscriber
+        update-types:
+          - version-update:semver-major
+      - dependency-name: hkdf
+        update-types:
+          - version-update:semver-major
+      - dependency-name: ed25519-dalek
         update-types:
           - version-update:semver-major
   - package-ecosystem: npm
     directory: /packages/sdk
     schedule:
       interval: weekly
+    groups:
+      sdk-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
   - package-ecosystem: npm
     directory: /apps/relay
     schedule:
       interval: weekly
+    groups:
+      relay-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
   - package-ecosystem: npm
     directory: /apps/web
     schedule:
       interval: weekly
+    groups:
+      web-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns:
+          - '*'
