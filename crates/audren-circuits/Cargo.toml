@@ -37,7 +37,7 @@ ark-serialize = { version = "=0.5.0", default-features = false, features = ["std
 ark-snark = { version = "=0.5.1", default-features = false }
 ark-std = { version = "=0.5.0", default-features = false, features = ["std"] }
 audren-core = { path = "../audren-core" }
-light-poseidon = "=0.4.1"
+light-poseidon = "=0.5.0"
 rand = "0.8"
 rand_chacha = "0.3"
 sha2 = "0.10"
