@@ -37,5 +37,5 @@ solana-rent = "4.4"
 solana-signer = "3.0.1"
 solana-system-interface = { version = "3.3.0", features = ["bincode"] }
 solana-transaction = { version = "4.2.0", features = ["serde", "wincode"] }
-spl-token-2022-interface = "3.1.0"
+spl-token-2022-interface = "4.0.0"
 wincode = "0.6"
