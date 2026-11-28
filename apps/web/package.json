@@ -25,7 +25,7 @@
     "@solana/wallet-standard-chains": "^1.1.2",
     "@solana/wallet-standard-features": "^1.5.0",
     "@wallet-standard/app": "^1.1.1",
-    "lucide-react": "^1.32.0",
+    "lucide-react": "^1.80.0",
     "next": "16.4.6",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
